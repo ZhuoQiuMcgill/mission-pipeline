@@ -1,0 +1,13 @@
+{
+  "name": "mission-pipeline",
+  "owner": {
+    "name": "Zhuo Qiu"
+  },
+  "plugins": [
+    {
+      "name": "mission-pipeline",
+      "source": "./",
+      "description": "Human-in-the-loop multi-agent engineering workflow with bounded build–critique–stabilize loops, wave-parallel task groups, and principal sign-off."
+    }
+  ]
+}
