@@ -6,6 +6,18 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [0.2.0] — 2026-07-07
+
+### Added
+- `/mission-pipeline:init` plugin command — idempotent project initialization:
+  creates the state folders, briefly scouts an existing project (stack,
+  conventions, verification commands, week evidence; read-only, coexists with
+  any established workflow), then runs the setup interview pre-filled with the
+  scouted answers so the principal vetoes proposals instead of answering open
+  questions.
+- Setup reference (`references/setup.md`): explicit read-only scout phase as
+  install step 3; the interview now asks only what the scout could not answer.
+
 ## [0.1.0] — 2026-07-06
 
 Initial public release.

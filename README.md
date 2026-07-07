@@ -57,11 +57,13 @@ flowchart TD
 
 ## Quickstart
 
-In a project with the skill installed, tell Claude:
+In a project with the plugin installed, run:
 
-> set up mission-pipeline
+```
+/mission-pipeline:init
+```
 
-The PM runs a short setup interview (your ground-rule docs, tech constraints, verification commands, week scheme, model picks) and writes the answers to `.claude/mission-pipeline/PROJECT.md` — the **only** file your project ever edits. Then give it a goal:
+(Manual installs: tell Claude *"set up mission-pipeline"* instead.) Init is idempotent and safe in old projects with an established workflow — it creates the pipeline's folders, **briefly scouts your existing codebase and conventions** (read-only; it changes nothing about your current workflow), then runs a short setup interview pre-filled with what it found — you mostly veto proposals rather than answer questions. The result lands in `.claude/mission-pipeline/PROJECT.md` — the **only** file your project ever edits. Then give it a goal:
 
 > mission: add rate limiting to the public API
 

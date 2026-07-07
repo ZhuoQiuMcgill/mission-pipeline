@@ -4,18 +4,24 @@ Run this once per project, before the first mission. If `.claude/mission-pipelin
 
 ## Install steps
 
-1. **Skill present?** Confirm this skill folder is at `<project>/.claude/skills/mission-pipeline/` (copied verbatim from its source project — engine files are never rewritten during install).
+1. **Skill present?** Confirm this skill is installed (as a plugin, or copied verbatim to `<project>/.claude/skills/mission-pipeline/` — engine files are never rewritten during install).
 2. **Create the state directory:**
    - `<project>/.claude/mission-pipeline/`
    - `<project>/.claude/mission-pipeline/ledger/`
    - Copy `templates/missions-registry.md` → `ledger/MISSIONS.md`.
-3. **Run the setup interview** (below) with the principal — plain language, a few questions at a time.
-4. **Write PROJECT.md:** copy `templates/PROJECT.md` → `.claude/mission-pipeline/PROJECT.md` and fill every slot from the interview. Leave the contract header intact.
-5. **Confirm.** Play the bindings back to the principal in plain terms; adjust until signed off. Then the pipeline is live — the next request starts the first mission.
+3. **Scout the project — briefly, read-only.** Before asking the principal anything, explore what already exists; an old project answers most of the interview itself. Keep it to minutes, not an audit:
+   - **Identity & ground rules** — README, project agent instructions (e.g. `CLAUDE.md`), `CONTRIBUTING`, the top level of any `docs/` tree.
+   - **Stack & layout** — package manifests (`package.json`, `pyproject.toml`, …), top-level directories, obvious architectural boundaries.
+   - **Existing workflow** — CI config, commit-message style from recent `git log`, any planning/reporting conventions already in use — including week-numbered files (feeds the week-scheme rule in §9).
+   - **Verification** — test/build/lint commands from manifests, CI, or a Makefile.
+   Summarize the findings to the principal in a few plain lines — this doubles as orientation in an unfamiliar project.
+4. **Run the setup interview** (below) with the principal — plain language, a few questions at a time. For every slot the scout answered, **propose the scouted answer and ask for a veto**; ask open questions only for the gaps.
+5. **Write PROJECT.md:** copy `templates/PROJECT.md` → `.claude/mission-pipeline/PROJECT.md` and fill every slot from the interview. Leave the contract header intact.
+6. **Confirm.** Play the bindings back to the principal in plain terms; adjust until signed off. Then the pipeline is live — the next request starts the first mission.
 
 ## The setup interview
 
-Ask only what the project cannot answer itself; propose defaults and let the principal veto rather than interrogating.
+Ask only what the scout could not answer; propose defaults and let the principal veto rather than interrogating.
 
 1. **Principal** — name; anything notable about how they want to be communicated with.
 2. **Ground rules** — which existing docs bind every agent (contribution guide, project instructions, architecture docs)? These become mandatory reading in PROJECT.md.

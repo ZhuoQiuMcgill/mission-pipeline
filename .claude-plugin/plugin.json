@@ -1,7 +1,7 @@
 {
   "name": "mission-pipeline",
   "description": "Human-in-the-loop multi-agent engineering workflow: a PM aligns with the principal, decomposes missions into tasks, fans them out to parallel groups (Constructor builds, Crititor reviews, Stabilizer judges a bounded loop), schedules waves via a read-only Architect, and closes only on the principal's sign-off.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Zhuo Qiu"
   },
