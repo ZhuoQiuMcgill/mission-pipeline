@@ -27,8 +27,8 @@ The DAG's facts are the Architect's; these calls — order, priority, re-cuts �
 
 ## Handoffs into a group
 
-Every spawned agent gets absolute paths to: its role file (skill `roles/`), PROJECT.md, the task spec — plus, for worktree groups, the worktree path and branch name, and always the anchored ledger path. Sub-agents inherit nothing implicitly; if it isn't in the handoff, it doesn't reach them.
+Every spawned agent gets absolute paths to: its role file (skill `roles/`), PROJECT.md, the task spec — plus, for worktree groups, the worktree path and branch name, and always the anchored ledger path. Sub-agents inherit nothing implicitly; if it isn't in the handoff, it doesn't reach them. The spec's mandatory-reading list is an input for the **whole group** — the Crititor and Stabilizer read it too, not just the Constructor.
 
 ## Between waves
 
-After each wave: read every GroupReport, integrate accepts, decide escalations (re-plan / re-scope / one more scoped round / take to the principal), refresh the Architect's DAG only if the task set changed materially, then launch the next wave. Report to the principal at natural checkpoints — wave boundaries, not every round.
+After each wave: read every GroupReport, integrate accepts, decide escalations (re-plan / re-scope / one more scoped round / take to the principal), and write the wave's **Integration Note** (template: `templates/integration-note.md`) — merges, escalation decisions, an explicit disposition for every flag carried up (engine invariant 11), and the footprint reconciliation: ArchPlan predictions vs the files the dev reports actually touched, with deviations feeding the next DAG. Refresh the Architect's DAG only if the task set changed materially, then launch the next wave. Report to the principal at natural checkpoints — wave boundaries, not every round.

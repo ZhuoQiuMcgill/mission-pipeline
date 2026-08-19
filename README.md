@@ -41,8 +41,9 @@ flowchart TD
 | **Architect** | Reads the codebase → structural map → wave schedule (facts) | edits code, decides |
 | **Constructor** | Builds + tests exactly to the task spec | redesigns, touches out-of-scope |
 | **Crititor** | Evidence-backed verdict against the acceptance criteria | fixes the work itself |
-| **Stabilizer** | The PM's judgment inside one group: accept / send back / escalate | moves goalposts, exceeds N rounds |
+| **Stabilizer** | The PM's judgment inside one group: spot-checks evidence, then accept / send back / escalate | moves goalposts, exceeds N rounds |
 | **Researcher** *(optional)* | Adversarial external evidence before a decision | decides the question |
+| **Auditor** *(optional)* | One arms-length read at close: does the integrated result deliver the written goal? | re-judges tasks, decides |
 
 ## Install
 
@@ -72,7 +73,8 @@ Everything the pipeline produces — task specs, implementation reports, critiqu
 ## Design rules worth knowing
 
 - **Engine vs. bindings.** The skill's files are the engine and are never edited in your project; `PROJECT.md` fills declared slots and may add rules but can't override the engine. Upgrades are drop-in; drift is detectable by `diff`.
-- **Nine invariants** (separate hands, align-first, verdict ≠ judgment, bounded rounds, mandatory out-of-scope lists, undeclared deviation = automatic fail, one voice per group, Architect proposes / PM disposes, principal closes) are named in `SKILL.md`. Changing them is forking the methodology, not configuring it.
+- **Eleven invariants** (separate hands, align-first, verdict ≠ judgment, bounded rounds, mandatory out-of-scope lists, undeclared deviation = automatic fail, one voice per group, Architect proposes / PM disposes, principal closes, reality closes the evidence, flags route) are named in `SKILL.md`. Changing them is forking the methodology, not configuring it.
+- **Contracts stay armed.** Task-level verification may be narrowed for speed, but every mission must pass one full-scope closing gate before sign-off; out-of-frame observations route verbatim to the PM and each gets an explicit disposition; ratified standing contracts (`ledger/CONTRACTS.md`) bind every task whether or not a spec restates them. All three rules were mined from a seven-mission production ledger where their absence let a fully-accepted mission ship 13 latent test failures.
 - **Missions, not tickets.** Every piece of work is a mission — a goal *plus your acceptance of it*. A one-line fix is a small mission; a redesign is a big one with waves.
 
 ## Releases

@@ -26,7 +26,9 @@
 - <deviation + why> / None.
 
 ## Noticed but not fixed
-<!-- Out-of-scope observations for the PM. Not changes — observations. -->
+<!-- Mandatory — write "None." explicitly. Out-of-scope observations for the PM. Not
+     changes — observations. Carried verbatim in the group report; the PM must
+     disposition each (engine invariant 11). -->
 - <observation> / None.
 
 ## Files touched

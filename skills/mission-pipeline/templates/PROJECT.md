@@ -18,6 +18,13 @@ engine wins. Engine files (the skill folder) are never edited in a host project.
 - `<path/to/contribution guide>`
 - `<path/to/architecture doc>`
 
+## Document map
+<!-- Where the "why" lives. The PM may not fan out a mission while a slot here is unset —
+     resolve it with the principal first. Mid-pipeline adoptions keep their existing tree:
+     point the slot at it; never restructure the host project's docs. -->
+- **Mission rationale (design decisions):** `<default: <ledger>/<Mission>/design/ — or the project's own tree, e.g. docs/design_docs/>`
+- **Standing contracts:** `<ledger>/CONTRACTS.md` <!-- default; seeded at setup from templates/standing-contracts.md -->
+
 ## Tech constraints (Constructor must obey; Crititor must check)
 <!-- The architecture rules that bite: import discipline, state ownership, contracts, size limits. -->
 - <rule 1>
@@ -29,6 +36,7 @@ engine wins. Engine files (the skill folder) are never edited in a host project.
 <test command>        # expect: <outcome>
 <lint/build command>  # expect: <outcome>
 ```
+- **Closing gate (full scope):** `<the command(s) run once over the integrated result before sign-off>` <!-- engine invariant 10: task-level verification may be narrowed per spec; this gate may not -->
 
 ## Commit policy
 - **Author:** <identity commits are authored as>
@@ -54,6 +62,11 @@ engine wins. Engine files (the skill folder) are never edited in a host project.
 - **Enabled:** <yes/no>
 - **Run by:** principal, in a separate session, from the PM's written request <!-- default -->
 - **External-evidence rules:** <path, if the project has its own research protocol>
+
+## Closure audit
+- **Enabled:** <yes/no — recommended yes>
+- **Run by:** principal, in a separate session <!-- default; the PM never runs it and never edits its report -->
+- **Model:** <a different family than the working seats when available; otherwise the same model in a fresh session — heterogeneity is preferred, never required>
 
 ## Additional project rules
 <!-- Project-specific additions. May add; may not override the engine. -->

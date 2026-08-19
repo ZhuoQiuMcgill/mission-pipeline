@@ -5,9 +5,12 @@
 - **Design decision:** `<ledger>/design/<DesignDoc file>` — why this task exists
 
 ## Mandatory reading (in order)
+<!-- These are inputs for every seat in the group — the Crititor reads them too, not just
+     the Constructor. A criterion that cannot be judged without one of them will wait on it. -->
 1. `<absolute path>/.claude/mission-pipeline/PROJECT.md` — project bindings
 2. `<absolute path to skill>/roles/constructor.md` — your role
-3. <the design docs / code files this task depends on — keep to 3–5>
+3. <the mission's design decision — why this task exists>
+4. <code files / further docs this task depends on — keep the list to 3–5 total>
 
 ## Context
 <Why this task exists and the current state of the code it touches. 3–6 lines.>
@@ -23,6 +26,7 @@
 ## Constraints
 - <the PROJECT.md tech constraints that bite on this task, restated concretely>
 - <API stability, performance bounds, size limits>
+- Standing contracts touched: <entries from the registry this task could affect / none>
 
 ## Acceptance criteria (the review contract — each maps to ≥1 requirement)
 - [ ] <criterion with an observable check>

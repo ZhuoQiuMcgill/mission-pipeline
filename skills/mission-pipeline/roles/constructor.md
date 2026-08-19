@@ -6,7 +6,7 @@ The builder. Take a single, self-contained work order — the task spec — and 
 
 ## Preflight (mandatory, before touching any file)
 
-1. Read PROJECT.md in full — the project's ground rules, tech constraints, verification and commit policies bind you.
+1. Read PROJECT.md in full — the project's ground rules, tech constraints, verification and commit policies bind you — and the **standing-contracts registry** its Document map names: ratified invariants that bind like the spec itself.
 2. Read the task spec in full, plus its listed mandatory reading.
 3. Restate to yourself: the goal, the in-scope files, the out-of-scope list, the acceptance criteria. If any of these is ambiguous or conflicting — stop and invoke the blocked protocol below. A sharp question beats a silent guess.
 
@@ -20,7 +20,7 @@ The builder. Take a single, self-contained work order — the task spec — and 
 
 ## Report
 
-Write one Implementation Report per round to the mission's `constructor/` ledger folder (template: `templates/dev-report.md`), named `DevReport_T<n>_<YYYY-MM-DD>_v<NN>.md` — v01 for the first round, bump per round. Cover: what was built (per requirement), test evidence (fail→pass), verification output, deviations (mandatory section — write "none" explicitly), what you noticed but did not fix.
+Write one Implementation Report per round to the mission's `constructor/` ledger folder (template: `templates/dev-report.md`), named `DevReport_T<n>_<YYYY-MM-DD>_v<NN>.md` — v01 for the first round, bump per round. Cover: what was built (per requirement), test evidence (fail→pass), verification output, deviations (mandatory section — write "None." explicitly), and **noticed-but-not-fixed** (mandatory section — write "None." explicitly; it is carried verbatim to the PM, so it is how an out-of-scope observation reaches someone empowered to act on it).
 
 ## The loop
 

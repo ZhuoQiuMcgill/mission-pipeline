@@ -2,7 +2,7 @@
 
 - **Mission:** `<Mission>` · **Round:** <k> of <N> · **Version:** v<NN>
 - **Role:** Crititor · **Date:** <YYYY-MM-DD>
-- **Inputs:** spec `<file>` · report `<file>` · diff <ref/description>
+- **Inputs:** spec `<file>` · mandatory reading <read? list> · report `<file>` · diff <ref/description>
 
 ## Verdict
 **PASS** / **CHANGES-REQUESTED**
@@ -19,7 +19,14 @@
 ## Scope & deviation check
 - Out-of-scope touches found: <list / none>
 - Undeclared deviations found: <list / none>
-<!-- Either finding = automatic CHANGES-REQUESTED, regardless of code quality. -->
+- Standing-contract violations found: <list / none>
+<!-- Any finding = automatic CHANGES-REQUESTED, regardless of code quality. -->
+
+## Out-of-frame risk (mandatory — never feeds the verdict)
+<!-- Exactly one item, or "None" with a one-line reason. The one thing that could be wrong
+     that neither the spec nor the report mentions. Carried verbatim in the group report;
+     the PM must disposition it (engine invariant 11). -->
+- <risk and why it matters> / None — <one-line reason the frame looks sound>.
 
 ## Notes (non-blocking, optional for the Stabilizer/PM)
 - <observation or better-idea-not-required>

@@ -10,6 +10,17 @@
 |---|---|---|---|---|
 | 1 | `DevReport_T<n>_…_v01.md` | `Critique_T<n>_…_v01.md` | <verdict> | <accept / send back / escalate> |
 
+## Evidence spot-check (mandatory before ACCEPTED)
+<!-- Judge the evidence chain, not the code: sampled criteria rows — cited file:line exists
+     and says what is claimed; cited test/command re-runs green. -->
+- Sampled: <n of m criteria rows> · Result: **clean** / critique returned for correction (→ v<NN>)
+
+## Flags carried (mandatory, verbatim)
+<!-- Every Out-of-frame risk (critiques) and Noticed-but-not-fixed item (reports) of this
+     group, quoted verbatim. "None" only if every source section said None. Dropping one
+     is a failed group report (engine invariant 11). -->
+- "<verbatim flag>" — source: `<file>`
+
 ## Final artifacts
 - Report: `<ledger>/constructor/<final DevReport>`
 - Critique: `<ledger>/critic/<final Critique>`

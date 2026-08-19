@@ -10,8 +10,10 @@ The ledger is the pipeline's paper trail: operational state, deliberately **outs
 ├── PROJECT.md                               ←   the binding layer (from templates/PROJECT.md at setup)
 └── ledger/
     ├── MISSIONS.md                          ←   registry: one line per mission (from templates/missions-registry.md)
+    ├── CONTRACTS.md                         ←   standing contracts (from templates/standing-contracts.md at setup)
     └── Week<NN>-<MissionName>/              ←   one folder per mission
-        ├── design/        # DesignDoc — what was decided and why
+        ├── IntegrationNote / ClosureAudit   #   mission-level artifacts, at the folder root
+        ├── design/        # DesignDoc — what was decided and why (unless the Document map points elsewhere)
         ├── architect/     # ArchPlan — map + DAG (large missions)
         ├── tasks/         # TaskSpec — one per task
         ├── constructor/   # DevReport — one per task per round
@@ -20,7 +22,7 @@ The ledger is the pipeline's paper trail: operational state, deliberately **outs
         └── research/      # ResearchRequest / ResearchResult / ResearchTrail (only if the detour ran)
 ```
 
-State lives outside the skill folder so that copying the skill to another project can never drag mission history along. PROJECT.md may relocate the ledger (e.g. into a tracked `docs/` tree) — the layout below it stays identical.
+State lives outside the skill folder so that copying the skill to another project can never drag mission history along. PROJECT.md may relocate the ledger (e.g. into a tracked `docs/` tree) — the layout below it stays identical. Likewise, PROJECT.md's **Document map** may point mission rationale (design decisions) at the project's own existing tree — mid-pipeline adoptions keep their docs where they are; the slot, not the folder, is authoritative.
 
 ## The anchoring rule — critical
 
@@ -34,8 +36,8 @@ Corollary: because the default ledger is untracked by git, it is branch-independ
 - **Task ID:** `T1…Tn`, scoped to the mission. A task's global identity is `<MissionName> / T<n>`. Filenames never repeat the mission — the folder carries it.
 - **Artifact files:** `<Prefix><Category>_<Key>_<YYYY-MM-DD>_v<NN>.md`
   - `<Prefix>` — PROJECT.md's naming prefix; empty by default.
-  - `<Category>` — `DesignDoc` · `ArchPlan` · `TaskSpec` · `DevReport` · `Critique` · `GroupReport` · `ResearchRequest` · `ResearchResult` · `ResearchTrail`.
-  - `<Key>` — `T<n>` for task-level files (optionally `T<n>-ShortName` on the TaskSpec); the mission name for the ArchPlan; a topic for DesignDoc and research files.
+  - `<Category>` — `DesignDoc` · `ArchPlan` · `TaskSpec` · `DevReport` · `Critique` · `GroupReport` · `IntegrationNote` · `ClosureAudit` · `ResearchRequest` · `ResearchResult` · `ResearchTrail`.
+  - `<Key>` — `T<n>` for task-level files (optionally `T<n>-ShortName` on the TaskSpec); the mission name for the ArchPlan, IntegrationNote, and ClosureAudit; a topic for DesignDoc and research files.
   - Versions bump per round (DevReport/Critique) or per re-issue; never overwrite a version.
 - No spaces; underscores between parts, hyphens within a part.
 
@@ -54,4 +56,7 @@ Corollary: because the default ledger is untracked by git, it is branch-independ
 | DevReport | Constructor | `constructor/` | each round |
 | Critique | Crititor | `critic/` | each round |
 | GroupReport | Stabilizer | `stabilizer/` | group close or escalation |
+| IntegrationNote | PM | mission root | per wave; final version at close |
+| ClosureAudit | Auditor | mission root | before sign-off (if enabled) |
+| CONTRACTS.md entry | PM drafts / principal ratifies | ledger root | ratified at sign-off |
 | Research trio | PM (request) / Researcher (result, trail) | `research/` | detour only |

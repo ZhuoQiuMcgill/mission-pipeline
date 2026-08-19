@@ -39,6 +39,19 @@
 ### Task-cut advice
 - <where re-cutting along a module seam unlocks parallelism>
 
+### Spec lint (cold read — feeds the PM's delta veto)
+| Check | Finding |
+|---|---|
+| Pointer requirements (defer to another doc, unexpanded) | <T<n> req <#> → doc §> / none |
+| Unanchorable acceptance criteria | <T<n> criterion <#>> / none |
+| Verification-scope regression vs earlier waves & the closing gate | <dropped command/path, since T<n>> / none |
+| Out-of-scope missing or empty | <T<n>> / none |
+
+### Unstated assumptions
+<!-- Premises the specs rely on that no document states. Which task breaks if each is false.
+     Feed the PM's delta veto — most critical first. -->
+- <assumption — breaks T<n> if false> / None.
+
 ### Unverified
 <!-- Claims not grounded in files actually read. Empty = everything verified. -->
 - <claim> / None.

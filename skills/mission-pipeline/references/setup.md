@@ -9,6 +9,7 @@ Run this once per project, before the first mission. If `.claude/mission-pipelin
    - `<project>/.claude/mission-pipeline/`
    - `<project>/.claude/mission-pipeline/ledger/`
    - Copy `templates/missions-registry.md` → `ledger/MISSIONS.md`.
+   - Copy `templates/standing-contracts.md` → `ledger/CONTRACTS.md`.
 3. **Scout the project — briefly, read-only.** Before asking the principal anything, explore what already exists; an old project answers most of the interview itself. Keep it to minutes, not an audit:
    - **Identity & ground rules** — README, project agent instructions (e.g. `CLAUDE.md`), `CONTRIBUTING`, the top level of any `docs/` tree.
    - **Stack & layout** — package manifests (`package.json`, `pyproject.toml`, …), top-level directories, obvious architectural boundaries.
@@ -26,7 +27,7 @@ Ask only what the scout could not answer; propose defaults and let the principal
 1. **Principal** — name; anything notable about how they want to be communicated with.
 2. **Ground rules** — which existing docs bind every agent (contribution guide, project instructions, architecture docs)? These become mandatory reading in PROJECT.md.
 3. **Tech constraints** — the architecture rules a Constructor must never violate and a Crititor must check (import discipline, state ownership, public contracts, size limits).
-4. **Verification** — the commands that prove the project healthy (test suite, linters, build), with expected outcomes.
+4. **Verification** — the commands that prove the project healthy (test suite, linters, build), with expected outcomes — and the **closing gate**: the full-scope command(s) run once per mission over the integrated result before sign-off. Task-level verification may be narrowed for speed; the closing gate may not (engine invariant 10).
 5. **Commit policy** — author identity, message convention, branching rule, any attribution restrictions.
 6. **Model picks** — which model runs each role (see PROJECT.md template for the recommended shape).
 7. **Round cap** — default 3; raise or lower only with a reason.
@@ -39,6 +40,8 @@ Ask only what the scout could not answer; propose defaults and let the principal
    Record the outcome in PROJECT.md, including the start date of the count when weeks are on.
 10. **Ledger location** — default `.claude/mission-pipeline/ledger/` (untracked, branch-independent); relocate into the repo (e.g. `docs/…`) only if the principal wants the paper trail in version control.
 11. **Researcher** — enabled? Who runs it (default: principal, separate session)? Where do external-evidence rules live, if the project has its own?
+12. **Document map** — **scout first.** Where do design decisions (the "why" behind missions) live? An established project usually already has a tree (e.g. `docs/design_docs/`) — adopt it, never restructure it. A fresh project defaults to the mission folder's `design/`. The PM may not fan out a mission while this slot is unset. Also confirm the standing-contracts registry location (default `ledger/CONTRACTS.md`).
+13. **Closure audit** — enabled (recommended)? Who runs it (default: principal, separate session)? Which model — a different family than the working seats when one is available; otherwise the same model in a fresh session. Heterogeneity is preferred, never required.
 
 ## Upgrading the engine
 
