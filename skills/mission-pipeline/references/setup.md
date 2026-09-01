@@ -10,19 +10,31 @@ Run this once per project, before the first mission. If `.claude/mission-pipelin
    - `<project>/.claude/mission-pipeline/ledger/`
    - Copy `templates/missions-registry.md` → `ledger/MISSIONS.md`.
    - Copy `templates/standing-contracts.md` → `ledger/CONTRACTS.md`.
-3. **Scout the project — briefly, read-only.** Before asking the principal anything, explore what already exists; an old project answers most of the interview itself. Keep it to minutes, not an audit:
+3. **Bootstrap the substrate — the agent runs this; the principal is never asked to (invariant 12).**
+   From the main project root, using the skill's absolute path:
+   - `python3 <skill>/scripts/mp doctor` — the environment check: Python ≥ 3.8 with stdlib
+     `sqlite3`, mount type (DrvFS gets safe journal settings), journal/DB health. A failure
+     here fails the install loudly — that is the point: a broken environment surfaces at
+     setup, never mid-mission. **Python ≥ 3.8 is required for new missions.**
+   - `python3 <skill>/scripts/mp init` — creates the substrate under the ledger:
+     `ledger/events.jsonl` (append-only journal, authoritative for every state transition,
+     refusals included) and `ledger/mp.db` (derived SQLite view, rebuildable by replay).
+     `references/substrate.md` has the three-layer authority and the command surface.
+   - A v0.3-era prose ledger stays readable and is imported via `mp adopt` — never
+     converted by hand.
+4. **Scout the project — briefly, read-only.** Before asking the principal anything, explore what already exists; an old project answers most of the interview itself. Keep it to minutes, not an audit:
    - **Identity & ground rules** — README, project agent instructions (e.g. `CLAUDE.md`), `CONTRIBUTING`, the top level of any `docs/` tree.
    - **Stack & layout** — package manifests (`package.json`, `pyproject.toml`, …), top-level directories, obvious architectural boundaries.
    - **Existing workflow** — CI config, commit-message style from recent `git log`, any planning/reporting conventions already in use — including week-numbered files (feeds the week-scheme rule in §9).
    - **Verification** — test/build/lint commands from manifests, CI, or a Makefile.
    Summarize the findings to the principal in a few plain lines — this doubles as orientation in an unfamiliar project.
-4. **Run the setup interview** (below) with the principal — plain language, a few questions at a time. For every slot the scout answered, **propose the scouted answer and ask for a veto**; ask open questions only for the gaps.
-5. **Write PROJECT.md:** copy `templates/PROJECT.md` → `.claude/mission-pipeline/PROJECT.md` and fill every slot from the interview. Leave the contract header intact.
-6. **Confirm.** Play the bindings back to the principal in plain terms; adjust until signed off. Then the pipeline is live — the next request starts the first mission.
+5. **Run the setup interview** (below) with the principal — **one consolidated proposal, a single veto pass**: present every slot, pre-filled from the scout, in one message for line-by-line veto. Ask individual questions only for what the scout cannot answer — typically just the principal's identity (§1) and the week scheme (§9).
+6. **Write PROJECT.md:** copy `templates/PROJECT.md` → `.claude/mission-pipeline/PROJECT.md` and fill every slot from the interview. Leave the contract header intact.
+7. **Confirm.** Play the bindings back to the principal in plain terms; adjust until signed off. Then the pipeline is live — the next request starts the first mission.
 
 ## The setup interview
 
-Ask only what the scout could not answer; propose defaults and let the principal veto rather than interrogating.
+The interview is **one consolidated proposal and a single veto pass**: every slot below, pre-filled from the scout, presented in one message; the principal vetoes line by line. Ask individually only what the scout cannot answer — typically §1 (the principal) and §9 (the week scheme). The principal edits a proposal; they never sit an interrogation.
 
 1. **Principal** — name; anything notable about how they want to be communicated with.
 2. **Ground rules** — which existing docs bind every agent (contribution guide, project instructions, architecture docs)? These become mandatory reading in PROJECT.md.
@@ -39,10 +51,11 @@ Ask only what the scout could not answer; propose defaults and let the principal
    - If the principal opts out, mission names drop the prefix entirely and are just `<MissionName>` — the registry still enforces uniqueness.
    Record the outcome in PROJECT.md, including the start date of the count when weeks are on.
 10. **Ledger location** — default `.claude/mission-pipeline/ledger/` (untracked, branch-independent); relocate into the repo (e.g. `docs/…`) only if the principal wants the paper trail in version control.
-11. **Researcher** — enabled? Who runs it (default: principal, separate session)? Where do external-evidence rules live, if the project has its own?
+11. **Researcher** — enabled? Run by — default: **a PM-spawned fresh context with engine-fixed inputs**; "principal, separate session" remains an optional binding. Where do external-evidence rules live, if the project has its own?
 12. **Document map** — **scout first.** Where do design decisions (the "why" behind missions) live? An established project usually already has a tree (e.g. `docs/design_docs/`) — adopt it, never restructure it. A fresh project defaults to the mission folder's `design/`. The PM may not fan out a mission while this slot is unset. Also confirm the standing-contracts registry location (default `ledger/CONTRACTS.md`).
-13. **Closure audit** — enabled (recommended)? Who runs it (default: principal, separate session)? Which model — a different family than the working seats when one is available; otherwise the same model in a fresh session. Heterogeneity is preferred, never required.
+13. **Closure audit** — enabled (recommended)? Run by — default: **a PM-spawned fresh context with engine-fixed inputs**; "principal, separate session" remains an optional binding. Which model — a different family than the working seats when one is available; otherwise the same model in a fresh session. Heterogeneity is preferred, never required.
+14. **Calibration** — which model takes the **arbiter** seat in the wave-boundary calibration cell: a different family than the working seats when one is available; heterogeneity is preferred, **never required** (the closure-audit rule). Calibration seats default to PM-spawned fresh contexts with engine-fixed inputs; principal-run is an optional override, recorded in PROJECT.md's Calibration slots.
 
 ## Upgrading the engine
 
-To pick up an improved engine: replace this skill folder wholesale with the newer copy. PROJECT.md and the ledger are untouched by design. To check for drift first: `diff -r` the project's skill folder against the source copy — any difference in a host project is drift, since engine files are never edited locally.
+To pick up an improved engine: replace this skill folder wholesale with the newer copy. Scripts (`scripts/mp`) are engine files exactly like the prose — replaced wholesale on upgrade, never edited in a host project. PROJECT.md and the ledger are untouched by design. To check for drift first: `diff -r` the project's skill folder against the source copy — any difference in a host project is drift, since engine files are never edited locally.

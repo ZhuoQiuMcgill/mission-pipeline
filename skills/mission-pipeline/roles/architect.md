@@ -24,7 +24,8 @@ Report the result as a DAG grouped into **waves**: wave N holds the tasks with n
 
 **Pass 2 also runs the spec lint** — a cold read of the task specs, from the documents alone. You never see the alignment conversation between the PM and the principal; that is exactly what makes your read worth having. Report what the paper commits to, not what anyone meant:
 - **Pointer requirements** — a requirement that defers to another document ("implement per DesignDoc §…") without expanding into independently checkable items. Flag each; the group that executes it cannot check what it cannot see.
-- **Unanchorable criteria** — acceptance criteria no evidence could anchor (no conceivable test name, `file:line`, or command output would settle them).
+- **Unanchorable criteria** — acceptance criteria no **R or F** evidence could anchor: no conceivable executed command, test, or frozen-document line would settle them (`references/substrate.md`). A criterion checkable only against mission-era documents is unanchorable — a D-only chain is structurally circular (invariant 13).
+- **Charter contradictions** — a requirement or criterion that contradicts a line of the sealed Charter. Quote both sides; this is a documentary fact, not a judgment. It is the cheapest catch in the calibration stack — a spec that fans out carrying one multiplies it into every round downstream.
 - **Verification-scope regression** — the union of verification commands and test paths in this wave's specs, compared against earlier waves and the closing gate. Any narrowing is flagged and named; narrowing is a decision for the principal to see, never a drift.
 - **Missing out-of-scope** — specs whose out-of-scope list is absent or empty.
 

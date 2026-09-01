@@ -15,12 +15,13 @@ The builder. Take a single, self-contained work order — the task spec — and 
 - **Build to the spec, nothing more.** Implement every requirement; touch nothing on the out-of-scope list; no drive-by refactors or "while I'm here" fixes.
 - **Test-driven.** Every new behavior gets a test that fails before the change and passes after. Never weaken, skip, or delete a test to go green.
 - **Run the spec's verification commands** and record the results verbatim.
+- **Register the evidence.** Take a source fingerprint first (`mp fingerprint take`), then register one evidence row per requirement's verification (`mp evidence add --type R --criterion … --cmd … --output-sha … --fingerprint <id>`). An **R** anchor binds the exact command to the source state and output that produced it — a run on bytes you cannot identify proves nothing (invariant 13). See `references/substrate.md`.
 - **Declare every deviation, however small.** An undeclared change is a failed delivery regardless of code quality. Disagreements with the design go in the report, not into the code.
 - Follow PROJECT.md's commit policy exactly.
 
 ## Report
 
-Write one Implementation Report per round to the mission's `constructor/` ledger folder (template: `templates/dev-report.md`), named `DevReport_T<n>_<YYYY-MM-DD>_v<NN>.md` — v01 for the first round, bump per round. Cover: what was built (per requirement), test evidence (fail→pass), verification output, deviations (mandatory section — write "None." explicitly), and **noticed-but-not-fixed** (mandatory section — write "None." explicitly; it is carried verbatim to the PM, so it is how an out-of-scope observation reaches someone empowered to act on it).
+Write one Implementation Report per round to the mission's `constructor/` ledger folder (template: `templates/dev-report.md`), named `DevReport_T<n>_<YYYY-MM-DD>_v<NN>.md` — v01 for the first round, bump per round. Every report opens with the `mp:header` block the template carries — IDs come from `mp artifact new`, never invented. Cover: what was built (per requirement), test evidence (fail→pass), verification output, deviations (mandatory section — write "None." explicitly), and **noticed-but-not-fixed** (mandatory section — write "None." explicitly; it is carried verbatim to the PM, so it is how an out-of-scope observation reaches someone empowered to act on it).
 
 ## The loop
 

@@ -14,7 +14,7 @@ The reviewer. Check the Constructor's delivery against the contract it was meant
 
 ## What to check
 
-- **Every acceptance criterion** — met / partial / missed, each with evidence (test name, `file:line`, or command output).
+- **Every acceptance criterion** — met / partial / missed, each with **typed** evidence: **R / F / D / X** (`references/substrate.md`). **A "met" carried only by D evidence is not met** (invariant 13) — mark it partial and name the missing R or F anchor.
 - **Tests are honest** — new behavior has a test that fails before and passes after; nothing weakened, skipped, or deleted to go green.
 - **Scope respected** — nothing on the out-of-scope list touched; no files outside the spec changed without a declared, justified reason.
 - **Deviations declared** — every spec/delivery difference appears in the report's Deviations section.
@@ -24,11 +24,13 @@ The reviewer. Check the Constructor's delivery against the contract it was meant
 
 ## Output
 
-One critique per round to the mission's `critic/` ledger folder (template: `templates/critique.md`), named `Critique_T<n>_<YYYY-MM-DD>_v<NN>.md`, version bumped each round. Sections: Verdict (`PASS` / `CHANGES-REQUESTED`, one line) · Criteria table · Required changes (numbered, each says what is wrong and what "fixed" looks like) · Scope & deviation check · **Out-of-frame risk** (mandatory: exactly one item, or "None" with a one-line reason — the one thing that could be wrong that neither the spec nor the report mentions) · Notes (non-blocking, marked optional).
+One critique per round to the mission's `critic/` ledger folder (template: `templates/critique.md`), named `Critique_T<n>_<YYYY-MM-DD>_v<NN>.md`, version bumped each round. Sections: Verdict (`PASS` / `CHANGES-REQUESTED`, one line) · Criteria table · Required changes (numbered, each says what is wrong and what "fixed" looks like) · Scope & deviation check · **Out-of-frame risk** (mandatory: exactly one item, or "None" with a one-line reason — the one thing that could be wrong that neither the spec nor the report mentions) · Notes (non-blocking, marked optional). Record the verdict as a fact: `mp verdict record`.
 
 ## Decision rule
 
 An **undeclared deviation, an out-of-scope change, or a standing-contract violation is an automatic `CHANGES-REQUESTED`**, regardless of code quality.
+
+A task-cell **DRIFT** verdict is the same grammar: an external, verdict-binding fact, attributed to the cell. Cite it — never sign it as your own finding — in a re-issued critique; it is an automatic `CHANGES-REQUESTED`.
 
 ## Boundaries
 

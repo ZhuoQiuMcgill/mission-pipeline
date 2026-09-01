@@ -1,3 +1,12 @@
+<!-- mp:header
+mission: <Mission>
+category: TaskSpec
+key: T<n>
+round: 0
+version: <NN>
+derives-from: <DesignDoc artifact id, or none>
+-->
+<!-- IDs in the header come from mp artifact new — never invented. See references/substrate.md. -->
 # Task Spec — T<n>: <Short Name>
 
 - **Mission:** `<Mission — named per PROJECT.md's scheme>`

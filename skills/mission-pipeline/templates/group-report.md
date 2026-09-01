@@ -1,3 +1,12 @@
+<!-- mp:header
+mission: <Mission>
+category: GroupReport
+key: T<n>
+round: 0
+version: <NN>
+derives-from: <final DevReport artifact id>, <final Critique artifact id>
+-->
+<!-- IDs in the header come from mp artifact new — never invented. See references/substrate.md. -->
 # Group Report — T<n>: <Short Name>
 
 - **Mission:** `<Mission>` · **Role:** Stabilizer · **Date:** <YYYY-MM-DD> · **Version:** v<NN>
@@ -12,8 +21,9 @@
 
 ## Evidence spot-check (mandatory before ACCEPTED)
 <!-- Judge the evidence chain, not the code: sampled criteria rows — cited file:line exists
-     and says what is claimed; cited test/command re-runs green. -->
-- Sampled: <n of m criteria rows> · Result: **clean** / critique returned for correction (→ v<NN>)
+     and says what is claimed; cited test/command re-runs green; claimed types are honest —
+     a claimed R has its mp evidence row, fingerprint-bound and matching (invariant 13). -->
+- Sampled: <n of m criteria rows> · Citations: <real / returned> · Typing: <honest / returned> · Result: **clean** / critique returned for correction (→ v<NN>)
 
 ## Flags carried (mandatory, verbatim)
 <!-- Every Out-of-frame risk (critiques) and Noticed-but-not-fixed item (reports) of this

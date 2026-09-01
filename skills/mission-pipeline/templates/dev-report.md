@@ -1,3 +1,12 @@
+<!-- mp:header
+mission: <Mission>
+category: DevReport
+key: T<n>
+round: <k>
+version: <NN>
+derives-from: <TaskSpec artifact id>
+-->
+<!-- IDs in the header come from mp artifact new — never invented. See references/substrate.md. -->
 # Implementation Report — T<n>: <Short Name>
 
 - **Mission:** `<Mission>` · **Round:** <k> of <N> · **Version:** v<NN>
@@ -17,6 +26,11 @@
 | <behavior> | `test_name` | <output / commit ref> | <output> |
 
 ## Verification results
+<!-- Before reporting: take the fingerprint (mp fingerprint take), then register one
+     evidence row per requirement (mp evidence add --type R --cmd … --output-sha …
+     --fingerprint <id>). An R anchor binds the command to the source state that produced
+     it — invariant 13. -->
+- **Fingerprint:** <id — commit SHA, dirty state> · **Evidence rows:** <registered per requirement / ids>
 ```
 <verbatim output of the spec's verification commands>
 ```

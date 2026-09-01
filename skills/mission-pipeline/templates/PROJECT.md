@@ -37,6 +37,7 @@ engine wins. Engine files (the skill folder) are never edited in a host project.
 <lint/build command>  # expect: <outcome>
 ```
 - **Closing gate (full scope):** `<the command(s) run once over the integrated result before sign-off>` <!-- engine invariant 10: task-level verification may be narrowed per spec; this gate may not -->
+- **Closing-gate log location:** `<default: the mission folder's gate/ — the recorded gate run binds this log and its hash to a source fingerprint>`
 
 ## Commit policy
 - **Author:** <identity commits are authored as>
@@ -60,13 +61,17 @@ engine wins. Engine files (the skill folder) are never edited in a host project.
 
 ## Researcher
 - **Enabled:** <yes/no>
-- **Run by:** principal, in a separate session, from the PM's written request <!-- default -->
+- **Run by:** PM-spawned fresh context with engine-fixed inputs, from the PM's written request <!-- default; principal-run in a separate session is an optional override — see Calibration -->
 - **External-evidence rules:** <path, if the project has its own research protocol>
 
 ## Closure audit
 - **Enabled:** <yes/no — recommended yes>
-- **Run by:** principal, in a separate session <!-- default; the PM never runs it and never edits its report -->
+- **Run by:** PM-spawned fresh context with engine-fixed inputs <!-- default; the PM spawns it but never edits its report; principal-run in a separate session is an optional override — see Calibration -->
 - **Model:** <a different family than the working seats when available; otherwise the same model in a fresh session — heterogeneity is preferred, never required>
+
+## Calibration
+- **Arbiter model:** <a different family than the working seats when available; otherwise the same model in a fresh session — heterogeneity is preferred, never required>
+- **Principal-run overrides:** <none by default — Researcher, Auditor, and calibration seats run as PM-spawned fresh contexts with engine-fixed inputs; list any seat here to run it principal-side in a separate session instead>
 
 ## Additional project rules
 <!-- Project-specific additions. May add; may not override the engine. -->

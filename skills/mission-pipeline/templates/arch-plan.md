@@ -1,3 +1,12 @@
+<!-- mp:header
+mission: <Mission>
+category: ArchPlan
+key: <Mission>
+round: 0
+version: <NN>
+derives-from: none
+-->
+<!-- IDs in the header come from mp artifact new — never invented. See references/substrate.md. -->
 # ArchPlan — <Mission>
 
 - **Role:** Architect · **Date:** <YYYY-MM-DD> · **Version:** v01 (map) / v02 (adds schedule)
@@ -43,7 +52,8 @@
 | Check | Finding |
 |---|---|
 | Pointer requirements (defer to another doc, unexpanded) | <T<n> req <#> → doc §> / none |
-| Unanchorable acceptance criteria | <T<n> criterion <#>> / none |
+| Unanchorable acceptance criteria (no conceivable R or F anchor — invariant 13) | <T<n> criterion <#>> / none |
+| Charter contradiction (requirement/criterion vs a quoted Charter line) | <T<n> req <#> vs Charter: "<line>"> / none |
 | Verification-scope regression vs earlier waves & the closing gate | <dropped command/path, since T<n>> / none |
 | Out-of-scope missing or empty | <T<n>> / none |
 

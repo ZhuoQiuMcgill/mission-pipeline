@@ -1,5 +1,5 @@
 ---
-description: Initialize mission-pipeline in the current project — create the state folders, briefly scout the existing codebase and conventions, and set up PROJECT.md through a pre-filled interview. Use when the user asks to init, set up, or install the mission pipeline in a project, including old projects with an established workflow.
+description: Initialize mission-pipeline in the current project — create the state folders, bootstrap the deterministic substrate, briefly scout the existing codebase and conventions, and set up PROJECT.md through one pre-filled proposal. Use when the user asks to init, set up, or install the mission pipeline in a project, including old projects with an established workflow.
 ---
 
 # Initialize mission-pipeline
@@ -18,7 +18,18 @@ If `.claude/mission-pipeline/PROJECT.md` already exists, this project is initial
 
 Create `.claude/mission-pipeline/` and `.claude/mission-pipeline/ledger/`, and seed `ledger/MISSIONS.md` from `${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/templates/missions-registry.md` and `ledger/CONTRACTS.md` from `${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/templates/standing-contracts.md`. Anchor everything to the **main project root** — never to a worktree.
 
-## 2 · Scout the existing content (setup step 3)
+## 2 · Substrate bootstrap (setup step 3)
+
+**You run these commands; the principal is never told to run anything** — the substrate is agent-internal (engine invariant 12).
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/scripts/mp" doctor
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/scripts/mp" init
+```
+
+`doctor` is the environment check — Python ≥ 3.8 with stdlib `sqlite3`, mount type, journal/DB health. A failure here fails the install loudly, which is the point: a broken environment surfaces at setup, never mid-mission (Python ≥ 3.8 is required for new missions). `init` creates the state: `ledger/events.jsonl` (append-only journal) and `ledger/mp.db` (derived, rebuildable). If the project carries a v0.3-era prose ledger, it stays readable and is imported via `mp adopt` — never converted by hand.
+
+## 3 · Scout the existing content (setup step 4)
 
 Run the read-only scout exactly as setup.md describes — identity & ground rules, stack & layout, existing workflow & commit style, verification commands. Two rules for old projects:
 
@@ -27,10 +38,10 @@ Run the read-only scout exactly as setup.md describes — identity & ground rule
 
 Summarize findings to the principal in a few plain lines before moving on.
 
-## 3 · Interview, pre-filled (setup step 4)
+## 4 · One consolidated proposal, a single veto pass (setup step 5)
 
-For every slot the scout answered, propose the scouted answer for veto; ask open questions only for the gaps. Apply the week-scheme rule strictly (setup §9): adopt an existing counter → else `Week01` for a brand-new project → else **ask** — never invent, never the calendar week. Apply the document-map rule the same way (setup §12): an established design-doc tree is adopted, never restructured; the closing gate (setup §4) and the closure-audit bindings (setup §13) round out the interview.
+Present the whole interview as **one consolidated proposal**: every slot, pre-filled from the scout, in a single message — and take one veto pass over it. Ask individual questions only for what the scout cannot answer — typically just the principal's identity and the week scheme. Apply the week-scheme rule strictly (setup §9): adopt an existing counter → else `Week01` for a brand-new project → else **ask** — never invent, never the calendar week. Apply the document-map rule the same way (setup §12): an established design-doc tree is adopted, never restructured. The closing gate (setup §4), the Researcher/closure-audit executors (setup §11/§13 — default: PM-spawned fresh contexts; principal-run is an optional binding), and the calibration bindings (setup §14 — arbiter model) round out the proposal.
 
-## 4 · Write PROJECT.md and confirm (setup steps 5–6)
+## 5 · Write PROJECT.md and confirm (setup steps 6–7)
 
-Fill `.claude/mission-pipeline/PROJECT.md` from the template, play the bindings back in plain terms, adjust until signed off. Close by reporting what now exists (folders, registry, bindings) and that the next request can start the first mission.
+Fill `.claude/mission-pipeline/PROJECT.md` from the template, play the bindings back in plain terms, adjust until signed off. Close by reporting what now exists (folders, substrate, registry, bindings) and that the next request can start the first mission.

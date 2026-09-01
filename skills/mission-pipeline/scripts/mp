@@ -1,0 +1,1959 @@
+#!/usr/bin/env python3
+"""mp — mission-pipeline deterministic substrate.
+
+INTERNAL TOOLING FOR PIPELINE AGENTS. Humans: you never need this — talk to the PM.
+
+Three-layer authority (DesignDoc_CalibrationAndSubstrate v02, §7):
+  events.jsonl  — append-only journal: AUTHORITATIVE for every state transition,
+                  including REFUSED operations. History is physically unrewritable.
+  mp.db         — SQLite: derived, operational, rebuildable by replay (mp rebuild).
+  markdown      — authoritative for judgment prose. mp never edits artifact content.
+
+Single write path: every state change appends a journal line (fsync), then applies
+the same payload to the DB, under a lockfile. Replay uses the identical apply
+functions, so `mp rebuild` is deterministic. All ids and timestamps are assigned
+at validate time and recorded in the journal payload.
+
+On top of the state machine, mp enforces the evidence law (v02 §6) mechanically:
+  mp lint         anchoring (a PASS resting only on derived rows), summaries used
+                  as roots, stale Charter anchors, stale citations, R rows that
+                  lost their fingerprint, header/registry disagreement.
+  mp gate close   the hardened close: Charter sealed, every flag disposed, a logged
+                  closing-gate run, a FRESH fingerprint equal to the one that gate
+                  ran under (drift = fail closed), zero lint findings — then the
+                  mission closes. The comparison happens at validate time, so the
+                  journal records it and replay stays deterministic.
+  mp calib        bundle: rule-derived cell inputs per seat — the starved
+                  Calibrator, the fed Challenger (v02 §5.1); the PM cannot curate.
+                  check: DRIFT fan-out halt, consecutive-SUSPICION ratchet.
+  mp edge add     derives-from / cites / carries links; lint reads them for staleness.
+
+Python >= 3.8, stdlib only. No WAL (DrvFS-safe): journal_mode=DELETE,
+synchronous=FULL, writes serialized by an app-level lockfile.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+
+CATEGORIES = {
+    "TaskSpec", "DevPlan", "DevReport", "Critique", "GroupReport", "ArchPlan",
+    "DesignDoc", "IntegrationNote", "ClosureAudit", "Charter", "CalibrationVerdict",
+    "ResearchRequest", "ResearchResult", "ResearchTrail",
+}
+TASK_SPEC_CATS = {"TaskSpec", "DevPlan"}
+ROUND_CATS = {"DevReport", "Critique"}
+TASK_UNIVERSE_CATS = TASK_SPEC_CATS | ROUND_CATS | {"GroupReport"}
+
+VERDICT_KINDS = {
+    "PASS", "CHANGES-REQUESTED", "ACCEPTED", "ESCALATED",
+    "ALIGNED", "SUSPICION", "DRIFT",
+    "DELIVERS", "DELIVERS-WITH-GAPS", "DOES-NOT-DELIVER",
+}
+FLAG_KINDS = {"out-of-frame", "noticed-not-fixed"}
+EVIDENCE_TYPES = {"R", "F", "D", "X"}
+EDGE_KINDS = {"derives-from", "cites", "carries"}
+SUMMARY_CATS = {"GroupReport", "IntegrationNote"}  # never citable roots (rule 5)
+CALIB_SEATS = ("calibrator", "challenger")
+
+FLAT_LEGACY_DIRS = {"constructor", "critic", "stabilizer", "plans", "architect",
+                    "tasks", "design", "research"}
+
+# ---------------------------------------------------------------- util
+
+def now_utc():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def jdump(obj):
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+def run_git(args, cwd=None):
+    r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "git failed")
+    return r.stdout
+
+class Refused(Exception):
+    """A validated, journaled refusal — the enforcement layer speaking."""
+
+# ---------------------------------------------------------------- paths
+
+def find_root():
+    env = os.environ.get("MP_ROOT")
+    if env:
+        return Path(env).resolve()
+    # git main root, worktree-aware: parent of --git-common-dir is always the MAIN
+    # project root, even inside a linked worktree (the anchoring rule, ledger.md).
+    try:
+        common = run_git(["rev-parse", "--git-common-dir"]).strip()
+        if common:
+            p = Path(common)
+            if not p.is_absolute():
+                p = Path.cwd() / p
+            return p.resolve().parent
+    except Exception:
+        pass
+    cur = Path.cwd()
+    for c in [cur, *cur.parents]:
+        if (c / ".claude" / "mission-pipeline").exists():
+            return c
+    return cur
+
+class Ctx:
+    def __init__(self, root=None):
+        self.root = Path(root) if root else find_root()
+        self.state_dir = self.root / ".claude" / "mission-pipeline"
+        cfg = self.state_dir / "mp.json"
+        ledger = "ledger"
+        if cfg.exists():
+            try:
+                ledger = json.loads(cfg.read_text(encoding="utf-8")).get("ledger", "ledger")
+            except Exception:
+                pass
+        lp = Path(ledger)
+        self.ledger = lp if lp.is_absolute() else (self.state_dir / lp)
+        self.db_path = self.ledger / "mp.db"
+        self.journal = self.ledger / "events.jsonl"
+        self.lock_path = self.ledger / ".mp.lock"
+
+    def require_init(self):
+        if not self.db_path.exists():
+            die(f"no substrate at {self.ledger} — run `mp init` first")
+
+# ---------------------------------------------------------------- lock
+
+class Lock:
+    def __init__(self, path, timeout=10.0):
+        self.path = str(path)
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, f"{os.getpid()} {now_utc()}\n".encode())
+                return self
+            except FileExistsError:
+                if time.time() > deadline:
+                    raise RuntimeError(
+                        f"lock busy: {self.path} — another mp is running "
+                        f"(remove the file only if you are sure it is stale)")
+                time.sleep(0.2)
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+# ---------------------------------------------------------------- schema
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS missions (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, branch TEXT,
+  started TEXT, status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open','closed')),
+  closed_at TEXT, charter_version INTEGER, round_cap INTEGER NOT NULL DEFAULT 3);
+CREATE TABLE IF NOT EXISTS artifacts (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  category TEXT NOT NULL, key TEXT NOT NULL,
+  round INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL,
+  path TEXT NOT NULL, sha256 TEXT, sealed_at TEXT, author_role TEXT,
+  created_at TEXT,
+  UNIQUE (mission, category, key, round, version));
+CREATE TABLE IF NOT EXISTS edges (
+  from_artifact INTEGER NOT NULL REFERENCES artifacts(id),
+  to_artifact INTEGER NOT NULL REFERENCES artifacts(id),
+  kind TEXT NOT NULL CHECK (kind IN ('derives-from','cites','carries')));
+CREATE TABLE IF NOT EXISTS rounds (
+  mission INTEGER NOT NULL REFERENCES missions(id), task TEXT NOT NULL,
+  n INTEGER NOT NULL CHECK (n >= 1), opened TEXT NOT NULL, closed TEXT,
+  UNIQUE (mission, task, n));
+CREATE TABLE IF NOT EXISTS verdicts (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  task TEXT, artifact INTEGER REFERENCES artifacts(id),
+  kind TEXT NOT NULL, by_role TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS flags (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  task TEXT, source_artifact INTEGER REFERENCES artifacts(id),
+  text_verbatim TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('out-of-frame','noticed-not-fixed')),
+  raised_at TEXT NOT NULL, disposition TEXT, disposed_at TEXT,
+  disposed_in INTEGER REFERENCES artifacts(id));
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY, artifact INTEGER NOT NULL REFERENCES artifacts(id),
+  criterion TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('R','F','D','X')),
+  anchor TEXT NOT NULL, cmd TEXT, output_sha TEXT,
+  fingerprint_id INTEGER REFERENCES fingerprints(id));
+CREATE TABLE IF NOT EXISTS fingerprints (
+  id INTEGER PRIMARY KEY, commit_sha TEXT, dirty INTEGER NOT NULL,
+  tree_hash TEXT, taken_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS charter (
+  mission INTEGER NOT NULL REFERENCES missions(id), version INTEGER NOT NULL,
+  path TEXT NOT NULL, sha256 TEXT NOT NULL, amended_by TEXT,
+  verbatim_quote TEXT, readback_ref TEXT, at TEXT NOT NULL,
+  UNIQUE (mission, version));
+CREATE TABLE IF NOT EXISTS contracts (
+  id INTEGER PRIMARY KEY, text TEXT NOT NULL, origin TEXT,
+  verified_by TEXT, ratified_at TEXT, retired_at TEXT);
+CREATE TABLE IF NOT EXISTS gates (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  scope TEXT NOT NULL, cmd TEXT NOT NULL, log_path TEXT, log_sha TEXT,
+  fingerprint_id INTEGER REFERENCES fingerprints(id),
+  result TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (
+  seq INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
+  action TEXT NOT NULL, payload_json TEXT NOT NULL);
+"""
+
+def connect(db_path):
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA synchronous=FULL")
+    return conn
+
+def ensure_schema(conn):
+    conn.executescript(SCHEMA)
+    cur = conn.execute("SELECT version FROM schema_meta").fetchone()
+    if cur is None:
+        conn.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
+    elif cur[0] != SCHEMA_VERSION:
+        die(f"schema version {cur[0]} != tool version {SCHEMA_VERSION} — run `mp migrate`")
+    conn.commit()
+
+# ---------------------------------------------------------------- helpers
+
+def next_id(conn, table):
+    return conn.execute(f"SELECT COALESCE(MAX(id),0)+1 FROM {table}").fetchone()[0]
+
+def mission_row(conn, name):
+    return conn.execute(
+        "SELECT id, name, status, round_cap FROM missions WHERE name=?", (name,)
+    ).fetchone()
+
+def need_mission(conn, name):
+    m = mission_row(conn, name)
+    if m is None:
+        raise Refused(f"unknown mission '{name}'")
+    return m
+
+# ---------------------------------------------------------------- actions
+# Each action: validate(conn, args) -> payload dict (ids/timestamps assigned here;
+# raises Refused), and apply(conn, payload) -> side effects. apply() is shared
+# between the live write path and journal replay, and must be deterministic.
+
+def v_mission_claim(conn, a):
+    if mission_row(conn, a["name"]):
+        raise Refused(f"mission name '{a['name']}' already claimed")
+    return {"id": next_id(conn, "missions"), "name": a["name"],
+            "branch": a.get("branch", ""), "started": a.get("started") or now_utc(),
+            "cap": int(a.get("cap", 3))}
+
+def a_mission_claim(conn, p):
+    conn.execute(
+        "INSERT INTO missions (id,name,branch,started,status,round_cap)"
+        " VALUES (?,?,?,?,'open',?)",
+        (p["id"], p["name"], p["branch"], p["started"], p["cap"]))
+
+def v_mission_close(conn, a):
+    m = need_mission(conn, a["name"])
+    if m[2] == "closed":
+        raise Refused(f"mission '{a['name']}' already closed")
+    n = conn.execute(
+        "SELECT COUNT(*) FROM flags WHERE mission=? AND disposition IS NULL",
+        (m[0],)).fetchone()[0]
+    if n and not a.get("force_flags"):
+        raise Refused(
+            f"{n} flag(s) undisposed — silence is not disposal (invariant 11)")
+    return {"id": m[0], "name": m[1], "closed_at": a.get("at") or now_utc()}
+
+def a_mission_close(conn, p):
+    conn.execute("UPDATE missions SET status='closed', closed_at=? WHERE id=?",
+                 (p["closed_at"], p["id"]))
+
+def v_artifact_new(conn, a):
+    m = need_mission(conn, a["mission"])
+    cat = a["category"]
+    if cat not in CATEGORIES:
+        raise Refused(f"unknown category '{cat}'")
+    rnd = int(a.get("round", 0))
+    ver = int(a["version"])
+    dup = conn.execute(
+        "SELECT id FROM artifacts WHERE mission=? AND category=? AND key=?"
+        " AND round=? AND version=?", (m[0], cat, a["key"], rnd, ver)).fetchone()
+    if dup:
+        raise Refused(
+            f"artifact exists (id {dup[0]}): {cat} {a['key']} r{rnd} v{ver} — "
+            "never overwrite a version")
+    return {"id": next_id(conn, "artifacts"), "mission": m[0], "category": cat,
+            "key": a["key"], "round": rnd, "version": ver, "path": a["path"],
+            "author_role": a.get("author_role", ""),
+            "created_at": a.get("created_at") or now_utc()}
+
+def a_artifact_new(conn, p):
+    conn.execute(
+        "INSERT INTO artifacts (id,mission,category,key,round,version,path,"
+        "author_role,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (p["id"], p["mission"], p["category"], p["key"], p["round"], p["version"],
+         p["path"], p["author_role"], p["created_at"]))
+
+def v_artifact_seal(conn, a):
+    row = conn.execute("SELECT id, path, sealed_at FROM artifacts WHERE id=?",
+                       (int(a["id"]),)).fetchone()
+    if row is None:
+        raise Refused(f"no artifact id {a['id']}")
+    if row[2]:
+        raise Refused(f"artifact {row[0]} already sealed at {row[2]} — versions are immutable")
+    path = Path(row[1])
+    if not path.is_absolute():
+        path = Path(a["_root"]) / path
+    if not path.exists():
+        raise Refused(f"cannot seal: file missing at {path}")
+    return {"id": row[0], "sha256": sha256_file(path), "sealed_at": now_utc()}
+
+def a_artifact_seal(conn, p):
+    conn.execute("UPDATE artifacts SET sha256=?, sealed_at=? WHERE id=?",
+                 (p["sha256"], p["sealed_at"], p["id"]))
+
+def v_round_open(conn, a):
+    m = need_mission(conn, a["mission"])
+    n = int(a["n"])
+    if n > m[3]:
+        raise Refused(f"round {n} exceeds cap {m[3]} — escalate instead (invariant 4)")
+    if conn.execute("SELECT 1 FROM rounds WHERE mission=? AND task=? AND n=?",
+                    (m[0], a["task"], n)).fetchone():
+        raise Refused(f"round {n} already open for {a['task']}")
+    return {"mission": m[0], "task": a["task"], "n": n, "opened": now_utc()}
+
+def a_round_open(conn, p):
+    conn.execute("INSERT INTO rounds (mission,task,n,opened) VALUES (?,?,?,?)",
+                 (p["mission"], p["task"], p["n"], p["opened"]))
+
+def v_round_close(conn, a):
+    m = need_mission(conn, a["mission"])
+    n = int(a["n"])
+    row = conn.execute(
+        "SELECT closed FROM rounds WHERE mission=? AND task=? AND n=?",
+        (m[0], a["task"], n)).fetchone()
+    if row is None:
+        raise Refused(f"round {n} of {a['task']} was never opened")
+    if row[0]:
+        raise Refused(f"round {n} of {a['task']} already closed")
+    return {"mission": m[0], "task": a["task"], "n": n, "closed": now_utc()}
+
+def a_round_close(conn, p):
+    conn.execute("UPDATE rounds SET closed=? WHERE mission=? AND task=? AND n=?",
+                 (p["closed"], p["mission"], p["task"], p["n"]))
+
+def v_verdict_record(conn, a):
+    m = need_mission(conn, a["mission"])
+    if a["kind"] not in VERDICT_KINDS:
+        raise Refused(f"unknown verdict kind '{a['kind']}'")
+    return {"id": next_id(conn, "verdicts"), "mission": m[0],
+            "task": a.get("task", ""), "artifact": a.get("artifact"),
+            "kind": a["kind"], "by_role": a.get("by", ""), "at": now_utc()}
+
+def a_verdict_record(conn, p):
+    conn.execute(
+        "INSERT INTO verdicts (id,mission,task,artifact,kind,by_role,at)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (p["id"], p["mission"], p["task"], p["artifact"], p["kind"],
+         p["by_role"], p["at"]))
+
+def v_flag_add(conn, a):
+    m = need_mission(conn, a["mission"])
+    if a["kind"] not in FLAG_KINDS:
+        raise Refused(f"unknown flag kind '{a['kind']}'")
+    if not a.get("text", "").strip():
+        raise Refused("flag text is empty — flags travel verbatim, not vacuously")
+    return {"id": next_id(conn, "flags"), "mission": m[0],
+            "task": a.get("task", ""), "source_artifact": a.get("source"),
+            "kind": a["kind"], "text": a["text"], "raised_at": now_utc()}
+
+def a_flag_add(conn, p):
+    conn.execute(
+        "INSERT INTO flags (id,mission,task,source_artifact,text_verbatim,kind,"
+        "raised_at) VALUES (?,?,?,?,?,?,?)",
+        (p["id"], p["mission"], p["task"], p["source_artifact"], p["text"],
+         p["kind"], p["raised_at"]))
+
+def v_flag_dispose(conn, a):
+    row = conn.execute("SELECT id, disposition FROM flags WHERE id=?",
+                       (int(a["id"]),)).fetchone()
+    if row is None:
+        raise Refused(f"no flag id {a['id']}")
+    if row[1]:
+        raise Refused(f"flag {row[0]} already disposed")
+    if not a.get("disposition", "").strip():
+        raise Refused("empty disposition — silence is not disposal (invariant 11)")
+    return {"id": row[0], "disposition": a["disposition"],
+            "disposed_in": a.get("disposed_in"), "disposed_at": now_utc()}
+
+def a_flag_dispose(conn, p):
+    conn.execute(
+        "UPDATE flags SET disposition=?, disposed_at=?, disposed_in=? WHERE id=?",
+        (p["disposition"], p["disposed_at"], p["disposed_in"], p["id"]))
+
+def v_evidence_add(conn, a):
+    if a["type"] not in EVIDENCE_TYPES:
+        raise Refused(f"evidence type must be one of R/F/D/X, got '{a['type']}'")
+    if not conn.execute("SELECT 1 FROM artifacts WHERE id=?",
+                        (int(a["artifact"]),)).fetchone():
+        raise Refused(f"no artifact id {a['artifact']}")
+    if a["type"] == "R":
+        if not a.get("fingerprint"):
+            raise Refused("R-type evidence requires --fingerprint "
+                          "(reality binds to the source state that produced it)")
+        if not a.get("output_sha"):
+            raise Refused("R-type evidence requires --output-sha")
+        if not conn.execute("SELECT 1 FROM fingerprints WHERE id=?",
+                            (int(a["fingerprint"]),)).fetchone():
+            raise Refused(f"no fingerprint id {a['fingerprint']}")
+    return {"id": next_id(conn, "evidence"), "artifact": int(a["artifact"]),
+            "criterion": a["criterion"], "type": a["type"],
+            "anchor": a.get("anchor", ""), "cmd": a.get("cmd"),
+            "output_sha": a.get("output_sha"),
+            "fingerprint": a.get("fingerprint")}
+
+def a_evidence_add(conn, p):
+    conn.execute(
+        "INSERT INTO evidence (id,artifact,criterion,type,anchor,cmd,output_sha,"
+        "fingerprint_id) VALUES (?,?,?,?,?,?,?,?)",
+        (p["id"], p["artifact"], p["criterion"], p["type"], p["anchor"],
+         p["cmd"], p["output_sha"], p["fingerprint"]))
+
+def _is_pipeline_state(rel, root, ledger):
+    """Pipeline state (the .claude state dir, the ledger wherever it lives) is
+    expected churn, never source drift — a fingerprint is about the SOURCE."""
+    if rel.startswith(".claude/"):
+        return True
+    try:
+        p = (Path(root) / rel).resolve()
+        return str(p).startswith(str(Path(ledger).resolve()) + os.sep)
+    except OSError:
+        return False
+
+def v_fingerprint_take(conn, a):
+    root = a["_root"]
+    try:
+        commit = run_git(["rev-parse", "HEAD"], cwd=root).strip()
+    except Exception:
+        raise Refused("not a git repository — a fingerprint without source "
+                      "identity is meaningless")
+    dirty = 0
+    for line in run_git(["status", "--porcelain"], cwd=root).splitlines():
+        rel = line[3:].split(" -> ")[-1].strip().strip('"')
+        if rel and not _is_pipeline_state(rel, root, a["_ledger"]):
+            dirty = 1
+            break
+    # Byte-level content hash of every tracked file: catches the CRLF class —
+    # drift that changes bytes while `git status` stays clean.
+    files = run_git(["ls-files", "-z"], cwd=root).split("\0")
+    h = hashlib.sha256()
+    for rel in sorted(f for f in files if f):
+        if _is_pipeline_state(rel, root, a["_ledger"]):
+            continue
+        fp = Path(root) / rel
+        h.update(rel.encode())
+        try:
+            h.update(hashlib.sha256(fp.read_bytes()).digest())
+        except OSError:
+            h.update(b"<unreadable>")
+    return {"id": next_id(conn, "fingerprints"), "commit_sha": commit,
+            "dirty": dirty, "tree_hash": h.hexdigest(), "taken_at": now_utc()}
+
+def a_fingerprint_take(conn, p):
+    conn.execute(
+        "INSERT INTO fingerprints (id,commit_sha,dirty,tree_hash,taken_at)"
+        " VALUES (?,?,?,?,?)",
+        (p["id"], p["commit_sha"], p["dirty"], p["tree_hash"], p["taken_at"]))
+
+def _charter_payload(conn, a, version, amended_by, quote, readback):
+    path = Path(a["path"])
+    if not path.is_absolute():
+        path = Path(a["_root"]) / path
+    if not path.exists():
+        raise Refused(f"charter file missing at {path}")
+    return {"mission": need_mission(conn, a["mission"])[0], "version": version,
+            "path": a["path"], "sha256": sha256_file(path),
+            "amended_by": amended_by, "quote": quote, "readback": readback,
+            "at": now_utc()}
+
+def v_charter_seal(conn, a):
+    m = need_mission(conn, a["mission"])
+    if conn.execute("SELECT 1 FROM charter WHERE mission=?", (m[0],)).fetchone():
+        raise Refused("charter already sealed — use `mp charter amend`")
+    return _charter_payload(conn, a, 1, a.get("by", "principal"), "", "")
+
+def v_charter_amend(conn, a):
+    m = need_mission(conn, a["mission"])
+    cur = conn.execute("SELECT MAX(version) FROM charter WHERE mission=?",
+                       (m[0],)).fetchone()[0]
+    if cur is None:
+        raise Refused("no sealed charter to amend — use `mp charter seal`")
+    if not a.get("quote", "").strip():
+        raise Refused("amendment requires the principal's verbatim words (--quote)")
+    return _charter_payload(conn, a, cur + 1, a.get("by", "principal"),
+                            a["quote"], a.get("readback", ""))
+
+def a_charter(conn, p):
+    conn.execute(
+        "INSERT INTO charter (mission,version,path,sha256,amended_by,"
+        "verbatim_quote,readback_ref,at) VALUES (?,?,?,?,?,?,?,?)",
+        (p["mission"], p["version"], p["path"], p["sha256"], p["amended_by"],
+         p["quote"], p["readback"], p["at"]))
+    conn.execute("UPDATE missions SET charter_version=? WHERE id=?",
+                 (p["version"], p["mission"]))
+
+def v_gate_record(conn, a):
+    m = need_mission(conn, a["mission"])
+    log_sha = None
+    if a.get("log"):
+        lp = Path(a["log"])
+        if not lp.is_absolute():
+            lp = Path(a["_root"]) / lp
+        if not lp.exists():
+            raise Refused(f"gate log missing at {lp} — reality closes the evidence")
+        log_sha = sha256_file(lp)
+    return {"id": next_id(conn, "gates"), "mission": m[0], "scope": a["scope"],
+            "cmd": a["cmd"], "log_path": a.get("log"), "log_sha": log_sha,
+            "fingerprint": a.get("fingerprint"), "result": a["result"],
+            "at": now_utc()}
+
+def a_gate_record(conn, p):
+    conn.execute(
+        "INSERT INTO gates (id,mission,scope,cmd,log_path,log_sha,fingerprint_id,"
+        "result,at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (p["id"], p["mission"], p["scope"], p["cmd"], p["log_path"], p["log_sha"],
+         p["fingerprint"], p["result"], p["at"]))
+
+def v_contract_add(conn, a):
+    if not a.get("text", "").strip():
+        raise Refused("empty contract text")
+    return {"id": next_id(conn, "contracts"), "text": a["text"],
+            "origin": a.get("origin", ""), "verified_by": a.get("verified_by", ""),
+            "ratified_at": a.get("ratified")}
+
+def a_contract_add(conn, p):
+    conn.execute(
+        "INSERT INTO contracts (id,text,origin,verified_by,ratified_at)"
+        " VALUES (?,?,?,?,?)",
+        (p["id"], p["text"], p["origin"], p["verified_by"], p["ratified_at"]))
+
+def v_edge_add(conn, a):
+    kind = a["kind"]
+    if kind not in EDGE_KINDS:
+        raise Refused(f"edge kind must be one of {'|'.join(sorted(EDGE_KINDS))},"
+                      f" got '{kind}'")
+    ids = {}
+    for side in ("from", "to"):
+        ids[side] = int(a[side])
+        if not conn.execute("SELECT 1 FROM artifacts WHERE id=?",
+                            (ids[side],)).fetchone():
+            raise Refused(f"no artifact id {ids[side]} (--{side})")
+    if conn.execute(
+            "SELECT 1 FROM edges WHERE from_artifact=? AND to_artifact=? AND kind=?",
+            (ids["from"], ids["to"], kind)).fetchone():
+        raise Refused(f"edge already recorded: {ids['from']} -{kind}-> {ids['to']}")
+    return {"from": ids["from"], "to": ids["to"], "kind": kind}
+
+def a_edge_add(conn, p):
+    conn.execute(
+        "INSERT INTO edges (from_artifact,to_artifact,kind) VALUES (?,?,?)",
+        (p["from"], p["to"], p["kind"]))
+
+def v_gate_check(conn, a):
+    """The hardened closing gate (v02 §6/§7.3). Every check runs here, at
+    validate time — including the FRESH fingerprint comparison — so the journal
+    payload records the verdict and `mp rebuild` replays it identically."""
+    m = need_mission(conn, a["mission"])
+    mid, mname = m[0], m[1]
+    checks, failures = [], []
+
+    def record(name, ok, detail):
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+        if not ok:
+            failures.append(f"{name}: {detail}")
+
+    # 1. the Charter is sealed — the frozen basis the whole mission is judged against
+    cv = conn.execute("SELECT MAX(version) FROM charter WHERE mission=?",
+                      (mid,)).fetchone()[0]
+    record("charter-sealed", cv is not None,
+           f"Charter sealed at v{cv}" if cv is not None else
+           "no sealed Charter — a mission may not close without its frozen basis")
+
+    # 2. every flag disposed (invariant 11)
+    open_flags = [r[0] for r in conn.execute(
+        "SELECT id FROM flags WHERE mission=? AND disposition IS NULL ORDER BY id",
+        (mid,))]
+    record("flags-disposed", not open_flags,
+           "every flag disposed" if not open_flags else
+           f"{len(open_flags)} flag(s) undisposed ("
+           + ", ".join(str(i) for i in open_flags)
+           + ") — silence is not disposal (invariant 11)")
+
+    # 3. a closing-scope gate run exists, bound to its log hash
+    gate = conn.execute(
+        "SELECT id, cmd, log_path, log_sha, fingerprint_id, result FROM gates"
+        " WHERE mission=? AND scope='closing' AND log_sha IS NOT NULL"
+        " ORDER BY id DESC LIMIT 1", (mid,)).fetchone()
+    record("closing-gate-logged", gate is not None,
+           f"gate {gate[0]}: `{gate[1]}` result={gate[5]} log={gate[2]}"
+           f" sha={gate[3][:12]}" if gate else
+           "no closing-scope gate run recorded with a log hash — run the"
+           " full-scope gate and `mp gate record --scope closing --log ...` first")
+
+    # 4. R binds to source state (rule 4): a fresh fingerprint must equal the one
+    #    the recorded gate ran under, or the source drifted underneath the proof.
+    fp = None
+    if gate is None:
+        record("source-unchanged", False,
+               "no closing-gate row to bind a fingerprint to")
+    elif gate[4] is None:
+        record("source-unchanged", False,
+               f"closing gate {gate[0]} carries no fingerprint — an unbound gate"
+               " proves nothing about the source it ran over (rule 4)")
+    else:
+        try:
+            fp = v_fingerprint_take(conn, a)
+        except Refused as r:
+            record("source-unchanged", False, f"cannot take a fresh fingerprint: {r}")
+        if fp is not None:
+            old = conn.execute(
+                "SELECT commit_sha, dirty, tree_hash FROM fingerprints WHERE id=?",
+                (gate[4],)).fetchone()
+            same = bool(old) and old[0] == fp["commit_sha"] \
+                and old[2] == fp["tree_hash"]
+            record("source-unchanged", same,
+                   f"source identical to fingerprint {gate[4]}"
+                   f" (commit {str(fp['commit_sha'])[:12]},"
+                   f" tree {fp['tree_hash'][:12]})" if same else
+                   "source drifted since the gate ran — fail closed"
+                   f" (gate fingerprint {gate[4]}: commit"
+                   f" {str(old[0])[:12] if old else '?'}, tree"
+                   f" {str(old[2])[:12] if old else '?'}; now: commit"
+                   f" {str(fp['commit_sha'])[:12]}, tree {fp['tree_hash'][:12]}"
+                   + (", working tree dirty" if fp["dirty"] else "") + ")")
+
+    # 5. zero lint findings for this mission — the gate refuses on the evidence law
+    findings, _info = lint_findings(conn, a["_root"], mname)
+    record("lint-clean", not findings,
+           "0 lint findings" if not findings else
+           f"{len(findings)} lint finding(s): "
+           + "; ".join(f"[{f['rule']}] {f['message']}" for f in findings[:5])
+           + (" ..." if len(findings) > 5 else ""))
+
+    return {"id": next_id(conn, "gates"), "mission": mid, "mission_name": mname,
+            "result": "PASSED" if not failures else "FAILED",
+            "checks": checks, "failures": failures, "findings": findings,
+            "fingerprint": fp, "at": now_utc()}
+
+def a_gate_check(conn, p):
+    fp = p.get("fingerprint")
+    if fp:
+        a_fingerprint_take(conn, fp)
+    conn.execute(
+        "INSERT INTO gates (id,mission,scope,cmd,log_path,log_sha,fingerprint_id,"
+        "result,at) VALUES (?,?,'close-check','mp gate close',NULL,NULL,?,?,?)",
+        (p["id"], p["mission"], fp["id"] if fp else None, p["result"], p["at"]))
+
+def v_init(conn, a):
+    return {"root": a["_root"], "ledger": a.get("ledger", "ledger")}
+
+def a_init(conn, p):
+    pass  # directories are created by cmd_init; the event records that it happened
+
+ACTIONS = {
+    "init":            (v_init, a_init),
+    "mission.claim":   (v_mission_claim, a_mission_claim),
+    "mission.close":   (v_mission_close, a_mission_close),
+    "artifact.new":    (v_artifact_new, a_artifact_new),
+    "artifact.seal":   (v_artifact_seal, a_artifact_seal),
+    "round.open":      (v_round_open, a_round_open),
+    "round.close":     (v_round_close, a_round_close),
+    "verdict.record":  (v_verdict_record, a_verdict_record),
+    "flag.add":        (v_flag_add, a_flag_add),
+    "flag.dispose":    (v_flag_dispose, a_flag_dispose),
+    "evidence.add":    (v_evidence_add, a_evidence_add),
+    "fingerprint.take": (v_fingerprint_take, a_fingerprint_take),
+    "charter.seal":    (v_charter_seal, a_charter),
+    "charter.amend":   (v_charter_amend, a_charter),
+    "gate.record":     (v_gate_record, a_gate_record),
+    "gate.check":      (v_gate_check, a_gate_check),
+    "edge.add":        (v_edge_add, a_edge_add),
+    "contract.add":    (v_contract_add, a_contract_add),
+}
+
+# ---------------------------------------------------------------- write path
+
+def last_seq(journal):
+    if not journal.exists():
+        return 0
+    last = 0
+    with open(journal, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                last = json.loads(line)["seq"]
+    return last
+
+def commit_actions(ctx, actor, requests):
+    """The single write path. requests: [(action, args)]. Journal first (fsync),
+    then DB, one lock, one commit. Returns [event dict]."""
+    results = []
+    with Lock(ctx.lock_path):
+        conn = connect(ctx.db_path)
+        try:
+            ensure_schema(conn)
+            seq = last_seq(ctx.journal)
+            with open(ctx.journal, "a", encoding="utf-8") as jf:
+                for action, args in requests:
+                    args = dict(args)
+                    args["_root"] = str(ctx.root)
+                    args["_ledger"] = str(ctx.ledger)
+                    validate, apply = ACTIONS[action]
+                    seq += 1
+                    try:
+                        payload = validate(conn, args)
+                        event = {"seq": seq, "at": now_utc(), "actor": actor,
+                                 "action": action, "result": "OK",
+                                 "payload": payload}
+                    except Refused as r:
+                        pub = {k: v for k, v in args.items()
+                               if not k.startswith("_")}
+                        event = {"seq": seq, "at": now_utc(), "actor": actor,
+                                 "action": action, "result": "REFUSED",
+                                 "reason": str(r), "args": pub}
+                    jf.write(jdump(event) + "\n")
+                    jf.flush()
+                    os.fsync(jf.fileno())
+                    conn.execute(
+                        "INSERT INTO events (seq,at,actor,action,payload_json)"
+                        " VALUES (?,?,?,?,?)",
+                        (event["seq"], event["at"], actor, action, jdump(event)))
+                    if event["result"] == "OK":
+                        apply(conn, event["payload"])
+                    results.append(event)
+            conn.commit()
+        finally:
+            conn.close()
+    return results
+
+def replay(journal, db_path):
+    """Rebuild a DB from the journal using the same apply functions."""
+    if db_path.exists():
+        db_path.unlink()
+    conn = connect(db_path)
+    ensure_schema(conn)
+    with open(journal, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            event = json.loads(line)
+            conn.execute(
+                "INSERT INTO events (seq,at,actor,action,payload_json)"
+                " VALUES (?,?,?,?,?)",
+                (event["seq"], event["at"], event["actor"], event["action"],
+                 jdump(event)))
+            if event["result"] == "OK":
+                ACTIONS[event["action"]][1](conn, event["payload"])
+    conn.commit()
+    return conn
+
+# ---------------------------------------------------------------- output
+
+JSON_MODE = False
+
+def out(human, obj):
+    if JSON_MODE:
+        print(jdump(obj))
+    else:
+        print(human)
+
+def die(msg, code=1):
+    if JSON_MODE:
+        print(jdump({"ok": False, "error": msg}))
+    else:
+        print(f"mp: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+def emit(events):
+    """Report the outcome of commit_actions; exit 3 if anything was refused."""
+    refused = [e for e in events if e["result"] == "REFUSED"]
+    if JSON_MODE:
+        single = events[0] if len(events) == 1 else {"events": events}
+        body = dict(single)
+        body["ok"] = not refused
+        if refused:
+            body["refused"] = True
+        print(jdump(body))
+    else:
+        for e in events:
+            if e["result"] == "OK":
+                pid = e["payload"].get("id", "")
+                print(f"OK {e['action']} seq={e['seq']}"
+                      + (f" id={pid}" if pid != "" and pid is not None else ""))
+            else:
+                print(f"REFUSED {e['action']}: {e['reason']}")
+    if refused:
+        sys.exit(3)
+
+# ---------------------------------------------------------------- adopt
+
+FILENAME_KNOWN = sorted(CATEGORIES)
+
+def parse_artifact_name(name):
+    """<prefix>_<Category>_<Key>_<datetok>_v<NN>.md — prefix optional; the key
+    never contains underscores (engine naming rule). Returns dict or None."""
+    if not name.endswith(".md"):
+        return None
+    parts = name[:-3].split("_")
+    if len(parts) < 4:
+        return None
+    m = re.fullmatch(r"v(\d+)", parts[-1])
+    if not m:
+        return None
+    cat_idx = None
+    for i, p in enumerate(parts[:-2]):
+        if p in CATEGORIES:
+            cat_idx = i
+            break
+    if cat_idx is None:
+        return None
+    key = "_".join(parts[cat_idx + 1:-2])
+    if not key:
+        return None
+    datetok = parts[-2]
+    tm = re.match(r"(?:W\d+-)?(T\d+)(?:-|$)", key)
+    return {"category": parts[cat_idx], "key": key,
+            "task": tm.group(1) if tm else None,
+            "date": datetok if re.fullmatch(r"\d{4}-\d{2}-\d{2}", datetok) else "",
+            "version": int(m.group(1))}
+
+def parse_outcome(path):
+    """ACCEPTED/ESCALATED from a group report head. Formats observed in the
+    DIVRA corpus: inline `**Outcome:** **ACCEPTED**` (Week 22 era) and a
+    `## Outcome` section whose bold line opens with the verdict (Week 24+)."""
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace").splitlines()[:40]
+    except OSError:
+        return None
+    for line in head:
+        s = line.strip()
+        # inline label style: **Outcome:** / **Stabilizer outcome:** /
+        # **Stabilizer verdict:** — the verdict token itself stays strict-uppercase
+        m = re.search(r"\*\*[A-Za-z ]{0,24}(?:[Oo]utcome|[Vv]erdict)s?:?\*\*:?"
+                      r"\s*\**\s*(ACCEPTED|ESCALATED)", s)
+        if m:
+            return m.group(1)
+        if s.startswith("**ACCEPTED"):
+            return "ACCEPTED"
+        if s.startswith("**ESCALATED"):
+            return "ESCALATED"
+    return None
+
+def missions_md_status(ledger_root, mission):
+    reg = ledger_root / "MISSIONS.md"
+    if not reg.exists():
+        return None
+    for line in reg.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.strip().startswith("|") and f"| {mission} " in line + " ":
+            cells = [c.strip() for c in line.split("|")]
+            joined = " ".join(cells)
+            if re.search(r"\bclosed\b", joined):
+                m = re.search(r"closed\s+(\d{4}-\d{2}-\d{2})", joined)
+                return ("closed", m.group(1) if m else "")
+            return ("open", "")
+    return None
+
+def cmd_adopt(ctx, args):
+    ctx.require_init()
+    ledger_root = Path(args.ledger_root).resolve()
+    if not ledger_root.is_dir():
+        die(f"not a directory: {ledger_root}")
+    mission_dirs = []
+    for d in sorted(ledger_root.iterdir()):
+        if not d.is_dir():
+            continue
+        if d.name in FLAT_LEGACY_DIRS and not args.include_flat:
+            continue
+        mission_dirs.append(d)
+    report = {"missions": [], "skipped": []}
+    requests = []
+    for md in mission_dirs:
+        files = sorted(p for p in md.rglob("*.md") if p.is_file())
+        parsed = []
+        for p in files:
+            info = parse_artifact_name(p.name)
+            if info is None:
+                report["skipped"].append(str(p.relative_to(ledger_root)))
+                continue
+            parsed.append((p, info))
+        if not parsed:
+            report["skipped"].append(f"{md.name}/ (no parseable artifacts)")
+            continue
+        dates = sorted(i["date"] for _, i in parsed if i["date"])
+        started = dates[0] if dates else ""
+        requests.append(("mission.claim",
+                         {"name": md.name, "branch": "", "started": started}))
+        latest_gr = {}  # task -> (version, path)
+        for p, i in parsed:
+            key = i["task"] if (i["task"] and i["category"] in TASK_UNIVERSE_CATS) \
+                else i["key"]
+            rnd = i["version"] if i["category"] in ROUND_CATS else 0
+            requests.append(("artifact.new", {
+                "mission": md.name, "category": i["category"], "key": key,
+                "round": rnd, "version": i["version"],
+                "path": str(p.relative_to(ledger_root)),
+                "author_role": "adopt", "created_at": i["date"]}))
+            if i["category"] == "GroupReport" and i["task"]:
+                cur = latest_gr.get(i["task"])
+                if cur is None or i["version"] > cur[0]:
+                    latest_gr[i["task"]] = (i["version"], p)
+        outcomes = 0
+        for task, (_, p) in sorted(latest_gr.items()):
+            oc = parse_outcome(p)
+            if oc:
+                requests.append(("verdict.record", {
+                    "mission": md.name, "task": task, "kind": oc,
+                    "by": "stabilizer"}))
+                outcomes += 1
+        st = missions_md_status(ledger_root, md.name)
+        if st and st[0] == "closed":
+            requests.append(("mission.close",
+                             {"name": md.name, "at": st[1]}))
+        report["missions"].append(
+            {"mission": md.name, "artifacts": len(parsed), "outcomes": outcomes})
+    if args.dry_run:
+        out("\n".join(f"{m['mission']}: {m['artifacts']} artifacts, "
+                      f"{m['outcomes']} outcomes" for m in report["missions"])
+            + (f"\nskipped: {len(report['skipped'])}" if report["skipped"] else ""),
+            {"ok": True, "dry_run": True, **report})
+        return
+    events = commit_actions(ctx, "adopt", requests)
+    refused = [e for e in events if e["result"] == "REFUSED"]
+    report["events"] = len(events)
+    report["refused"] = [e["reason"] for e in refused]
+    out("\n".join(f"adopted {m['mission']}: {m['artifacts']} artifacts, "
+                  f"{m['outcomes']} outcomes" for m in report["missions"])
+        + f"\n{len(events)} events"
+        + (f", {len(refused)} refused" if refused else "")
+        + (f", {len(report['skipped'])} files skipped" if report["skipped"] else ""),
+        {"ok": True, **report})
+
+# ---------------------------------------------------------------- metrics
+
+def task_stats(conn, match=None):
+    """Per-(mission, task) stats, task-rounds semantics: the task universe is
+    every T-key with any DevPlan/TaskSpec/DevReport/Critique/GroupReport;
+    rounds = max filename version over DevReport+Critique."""
+    q = ("SELECT m.name, a.category, a.key, a.version, a.id FROM artifacts a "
+         "JOIN missions m ON m.id=a.mission")
+    rows = conn.execute(q).fetchall()
+    verd = {}
+    for mname, task, kind, vid in conn.execute(
+            "SELECT m.name, v.task, v.kind, v.id FROM verdicts v "
+            "JOIN missions m ON m.id=v.mission "
+            "WHERE v.kind IN ('ACCEPTED','ESCALATED') ORDER BY v.id"):
+        verd[(mname, task)] = kind  # latest wins
+    stats = {}
+    for mname, cat, key, ver, _ in rows:
+        if match and not _glob(mname, match):
+            continue
+        if cat not in TASK_UNIVERSE_CATS or not re.fullmatch(r"T\d+", key):
+            continue
+        s = stats.setdefault((mname, key), {
+            "rounds": 0, "dev_reports": 0, "critiques": 0, "group_reports": 0,
+            "outcome": "", "has_task_spec": False})
+        if cat in ROUND_CATS:
+            s["rounds"] = max(s["rounds"], ver)
+        if cat == "DevReport":
+            s["dev_reports"] += 1
+        elif cat == "Critique":
+            s["critiques"] += 1
+        elif cat == "GroupReport":
+            s["group_reports"] += 1
+        elif cat in TASK_SPEC_CATS:
+            s["has_task_spec"] = True
+    for k in stats:
+        stats[k]["outcome"] = verd.get(k, "")
+    return stats
+
+def _glob(name, pattern):
+    import fnmatch
+    return fnmatch.fnmatch(name, pattern)
+
+def mission_table(stats):
+    per = {}
+    for (mname, task), s in stats.items():
+        row = per.setdefault(mname, {"tasks": 0, "r1": 0, "r2": 0, "r3": 0,
+                                     "escalated": 0})
+        row["tasks"] += 1
+        if s["rounds"] in (1, 2, 3):
+            row[f"r{s['rounds']}"] += 1
+        if s["outcome"] == "ESCALATED":
+            row["escalated"] += 1
+    return per
+
+def _task_sort(item):
+    (mname, task) = item[0]
+    return (mname, int(task[1:]))
+
+def cmd_metrics(ctx, args):
+    ctx.require_init()
+    conn = connect(ctx.db_path)
+    ensure_schema(conn)
+    stats = task_stats(conn, args.match)
+    per = mission_table(stats)
+    if args.tasks_csv:
+        lines = ["mission,task,rounds,dev_reports,critiques,group_reports,"
+                 "outcome,has_task_spec"]
+        for (mname, task), s in sorted(stats.items(), key=_task_sort):
+            lines.append(f"{mname},{task},{s['rounds']},{s['dev_reports']},"
+                         f"{s['critiques']},{s['group_reports']},{s['outcome']},"
+                         f"{'yes' if s['has_task_spec'] else 'no'}")
+        print("\n".join(lines))
+        return
+    order = sorted(per)
+    total = {"tasks": 0, "r1": 0, "r2": 0, "r3": 0, "escalated": 0}
+    for m in order:
+        for k in total:
+            total[k] += per[m][k]
+    if JSON_MODE:
+        print(jdump({"ok": True, "missions": {m: per[m] for m in order},
+                     "total": total}))
+        return
+    print("| Mission | Tasks | Passed round 1 | 2 rounds | 3 rounds (cap) | Escalated |")
+    print("|---|---:|---:|---:|---:|---:|")
+    for m in order:
+        r = per[m]
+        print(f"| {m} | {r['tasks']} | {r['r1']} | {r['r2']} | {r['r3']} |"
+              f" {r['escalated']} |")
+    print(f"| **Total** | **{total['tasks']}** | **{total['r1']}** |"
+          f" **{total['r2']}** | **{total['r3']}** | **{total['escalated']}** |")
+
+# ---------------------------------------------------------------- evidence law
+# The six rules of v02 §6, mechanically. Judgment stays in prose; this layer only
+# reports what can be decided without reading a sentence.
+
+MP_HEADER_RE = re.compile(r"<!--\s*mp:header\s(.*?)-->", re.S)
+ANCHOR_ARTIFACT_RE = re.compile(r"^artifact:(\d+)(?::.+)?$")
+ANCHOR_CHARTER_RE = re.compile(r"^charter:v(\d+)(?::.+)?$")
+HEADER_FIELDS = ("mission", "category", "key", "round", "version")
+
+def parse_mp_header(text):
+    """The machine-readable block the templates carry. Returns dict or None."""
+    m = MP_HEADER_RE.search(text)
+    if not m:
+        return None
+    fields = {}
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        fields[k.strip().lower()] = v.strip()
+    return fields
+
+def live_artifact_ids(conn):
+    """Artifacts still speaking: the highest version of each (mission, category,
+    key). Superseded versions are history — their citations are not re-litigated,
+    which is how a stale anchor is retired (issue a new version carrying current
+    anchors) without ever editing sealed prose."""
+    best = {}
+    for aid, mid, cat, key, ver in conn.execute(
+            "SELECT id, mission, category, key, version FROM artifacts"):
+        k = (mid, cat, key)
+        cur = best.get(k)
+        if cur is None or ver > cur[0]:
+            best[k] = (ver, [aid])
+        elif ver == cur[0]:
+            cur[1].append(aid)
+    live = set()
+    for _ver, ids in best.values():
+        live.update(ids)
+    return live
+
+def lint_findings(conn, root, mission=None):
+    """Read-only. Returns (findings, info). Each finding names its rule."""
+    root = Path(root)
+    arts = {}
+    cols = ("id", "mission_name", "mission", "category", "key", "round",
+            "version", "path")
+    for row in conn.execute(
+            "SELECT a.id, m.name, a.mission, a.category, a.key, a.round,"
+            " a.version, a.path FROM artifacts a JOIN missions m ON m.id=a.mission"):
+        arts[row[0]] = dict(zip(cols, row))
+    live = live_artifact_ids(conn)
+    scope = sorted((a for a in arts.values()
+                    if mission is None or a["mission_name"] == mission),
+                   key=lambda x: x["id"])
+    findings, info = [], []
+
+    def label(a):
+        return (f"{a['category']} {a['key']} r{a['round']} v{a['version']}"
+                f" (artifact {a['id']})")
+
+    def add(rule, a, msg):
+        findings.append({"rule": rule,
+                         "mission": a["mission_name"] if a else mission,
+                         "artifact": a["id"] if a else None, "message": msg})
+
+    ev = {}
+    for eid, aid, crit, typ, anchor, osha, fpid in conn.execute(
+            "SELECT id, artifact, criterion, type, anchor, output_sha,"
+            " fingerprint_id FROM evidence ORDER BY id"):
+        ev.setdefault(aid, []).append(
+            {"id": eid, "criterion": crit, "type": typ, "anchor": (anchor or "").strip(),
+             "output_sha": osha, "fingerprint": fpid})
+    passed = {r[0] for r in conn.execute(
+        "SELECT DISTINCT artifact FROM verdicts WHERE kind='PASS'"
+        " AND artifact IS NOT NULL")}
+    charter_ver = dict(conn.execute("SELECT id, charter_version FROM missions"))
+    top_version = {}
+    for a in arts.values():
+        k = (a["mission"], a["category"], a["key"])
+        top_version[k] = max(top_version.get(k, 0), a["version"])
+
+    for a in scope:
+        if a["id"] not in live:
+            continue
+        rows = ev.get(a["id"], [])
+
+        # rules 1+2+3 — an acceptance standing only on derived documents
+        if a["id"] in passed:
+            if not rows:
+                add("evidence-anchoring", a,
+                    f"{label(a)} carries a PASS verdict with no evidence rows —"
+                    " an acceptance with no anchor at all (rules 2+3)")
+            else:
+                by_crit = {}
+                for e in rows:
+                    by_crit.setdefault(e["criterion"], []).append(e)
+                for crit in sorted(by_crit):
+                    types = [e["type"] for e in by_crit[crit]]
+                    if all(t in ("D", "X") for t in types):
+                        kindword = ("derived" if set(types) == {"D"}
+                                    else "derived/external")
+                        add("evidence-anchoring", a,
+                            f"{label(a)} criterion '{crit}' rests on {kindword}"
+                            f" evidence only (types: {','.join(types)}) — echoes"
+                            " are not evidence; a criterion marked met needs >=1"
+                            " R or F anchor (rules 1+2+3)")
+
+        for e in rows:
+            # rule 5 — summaries are never citable roots
+            if e["type"] == "D":
+                m2 = ANCHOR_ARTIFACT_RE.match(e["anchor"])
+                tgt = arts.get(int(m2.group(1))) if m2 else None
+                if tgt is not None and tgt["category"] in SUMMARY_CATS:
+                    add("summary-as-root", a,
+                        f"{label(a)} criterion '{e['criterion']}' anchors D"
+                        f" evidence to {tgt['category']} {tgt['key']} v"
+                        f"{tgt['version']} (artifact {tgt['id']}) — summaries are"
+                        " never citable roots (rule 5); cite the artifact the"
+                        " summary carries")
+            # rule 6a — a Charter amendment propagates staleness
+            if e["type"] == "F":
+                m2 = ANCHOR_CHARTER_RE.match(e["anchor"])
+                cur = charter_ver.get(a["mission"])
+                if m2 and cur is not None and int(m2.group(1)) < cur:
+                    add("stale-charter", a,
+                        f"{label(a)} criterion '{e['criterion']}' anchors"
+                        f" '{e['anchor']}' but {a['mission_name']}'s Charter is at"
+                        f" v{cur} — amendments propagate staleness (rule 6);"
+                        " re-anchor on a new version of this artifact")
+
+    # rule 6b — citing v01 of a document whose v03 exists
+    for frm, to, kind in conn.execute(
+            "SELECT from_artifact, to_artifact, kind FROM edges"
+            " WHERE kind IN ('cites','derives-from') ORDER BY rowid"):
+        s, t = arts.get(frm), arts.get(to)
+        if s is None or t is None or s["id"] not in live:
+            continue
+        if mission is not None and s["mission_name"] != mission:
+            continue
+        newest = top_version.get((t["mission"], t["category"], t["key"]),
+                                 t["version"])
+        if newest > t["version"]:
+            add("stale-citation", s,
+                f"{label(s)} {kind} {t['category']} {t['key']} v{t['version']}"
+                f" (artifact {t['id']}) but v{newest} exists — stale citation"
+                " (rule 6)")
+
+    # rule 4, defense in depth — R rows that lost their binding. mp refuses these
+    # at `evidence add`, so a row here entered outside the write path.
+    for eid, aid, crit, osha, fpid in conn.execute(
+            "SELECT id, artifact, criterion, output_sha, fingerprint_id"
+            " FROM evidence WHERE type='R' ORDER BY id"):
+        a = arts.get(aid)
+        if a is None or (mission is not None and a["mission_name"] != mission):
+            continue
+        missing = []
+        if fpid is None:
+            missing.append("fingerprint")
+        if not osha:
+            missing.append("output hash")
+        if missing:
+            add("r-integrity", a,
+                f"{label(a)} criterion '{crit}': R evidence row {eid} has no "
+                + " and no ".join(missing) + " — R binds to the source state that"
+                " produced it (rule 4); mp refuses this at add, so this row"
+                " entered outside the write path")
+
+    # header <-> registry agreement
+    no_header, off_disk = 0, 0
+    for a in scope:
+        p = Path(a["path"])
+        if not p.is_absolute():
+            p = root / p
+        if not p.exists():
+            off_disk += 1
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            off_disk += 1
+            continue
+        h = parse_mp_header(text)
+        if h is None:
+            no_header += 1
+            continue
+        for f in HEADER_FIELDS:
+            want = a["mission_name"] if f == "mission" else a[f]
+            got = h.get(f)
+            if got is None:
+                add("header-consistency", a,
+                    f"{label(a)} mp:header has no '{f}' line")
+                continue
+            if f in ("round", "version"):
+                ok = got.isdigit() and int(got) == int(want)
+            else:
+                ok = got == str(want)
+            if not ok:
+                add("header-consistency", a,
+                    f"{label(a)} mp:header {f}='{got}' but the registry says"
+                    f" '{want}' — the header and the ledger must agree")
+        df = (h.get("derives-from") or "").strip()
+        if df and df.lower() != "none":
+            for tok in df.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                if not tok.isdigit() or int(tok) not in arts:
+                    add("header-consistency", a,
+                        f"{label(a)} mp:header derives-from '{tok}' is not a"
+                        " registered artifact id — ids come from `mp artifact"
+                        " new`, never invented")
+    info.append(f"{len(scope)} artifact(s) in scope, {len(live & {x['id'] for x in scope})}"
+                f" of them current; {no_header} carry no mp:header block;"
+                f" {off_disk} not readable on disk")
+    return findings, info
+
+def cmd_lint(ctx, args):
+    ctx.require_init()
+    conn = connect(ctx.db_path)
+    ensure_schema(conn)
+    if args.mission and mission_row(conn, args.mission) is None:
+        conn.close()
+        die(f"unknown mission '{args.mission}'")
+    findings, info = lint_findings(conn, ctx.root, args.mission)
+    conn.close()
+    counts = {}
+    for f in findings:
+        counts[f["rule"]] = counts.get(f["rule"], 0) + 1
+    human = [f"mp lint — {args.mission or 'all missions'}"]
+    for f in findings:
+        human.append(f"  FINDING [{f['rule']}] {f['mission']}: {f['message']}")
+    human += [f"  info: {i}" for i in info]
+    human.append("  status: " + ("CLEAN" if not findings else
+                                 f"{len(findings)} finding(s) — "
+                                 + ", ".join(f"{k}:{v}"
+                                             for k, v in sorted(counts.items()))))
+    out("\n".join(human), {"ok": not findings, "mission": args.mission,
+                           "findings": findings, "info": info, "counts": counts})
+    if findings:
+        sys.exit(2)
+
+def cmd_gate_close(ctx, args):
+    """The hardened close. Every check is journaled — passed or failed."""
+    ctx.require_init()
+    events = commit_actions(ctx, args.actor, [("gate.check",
+                                               {"mission": args.mission})])
+    if events[0]["result"] == "REFUSED":
+        return emit(events)  # journaled refusal, exit 3
+    p = events[0]["payload"]
+    passed = p["result"] == "PASSED"
+    closed_at, close_refused = None, None
+    if passed:
+        cev = commit_actions(ctx, args.actor,
+                             [("mission.close", {"name": args.mission})])[0]
+        if cev["result"] == "OK":
+            closed_at = cev["payload"]["closed_at"]
+        else:
+            close_refused, passed = cev["reason"], False
+    human = [f"mp gate close — {args.mission}"]
+    for c in p["checks"]:
+        human.append(("  ok   " if c["ok"] else "  FAIL ")
+                     + f"{c['check']}: {c['detail']}")
+    if close_refused:
+        human.append(f"  FAIL mission.close: {close_refused}")
+    n_fail = len(p["failures"]) + (1 if close_refused else 0)
+    human.append("  result: " + (f"PASSED — mission closed at {closed_at}" if passed
+                                 else f"FAILED — {n_fail} failure(s);"
+                                      " the mission stays open"))
+    body = {"ok": passed, "mission": args.mission,
+            "result": "PASSED" if passed else "FAILED", "gate": p["id"],
+            "checks": p["checks"], "failures": p["failures"],
+            "findings": p["findings"], "closed_at": closed_at}
+    if close_refused:
+        body["close_refused"] = close_refused
+    out("\n".join(human), body)
+    if not passed:
+        sys.exit(2)
+
+# ---------------------------------------------------------------- calibration
+
+CALIBRATOR_EXCLUSIONS = [
+    "TaskSpec / DevPlan — requirements, acceptance criteria, out-of-scope lists",
+    "Critique — every round, every task",
+    "the design decision — DesignDoc / ArchPlan",
+    "IntegrationNote — and any other PM narrative, summary or disposition",
+    "prior CalibrationVerdict artifacts — this cell's own history",
+    "the Charter amendment ledger — the sealed current version only",
+]
+
+def _art_row(role, r):
+    return {"role": role, "artifact": r[0], "category": r[1], "key": r[2],
+            "round": r[3], "version": r[4], "path": r[5]}
+
+def cmd_calib_bundle(ctx, args):
+    """Rule-derived inputs for one calibration seat (v02 §5.1). Read-only: the
+    PM spawns the cell but cannot curate what it reads."""
+    ctx.require_init()
+    conn = connect(ctx.db_path)
+    ensure_schema(conn)
+    m = mission_row(conn, args.mission)
+    if m is None:
+        conn.close()
+        die(f"unknown mission '{args.mission}'")
+    mid, mname = m[0], m[1]
+    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
+    if not tasks:
+        conn.close()
+        die("--tasks is empty — name the wave's tasks, e.g. --tasks T1,T2")
+    fed = args.seat == "challenger"
+
+    ch = conn.execute("SELECT version, path FROM charter WHERE mission=?"
+                      " ORDER BY version DESC LIMIT 1", (mid,)).fetchone()
+    charter = {"version": ch[0], "path": ch[1]} if ch else None
+
+    files, task_list = [], []
+    for t in tasks:
+        rows = conn.execute(
+            "SELECT id, category, key, round, version, path FROM artifacts"
+            " WHERE mission=? AND key=? ORDER BY version, round, id",
+            (mid, t)).fetchall()
+        dev = [r for r in rows if r[1] == "DevReport"]
+        specs = {c: [r for r in rows if r[1] == c] for c in sorted(TASK_SPEC_CATS)}
+        crit = [r for r in rows if r[1] == "Critique"]
+        if dev:
+            files.append(_art_row("DevReport", dev[-1]))
+        have_spec = [c for c, rs in specs.items() if rs]
+        task_list.append({"task": t, "spec_exists": bool(have_spec),
+                          "spec_categories": have_spec,
+                          "dev_reports": len(dev), "critiques": len(crit),
+                          "registered": len(rows)})
+        if fed:
+            for c in have_spec:
+                files.append(_art_row(c, specs[c][-1]))
+            for r in crit:
+                files.append(_art_row("Critique", r))
+    if fed:
+        for r in conn.execute(
+                "SELECT id, category, key, round, version, path FROM artifacts"
+                " WHERE mission=? AND category='IntegrationNote'"
+                " ORDER BY version, id", (mid,)):
+            files.append(_art_row("IntegrationNote", r))
+
+    # by name, not by glob: a mission name is not a pattern
+    stats = {k: v for k, v in task_stats(conn).items() if k[0] == mname}
+    per = mission_table(stats).get(
+        mname, {"tasks": 0, "r1": 0, "r2": 0, "r3": 0, "escalated": 0})
+    metrics = {"summary": per,
+               "per_task": {k[1]: v for k, v in sorted(stats.items(),
+                                                       key=_task_sort)}}
+    amendments = [dict(zip(("version", "amended_by", "verbatim_quote",
+                            "readback_ref", "at"), r))
+                  for r in conn.execute(
+                      "SELECT version, amended_by, verbatim_quote, readback_ref,"
+                      " at FROM charter WHERE mission=? ORDER BY version", (mid,))]
+    conn.close()
+
+    exclusions = [] if fed else list(CALIBRATOR_EXCLUSIONS)
+    body = {"ok": True, "seat": args.seat, "mission": mname, "root": str(ctx.root),
+            "charter": charter, "tasks": task_list, "files": files,
+            "metrics": metrics, "exclusions": exclusions}
+    if fed:
+        body["amendments"] = amendments
+
+    human = [f"mp calib bundle — {mname} · seat: {args.seat}"
+             + ("  (fed)" if fed else "  (starved — the detector must not inherit"
+                                      " the web's frame)")]
+    human.append(f"  charter: v{charter['version']}  {charter['path']}" if charter
+                 else "  charter: NONE SEALED — the cell has no basis to judge against")
+    human.append("  tasks:")
+    for t in task_list:
+        human.append(f"    {t['task']}: spec "
+                     + (("present (" + "/".join(t["spec_categories"]) + ")")
+                        if t["spec_exists"] else "ABSENT")
+                     + f", {t['dev_reports']} DevReport(s)")
+    human.append(f"  files ({len(files)}):")
+    for f in files:
+        human.append(f"    [{f['role']}] {f['path']}"
+                     f"  (artifact {f['artifact']} v{f['version']})")
+    human.append("  metrics: " + jdump(metrics["summary"]))
+    if fed:
+        human.append("  charter amendment history:")
+        for am in amendments:
+            human.append(f"    v{am['version']} by {am['amended_by'] or '-'}"
+                         f" at {am['at']}: \"{am['verbatim_quote'] or ''}\""
+                         f" (readback: {am['readback_ref'] or '-'})")
+        human.append("  exclusions: none — the fed seat sees everything above,"
+                     " on purpose")
+    else:
+        human.append("  exclusions — this seat must not receive:")
+        for x in exclusions:
+            human.append(f"    - {x}")
+    out("\n".join(human), body)
+
+def cmd_calib_check(ctx, args):
+    """Calibration verdict state: the DRIFT halt and the SUSPICION ratchet, read
+    off the ledger rather than off anyone's memory. Read-only."""
+    ctx.require_init()
+    conn = connect(ctx.db_path)
+    ensure_schema(conn)
+    m = mission_row(conn, args.mission)
+    if m is None:
+        conn.close()
+        die(f"unknown mission '{args.mission}'")
+    mid, mname = m[0], m[1]
+    rows = conn.execute(
+        "SELECT a.key, a.version, v.kind, a.id, v.id, v.by_role, v.at"
+        " FROM verdicts v JOIN artifacts a ON a.id=v.artifact"
+        " WHERE a.mission=? AND a.category='CalibrationVerdict'"
+        " ORDER BY a.key, a.version, v.id", (mid,)).fetchall()
+    conn.close()
+    def rec(r):
+        return {"key": r[0], "version": r[1], "kind": r[2], "artifact": r[3],
+                "by": r[5], "at": r[6]}
+    agg = [rec(r) for r in rows if r[0] == mname]          # aggregate cell: mission-keyed
+    cells = [rec(r) for r in rows if r[0] != mname]        # task cells: T<n>
+    findings = []
+    if agg:
+        last = agg[-1]
+        if last["kind"] == "DRIFT":
+            findings.append({"rule": "drift-halt", "message":
+                             f"latest aggregate verdict is DRIFT (v{last['version']},"
+                             f" artifact {last['artifact']}) — fan-out halted"
+                             " pending principal disposition"})
+        if last["kind"] == "SUSPICION" and len(agg) > 1 \
+                and agg[-2]["kind"] == "SUSPICION":
+            findings.append({"rule": "suspicion-ratchet", "message":
+                             f"SUSPICION in consecutive waves (v{agg[-2]['version']},"
+                             f" v{last['version']}) — SUSPICION ratchet:"
+                             " auto-escalate to principal; the PM cannot absorb it"})
+    open_drift = []
+    by_key = {}
+    for c in cells:
+        by_key.setdefault(c["key"], []).append(c)
+    for k in sorted(by_key):
+        standing = None
+        for c in by_key[k]:
+            if c["kind"] == "DRIFT":
+                standing = c
+            elif c["kind"] == "ALIGNED":
+                standing = None
+        if standing:
+            open_drift.append(standing)
+    human = [f"mp calib check — {mname}"]
+    human.append("  aggregate cell: " + (" -> ".join(
+        f"v{a['version']} {a['kind']}" for a in agg) if agg
+        else "no verdicts recorded"))
+    for f in findings:
+        human.append(f"  FINDING [{f['rule']}] {f['message']}")
+    for c in open_drift:
+        human.append(f"  info: task cell {c['key']} — DRIFT open (v{c['version']},"
+                     f" artifact {c['artifact']}): no later ALIGNED for this cell")
+    human.append("  status: " + ("clean — next wave may launch" if not findings
+                                 else f"{len(findings)} finding(s)"))
+    out("\n".join(human), {"ok": not findings, "mission": mname,
+                           "aggregate": agg, "task_cells": cells,
+                           "open_task_drift": open_drift, "findings": findings})
+    if findings:
+        sys.exit(2)
+
+# ---------------------------------------------------------------- doctor / rebuild
+
+DOMAIN_TABLES = ["missions", "artifacts", "edges", "rounds", "verdicts", "flags",
+                 "evidence", "fingerprints", "charter", "contracts", "gates",
+                 "events"]
+
+def dump_tables(conn):
+    snap = {}
+    for t in DOMAIN_TABLES:
+        cols = [c[1] for c in conn.execute(f"PRAGMA table_info({t})")]
+        order = ",".join(cols)  # total order: non-unique first columns must not
+        rows = conn.execute(     # yield unstable dumps and false divergence
+            f"SELECT * FROM {t} ORDER BY {order}").fetchall()
+        snap[t] = rows
+    return snap
+
+def cmd_doctor(ctx, args):
+    findings, warnings = [], []
+    info = {"python": sys.version.split()[0],
+            "sqlite": sqlite3.sqlite_version, "root": str(ctx.root),
+            "ledger": str(ctx.ledger)}
+    # mount type (informational; DrvFS/9p means WAL is off the table — it is)
+    try:
+        best = ("", "")
+        with open("/proc/mounts") as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 3 and str(ctx.ledger).startswith(p[1]) \
+                        and len(p[1]) > len(best[0]):
+                    best = (p[1], p[2])
+        info["mount"] = best[1]
+        if best[1] in ("9p", "drvfs", "fuse.drvfs"):
+            warnings.append(f"ledger on {best[1]} mount — WAL disabled by design,"
+                            " writes serialized via lockfile")
+    except OSError:
+        pass
+    if not ctx.db_path.exists():
+        die(f"no substrate at {ctx.ledger} — run `mp init` first")
+    if ctx.lock_path.exists():
+        warnings.append(f"lockfile present: {ctx.lock_path} "
+                        "(stale if no mp is running)")
+    # journal integrity
+    seq_prev, parse_err = 0, 0
+    if ctx.journal.exists():
+        with open(ctx.journal, encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    parse_err += 1
+                    findings.append(f"journal line {i}: invalid JSON")
+                    continue
+                if e["seq"] != seq_prev + 1:
+                    findings.append(
+                        f"journal line {i}: seq {e['seq']} after {seq_prev}"
+                        " (gap or reorder)")
+                seq_prev = e["seq"]
+    else:
+        findings.append("journal missing")
+    conn = connect(ctx.db_path)
+    ensure_schema(conn)
+    # DB integrity
+    ic = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    if ic != "ok":
+        findings.append(f"integrity_check: {ic}")
+    fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk:
+        findings.append(f"foreign_key_check: {len(fk)} violation(s)")
+    # journal ↔ DB divergence: rebuild to temp and diff (the state layer's diff -r)
+    if ctx.journal.exists() and parse_err == 0:
+        tmp = Path(tempfile.mkstemp(suffix=".db", prefix="mp-doctor-")[1])
+        try:
+            rconn = replay(ctx.journal, tmp)
+            a, b = dump_tables(conn), dump_tables(rconn)
+            rconn.close()
+            for t in DOMAIN_TABLES:
+                if a[t] != b[t]:
+                    findings.append(
+                        f"divergence in '{t}': DB has {len(a[t])} row(s), journal"
+                        f" replay yields {len(b[t])} — the DB was written outside"
+                        " the write path")
+        finally:
+            tmp.unlink(missing_ok=True)
+    # seal verification: tamper-evidence over sealed artifacts
+    for aid, path, sha in conn.execute(
+            "SELECT id, path, sha256 FROM artifacts WHERE sealed_at IS NOT NULL"):
+        p = Path(path)
+        if not p.is_absolute():
+            p = ctx.root / p
+        if not p.exists():
+            findings.append(f"sealed artifact {aid} missing on disk: {path}")
+        elif sha256_file(p) != sha:
+            findings.append(f"sealed artifact {aid} MODIFIED after seal: {path}")
+    conn.close()
+    ok = not findings
+    human = [f"mp doctor — {info['root']}"]
+    human += [f"  {k}: {v}" for k, v in info.items() if k != "root"]
+    human += [f"  WARN {w}" for w in warnings]
+    human += [f"  FAIL {f}" for f in findings]
+    human.append("  status: " + ("CLEAN" if ok else f"{len(findings)} finding(s)"))
+    out("\n".join(human), {"ok": ok, "info": info, "warnings": warnings,
+                           "findings": findings})
+    if not ok:
+        sys.exit(2)
+
+def cmd_rebuild(ctx, args):
+    ctx.require_init()
+    if not ctx.journal.exists():
+        die("no journal to replay")
+    with Lock(ctx.lock_path):
+        tmp = ctx.db_path.with_suffix(".rebuild")
+        conn = replay(ctx.journal, tmp)
+        n = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        conn.close()
+        bak = ctx.db_path.with_suffix(".bak")
+        if ctx.db_path.exists():
+            shutil.copy2(ctx.db_path, bak)
+        os.replace(tmp, ctx.db_path)
+    out(f"rebuilt from journal: {n} events (previous DB at {bak.name})",
+        {"ok": True, "events": n})
+
+# ---------------------------------------------------------------- misc commands
+
+def cmd_init(ctx, args):
+    ctx.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg = ctx.state_dir / "mp.json"
+    if args.ledger:
+        cfg.write_text(jdump({"ledger": args.ledger}) + "\n", encoding="utf-8")
+        ctx = Ctx(ctx.root)  # re-resolve with the new binding
+    ctx.ledger.mkdir(parents=True, exist_ok=True)
+    fresh = not ctx.db_path.exists()
+    conn = connect(ctx.db_path)
+    ensure_schema(conn)
+    conn.close()
+    if fresh:
+        emit(commit_actions(ctx, args.actor, [("init", {"ledger": str(ctx.ledger)})]))
+    else:
+        out(f"already initialized at {ctx.ledger}",
+            {"ok": True, "already": True, "ledger": str(ctx.ledger)})
+
+def cmd_status(ctx, args):
+    ctx.require_init()
+    conn = connect(ctx.db_path)
+    ensure_schema(conn)
+    missions = conn.execute(
+        "SELECT name, status, started, closed_at, round_cap FROM missions"
+        " ORDER BY id").fetchall()
+    open_flags = conn.execute(
+        "SELECT m.name, f.id, f.kind, substr(f.text_verbatim,1,60) FROM flags f"
+        " JOIN missions m ON m.id=f.mission WHERE f.disposition IS NULL"
+        " ORDER BY f.id").fetchall()
+    seq = last_seq(ctx.journal)
+    if JSON_MODE:
+        print(jdump({"ok": True, "seq": seq,
+                     "missions": [dict(zip(("name", "status", "started",
+                                            "closed_at", "cap"), m))
+                                  for m in missions],
+                     "undisposed_flags": [dict(zip(("mission", "id", "kind",
+                                                    "text"), f))
+                                          for f in open_flags]}))
+        return
+    print(f"substrate: {ctx.ledger}  (journal seq {seq})")
+    for m in missions:
+        print(f"  {m[0]} — {m[1]}"
+              + (f" (closed {m[3]})" if m[1] == "closed" and m[3] else ""))
+    if open_flags:
+        print(f"  undisposed flags: {len(open_flags)}")
+        for f in open_flags:
+            print(f"    [{f[1]}] {f[0]} {f[2]}: {f[3]}")
+
+def cmd_migrate(ctx, args):
+    ctx.require_init()
+    conn = connect(ctx.db_path)
+    cur = conn.execute("SELECT version FROM schema_meta").fetchone()
+    v = cur[0] if cur else None
+    conn.close()
+    if v == SCHEMA_VERSION:
+        out(f"schema v{v} — up to date", {"ok": True, "version": v})
+    else:
+        die(f"no migration path from v{v} to v{SCHEMA_VERSION}")
+
+# ---------------------------------------------------------------- CLI
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="mp",
+        description="mission-pipeline deterministic substrate — internal tooling"
+                    " for pipeline agents. Humans: talk to the PM instead.")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--actor", default=os.environ.get("MP_ACTOR", "agent"),
+                   help="who is acting (role[:task]); default $MP_ACTOR or 'agent'")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("init", help="create the substrate (dirs, DB, journal)")
+    sp.add_argument("--ledger", help="relocate the ledger (path, abs or relative"
+                                     " to the state dir)")
+    sub.add_parser("status", help="missions, undisposed flags, journal seq")
+    sub.add_parser("doctor", help="environment, journal/DB divergence, seals")
+    sub.add_parser("rebuild", help="rebuild mp.db by replaying the journal")
+    sub.add_parser("migrate", help="check/upgrade the schema version")
+
+    sp = sub.add_parser("mission", help="mission lifecycle")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("claim")
+    c.add_argument("name")
+    c.add_argument("--branch", default="")
+    c.add_argument("--cap", type=int, default=3)
+    c.add_argument("--started")
+    c = ss.add_parser("close")
+    c.add_argument("name")
+    c.add_argument("--at")
+
+    sp = sub.add_parser("artifact", help="artifact registry")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("new")
+    for flag, kw in (("--mission", {"required": True}),
+                     ("--category", {"required": True}),
+                     ("--key", {"required": True}),
+                     ("--round", {"type": int, "default": 0}),
+                     ("--version", {"type": int, "required": True}),
+                     ("--path", {"required": True}),
+                     ("--author-role", {"default": ""})):
+        c.add_argument(flag, **kw)
+    c = ss.add_parser("seal")
+    c.add_argument("id", type=int)
+
+    sp = sub.add_parser("edge", help="artifact links: derives-from | cites | carries")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("add")
+    c.add_argument("--from", dest="from_id", type=int, required=True)
+    c.add_argument("--to", dest="to_id", type=int, required=True)
+    c.add_argument("--kind", required=True, choices=sorted(EDGE_KINDS))
+
+    sp = sub.add_parser("round", help="bounded rounds (invariant 4)")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    for name in ("open", "close"):
+        c = ss.add_parser(name)
+        c.add_argument("--mission", required=True)
+        c.add_argument("--task", required=True)
+        c.add_argument("--n", type=int, required=True)
+
+    sp = sub.add_parser("verdict", help="verdicts as facts")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("record")
+    c.add_argument("--mission", required=True)
+    c.add_argument("--task", default="")
+    c.add_argument("--artifact", type=int)
+    c.add_argument("--kind", required=True)
+    c.add_argument("--by", default="")
+
+    sp = sub.add_parser("flag", help="flag ledger (invariant 11)")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("add")
+    c.add_argument("--mission", required=True)
+    c.add_argument("--task", default="")
+    c.add_argument("--kind", required=True, choices=sorted(FLAG_KINDS))
+    c.add_argument("--text", required=True)
+    c.add_argument("--source", type=int)
+    c = ss.add_parser("dispose")
+    c.add_argument("id", type=int)
+    c.add_argument("--disposition", required=True)
+    c.add_argument("--in", dest="disposed_in", type=int)
+
+    sp = sub.add_parser("evidence", help="typed evidence (R/F/D/X)")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("add")
+    c.add_argument("--artifact", type=int, required=True)
+    c.add_argument("--criterion", required=True)
+    c.add_argument("--type", required=True, choices=sorted(EVIDENCE_TYPES))
+    c.add_argument("--anchor", default="")
+    c.add_argument("--cmd", dest="cmd_str")
+    c.add_argument("--output-sha")
+    c.add_argument("--fingerprint", type=int)
+
+    sp = sub.add_parser("fingerprint", help="source-state identity")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    ss.add_parser("take")
+
+    sp = sub.add_parser("charter", help="the frozen calibration basis")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("seal")
+    c.add_argument("--mission", required=True)
+    c.add_argument("--path", required=True)
+    c.add_argument("--by", default="principal")
+    c = ss.add_parser("amend")
+    c.add_argument("--mission", required=True)
+    c.add_argument("--path", required=True)
+    c.add_argument("--by", default="principal")
+    c.add_argument("--quote", required=True,
+                   help="the principal's verbatim confirming words")
+    c.add_argument("--readback", default="")
+
+    sp = sub.add_parser("gate", help="verification gate runs (invariant 10)")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("record")
+    c.add_argument("--mission", required=True)
+    c.add_argument("--scope", required=True)
+    c.add_argument("--cmd", dest="cmd_str", required=True)
+    c.add_argument("--log")
+    c.add_argument("--fingerprint", type=int)
+    c.add_argument("--result", required=True)
+    c = ss.add_parser("close", help="the hardened closing gate: Charter sealed,"
+                                    " flags disposed, closing gate logged, source"
+                                    " unchanged since it ran, lint clean")
+    c.add_argument("--mission", required=True)
+
+    sp = sub.add_parser("contract", help="standing contracts")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("add")
+    c.add_argument("--text", required=True)
+    c.add_argument("--origin", default="")
+    c.add_argument("--verified-by", default="")
+    c.add_argument("--ratified")
+
+    c = sub.add_parser("metrics", help="mechanical cross-mission metrics")
+    c.add_argument("--match", help="mission name glob, e.g. 'Week*'")
+    c.add_argument("--tasks-csv", action="store_true",
+                   help="per-task rows (task-rounds.csv semantics)")
+
+    sp = sub.add_parser("calib", help="calibration cells (v02 §5)")
+    ss = sp.add_subparsers(dest="sub", required=True)
+    c = ss.add_parser("bundle", help="rule-derived cell inputs per seat —"
+                                     " the PM cannot curate them")
+    c.add_argument("--mission", required=True)
+    c.add_argument("--tasks", required=True,
+                   help="the wave's task keys, comma-separated: T1,T2,...")
+    c.add_argument("--seat", required=True, choices=list(CALIB_SEATS))
+    c = ss.add_parser("check", help="verdict state: DRIFT fan-out halt,"
+                                    " consecutive-SUSPICION ratchet")
+    c.add_argument("--mission", required=True)
+
+    c = sub.add_parser("lint", help="the evidence law, mechanically: anchoring,"
+                                    " summaries as roots, staleness, R integrity,"
+                                    " headers")
+    c.add_argument("--mission", help="limit to one mission")
+
+    c = sub.add_parser("adopt", help="import a prose-era ledger tree")
+    c.add_argument("ledger_root")
+    c.add_argument("--include-flat", action="store_true",
+                   help="also import flat pre-mission-folder dirs")
+    c.add_argument("--dry-run", action="store_true")
+    return p
+
+def single(ctx, actor, action, args_dict):
+    emit(commit_actions(ctx, actor, [(action, args_dict)]))
+
+def main(argv=None):
+    global JSON_MODE
+    args = build_parser().parse_args(argv)
+    JSON_MODE = args.json
+    ctx = Ctx()
+    if args.cmd == "init":
+        return cmd_init(ctx, args)
+    if args.cmd == "status":
+        return cmd_status(ctx, args)
+    if args.cmd == "doctor":
+        return cmd_doctor(ctx, args)
+    if args.cmd == "rebuild":
+        return cmd_rebuild(ctx, args)
+    if args.cmd == "migrate":
+        return cmd_migrate(ctx, args)
+    if args.cmd == "metrics":
+        return cmd_metrics(ctx, args)
+    if args.cmd == "adopt":
+        return cmd_adopt(ctx, args)
+    if args.cmd == "lint":
+        return cmd_lint(ctx, args)
+    if args.cmd == "calib" and args.sub == "bundle":
+        return cmd_calib_bundle(ctx, args)
+    if args.cmd == "calib" and args.sub == "check":
+        return cmd_calib_check(ctx, args)
+    ctx.require_init()
+    a, act = args, args.actor
+    if args.cmd == "mission" and args.sub == "claim":
+        return single(ctx, act, "mission.claim",
+                      {"name": a.name, "branch": a.branch, "cap": a.cap,
+                       "started": a.started})
+    if args.cmd == "mission" and args.sub == "close":
+        return single(ctx, act, "mission.close", {"name": a.name, "at": a.at})
+    if args.cmd == "artifact" and args.sub == "new":
+        return single(ctx, act, "artifact.new",
+                      {"mission": a.mission, "category": a.category, "key": a.key,
+                       "round": a.round, "version": a.version, "path": a.path,
+                       "author_role": a.author_role})
+    if args.cmd == "artifact" and args.sub == "seal":
+        return single(ctx, act, "artifact.seal", {"id": a.id})
+    if args.cmd == "edge":
+        return single(ctx, act, "edge.add",
+                      {"from": a.from_id, "to": a.to_id, "kind": a.kind})
+    if args.cmd == "round":
+        return single(ctx, act, f"round.{args.sub}",
+                      {"mission": a.mission, "task": a.task, "n": a.n})
+    if args.cmd == "verdict":
+        return single(ctx, act, "verdict.record",
+                      {"mission": a.mission, "task": a.task,
+                       "artifact": a.artifact, "kind": a.kind, "by": a.by})
+    if args.cmd == "flag" and args.sub == "add":
+        return single(ctx, act, "flag.add",
+                      {"mission": a.mission, "task": a.task, "kind": a.kind,
+                       "text": a.text, "source": a.source})
+    if args.cmd == "flag" and args.sub == "dispose":
+        return single(ctx, act, "flag.dispose",
+                      {"id": a.id, "disposition": a.disposition,
+                       "disposed_in": a.disposed_in})
+    if args.cmd == "evidence":
+        return single(ctx, act, "evidence.add",
+                      {"artifact": a.artifact, "criterion": a.criterion,
+                       "type": a.type, "anchor": a.anchor, "cmd": a.cmd_str,
+                       "output_sha": a.output_sha, "fingerprint": a.fingerprint})
+    if args.cmd == "fingerprint":
+        return single(ctx, act, "fingerprint.take", {})
+    if args.cmd == "charter" and args.sub == "seal":
+        return single(ctx, act, "charter.seal",
+                      {"mission": a.mission, "path": a.path, "by": a.by})
+    if args.cmd == "charter" and args.sub == "amend":
+        return single(ctx, act, "charter.amend",
+                      {"mission": a.mission, "path": a.path, "by": a.by,
+                       "quote": a.quote, "readback": a.readback})
+    if args.cmd == "gate" and args.sub == "close":
+        return cmd_gate_close(ctx, args)
+    if args.cmd == "gate":
+        return single(ctx, act, "gate.record",
+                      {"mission": a.mission, "scope": a.scope, "cmd": a.cmd_str,
+                       "log": a.log, "fingerprint": a.fingerprint,
+                       "result": a.result})
+    if args.cmd == "contract":
+        return single(ctx, act, "contract.add",
+                      {"text": a.text, "origin": a.origin,
+                       "verified_by": a.verified_by, "ratified": a.ratified})
+    die(f"unhandled command {args.cmd}")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except RuntimeError as e:
+        die(str(e))

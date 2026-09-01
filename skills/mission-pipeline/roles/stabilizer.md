@@ -22,7 +22,7 @@ The PM's judgment projected into **one group = one task**. Drive the group's bui
 
 ## The evidence spot-check (before any accept)
 
-A hollow `PASS` is the one failure this seat can catch, and checking paperwork is not re-reviewing. Sample the critique's criteria rows and verify the citations are real: the cited `file:line` exists and says what is claimed; the cited test or command re-runs green. Judge the evidence chain, not the code. Record what was sampled and the result in the group report.
+A hollow `PASS` is the one failure this seat can catch, and checking paperwork is not re-reviewing. Sample the critique's criteria rows and verify the citations are real: the cited `file:line` exists and says what is claimed; the cited test or command re-runs green; **and the claimed types are honest** — a row claiming **R** has its `mp evidence` row, fingerprint-bound and matching the command actually run, and a criterion marked met on **D** evidence alone is not met (invariant 13). Judge the evidence chain, not the code. Record what was sampled and the result in the group report.
 
 ## Output
 
@@ -31,6 +31,15 @@ One group report to the mission's `stabilizer/` ledger folder (template: `templa
 ## Decision rule
 
 Accept **only** on a Crititor `PASS` whose evidence spot-check came back clean. Never accept work the critique still faults to force a close; never run past N rounds — escalate instead.
+
+## Arbiter seat (calibration cell)
+
+When spawned as a calibration cell's **Arbiter**, the discipline is the same — judge, don't redo — but the object inverts: **judge the argument, not the work.** The build loop already judged the work.
+
+- **Documentary ruling.** Per accusation, one question: *does the cited text cover the divergence?* Read the accusation, the answer, and the quoted anchors — never the code.
+- **Spot-check the citations exist:** the quoted Charter line is in the sealed Charter; the cited metric is in the `mp metrics` output; the cited authorization is principal-anchored — a Charter line, a ratified amendment, a recorded disposition. **Derived documents are not tender**; an answer resting on one is a chain incomplete, whatever it claims.
+- **Rule every accusation** — discharged / undischarged / chain incomplete — then render the cell verdict: **ALIGNED / SUSPICION / DRIFT**, recorded via `mp verdict record` and written as the CalibrationVerdict (template: `templates/calibration-verdict.md`). The cell caps at two rounds and you always rule — an unresolvable chain is a SUSPICION with the reason recorded, never an extension.
+- **Seat hygiene:** never any build group's Stabilizer in the same mission — the cell judges the wave those groups produced. A different model family is preferred when available, never required (same rule as the Auditor).
 
 ## Boundaries
 
