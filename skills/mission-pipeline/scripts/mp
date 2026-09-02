@@ -764,8 +764,15 @@ def commit_actions(ctx, actor, requests):
             conn.close()
     return results
 
-def replay(journal, db_path):
-    """Rebuild a DB from the journal using the same apply functions."""
+def replay(journal, db_path, skipped=None):
+    """Rebuild a DB from the journal using the same apply functions.
+
+    A malformed historical line (e.g. a seat's mis-parsed id: journaled and
+    fsynced, but its DB half rolled back in the live path) must not take down
+    disaster recovery. Each event applies inside a savepoint; a line whose
+    application fails is rolled back WHOLE — no events row, no domain rows,
+    mirroring exactly what the live path committed — and reported through
+    `skipped` (a list of (seq, action, error)) instead of crashing replay."""
     if db_path.exists():
         db_path.unlink()
     conn = connect(db_path)
@@ -776,13 +783,22 @@ def replay(journal, db_path):
             if not line:
                 continue
             event = json.loads(line)
-            conn.execute(
-                "INSERT INTO events (seq,at,actor,action,payload_json)"
-                " VALUES (?,?,?,?,?)",
-                (event["seq"], event["at"], event["actor"], event["action"],
-                 jdump(event)))
-            if event["result"] == "OK":
-                ACTIONS[event["action"]][1](conn, event["payload"])
+            conn.execute("SAVEPOINT replay_event")
+            try:
+                conn.execute(
+                    "INSERT INTO events (seq,at,actor,action,payload_json)"
+                    " VALUES (?,?,?,?,?)",
+                    (event["seq"], event["at"], event["actor"], event["action"],
+                     jdump(event)))
+                if event["result"] == "OK":
+                    ACTIONS[event["action"]][1](conn, event["payload"])
+            except sqlite3.IntegrityError as e:
+                conn.execute("ROLLBACK TO replay_event")
+                if skipped is not None:
+                    skipped.append((event.get("seq"), event.get("action"),
+                                    str(e)))
+            finally:
+                conn.execute("RELEASE replay_event")
     conn.commit()
     return conn
 
@@ -1136,6 +1152,8 @@ def lint_findings(conn, root, mission=None):
         "SELECT DISTINCT artifact FROM verdicts WHERE kind='PASS'"
         " AND artifact IS NOT NULL")}
     charter_ver = dict(conn.execute("SELECT id, charter_version FROM missions"))
+    closed_rounds = {(m, t, n) for m, t, n in conn.execute(
+        "SELECT mission, task, n FROM rounds WHERE closed IS NOT NULL")}
     top_version = {}
     for a in arts.values():
         k = (a["mission"], a["category"], a["key"])
@@ -1199,6 +1217,20 @@ def lint_findings(conn, root, mission=None):
             continue
         if mission is not None and s["mission_name"] != mission:
             continue
+        # A Charter's registration chain does not supersede: the charter is
+        # registered once and amended IN PLACE (rule 6a covers charter
+        # staleness via F anchors); a same-path version-2+ charter row is an
+        # inert husk, so a citation to the v1 row is never stale.
+        if t["category"] == "Charter":
+            continue
+        # An artifact of a CLOSED round is historical record: it cites the
+        # version that governed its round, and a later re-issue of that
+        # target (a new round's critique, an administrative spec re-issue)
+        # does not retroactively stale it. A LIVE round's current artifact
+        # citing a superseded version is still flagged — that is the prompt
+        # to re-issue within the loop.
+        if (s["mission"], s["key"], s["round"]) in closed_rounds:
+            continue
         newest = top_version.get((t["mission"], t["category"], t["key"]),
                                  t["version"])
         if newest > t["version"]:
@@ -1230,6 +1262,18 @@ def lint_findings(conn, root, mission=None):
     # header <-> registry agreement
     no_header, off_disk = 0, 0
     for a in scope:
+        # A Charter is registered once and then amended IN PLACE; the v1 row
+        # is its identity, and any same-path version-2+ registration is an
+        # inert husk that can never agree with the single on-disk header —
+        # lint the v1 row only.
+        if a["category"] == "Charter":
+            if a["version"] != 1:
+                continue
+        # Superseded versions of any other path-sharing artifact can never
+        # agree with the single on-disk header either. Lint the CURRENT
+        # version only — the same live-scoping rule 6b applies to edges.
+        elif a["id"] not in live:
+            continue
         p = Path(a["path"])
         if not p.is_absolute():
             p = root / p
@@ -1593,9 +1637,15 @@ def cmd_doctor(ctx, args):
     if ctx.journal.exists() and parse_err == 0:
         tmp = Path(tempfile.mkstemp(suffix=".db", prefix="mp-doctor-")[1])
         try:
-            rconn = replay(ctx.journal, tmp)
+            skips = []
+            rconn = replay(ctx.journal, tmp, skips)
             a, b = dump_tables(conn), dump_tables(rconn)
             rconn.close()
+            for seq, action, err in skips:
+                warnings.append(
+                    f"replay-skip seq={seq} {action}: {err} — malformed"
+                    " historical row skipped whole during replay (mirrors the"
+                    " live path's rollback)")
             for t in DOMAIN_TABLES:
                 if a[t] != b[t]:
                     findings.append(
@@ -1604,16 +1654,25 @@ def cmd_doctor(ctx, args):
                         " the write path")
         finally:
             tmp.unlink(missing_ok=True)
-    # seal verification: tamper-evidence over sealed artifacts
-    for aid, path, sha in conn.execute(
-            "SELECT id, path, sha256 FROM artifacts WHERE sealed_at IS NOT NULL"):
+    # seal verification: tamper-evidence over sealed artifacts. The Charter is
+    # the one category that lawfully mutates after seal (`mp charter amend`
+    # rewrites the file in place; the recorded sha is the bytes at seal) — an
+    # amended charter is a WARN, not tampering.
+    for aid, path, sha, cat in conn.execute(
+            "SELECT id, path, sha256, category FROM artifacts"
+            " WHERE sealed_at IS NOT NULL"):
         p = Path(path)
         if not p.is_absolute():
             p = ctx.root / p
         if not p.exists():
             findings.append(f"sealed artifact {aid} missing on disk: {path}")
         elif sha256_file(p) != sha:
-            findings.append(f"sealed artifact {aid} MODIFIED after seal: {path}")
+            if cat == "Charter":
+                warnings.append(f"charter artifact {aid} amended after seal"
+                                f" (lawful in-place amendment): {path}")
+            else:
+                findings.append(
+                    f"sealed artifact {aid} MODIFIED after seal: {path}")
     conn.close()
     ok = not findings
     human = [f"mp doctor — {info['root']}"]
@@ -1632,15 +1691,21 @@ def cmd_rebuild(ctx, args):
         die("no journal to replay")
     with Lock(ctx.lock_path):
         tmp = ctx.db_path.with_suffix(".rebuild")
-        conn = replay(ctx.journal, tmp)
+        skips = []
+        conn = replay(ctx.journal, tmp, skips)
         n = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         conn.close()
         bak = ctx.db_path.with_suffix(".bak")
         if ctx.db_path.exists():
             shutil.copy2(ctx.db_path, bak)
         os.replace(tmp, ctx.db_path)
-    out(f"rebuilt from journal: {n} events (previous DB at {bak.name})",
-        {"ok": True, "events": n})
+    human = f"rebuilt from journal: {n} events (previous DB at {bak.name})"
+    for seq, action, err in skips:
+        human += (f"\n  WARN replay-skip seq={seq} {action}: {err}"
+                  " — malformed historical row skipped whole")
+    out(human, {"ok": True, "events": n,
+                "replay_skips": [{"seq": s, "action": ac, "error": er}
+                                 for s, ac, er in skips]})
 
 # ---------------------------------------------------------------- misc commands
 
