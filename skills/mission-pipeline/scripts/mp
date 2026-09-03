@@ -1172,6 +1172,13 @@ def lint_findings(conn, root, mission=None):
     charter_ver = dict(conn.execute("SELECT id, charter_version FROM missions"))
     closed_rounds = {(m, t, n) for m, t, n in conn.execute(
         "SELECT mission, task, n FROM rounds WHERE closed IS NOT NULL")}
+    # A task with an ACCEPTED verdict is finished: its round-0 artifacts (the
+    # spec, the plan) are historical record too, though no rounds row carries
+    # n = 0 — without this, a later DesignDoc version stales every accepted
+    # task's spec forever, and nothing lawful can clear it.
+    accepted_tasks = {(m, t) for m, t in conn.execute(
+        "SELECT mission, task FROM verdicts WHERE kind='ACCEPTED'"
+        " AND task IS NOT NULL")}
     top_version = {}
     for a in arts.values():
         k = (a["mission"], a["category"], a["key"])
@@ -1248,6 +1255,8 @@ def lint_findings(conn, root, mission=None):
         # citing a superseded version is still flagged — that is the prompt
         # to re-issue within the loop.
         if (s["mission"], s["key"], s["round"]) in closed_rounds:
+            continue
+        if s["round"] == 0 and (s["mission"], s["key"]) in accepted_tasks:
             continue
         newest = top_version.get((t["mission"], t["category"], t["key"]),
                                  t["version"])
