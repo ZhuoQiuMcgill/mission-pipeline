@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""M1 smoke test — the live state machine end to end.
+"""M1 smoke test — the live state machine end to end, through the DEPRECATED
+v1.0 verbs, which must keep working for compatibility and replay.
 
 Exercises: init, atomic mission claim, artifact seal immutability, the round cap
 (invariant 4), flag disposal blocking close (invariant 11), R-evidence needing a
-fingerprint, charter seal/amend, gate log binding, REFUSED journaling, rebuild,
-and doctor's three detectors (clean / DB written outside the write path /
-sealed file modified).
+fingerprint, charter seal, the RETIRED `charter amend` and the re-issue that
+replaces it, gate log binding, REFUSED journaling, rebuild, and doctor's three
+detectors (clean / DB written outside the write path / sealed file modified).
 
 Run: python3 tests/m1_smoke.py
 """
@@ -19,6 +20,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 MP = str(REPO / "skills" / "mission-pipeline" / "scripts" / "mp")
+sys.dont_write_bytecode = True  # no __pycache__ in the working tree
+sys.path.insert(0, str(REPO / "tests" / "fixtures"))
+from docs import write as fixture  # noqa: E402
 
 FAILS = []
 
@@ -66,7 +70,10 @@ def main():
     art = ledger / "Week01-Smoke" / "constructor"
     art.mkdir(parents=True)
     f = art / "DevReport_T1_2026-08-31_v01.md"
-    f.write_text("# report v01\n")
+    fixture(tmp, f.relative_to(tmp), "devreport", mission="Week01-Smoke",
+            key="T1", round=1, version=1, derives="none",
+            summary="the first cut", runs="| None | — | — |",
+            noticed="- None", relay="")
     rel = str(f.relative_to(tmp))
     rc, b = run(["artifact", "new", "--mission", "Week01-Smoke", "--category",
                  "DevReport", "--key", "T1", "--round", "1", "--version", "1",
@@ -83,13 +90,16 @@ def main():
     check("same version twice REFUSED", b.get("refused") is True)
 
     print("== round cap (invariant 4)")
+    # T9 rather than T1: sealing the T1 DevReport already DERIVED T1's round 1
+    # from its header, which is the point of v1.1 — the rounds row no longer
+    # depends on anyone remembering the ceremony.
     for n in (1, 2, 3):
         rc, b = run(["round", "open", "--mission", "Week01-Smoke", "--task",
-                     "T1", "--n", str(n)], env=env)
+                     "T9", "--n", str(n)], env=env)
         check(f"round {n} opens", b.get("ok") is True)
-        run(["round", "close", "--mission", "Week01-Smoke", "--task", "T1",
+        run(["round", "close", "--mission", "Week01-Smoke", "--task", "T9",
              "--n", str(n)], env=env)
-    rc, b = run(["round", "open", "--mission", "Week01-Smoke", "--task", "T1",
+    rc, b = run(["round", "open", "--mission", "Week01-Smoke", "--task", "T9",
                  "--n", "4"], rc=3, env=env)
     check("round 4 REFUSED at cap", b.get("refused") is True
           and "cap" in b.get("reason", ""))
@@ -122,15 +132,41 @@ def main():
 
     print("== charter + gate")
     ch = ledger / "Week01-Smoke" / "Charter_Week01-Smoke_2026-08-31_v01.md"
-    ch.write_text("# Charter\nnever weaken the gate\n")
+    fixture(tmp, ch.relative_to(tmp), "charter", mission="Week01-Smoke",
+            version=1, derives="none", goal="ship the loader",
+            prohibitions="- never weaken the gate",
+            amendments="| v1 | 2026-08-31 | (initial seal) | — |")
     rc, b = run(["charter", "seal", "--mission", "Week01-Smoke", "--path",
                  str(ch.relative_to(tmp))], env=env)
     check("charter seal ok", b.get("ok") is True)
     rc, b = run(["charter", "amend", "--mission", "Week01-Smoke", "--path",
                  str(ch.relative_to(tmp)), "--quote", "yes, include T9",
-                 "--readback", "readback-1"], env=env)
-    check("charter amend v2 ok", b.get("ok") is True
-          and b["payload"]["version"] == 2)
+                 "--readback", "readback-1"], rc=3, env=env)
+    check("charter amend REFUSED — a Charter is re-issued, never edited",
+          b.get("refused") is True and "retired" in b.get("reason", "")
+          and "version: 2" in b.get("reason", ""), b.get("reason", ""))
+
+    print("== charter re-issue: a new file, a new version, the same identity")
+    ch2 = ledger / "Week01-Smoke" / "Charter_Week01-Smoke_2026-08-31_v02.md"
+    fixture(tmp, ch2.relative_to(tmp), "charter", mission="Week01-Smoke",
+            version=2, derives="none", goal="ship the loader",
+            prohibitions="- never weaken the gate",
+            amendments="| v1 | 2026-08-31 | (initial seal) | — |\n"
+                       "| v2 | 2026-08-31 | yes, include T9 | readback-1 |")
+    rc, b = run(["seal", str(ch2.relative_to(tmp))], env=env)
+    check("charter v2 sealed by re-issue",
+          b.get("ok") is True and b["charter"]["version"] == 2
+          and b["charter"]["quote"] == "yes, include T9", str(b)[:300])
+    ch3 = ledger / "Week01-Smoke" / "Charter_Week01-Smoke_2026-08-31_v03.md"
+    fixture(tmp, ch3.relative_to(tmp), "charter", mission="Week01-Smoke",
+            version=3, derives="none", goal="ship the loader",
+            prohibitions="- never weaken the gate",
+            amendments="| v1 | 2026-08-31 | (initial seal) | — |\n"
+                       "| v2 | 2026-08-31 | yes, include T9 | readback-1 |")
+    rc, b = run(["seal", str(ch3.relative_to(tmp))], rc=3, env=env)
+    check("a v3 with no amendment row of its own is REFUSED",
+          b.get("refused") is True
+          and "charter-amendment" in b.get("reason", ""), b.get("reason", ""))
     rc, b = run(["gate", "record", "--mission", "Week01-Smoke", "--scope",
                  "closing", "--cmd", "pytest", "--log", "no/such.log",
                  "--result", "green"], rc=3, env=env)
@@ -140,13 +176,24 @@ def main():
     rc, b = run(["gate", "record", "--mission", "Week01-Smoke", "--scope",
                  "closing", "--cmd", "pytest", "--log", "gate.log",
                  "--result", "green"], env=env)
-    check("gate with real log ok", b.get("ok") is True
-          and b["payload"]["log_sha"])
+    check("gate with real log ok — it is a run now",
+          b.get("ok") is True and b.get("output_sha") and b.get("tree_hash"),
+          str(b)[:300])
+    rc, b2 = run(["gate", "record", "--mission", "Week01-Smoke", "--scope",
+                  "closing", "--cmd", "pytest", "--log", "gate.log",
+                  "--result", "green"], env=env)
+    check("the same tree + command + output cites the run, never duplicates it",
+          b2.get("existing") is True and b2.get("id") == b.get("id"),
+          str(b2)[:200])
 
     print("== journal carries refusals")
     jl = (ledger / "events.jsonl").read_text().strip().splitlines()
     refused = [json.loads(l) for l in jl if json.loads(l)["result"] == "REFUSED"]
     check("REFUSED events journaled", len(refused) >= 6, f"got {len(refused)}")
+    events = [json.loads(x) for x in jl]
+    check("no OK line describes something that did not happen",
+          all(e.get("payload") is not None
+              for e in events if e["result"] == "OK"))
     seqs = [json.loads(l)["seq"] for l in jl]
     check("seq contiguous", seqs == list(range(1, len(seqs) + 1)))
 
@@ -162,7 +209,7 @@ def main():
     check("rebuild ok", b.get("ok") is True)
     rc, b = run(["doctor"], env=env)
     check("doctor CLEAN after rebuild", rc == 0)
-    f.write_text("# report v01 — quietly edited after seal\n")
+    f.write_text(f.read_text() + "\nquietly edited after seal\n")
     rc, b = run(["doctor"], rc=2, env=env)
     check("doctor detects post-seal tamper",
           any("MODIFIED after seal" in x for x in b.get("findings", [])))

@@ -4,9 +4,17 @@ category: TaskSpec
 key: T<n>
 round: 0
 version: <NN>
-derives-from: <DesignDoc artifact id, or none>
+wave: W<n>
+recovers: <T<n> — only if this task was opened to repair another task's escalation; delete otherwise>
+touches-contract: <yes|no>
+derives-from: <artifact:<DesignDoc id>, or none>
 -->
-<!-- IDs in the header come from mp artifact new — never invented. See references/substrate.md. -->
+<!-- wave: the wave this task fans out in. `mp wave open W<n>` must have run or the seal
+     is refused — that is where a standing DRIFT or a fired ratchet stops the mission.
+     touches-contract: yes when the task changes something other tasks or the product
+     depend on — an interface, a data shape, a verification path; a prose-only or
+     records-only task is no. It drives a calibration trigger, so get it right.
+     Document contract: references/substrate.md. -->
 # Task Spec — T<n>: <Short Name>
 
 - **Mission:** `<Mission — named per PROJECT.md's scheme>`
@@ -19,7 +27,8 @@ derives-from: <DesignDoc artifact id, or none>
 1. `<absolute path>/.claude/mission-pipeline/PROJECT.md` — project bindings
 2. `<absolute path to skill>/roles/constructor.md` — your role
 3. <the mission's design decision — why this task exists>
-4. <code files / further docs this task depends on — keep the list to 3–5 total>
+4. <the seam contract, by section, if this wave has one>
+5. <code files / further docs this task depends on — keep the list to 3–5 total>
 
 ## Context
 <Why this task exists and the current state of the code it touches. 3–6 lines.>
@@ -29,7 +38,8 @@ derives-from: <DesignDoc artifact id, or none>
 2. …
 
 ## Out of scope — do NOT
-<!-- Mandatory. An empty list means the spec is not finished. -->
+<!-- Mandatory, and mechanically checked: a spec whose list is empty is REFUSED at seal
+     (invariant 5). Real bullets — "nothing" is not a bullet. -->
 - <files, modules, or behaviors to leave alone>
 
 ## Constraints
@@ -38,18 +48,21 @@ derives-from: <DesignDoc artifact id, or none>
 - Standing contracts touched: <entries from the registry this task could affect / none>
 
 ## Acceptance criteria (the review contract — each maps to ≥1 requirement)
+<!-- Each must be anchorable by an R (a recorded run) or F (a frozen line) anchor. A
+     criterion only mission-era documents could settle is unanchorable: the Architect's
+     Pass 2 lint catches it, and the Crititor cannot mark it met (invariant 13). -->
 - [ ] <criterion with an observable check>
 - [ ] …
 
 ## Verification commands (exact, with expected outcomes)
+<!-- The Constructor runs these and records each with `mp run record` — one run id per
+     command, cited by every seat downstream instead of re-running. -->
 ```bash
 <command>   # expect: <outcome>
 ```
 
 ## Report
-Write the Implementation Report to
-`<anchored ledger path>/<Mission>/constructor/DevReport_T<n>_<YYYY-MM-DD>_v01.md`
-(template: skill `templates/dev-report.md`).
+Write the Implementation Report to `<anchored ledger path>/<Mission>/constructor/DevReport_T<n>_<YYYY-MM-DD>_v01.md` (template: skill `templates/dev-report.md`), then seal it: `python3 <skill>/scripts/mp seal <that path>`.
 
 ## Execution context
 <!-- Filled by the PM at spawn time. -->

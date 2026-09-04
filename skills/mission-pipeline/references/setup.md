@@ -20,6 +20,9 @@ Run this once per project, before the first mission. If `.claude/mission-pipelin
      `ledger/events.jsonl` (append-only journal, authoritative for every state transition,
      refusals included) and `ledger/mp.db` (derived SQLite view, rebuildable by replay).
      `references/substrate.md` has the three-layer authority and the command surface.
+   - `python3 <skill>/scripts/mp migrate` — only when the project already ran an earlier
+     engine release: it upgrades an existing v1.0.0 ledger's schema in place. A fresh
+     install never needs it.
    - A v0.3-era prose ledger stays readable and is imported via `mp adopt` — never
      converted by hand.
 4. **Scout the project — briefly, read-only.** Before asking the principal anything, explore what already exists; an old project answers most of the interview itself. Keep it to minutes, not an audit:
@@ -54,8 +57,8 @@ The interview is **one consolidated proposal and a single veto pass**: every slo
 11. **Researcher** — enabled? Run by — default: **a PM-spawned fresh context with engine-fixed inputs**; "principal, separate session" remains an optional binding. Where do external-evidence rules live, if the project has its own?
 12. **Document map** — **scout first.** Where do design decisions (the "why" behind missions) live? An established project usually already has a tree (e.g. `docs/design_docs/`) — adopt it, never restructure it. A fresh project defaults to the mission folder's `design/`. The PM may not fan out a mission while this slot is unset. Also confirm the standing-contracts registry location (default `ledger/CONTRACTS.md`).
 13. **Closure audit** — enabled (recommended)? Run by — default: **a PM-spawned fresh context with engine-fixed inputs**; "principal, separate session" remains an optional binding. Which model — a different family than the working seats when one is available; otherwise the same model in a fresh session. Heterogeneity is preferred, never required.
-14. **Calibration** — which model takes the **arbiter** seat in the wave-boundary calibration cell: a different family than the working seats when one is available; heterogeneity is preferred, **never required** (the closure-audit rule). Calibration seats default to PM-spawned fresh contexts with engine-fixed inputs; principal-run is an optional override, recorded in PROJECT.md's Calibration slots.
+14. **Calibration** — which model takes the **arbiter** seat in the wave-boundary calibration cell: a different family than the working seats when one is available; heterogeneity is preferred, **never required** (the closure-audit rule). The Calibrator runs alone first, so the Arbiter and Challenger are convened only when it files an anchored accusation — most cells never spend those seats. Calibration seats default to PM-spawned fresh contexts with engine-fixed inputs; principal-run is an optional override, recorded in PROJECT.md's Calibration slots.
 
 ## Upgrading the engine
 
-To pick up an improved engine: replace this skill folder wholesale with the newer copy. Scripts (`scripts/mp`) are engine files exactly like the prose — replaced wholesale on upgrade, never edited in a host project. PROJECT.md and the ledger are untouched by design. To check for drift first: `diff -r` the project's skill folder against the source copy — any difference in a host project is drift, since engine files are never edited locally.
+To pick up an improved engine: replace this skill folder wholesale with the newer copy, then run `python3 <skill>/scripts/mp migrate` (schema forward for an existing ledger) and `mp doctor`. Scripts (`scripts/mp`) are engine files exactly like the prose — replaced wholesale on upgrade, never edited in a host project. PROJECT.md and the ledger are untouched by design. To check for drift first: `diff -r` the project's skill folder against the source copy — any difference in a host project is drift, since engine files are never edited locally.

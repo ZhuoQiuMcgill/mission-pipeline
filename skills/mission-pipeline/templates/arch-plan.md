@@ -6,7 +6,8 @@ round: 0
 version: <NN>
 derives-from: none
 -->
-<!-- IDs in the header come from mp artifact new — never invented. See references/substrate.md. -->
+<!-- Seal with one call: python3 <skill>/scripts/mp seal <this file>. Every record is
+     derived from the text; nothing is registered by hand. See references/substrate.md. -->
 # ArchPlan — <Mission>
 
 - **Role:** Architect · **Date:** <YYYY-MM-DD> · **Version:** v01 (map) / v02 (adds schedule)
@@ -41,6 +42,16 @@ derives-from: none
 | 1 | T1, T2, … | independent, disjoint files |
 | 2 | … | unblocked once wave 1 lands |
 
+### Seams (tasks in one wave that consume each other's output)
+<!-- A seam found is a finding, not a suggestion: each obliges a seam-contract file
+     frozen BEFORE the fork, owned by one task and cited by section in both specs, plus an
+     integration round for the wave (references/parallel.md). Say so when a wave has none. -->
+| Wave | Producer → consumer | The value that crosses | Where its definition should live |
+|---|---|---|---|
+| <N> | T<i> → T<j> | <the payload / call / record> | `<proposed seam contract file>` |
+
+- Waves with **no** cross-group seam: <list> — no integration round owed.
+
 ### Collisions & resolutions proposed
 <!-- Facts are authoritative; the resolution is a proposal — the PM disposes. -->
 - T<i> × T<j> on `path` → propose: serialize / isolate / re-cut at <seam>
@@ -56,6 +67,7 @@ derives-from: none
 | Charter contradiction (requirement/criterion vs a quoted Charter line) | <T<n> req <#> vs Charter: "<line>"> / none |
 | Verification-scope regression vs earlier waves & the closing gate | <dropped command/path, since T<n>> / none |
 | Out-of-scope missing or empty | <T<n>> / none |
+| `touches-contract` wrong against the measured footprint (an interface, data shape, or verification path changes → yes) | <T<n>: declared no, touches `<contract>`> / none |
 
 ### Unstated assumptions
 <!-- Premises the specs rely on that no document states. Which task breaks if each is false.

@@ -3,20 +3,22 @@ mission: <Mission>
 category: Charter
 key: <Mission>
 round: 0
-version: 1
+version: <NN — 1 at the first seal; a re-issue bumps it>
 derives-from: none
 -->
-# Charter — <Mission>
+# Charter — <Mission> v<NN>
 
-- **Author:** PM (compiled) · **Signed by:** the principal · **Sealed:** <YYYY-MM-DD> (`mp charter seal`)
-- **Version:** v01 at seal — bumped only by amendment, only by the principal (`mp charter amend`)
+- **Author:** PM (compiled) · **Signed by:** the principal · **Sealed:** <YYYY-MM-DD>
+- **Seal:** `python3 <skill>/scripts/mp seal <this file>` — sealing **v1 ratifies every `## Prohibitions` bullet into a standing contract**, in the same act, with no extra principal interaction; a re-issue ratifies any bullet it adds.
 
 <!-- The mission's frozen calibration basis — the root every calibration layer measures
      against. Drafted during alignment; sealed BEFORE decomposition — no mission fans out
-     without a sealed Charter. Honest epistemics: partially a PM compilation with a
-     principal signature — the guarantee is "frozen after signing", not "PM-free". After
-     sealing, the web cannot rewrite its own anchor: every amendment goes through the
-     principal and marks specs citing the prior version stale (mp lint).
+     without a sealed Charter. Honest epistemics: partly a PM compilation with a principal
+     signature — the guarantee is "frozen after signing", not "PM-free".
+     RE-ISSUED, NEVER EDITED: an amendment is a NEW FILE at the next version
+     (Charter_<Mission>_<date>_v02.md beside v01), header `version` bumped, one
+     amendment-ledger row carrying the principal's verbatim words. Editing a sealed
+     Charter in place is not an amendment; it is a lost anchor.
      Small mission → the sections may total a paragraph; none may be dropped. -->
 
 ## The principal's own words
@@ -30,21 +32,22 @@ derives-from: none
 - <compiled statement> — confirmed <YYYY-MM-DD>.
 
 ## Prohibitions
-<!-- "Never X" content. Ratified into CONTRACTS.md in the same act as sealing — zero
-     extra principal interaction — and binding on every task from wave 1, checked by the
-     Crititor like any standing contract. -->
+<!-- "Never X" content. One bullet per prohibition: each becomes a standing contract when
+     this Charter seals, binding every task from wave 1 and checked by the Crititor like
+     any registry entry. Write them so a slice of work can be judged against them. -->
 - Never <X>.
 
-## Priorities / tradeoffs
-<!-- e.g. "correctness over speed". Soft prohibitions: slice-judgeable, quotable by the
-     calibration cell as contradiction anchors. -->
+## Priorities and tradeoffs
+<!-- e.g. "correctness over speed". Soft prohibitions: slice-judgeable, and quotable by a
+     calibration cell as a contradiction anchor. -->
 - <A> over <B>.
 
 ## Amendment ledger
-<!-- Every change to this file after sealing. Only the principal amends; the PM executes
-     on their behalf (mp charter amend --quote … --readback …) and the act enters the
-     "acts in your name" accumulator for sign-off. An amendment bumps the version and
-     marks specs citing the prior version stale. -->
-| Version | Date | The principal's verbatim words | Read-back ref |
+<!-- v1: the header row and nothing else — there is nothing to amend yet.
+     v2 and up: one row for every version from v2 to the version this file IS. A Charter
+     vN sealed without its own row is REFUSED.
+     Only the principal amends; the PM executes on their word, and the act appears in
+     `mp acts` and in the Integration Note's repudiation list. -->
+| Version | Date | Principal's words (verbatim) | Read-back ref |
 |---|---|---|---|
-| v01 | <YYYY-MM-DD> | (initial seal) | — |
+| v2 | <YYYY-MM-DD> | "<the principal's own words authorizing this change>" | <conversation ref> |

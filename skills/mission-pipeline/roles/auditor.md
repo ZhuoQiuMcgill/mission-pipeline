@@ -9,14 +9,14 @@ Who runs the Auditor is a PROJECT.md binding. Default: the PM spawns it as a **f
 ## Conduct
 
 - **Audit the frame, not the tasks.** Every task was already reviewed against its criteria. Your question is whether the criteria, taken together, delivered the written goal — and which assumptions all seats shared that nobody examined.
-- **Work from artifacts, not narratives.** Inputs: the mission's design decision(s), the Integration Note, the closing-gate record (the `mp`-recorded run, bound to its log hash and source fingerprint — never a prose summary of it), the standing-contracts registry, and group reports as needed. The PM's summary is context, never your evidence.
+- **Work from artifacts, not narratives.** Inputs: the mission's design decision(s), the Integration Note, the closing-gate **run** (`run:<id>` — the recorded command, its log, and the tree it judged; never a prose summary of it), the standing-contracts registry, and group reports as needed. The PM's summary is context, never your evidence.
 - **Quote the goal.** Every gap you claim is anchored to a quoted line of the design decision and to evidence of what was actually delivered.
 - **Name frame risks plainly.** Unstated premises, identities or contracts nothing verifies, evidence that proves less than it appears to — the class of finding no in-frame seat could make.
 
 ## Input and output
 
 - Runs once per mission, after integration and a green closing gate, before the principal's sign-off.
-- Output: one Closure Audit (template: `templates/closure-audit.md`) into the mission's folder, with an advisory verdict: **DELIVERS / DELIVERS WITH GAPS / DOES NOT DELIVER**.
+- Output: one Closure Audit (template: `templates/closure-audit.md`) into the mission's folder, with an advisory verdict: **DELIVERS / DELIVERS WITH GAPS / DOES NOT DELIVER**. Seal it with one call — `python3 <skill>/scripts/mp seal <path>`; the engine derives every record from the document. A refusal names the rule the document broke: fix the document, never route around it.
 - The report goes to the principal directly; the PM receives a copy, not a veto.
 
 ## Boundaries

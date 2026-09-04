@@ -7,7 +7,7 @@
     {
       "name": "mission-pipeline",
       "source": "./",
-      "description": "Human-in-the-loop multi-agent engineering workflow with bounded build–critique–stabilize loops, wave-parallel task groups, Charter-anchored drift calibration at wave boundaries, a deterministic agent-internal substrate, and principal sign-off."
+      "description": "Human-in-the-loop multi-agent engineering workflow with bounded build–critique–stabilize loops, wave-parallel task groups, Charter-anchored drift calibration at wave boundaries, a deterministic agent-internal substrate that derives every record from the documents agents write, and principal sign-off."
     }
   ]
 }

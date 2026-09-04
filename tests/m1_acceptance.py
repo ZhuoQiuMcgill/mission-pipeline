@@ -25,16 +25,19 @@ MP = str(REPO / "skills" / "mission-pipeline" / "scripts" / "mp")
 CORPUS = REPO / "data" / "divra-mission-pipeline-export-2026-08-13.zip"
 
 # analysis/mission-summary.md, hardcoded — the gate's ground truth.
+# The `r_other` bucket makes the buckets sum to the task count: Week24 and
+# Week25 each carry one spec-only task that the v1.0 table silently dropped.
 EXPECTED = {
-    "Week21-AutoCloseFix":              {"tasks": 3,  "r1": 3,  "r2": 0, "r3": 0,  "escalated": 0},
-    "Week22-ExperimentScaleReadiness":  {"tasks": 8,  "r1": 8,  "r2": 0, "r3": 0,  "escalated": 0},
-    "Week23-SPRHDCalibration":          {"tasks": 8,  "r1": 8,  "r2": 0, "r3": 0,  "escalated": 0},
-    "Week24-BaselineConsolidation":     {"tasks": 11, "r1": 2,  "r2": 1, "r3": 7,  "escalated": 2},
-    "Week25-ChannelCampaignReadiness":  {"tasks": 22, "r1": 10, "r2": 7, "r3": 4,  "escalated": 6},
-    "Week26-SpecifiedExperimentReplay": {"tasks": 12, "r1": 8,  "r2": 4, "r3": 0,  "escalated": 2},
-    "Week27-CampaignVerificationRepair": {"tasks": 3, "r1": 2,  "r2": 1, "r3": 0,  "escalated": 0},
+    "Week21-AutoCloseFix":              {"tasks": 3,  "r1": 3,  "r2": 0, "r3": 0,  "r_other": 0, "escalated": 0},
+    "Week22-ExperimentScaleReadiness":  {"tasks": 8,  "r1": 8,  "r2": 0, "r3": 0,  "r_other": 0, "escalated": 0},
+    "Week23-SPRHDCalibration":          {"tasks": 8,  "r1": 8,  "r2": 0, "r3": 0,  "r_other": 0, "escalated": 0},
+    "Week24-BaselineConsolidation":     {"tasks": 11, "r1": 2,  "r2": 1, "r3": 7,  "r_other": 1, "escalated": 2},
+    "Week25-ChannelCampaignReadiness":  {"tasks": 22, "r1": 10, "r2": 7, "r3": 4,  "r_other": 1, "escalated": 6},
+    "Week26-SpecifiedExperimentReplay": {"tasks": 12, "r1": 8,  "r2": 4, "r3": 0,  "r_other": 0, "escalated": 2},
+    "Week27-CampaignVerificationRepair": {"tasks": 3, "r1": 2,  "r2": 1, "r3": 0,  "r_other": 0, "escalated": 0},
 }
-EXPECTED_TOTAL = {"tasks": 67, "r1": 41, "r2": 13, "r3": 11, "escalated": 10}
+EXPECTED_TOTAL = {"tasks": 67, "r1": 41, "r2": 13, "r3": 11, "r_other": 2,
+                  "escalated": 10}
 
 FAILS = []
 
@@ -87,6 +90,10 @@ def main():
         check(f"{m}", got.get(m) == exp, f"expected {exp}, got {got.get(m)}")
     check("Total row", b.get("total") == EXPECTED_TOTAL,
           f"expected {EXPECTED_TOTAL}, got {b.get('total')}")
+    t = b.get("total") or {}
+    check("the buckets close: r1+r2+r3+other == tasks",
+          t.get("tasks") == t.get("r1", 0) + t.get("r2", 0) + t.get("r3", 0)
+          + t.get("r_other", 0), str(t))
 
     print("== gate 2: per-task rows reproduce task-rounds.csv (Week* missions)")
     truth_rows = set()

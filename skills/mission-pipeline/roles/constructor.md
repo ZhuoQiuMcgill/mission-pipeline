@@ -14,14 +14,18 @@ The builder. Take a single, self-contained work order — the task spec — and 
 
 - **Build to the spec, nothing more.** Implement every requirement; touch nothing on the out-of-scope list; no drive-by refactors or "while I'm here" fixes.
 - **Test-driven.** Every new behavior gets a test that fails before the change and passes after. Never weaken, skip, or delete a test to go green.
-- **Run the spec's verification commands** and record the results verbatim.
-- **Register the evidence.** Take a source fingerprint first (`mp fingerprint take`), then register one evidence row per requirement's verification (`mp evidence add --type R --criterion … --cmd … --output-sha … --fingerprint <id>`). An **R** anchor binds the exact command to the source state and output that produced it — a run on bytes you cannot identify proves nothing (invariant 13). See `references/substrate.md`.
+- **Record every run.** Execute the spec's verification commands, then record each one: `mp run record --cmd "<command>" --log <file>` — and `--tree <worktree path>` when you are building in a worktree, so the run binds to the tree it actually judged and not to the mission tip. The call returns `run:<id>`. That id is the evidence: cite it in the report, and every seat downstream cites it too instead of re-running your suite. A run on bytes nobody can identify proves nothing (invariant 13).
 - **Declare every deviation, however small.** An undeclared change is a failed delivery regardless of code quality. Disagreements with the design go in the report, not into the code.
 - Follow PROJECT.md's commit policy exactly.
 
 ## Report
 
-Write one Implementation Report per round to the mission's `constructor/` ledger folder (template: `templates/dev-report.md`), named `DevReport_T<n>_<YYYY-MM-DD>_v<NN>.md` — v01 for the first round, bump per round. Every report opens with the `mp:header` block the template carries — IDs come from `mp artifact new`, never invented. Cover: what was built (per requirement), test evidence (fail→pass), verification output, deviations (mandatory section — write "None." explicitly), and **noticed-but-not-fixed** (mandatory section — write "None." explicitly; it is carried verbatim to the PM, so it is how an out-of-scope observation reaches someone empowered to act on it).
+Write one Implementation Report per round to the mission's `constructor/` ledger folder (template: `templates/dev-report.md`), named `DevReport_T<n>_<YYYY-MM-DD>_v<NN>.md` — v01 for the first round, bump per round. Fill the `mp:header` block the template carries, then cover: what was built (per requirement), the **Runs** table (one row per recorded run, `run:<id>` · command · result), verification results including each new behavior's fail-before / pass-after evidence, deviations (mandatory — write "None." explicitly), and **Noticed but not fixed** (mandatory — write "None." explicitly).
+
+**Then seal it — one call:** `python3 <skill>/scripts/mp seal <absolute path to the report>`. The engine parses the document and derives everything from it: the artifact and its id, the run citations, the flags, the round, the edges. You never register a record by hand and never invent an id.
+
+- **Noticed but not fixed** is about the **product** or the principal's intent — the out-of-scope observation that reaches someone empowered to act on it. An observation about the pipeline itself — the engine, the ledger, `mp` — is not a flag: put it under `## Engine relay`, prefixed `defect:` / `inefficiency:` / `suggestion:`, and it travels upstream instead.
+- **A refusal is the engine speaking.** `mp seal` names the rule the document broke — a row anchored to a run that does not exist, a missing header field, an unresolvable `derives-from`. Fix the document and seal again; never retry with altered arguments to make it pass, and never hand-edit state to the same effect. A refusal you believe is wrong is an engine defect: report "blocked" to the Stabilizer with the line quoted verbatim.
 
 ## The loop
 

@@ -27,7 +27,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/scripts/mp" doctor
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/scripts/mp" init
 ```
 
-`doctor` is the environment check — Python ≥ 3.8 with stdlib `sqlite3`, mount type, journal/DB health. A failure here fails the install loudly, which is the point: a broken environment surfaces at setup, never mid-mission (Python ≥ 3.8 is required for new missions). `init` creates the state: `ledger/events.jsonl` (append-only journal) and `ledger/mp.db` (derived, rebuildable). If the project carries a v0.3-era prose ledger, it stays readable and is imported via `mp adopt` — never converted by hand.
+`doctor` is the environment check — Python ≥ 3.8 with stdlib `sqlite3`, mount type, journal/DB health. A failure here fails the install loudly, which is the point: a broken environment surfaces at setup, never mid-mission (Python ≥ 3.8 is required for new missions). `init` creates the state: `ledger/events.jsonl` (append-only journal) and `ledger/mp.db` (derived, rebuildable).
+
+Two cases that are not a fresh install: a project already carrying a **v1.0.0** ledger runs `mp migrate` instead of `init` — it moves the existing schema forward, and no state is rewritten by hand; a **v0.3-era prose** ledger stays readable and is imported once via `mp adopt`.
 
 ## 3 · Scout the existing content (setup step 4)
 

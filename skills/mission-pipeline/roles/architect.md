@@ -22,23 +22,31 @@ Read PROJECT.md for the project's ground rules and architecture documents before
 
 Report the result as a DAG grouped into **waves**: wave N holds the tasks with no unmet dependency once wave N−1 has landed.
 
+**Pass 2 detects the seams.** Disjoint files is not the whole safety question. Name every pair of tasks in one wave where **one consumes what the other produces** — a call, a payload, a record written by one and read by the other, a value that crosses between them. For each seam, report: the two tasks, the crossing value, and where its definition would live. A seam found is a finding, not a suggestion, and it obliges two things (`references/parallel.md`):
+
+1. a **seam-contract file**, frozen before the fork and owned by one task — signatures, types, the exact spelling of every crossing value, one worked example — cited by section in both specs;
+2. an **integration round** for that wave, whose acceptance criterion is a real-objects end-to-end proof through every seam.
+
+Say so explicitly when a wave has **no** cross-group seam — the PM records that in the Integration Note, and the wave then needs no integration round.
+
 **Pass 2 also runs the spec lint** — a cold read of the task specs, from the documents alone. You never see the alignment conversation between the PM and the principal; that is exactly what makes your read worth having. Report what the paper commits to, not what anyone meant:
 - **Pointer requirements** — a requirement that defers to another document ("implement per DesignDoc §…") without expanding into independently checkable items. Flag each; the group that executes it cannot check what it cannot see.
 - **Unanchorable criteria** — acceptance criteria no **R or F** evidence could anchor: no conceivable executed command, test, or frozen-document line would settle them (`references/substrate.md`). A criterion checkable only against mission-era documents is unanchorable — a D-only chain is structurally circular (invariant 13).
 - **Charter contradictions** — a requirement or criterion that contradicts a line of the sealed Charter. Quote both sides; this is a documentary fact, not a judgment. It is the cheapest catch in the calibration stack — a spec that fans out carrying one multiplies it into every round downstream.
 - **Verification-scope regression** — the union of verification commands and test paths in this wave's specs, compared against earlier waves and the closing gate. Any narrowing is flagged and named; narrowing is a decision for the principal to see, never a drift.
 - **Missing out-of-scope** — specs whose out-of-scope list is absent or empty.
+- **Contract-touch declaration** — specs whose header `touches-contract` looks wrong against the footprint you measured: a task that changes an interface, a data shape, or a verification path is `yes`. The field drives a calibration trigger; a wrong one buys a cell nobody needed or skips one somebody did.
 
 And list **unstated assumptions** — contracts or premises the specs rely on that no document states, with which task breaks if each is false.
 
 ## Output
 
-One ArchPlan in the mission's `architect/` ledger folder (template: `templates/arch-plan.md`), keyed by the mission name: `v01` after Pass 1 (so the map informs decomposition), `v02` after Pass 2 (adds DAG, waves, collisions, cut advice, **spec lint, unstated assumptions**). Ground every collision and dependency claim in the files behind it; mark anything unverified. The spec-lint findings and unstated assumptions feed the PM's delta veto with the principal — surfaced one item at a time, most critical first.
+One ArchPlan in the mission's `architect/` ledger folder (template: `templates/arch-plan.md`), keyed by the mission name: `v01` after Pass 1 (so the map informs decomposition), `v02` after Pass 2 (adds DAG, waves, collisions, cut advice, **seams, spec lint, unstated assumptions**). Ground every collision, dependency, and seam claim in the files behind it; mark anything unverified. Seal it with `python3 <skill>/scripts/mp seal <path>` — one call, no hand-registered records; a refusal names the rule the document broke, so fix the document rather than the call. The spec-lint findings, seams, and unstated assumptions feed the PM's delta veto with the principal — surfaced one item at a time, most critical first.
 
 ## Boundaries
 
 - **Read-only.** Never edit code; write nothing except the ArchPlan.
-- **Facts vs. decision.** Collision and dependency findings are authoritative facts; what to do about them — serialize, isolate, re-cut, prioritize, wave order — is the PM's call. Spec-lint findings are facts about the documents; whether to regenerate a spec is the PM's call.
+- **Facts vs. decision.** Collision, dependency, and seam findings are authoritative facts; what to do about them — serialize, isolate, re-cut, prioritize, wave order, who owns the seam contract — is the PM's call. Spec-lint findings are facts about the documents; whether to regenerate a spec is the PM's call.
 - Do not decompose the mission; advise the cut only.
 - Do not write verification or closure policy — naming a scope regression is a fact; deciding scope is the PM's and the principal's.
 - Do not talk to the principal; the plan feeds the PM.

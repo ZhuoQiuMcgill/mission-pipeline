@@ -6,6 +6,132 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [1.1.0] — 2026-09-04
+
+The derivation release. Three days of real use of 1.0.0 (5 missions, 77 tasks, 3296
+field journal events, 5.25 MB of ledger prose) measured where the tokens went: **68 % of
+all journal events were agents hand-copying facts from documents into the database** —
+`evidence add` alone was 1088 calls and 73 % of everything typed into `mp`, and 0 of 8
+sampled critiques still agreed with their own evidence rows. Meanwhile the real
+invariants fired 0 times, because they were attached to optional ceremony (`round open`
+was used on 36 of 76 tasks), the aggregate calibration's trend shape was dead (a metrics
+bug dropped 12 of 77 tasks, so the Arbiter rightly refused every trend accusation), and
+61 % of flags were about the ledger rather than the product. The defect was
+double-entry: truth in two places, with the model as the courier. This release removes
+the second entry. Rationale record:
+`docs/design/DesignDoc_DerivationAndSupersession_2026-09-04_v01.md`.
+
+### Added
+- **`mp seal <path>` — the artifact is the event.** Agents write a document once and
+  submit it with one call; the engine parses the `mp:header` block and the document's
+  structured sections and derives every record: the artifact, evidence rows (the
+  criteria table with its Type column), flags (Out-of-frame risk, Noticed but not
+  fixed), verdicts, rounds, edges (`derives-from`), dispositions (an Integration Note's
+  flag ledger), relay items, standing contracts (a Charter's prohibitions), wave
+  closure. One journal event per artifact carries the full derived payload, so replay
+  never re-reads a file. The M3 dry run measures the point: **2.00 journal events per
+  artifact** against the field's 10.40, with no declaration verb in the journal.
+- **Rules run at seal — the one step nobody can skip.** Refused, by name: a round past
+  the cap (invariant 4); a "met" resting only on D/X evidence (invariant 13); an R anchor
+  to a run that does not exist; a D anchor to a GroupReport or Integration Note
+  (summaries are never roots); a `charter:vN` with no such version; a TaskSpec whose
+  wave is not open or whose out-of-scope is empty (invariant 5); a Charter version
+  without its amendment row; an Integration Note disposing an unknown flag or leaving a
+  disposition empty (invariant 11); an unresolvable `derives-from` or an anchor to an
+  unknown id; a missing required section. A refusal names what to change in the
+  document; agents fix the document and seal again — never route around it.
+- **Runs are shared facts:** `mp run record --cmd … --log … [--tree <worktree>]
+  [--scope closing]` records an execution once, identified by (tree hash, command,
+  output hash); everyone else cites `run:<id>`. Fingerprints bind the **judged tree**,
+  not the mission tip. (Field: 26 % of R evidence duplicated another seat's identical
+  run — the same suite executed by up to five seats.)
+- **Supersession:** `mp supersede <kind>:<id> --by principal|reality|<kind>:<id>
+  --reason …` retires any record — artifact, verdict, flag (reopens its disposition),
+  evidence, charter version, contract, run. Sealing a new version supersedes the old
+  one automatically. **Rules read live records only.** Whatever depended on a
+  superseded record appears in **`mp worklist`** — a to-do for the PM to judge, never
+  an error and never an automatic re-issue. (Field: 23 of 23 lint findings were lawful
+  citations of superseded documents; the only "repair" was re-issuing unchanged content,
+  and one close was blocked for 10 h 44 m.)
+- **Waves with teeth:** `mp wave open W<n> --mission … --tasks …` is one call per
+  fan-out (single-wave missions included) and is **refused while a DRIFT stands or two
+  consecutive SUSPICIONs stand** — the ratchet. Only the principal clears them
+  (`mp supersede verdict:<id> --by principal`), recorded verbatim; no project rule or
+  standing contract outranks this. (Field: a fired ratchet was absorbed under a project
+  contract and fan-out continued — nothing mechanical stood in the way.) TaskSpecs seal
+  only into an open wave; the wave's Integration Note closes it.
+- **`mp calib triggers`** computes the task-cell triggers from the ledger (recovery
+  task, post-amendment spec, cap PASS, post-compaction window × `touches-contract`) —
+  the PM no longer checks them by hand.
+- **Engine relay:** `## Engine relay` sections and `mp relay add|list|export` — the
+  upstream channel for observations whose subject is the pipeline itself, exported as a
+  PR-ready body. Adopted from the deployment's own `engine-relay/` practice. Flags stay
+  about the product.
+- **`mp acts --mission`** derives the "acts in your name" list from the journal for the
+  Integration Note and sign-off.
+- **Schema v2 and `mp migrate`:** 1.0.0 ledgers upgrade in place; their journals replay
+  whole; v1 and v1.1 events coexist (`tests/m4_migrate.py`).
+- **Tests:** `tests/m2_lint.py` is now the seal gate (every evidence rule refused at
+  the door, by name; stale is a worklist item); `tests/m3_dryrun.py` drives a whole
+  mission by documents alone; `tests/m4_migrate.py`; fixture documents under
+  `tests/fixtures/` are the reference implementation of the document contract. 168
+  checks, five gates.
+
+### Changed
+- **Calibration is cheap first:** the Calibrator runs alone; with no anchored accusation
+  it writes the wave's ALIGNED verdict itself (`## Convened: calibrator-only`) and the
+  cell ends there — Challenger and Arbiter are convened only on cause. (Field: 30 cells,
+  ~90 seat runs; the expensive seats had work in a minority of them.) The post-compaction
+  trigger is bounded: specs written after a compaction and before the next completed
+  re-grounding, and only when the spec's `touches-contract` is yes — the engine-neutral
+  form of PR #3.
+- **Charter is re-issued, never edited in place:** each amendment is a new Charter file
+  at the next version whose amendment-ledger row carries the principal's verbatim words;
+  sealing v1 ratifies `## Prohibitions` into standing contracts automatically.
+  `mp charter amend` is retired (refused with the re-issue instruction).
+- **Flags are derived, not carried:** the Stabilizer no longer copies flags into the
+  group report (section removed); the Integration Note's flag ledger carries flag ids.
+  The Stabilizer's spot-check narrows to "does the cited evidence say what is claimed" —
+  existence is the engine's.
+- **Seams and the integration round** (PR #2, verbatim): seams are payload contracts
+  frozen before the fork; a seam-sharing wave ends with its own bounded integration
+  round whose acceptance is a real-objects end-to-end proof. The Architect's Pass 2 now
+  detects seams.
+- **`mp gate close` records the principal's sign-off**: the closing run is recorded
+  beforehand (`mp run record --scope closing`), the mission is presented, and the call
+  is made on acceptance.
+- **Metrics:** buckets always sum to the task count (`r_other`); rounds derived from the
+  reports' rounds; lint no longer reports staleness (worklist does).
+- **Deprecated, still working for replay:** `artifact new|seal`, `edge add`,
+  `round open|close`, `verdict record`, `flag add|dispose`, `evidence add`,
+  `fingerprint take`, `charter seal`, `gate record`, `contract add`. Not the documented
+  path; marked DEPRECATED in `--help`.
+
+### Fixed
+- The journal could record an OK event that never applied (a seat passed a journal
+  sequence number where an artifact id was required; the row rolled back after the
+  line was fsynced, and the next id was allocated three times). The write path now
+  applies inside a savepoint **before** journaling — an apply failure is journaled as
+  REFUSED — and every action validates its referenced ids. Replay is tolerant of the
+  historical lines such journals already carry (from PR #1).
+- `mp metrics` silently dropped tasks with 0 or > 3 rounds, which disabled the trend
+  half of calibration (2 of 70 field accusations were trend-shaped). From PR #1.
+- `mp doctor` reported absolute-path registrations as tampering (30 of 31 field
+  FAILs); paths are stored relative to the project root and normalized.
+- Heading matching is by leading phrase and HTML comments are stripped before
+  parsing, so template guidance never becomes a phantom flag.
+
+### Notes
+- The three field PRs are absorbed: #2 verbatim, #1's replay tolerance and metrics
+  fix, #3's intent in engine-neutral form; #1's Charter special cases are unnecessary
+  under supersession.
+- Upgrading a live 1.0.0 project: replace the skill folder, then the PM runs
+  `mp migrate` once. The one grammar rule seats will meet: the Evidence cell of a
+  criteria row is the anchor (`run:7`); trailing annotation is tolerated, prose belongs
+  in the sections.
+- Round-2 field data is the next input: events per artifact, refusals that bite,
+  cells convened vs calibrator-only, worklist size, relay volume.
+
 ## [1.0.0] — 2026-08-31
 
 The anti-drift, anti-circular-corroboration release — and the largest change in the

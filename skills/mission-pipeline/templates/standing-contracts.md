@@ -5,10 +5,14 @@
      re-verified by the closing gate where testable. Violating an entry is an automatic
      CHANGES-REQUESTED (see roles/crititor.md).
 
-     Entries are drafted by the PM (from flags, escalations, failures) and ratified by the
-     principal at sign-off; only the principal retires one. Small and high-density by
-     design: if everything is standing, nothing is. -->
+     TWO WAYS AN ENTRY GETS HERE. (1) Sealing a mission's Charter v1 ratifies every bullet
+     under its `## Prohibitions` automatically, in the same act (a Charter re-issue
+     ratifies any bullet it adds) — origin: that Charter version. (2) The PM drafts entries
+     from flags, escalations and failures; the principal ratifies them at sign-off.
+     Only the principal retires one.
+     Small and high-density by design: if everything is standing, nothing is.
+     Entries are cited as F anchors — `contract:<id>`. -->
 
 | # | Contract | Origin | How verified | Ratified |
 |---|---|---|---|---|
-| 1 | <e.g. recorded evidence identities must resolve to the definition that produced them> | <mission / flag / failure> | <test path / closing gate / review> | <YYYY-MM-DD> |
+| 1 | <e.g. recorded evidence identities must resolve to the definition that produced them> | <mission / flag / failure / Charter <Mission> v1 prohibition> | <test path / closing gate / review> | <YYYY-MM-DD> |

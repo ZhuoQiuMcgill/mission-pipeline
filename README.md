@@ -76,13 +76,15 @@ Everything the pipeline produces — task specs, implementation reports, critiqu
 
 ## The substrate
 
-Since 1.0.0 the paper trail runs on a deterministic substrate with three layers of authority:
+The paper trail runs on a deterministic substrate with three layers of authority:
 
 1. **`ledger/events.jsonl`** — an append-only journal, authoritative for every state transition, *including refused operations*. History is physically unrewritable.
 2. **`ledger/mp.db`** — SQLite, derived and disposable: invariants become constraints (round caps, registry uniqueness, undisposed flags block close), and the whole database is rebuildable from the journal at any time.
 3. **Markdown artifacts** — unchanged, authoritative for judgment prose. Arguments and verdicts stay in prose; the substrate only makes their state transitions facts.
 
 The substrate is **agent-internal**: the agents operate it, and you never run a command — that is invariant 12, *the principal converses; agents operate*. You talk to the PM; the machinery is the agents' problem.
+
+Since 1.1.0 nothing is typed twice: **agents write a document once and submit it with one call** (`mp seal`); the substrate parses the document and derives every record — evidence, flags, verdicts, rounds, citations. The rules run at that one step nobody can skip, so a document that breaks one is refused by name and fixed, and the ledger can never disagree with the documents it came from. Test runs are recorded once and cited by id; any record can be retired and rules only read live ones.
 
 ## Design rules worth knowing
 
@@ -91,6 +93,7 @@ The substrate is **agent-internal**: the agents operate it, and you never run a 
 - **Contracts stay armed.** Task-level verification may be narrowed for speed, but every mission must pass one full-scope closing gate before sign-off; out-of-frame observations route verbatim to the PM and each gets an explicit disposition; ratified standing contracts (`ledger/CONTRACTS.md`) bind every task whether or not a spec restates them. All three rules were mined from a seven-mission production ledger where their absence let a fully-accepted mission ship 13 latent test failures.
 - **The Charter is the anchor.** Each mission freezes its goal — your verbatim words plus read-backs you confirmed — before the mission's document web exists; only you can amend it, in conversation. Drift is judged against the Charter, never against what the paperwork has come to believe.
 - **Echoes are not evidence.** Agreement among derived documents adds zero evidential weight; every acceptance stands on at least one reality-anchored or fixed-point anchor, and reality anchors bind to the exact source state that produced them.
+- **Derive, don't declare.** Facts (versions, hashes, citations, rounds) are never typed by an agent — they are read from the documents. Only judgments are written by hand, once. A fact typed by a model is a defect by construction.
 - **Missions, not tickets.** Every piece of work is a mission — a goal *plus your acceptance of it*. A one-line fix is a small mission; a redesign is a big one with waves.
 
 ## Releases
