@@ -20,3 +20,4 @@ $convened
 ## Accusations
 
 $accusations
+$cell_criteria

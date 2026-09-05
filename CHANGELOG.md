@@ -6,7 +6,85 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] — 2026-09-05
+
+The closure-modes release. Two more days of field use (PR #4) found the pipeline
+stalled for hours at a mission boundary with nothing blocking on substance: lint
+re-checked 1.0.0-sealed documents against the 1.1 contract (163 false findings; the
+close refuses on any); the harness's permission classifier blocked `mp mission claim`
+and `mp mission close` — the two verbs that read like governance acts — while every
+other verb had run for days unprompted; the engine's own text told the harness a human
+belongs at the boundary; and the deployment's ratified delegation (its PM closes without
+per-mission sign-off, the principal repudiates afterwards) was something the engine could
+not read. The deployment's 29-item relay queue added the defect classes below. The
+principal's ruling: closure modes, like a harness's permission modes, and a lifecycle
+derived from documents like everything else. Rationale record:
+`docs/design/DesignDoc_ClosureModes_2026-09-05_v01.md`.
+
+### Added
+- **Two closure modes**, declared once by the principal and recorded by the PM on their
+  word (`mp config set closure sign-off|auto --quote …`, `mp init --closure …`; every
+  declaration is an act in `mp acts`): **sign-off** — the principal accepts each mission
+  in person (default, today's behaviour); **auto** — the PM closes when the gate
+  conditions hold, the principal is never interrupted for procedure and repudiates item
+  by item afterwards; a repudiation (`mp supersede mission:<name> --by principal`)
+  reopens the mission. In both modes the substantive stops stay: a DRIFT halt, the
+  SUSPICION ratchet, a Charter amendment. `mp config set audit on|off` decides whether a
+  sealed Closure Audit is required to close.
+- **The lifecycle is derived from documents.** Sealing a Charter v1 claims the mission
+  (optional `branch:` / `cap:` header fields); sealing a **MissionClose** note
+  (`templates/mission-close.md`) closes it — refused, naming every failing condition at
+  once, while a flag is undisposed, the mission's lint has findings, the Charter is
+  unsealed, the closing run is missing, drifted, or declared rather than measured, a
+  required Closure Audit is absent, or the mode's own section (the principal's verbatim
+  acceptance / the live delegating contract) is missing. No lifecycle verb remains for a
+  classifier to single out: `mp gate close` is retired, `mp mission claim|close` are
+  deprecated aliases.
+- **Re-issue reconciliation.** Sealing a new version of a document supersedes every
+  record the old version derived (evidence, verdicts, edges, relay) — except flags,
+  which are reconciled by text: a matching bullet keeps its id and its disposition, a
+  dropped one is retired, new text is a new flag. `- carried: flag:<id>` / `- carried:
+  <text>` carries explicitly and never creates a flag. (Field: one 17-item residue list
+  re-derived across three versions produced 52 flags and 77 undisposed items; the
+  sentence "round 1's flags still stand" became a flag. `tests/m6_reissue.py`: 17 items,
+  three versions, 17 flags.)
+- **Runs say what they were:** `--result pass|fail|mixed`, `--expect fail` for a
+  deliberate fail-before batch (never a passing anchor — a `met` row citing one is
+  refused at seal), `--commit <sha>` to bind a run to the commit actually executed
+  against when the tree has moved (a declared binding; never accepted as a closing
+  run), script-path commands with the script's hash recorded, scope as part of a run's
+  identity (a closing record of an identical output is no longer refused), and git's own
+  tree id beside the content fingerprint. `mp run list|show`.
+- **A full cell's Calibrator seals its accusation list** as a CalibrationVerdict whose
+  verdict line begins `pending — Challenger and Arbiter convened`; its evidence and
+  relay derive; the Arbiter's version supersedes it. A calibrator-only run is always
+  ALIGNED.
+- **Schema v3, `mp migrate` (v1 or v2 → v3) and `mp migrate --repair`**: re-stamps
+  1.0.0 in-place-amended Charters so doctor stops reporting them, marks adopted
+  prose-era artifacts as prose-only for lint, backfills one wave per mission that has
+  specs but no wave; a pre-1.1 spec with no `touches-contract` header counts as `yes`
+  for triggers. `--repair` is journaled, so doctor and rebuild still agree.
+- **Permission note:** `/mission-pipeline:init` may, with the principal's one-sentence
+  consent, allow the substrate command in the project's harness settings — the agent
+  makes the edit; the principal only says yes or no.
+- **Tests:** `tests/m5_closure.py` (both modes end to end, every refusal, a
+  repudiation, and no lifecycle command in the journal), `tests/m6_reissue.py`,
+  `tests/m7_runs.py`; m3/m4 extended. Eight gates.
+
+### Changed
+- **Invariant 9** now reads: *The principal closes the mission — in person (sign-off
+  mode), or by standing delegation with item-by-item repudiation (auto mode). The mode
+  is the principal's declaration in PROJECT.md; the PM never chooses it. Integration and
+  reporting do not close a mission.* Invariant 10's "reaches sign-off" became "closes"
+  (wording only). All other invariants are unchanged.
+- The MissionClose seal lints its own mission only, and seal-parse only over 1.1+
+  seals. Every "live records only" reading is literal: doctor's seal check, lint's
+  disk and parse checks, `relay list|export`, worklist's edge scan skip superseded rows;
+  superseded flags never count as undisposed.
+- Roles and templates carry the modes: the Charter's signature line and the PM's close
+  step render per mode; the Auditor's report is what stands in for the principal's
+  presence in auto mode; Constructors never probe in a copied tree (an inherited
+  virtualenv imports the unpatched source — field relay 13).
 
 ### Fixed
 - **`mp lint` no longer asks a v1.0.0-sealed document for sections it never had.** The

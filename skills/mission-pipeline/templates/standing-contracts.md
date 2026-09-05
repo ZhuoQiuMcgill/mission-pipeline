@@ -8,7 +8,7 @@
      TWO WAYS AN ENTRY GETS HERE. (1) Sealing a mission's Charter v1 ratifies every bullet
      under its `## Prohibitions` automatically, in the same act (a Charter re-issue
      ratifies any bullet it adds) — origin: that Charter version. (2) The PM drafts entries
-     from flags, escalations and failures; the principal ratifies them at sign-off.
+     from flags, escalations and failures; the principal ratifies them at the close.
      Only the principal retires one.
      Small and high-density by design: if everything is standing, nothing is.
      Entries are cited as F anchors — `contract:<id>`. -->

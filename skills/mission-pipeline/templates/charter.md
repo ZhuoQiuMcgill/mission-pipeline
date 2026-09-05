@@ -4,12 +4,15 @@ category: Charter
 key: <Mission>
 round: 0
 version: <NN — 1 at the first seal; a re-issue bumps it>
+branch: <mission branch — optional, read at the claim; fills the registry line>
+cap: <int — optional, read at the claim; this mission's round cap, PROJECT.md's N otherwise>
 derives-from: none
 -->
 # Charter — <Mission> v<NN>
 
-- **Author:** PM (compiled) · **Signed by:** the principal · **Sealed:** <YYYY-MM-DD>
-- **Seal:** `python3 <skill>/scripts/mp seal <this file>` — sealing **v1 ratifies every `## Prohibitions` bullet into a standing contract**, in the same act, with no extra principal interaction; a re-issue ratifies any bullet it adds.
+- **Author:** PM (compiled) · **Sealed:** <YYYY-MM-DD>
+- **Signed by:** the principal <!-- sign-off mode --> / **Closed under standing contract <N>** — the principal repudiates from `mp acts` <!-- auto mode; render the line PROJECT.md's Closure mode declares, and only that one -->
+- **Seal:** `python3 <skill>/scripts/mp seal <this file>` — sealing **v1 claims the mission** (it derives the `MISSIONS.md` line, `branch:` and `cap:` above filling it) and **ratifies every `## Prohibitions` bullet into a standing contract**, in the same act, with no extra principal interaction; a re-issue ratifies any bullet it adds.
 
 <!-- The mission's frozen calibration basis — the root every calibration layer measures
      against. Drafted during alignment; sealed BEFORE decomposition — no mission fans out

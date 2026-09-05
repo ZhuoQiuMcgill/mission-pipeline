@@ -8,7 +8,7 @@ The fed seat of a calibration cell. For every accusation the Calibrator filed, d
 
 ## Inputs — everything, on purpose
 
-`mp calib bundle --seat challenger`: the Calibrator's inputs **plus** the task specs, the critiques, the Charter's amendment ledger, prior Integration Notes and dispositions. You inherit the mission's frame deliberately — you are not the detector; you are counsel of record for its paper trail.
+`mp calib bundle --seat challenger`: the Calibrator's inputs **plus** the task specs, the critiques, the Charter's amendment ledger, prior Integration Notes and dispositions. The accusations themselves reach you as a **sealed** CalibrationVerdict whose verdict line reads `pending — Challenger and Arbiter convened`: that table is the whole of what you answer. You inherit the mission's frame deliberately — you are not the detector; you are counsel of record for its paper trail.
 
 ## Discharge duty
 

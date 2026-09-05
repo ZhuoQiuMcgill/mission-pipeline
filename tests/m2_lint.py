@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M2 gate — THE SEAL GATE (v1.1.0).
+"""M2 gate — THE SEAL GATE (v1.2.0).
 
     a document that breaks an evidence rule is REFUSED at `mp seal`, by name,
     with the fix to make in the document.
@@ -24,8 +24,10 @@ One temp MP_ROOT, one small git repo, two missions built from documents alone:
                                                             [charter-version]
                 6'  a STALE charter anchor (v1 after v2) is lawful — it seals,
                     and lands in `mp worklist`, which blocks nothing
-  Week02-Gate   the closing gate binds to a RUN of the tree it judged, and fails
-                closed when that tree changes underneath it.
+  Week02-Gate   the mission closes by DOCUMENT (v1.2): `mp gate close` is
+                retired, a MissionClose note carries the closing run and the
+                principal's words, and the close fails closed when the judged
+                tree changes underneath it.
 
 Run: python3 tests/m2_lint.py
 """
@@ -299,14 +301,27 @@ def main():
     check("re-sealing a sealed version is REFUSED [immutability]",
           "[immutability]" in r and "bump `version:` to 2" in r, r[:300])
 
-    print("== gate close: bound to a run of the judged tree, failing closed")
+    print("== the close, by document: bound to a run of the judged tree")
     run(["mission", "claim", G])
     run(["wave", "open", "W1", "--mission", G, "--tasks", "T1"])
-    rc, b = run(["gate", "close", "--mission", G], rc=2)
-    failed = " | ".join(b.get("failures", []))
-    check("close refuses with no Charter and no closing run",
-          b.get("result") == "FAILED" and "charter-sealed" in failed
-          and "closing-gate-logged" in failed, failed[:400])
+    rc, b = run(["gate", "close", "--mission", G], rc=3)
+    check("`mp gate close` is RETIRED and says what to write instead",
+          b.get("refused") is True and "retired" in b.get("reason", "")
+          and "MissionClose" in b.get("reason", ""), b.get("reason", "")[:300])
+
+    def close_note(rc=0, **kw):
+        kw.setdefault("mission", G)
+        kw.setdefault("version", 1)
+        kw.setdefault("derives", "none")
+        return seal(doc(led(G, "MissionClose_v01.md"), "missionclose", **kw),
+                    rc=rc)
+
+    rc, b = close_note(rc=3, closing_run="- None",
+                       acceptance="> close it")
+    fail = b.get("reason", "")
+    check("the note refuses with no Charter and no closing run",
+          "[mission-close]" in fail and "charter-sealed" in fail
+          and "closing-run" in fail, fail[:400])
     rc, b = seal(doc(led(G, "Charter_v01.md"), "charter", mission=G, version=1,
                      derives="none", goal="ship it",
                      prohibitions="- never weaken the closing gate",
@@ -326,10 +341,10 @@ def main():
     check("the DevReport's 'noticed but not fixed' bullet became the flag",
           b["flags"][0]["text"] == "the retry path is untested",
           str(b["flags"])[:200])
-    rc, b = run(["gate", "close", "--mission", G], rc=2)
+    rc, b = close_note(rc=3, closing_run="- None", acceptance="> close it")
     check("the open flag blocks the close (invariant 11)",
-          any("flags-disposed" in f for f in b.get("failures", [])),
-          str(b.get("failures"))[:300])
+          "flags-disposed" in b.get("reason", "")
+          and str(gflag) in b.get("reason", ""), b.get("reason", "")[:400])
     rc, b = seal(doc(led(G, "IntegrationNote_W1_v01.md"), "integrationnote",
                      mission=G, version=1, wave="W1",
                      derives=f"artifact:{gdev}",
@@ -343,33 +358,55 @@ def main():
           and b["wave_close"]["compaction"] == "no", str(b)[:300])
     (TMP / "gate.log").write_text("43 passed\n")
     rc, b = run(["run", "record", "--cmd", "python3 -m pytest -q",
-                 "--log", "gate.log", "--scope", "closing", "--mission", G])
+                 "--log", "gate.log", "--scope", "closing", "--mission", G,
+                 "--result", "pass"])
     closing = b["id"]
+    rc, b = close_note(rc=3, closing_run=f"run:{closing}")
+    check("sign-off mode refuses a close with no words from the principal",
+          "principal-acceptance" in b.get("reason", "")
+          and "Principal's acceptance" in b.get("reason", ""),
+          b.get("reason", "")[:400])
     (TMP / "src.txt").write_text("hello\nand a quiet change after the gate\n")
-    rc, b = run(["gate", "close", "--mission", G], rc=2)
-    check("source drift after the run fails the gate closed",
-          b.get("result") == "FAILED"
-          and any("source drifted since the gate ran — fail closed" in f
-                  for f in b.get("failures", [])),
-          str(b.get("failures"))[:400])
-    check("only the drift check failed", len(b.get("failures", [])) == 1,
-          str(b.get("failures"))[:400])
+    rc, b = close_note(rc=3, closing_run=f"run:{closing}",
+                       acceptance="> yes — close it")
+    check("source drift after the run fails the close closed",
+          "source drifted since the closing gate ran — fail closed"
+          in b.get("reason", ""), b.get("reason", "")[:400])
+    check("only the drift condition failed",
+          b.get("reason", "").count("; (") == 0, b.get("reason", "")[:400])
     rc, b = run(["status"])
     check("the mission stayed open",
           [m for m in b["missions"] if m["name"] == G][0]["status"] == "open")
     (TMP / "gate2.log").write_text("44 passed\n")
     rc, b = run(["run", "record", "--cmd", "python3 -m pytest -q",
-                 "--log", "gate2.log", "--scope", "closing", "--mission", G])
+                 "--log", "gate2.log", "--scope", "closing", "--mission", G,
+                 "--result", "pass"])
     check("the re-run is a NEW run — a different tree is a different fact",
           b["id"] != closing and b.get("existing") is False, str(b)[:200])
-    rc, b = run(["gate", "close", "--mission", G])
-    check("gate close PASSES once the gate ran over the current source",
-          rc == 0 and b.get("result") == "PASSED" and b.get("closed_at"),
-          str(b.get("failures"))[:400])
-    check("all five checks passed",
-          [c["check"] for c in b.get("checks", []) if c["ok"]]
-          == ["charter-sealed", "flags-disposed", "closing-gate-logged",
-              "source-unchanged", "lint-clean"], str(b.get("checks"))[:400])
+    closing2 = b["id"]
+    rc, b = close_note(closing_run=f"run:{closing2}",
+                       acceptance="> yes — close it")
+    mc = b.get("mission_close") or {}
+    check("the MissionClose seals once the gate ran over the current source",
+          rc == 0 and mc.get("name") == G and mc.get("closed_at"),
+          str(b.get("mission_close"))[:400])
+    check("every closing check passed, one by one",
+          [c["check"] for c in mc.get("checks", []) if c["ok"]]
+          == ["charter-sealed", "flags-disposed", "closing-run",
+              "source-unchanged", "lint-clean", "principal-acceptance"],
+          str(mc.get("checks"))[:500])
+    check("the mission is closed, and the note is what closed it",
+          mc.get("closed_in") == b["artifact"]["id"]
+          and mc.get("mode") == "sign-off", str(mc)[:300])
+    rc, b = run(["status"])
+    check("the registry agrees",
+          [m for m in b["missions"] if m["name"] == G][0]["status"] == "closed")
+    jl = [json.loads(x) for x in
+          (TMP / ".claude/mission-pipeline/ledger/events.jsonl")
+          .read_text(encoding="utf-8").splitlines() if x.strip()]
+    check("no `mission.close` command was ever issued — the close was derived",
+          not [e for e in jl if e["action"] == "mission.close"],
+          str([e["action"] for e in jl if e["action"].startswith("mission")]))
 
     print("== the whole gate replays")
     rc, b = run(["rebuild"])

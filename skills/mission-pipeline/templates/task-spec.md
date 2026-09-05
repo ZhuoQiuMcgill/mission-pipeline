@@ -55,8 +55,8 @@ derives-from: <artifact:<DesignDoc id>, or none>
 - [ ] …
 
 ## Verification commands (exact, with expected outcomes)
-<!-- The Constructor runs these and records each with `mp run record` — one run id per
-     command, cited by every seat downstream instead of re-running. -->
+<!-- The Constructor runs these and records each with `mp run record … --result pass|fail|mixed`
+     — one run id per command, cited by every seat downstream instead of re-running. -->
 ```bash
 <command>   # expect: <outcome>
 ```

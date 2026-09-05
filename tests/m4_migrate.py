@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M4 gate — migration (new at v1.1.0).
+"""M4 gate — migration (v1.1.0; extended at v1.2.0).
 
     a v1.0.0 ledger — a v1 SQLite schema and a journal of v1 actions — upgrades
     with `mp migrate`, replays whole, and then carries v1.1 events alongside its
@@ -13,8 +13,16 @@ verbs, hand-writes the three v1 journal lines the v1.1 CLI no longer emits
 re-aimed respectively), downgrades the DB to the v1.0.0 schema below, and then
 puts the whole thing through migrate / rebuild / doctor.
 
-V1_SCHEMA is the v1.0.0 DDL verbatim (`git show 3d24410:.../mp`). It is a
-fixture, not a copy to keep in sync: it is what shipped.
+V1_SCHEMA and V2_SCHEMA are the v1.0.0 and v1.1.0 DDL verbatim (`git show
+3d24410:.../mp`, `git show d1b6c7a:.../mp`). They are fixtures, not copies to
+keep in sync: they are what shipped.
+
+v1.2.0 adds the second half — `mp migrate --repair`, over the three classes the
+field reported: a Charter amended in place under 1.0.0 (doctor called it
+tampering for ever), adopted prose-era artifacts (lint asked them for sections
+and files they never had), and a mission holding specs but no wave (no v1 spec
+was trigger-eligible) — plus the v1.1.0 -> v1.2.0 path, where `runs` is
+recreated so scope joins a run's identity.
 
 Run: python3 tests/m4_migrate.py
 """
@@ -118,6 +126,122 @@ V1_TABLES = {
     "events": "seq,at,actor,action,payload_json",
 }
 
+V2_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS missions (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, branch TEXT,
+  started TEXT, status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open','closed')),
+  closed_at TEXT, charter_version INTEGER, round_cap INTEGER NOT NULL DEFAULT 3);
+CREATE TABLE IF NOT EXISTS artifacts (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  category TEXT NOT NULL, key TEXT NOT NULL,
+  round INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL,
+  path TEXT NOT NULL, sha256 TEXT, sealed_at TEXT, author_role TEXT,
+  created_at TEXT, wave TEXT, touches_contract TEXT, recovers TEXT,
+  superseded_by TEXT, superseded_at TEXT,
+  UNIQUE (mission, category, key, round, version));
+CREATE TABLE IF NOT EXISTS edges (
+  from_artifact INTEGER NOT NULL REFERENCES artifacts(id),
+  to_artifact INTEGER NOT NULL REFERENCES artifacts(id),
+  kind TEXT NOT NULL CHECK (kind IN ('derives-from','cites','carries')));
+CREATE TABLE IF NOT EXISTS rounds (
+  mission INTEGER NOT NULL REFERENCES missions(id), task TEXT NOT NULL,
+  n INTEGER NOT NULL CHECK (n >= 1), opened TEXT NOT NULL, closed TEXT,
+  UNIQUE (mission, task, n));
+CREATE TABLE IF NOT EXISTS verdicts (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  task TEXT, artifact INTEGER REFERENCES artifacts(id),
+  kind TEXT NOT NULL, by_role TEXT NOT NULL, at TEXT NOT NULL,
+  superseded_by TEXT, superseded_at TEXT);
+CREATE TABLE IF NOT EXISTS flags (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  task TEXT, source_artifact INTEGER REFERENCES artifacts(id),
+  text_verbatim TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('out-of-frame','noticed-not-fixed')),
+  raised_at TEXT NOT NULL, disposition TEXT, disposed_at TEXT,
+  disposed_in INTEGER REFERENCES artifacts(id),
+  superseded_by TEXT, superseded_at TEXT);
+CREATE TABLE IF NOT EXISTS runs (
+  id INTEGER PRIMARY KEY, mission INTEGER REFERENCES missions(id),
+  cmd TEXT NOT NULL, tree_path TEXT NOT NULL, tree_hash TEXT NOT NULL,
+  commit_sha TEXT, dirty INTEGER NOT NULL DEFAULT 0,
+  log_path TEXT, output_sha TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'task', result TEXT, recorded_by TEXT,
+  at TEXT NOT NULL, superseded_by TEXT, superseded_at TEXT,
+  UNIQUE (tree_hash, cmd, output_sha));
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY, artifact INTEGER NOT NULL REFERENCES artifacts(id),
+  criterion TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('R','F','D','X')),
+  anchor TEXT NOT NULL, cmd TEXT, output_sha TEXT,
+  fingerprint_id INTEGER REFERENCES fingerprints(id),
+  met TEXT, run_id INTEGER REFERENCES runs(id),
+  superseded_by TEXT, superseded_at TEXT);
+CREATE TABLE IF NOT EXISTS fingerprints (
+  id INTEGER PRIMARY KEY, commit_sha TEXT, dirty INTEGER NOT NULL,
+  tree_hash TEXT, taken_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS charter (
+  mission INTEGER NOT NULL REFERENCES missions(id), version INTEGER NOT NULL,
+  path TEXT NOT NULL, sha256 TEXT NOT NULL, amended_by TEXT,
+  verbatim_quote TEXT, readback_ref TEXT, at TEXT NOT NULL,
+  superseded_by TEXT, superseded_at TEXT,
+  UNIQUE (mission, version));
+CREATE TABLE IF NOT EXISTS contracts (
+  id INTEGER PRIMARY KEY, text TEXT NOT NULL, origin TEXT,
+  verified_by TEXT, ratified_at TEXT, retired_at TEXT);
+CREATE TABLE IF NOT EXISTS gates (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  scope TEXT NOT NULL, cmd TEXT NOT NULL, log_path TEXT, log_sha TEXT,
+  fingerprint_id INTEGER REFERENCES fingerprints(id),
+  result TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS waves (
+  id INTEGER PRIMARY KEY, mission INTEGER NOT NULL REFERENCES missions(id),
+  label TEXT NOT NULL, tasks TEXT NOT NULL DEFAULT '', opened TEXT NOT NULL,
+  closed TEXT, compaction TEXT, closed_in INTEGER REFERENCES artifacts(id),
+  UNIQUE (mission, label));
+CREATE TABLE IF NOT EXISTS relay (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('defect','inefficiency','suggestion')),
+  text TEXT NOT NULL, source_artifact INTEGER REFERENCES artifacts(id),
+  mission INTEGER REFERENCES missions(id), raised_by TEXT, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS supersessions (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL,
+  by_ref TEXT NOT NULL, reason TEXT, mission INTEGER REFERENCES missions(id),
+  actor TEXT, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (
+  seq INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
+  action TEXT NOT NULL, payload_json TEXT NOT NULL);
+"""
+
+# the tables a v1.1.0 mp.db carried, in v1.1.0 column order
+V2_TABLES = {
+    "schema_meta": "version",
+    "missions": "id,name,branch,started,status,closed_at,charter_version,round_cap",
+    "artifacts": "id,mission,category,key,round,version,path,sha256,sealed_at,"
+                 "author_role,created_at,wave,touches_contract,recovers,"
+                 "superseded_by,superseded_at",
+    "edges": "from_artifact,to_artifact,kind",
+    "rounds": "mission,task,n,opened,closed",
+    "verdicts": "id,mission,task,artifact,kind,by_role,at,superseded_by,"
+                "superseded_at",
+    "flags": "id,mission,task,source_artifact,text_verbatim,kind,raised_at,"
+             "disposition,disposed_at,disposed_in,superseded_by,superseded_at",
+    "runs": "id,mission,cmd,tree_path,tree_hash,commit_sha,dirty,log_path,"
+            "output_sha,scope,result,recorded_by,at,superseded_by,superseded_at",
+    "evidence": "id,artifact,criterion,type,anchor,cmd,output_sha,"
+                "fingerprint_id,met,run_id,superseded_by,superseded_at",
+    "fingerprints": "id,commit_sha,dirty,tree_hash,taken_at",
+    "charter": "mission,version,path,sha256,amended_by,verbatim_quote,"
+               "readback_ref,at,superseded_by,superseded_at",
+    "contracts": "id,text,origin,verified_by,ratified_at,retired_at",
+    "gates": "id,mission,scope,cmd,log_path,log_sha,fingerprint_id,result,at",
+    "waves": "id,mission,label,tasks,opened,closed,compaction,closed_in",
+    "relay": "id,kind,text,source_artifact,mission,raised_by,at",
+    "supersessions": "id,kind,target,by_ref,reason,mission,actor,at",
+    "events": "seq,at,actor,action,payload_json",
+}
+
 def check(name, cond, detail=""):
     print(("  ok  " if cond else "  FAIL") + f" {name}"
           + (f" — {detail}" if detail and not cond else ""))
@@ -174,6 +298,24 @@ def downgrade_to_v1():
         db.executemany(f"INSERT INTO {t} ({cols}) VALUES ({','.join('?' * n)})",
                        rows[t])
     db.execute("UPDATE schema_meta SET version=1")
+    db.commit()
+    db.close()
+
+def downgrade_to_v2():
+    """Rewrite mp.db as a v1.1.0 database holding exactly the same rows — the
+    other migration path a released deployment can be standing on."""
+    src = sqlite3.connect(str(ledger() / "mp.db"))
+    rows = {t: src.execute(f"SELECT {cols} FROM {t}").fetchall()
+            for t, cols in V2_TABLES.items()}
+    src.close()
+    (ledger() / "mp.db").unlink()
+    db = sqlite3.connect(str(ledger() / "mp.db"))
+    db.executescript(V2_SCHEMA)
+    for t, cols in V2_TABLES.items():
+        n = len(cols.split(","))
+        db.executemany(f"INSERT INTO {t} ({cols}) VALUES ({','.join('?' * n)})",
+                       rows[t])
+    db.execute("UPDATE schema_meta SET version=2")
     db.commit()
     db.close()
 
@@ -239,6 +381,10 @@ def main():
             goal="ship it", prohibitions="- never weaken the gate",
             amendments="| v1 | 2026-08-31 | (initial seal) | — |")
     run(["charter", "seal", "--mission", M, "--path", ch_rel])
+    rc, b = run(["artifact", "new", "--mission", M, "--category", "Charter",
+                 "--key", M, "--round", "0", "--version", "1", "--path",
+                 ch_rel, "--author-role", "pm"])
+    charter_art = b["payload"]["id"]
     run(["contract", "add", "--text", "never weaken the gate", "--origin",
          f"Charter v1 prohibition ({M})", "--verified-by", "crititor",
          "--ratified", "2026-08-31"])
@@ -254,6 +400,9 @@ def main():
     mid = 1
     append_v1_events([
         ("artifact.seal", {"id": spec, "sha256": sha256_file(TMP / spec_rel),
+                           "sealed_at": "2026-08-31T12:00:00Z"}),
+        ("artifact.seal", {"id": charter_art,
+                           "sha256": sha256_file(TMP / ch_rel),
                            "sealed_at": "2026-08-31T12:00:00Z"}),
         ("charter.amend", {"mission": mid, "version": 2, "path": ch_rel,
                            "sha256": sha256_file(TMP / ch_rel),
@@ -284,10 +433,14 @@ def main():
 
     print("== migrate")
     rc, b = run(["migrate"])
-    check("migrate reports what it added",
-          b.get("ok") is True and b.get("from") == 1 and b.get("version") == 2
-          and set(b["tables"]) == {"runs", "waves", "relay", "supersessions"}
-          and "artifacts.superseded_by" in b["added"], str(b)[:400])
+    check("v1 -> v3 in one go, reporting what it added",
+          b.get("ok") is True and b.get("from") == 1 and b.get("version") == 3
+          and set(b["tables"]) == {"config", "runs", "waves", "relay",
+                                   "supersessions"}
+          and "artifacts.superseded_by" in b["added"]        # the v2 columns
+          and "missions.closed_in" in b["added"]             # and the v3 ones
+          and "artifacts.note" in b["added"]
+          and "edges.superseded_by" in b["added"], str(b)[:600])
     rc, b = run(["migrate"])
     check("migrate is idempotent", b.get("already") is True)
 
@@ -375,12 +528,139 @@ def main():
           any(i["kind"] == "verdict-on-superseded" for i in b["items"]),
           str(b.get("items"))[:400])
 
+    print("== --repair (a): a Charter amended IN PLACE under 1.0.0")
+    # `mp charter amend` was lawful in 1.0.0 and edited the file after its seal,
+    # so 1.1.0's doctor reported every such Charter as tampering, for ever.
+    ch = (TMP / ch_rel).read_text(encoding="utf-8")
+    (TMP / ch_rel).write_text(
+        ch + "\n| v2 | 2026-08-31 | yes — widen T1 to cover the retry path |"
+             " readback-1 |\n", encoding="utf-8")
+    rc, b = run(["doctor"], rc=2)
+    check("doctor FAILs on the in-place-amended Charter, as the field saw",
+          any(f"artifact {charter_art} MODIFIED after seal" in f
+              for f in b.get("findings", [])), str(b.get("findings"))[:400])
+    rc, b = run(["migrate", "--repair"])
+    rep = b.get("repair") or {}
+    check("--repair re-stamps it, and says why",
+          [r["id"] for r in rep.get("restamp", [])] == [charter_art]
+          and rep["restamp"][0]["note"] == "amended-in-place-1.0", str(rep)[:400])
+    rc, b = run(["doctor"])
+    check("doctor CLEAN after the re-stamp", rc == 0 and b.get("ok") is True,
+          str(b.get("findings"))[:400])
+    rc, b = run(["rebuild"])
+    check("and the repair replays — it was journaled like any other write",
+          b.get("ok") is True and not b.get("replay_skips"), str(b)[:300])
+    rc, b = run(["doctor"])
+    check("doctor CLEAN after replaying the repair", rc == 0, str(b)[:300])
+    rc, b = run(["migrate", "--repair"])
+    check("--repair is idempotent — nothing left to re-stamp",
+          (b.get("repair") or {}).get("restamp") == [], str(b.get("repair"))[:300])
+
+    print("== --repair (b): adopted artifacts are prose-only")
+    A = "Week00-Adopted"
+    legacy = TMP / "legacy" / A
+    legacy.mkdir(parents=True)
+    for name in ("TaskSpec_T1_2026-01-01_v01.md",
+                 "DevReport_T1_2026-01-01_v01.md"):
+        (legacy / name).write_text(
+            f"# {name}\n\nA v0.3-era document, written years before the"
+            " mp:header contract existed.\n", encoding="utf-8")
+    # `mp adopt` registers paths relative to the tree it imported, which is a
+    # layout that no longer exists (relay 3). Here the registered path resolves
+    # to a file that HAS a header — and one that disagrees with the registry.
+    cur = TMP / A
+    cur.mkdir()
+    (cur / "DevReport_T1_2026-01-01_v01.md").write_text(
+        "<!-- mp:header\nmission: SomeOtherMission\ncategory: Critique\n"
+        "key: T9\nround: 7\nversion: 4\nderives-from: artifact:99999\n-->\n\n"
+        "# the layout moved under the registered path\n", encoding="utf-8")
+    rc, b = run(["adopt", str(TMP / "legacy")])
+    check("adopt imports the prose-era mission", b.get("ok") is True,
+          str(b)[:300])
+    rc, b = run(["lint", "--mission", A])
+    check("lint is CLEAN on it: an adopted record is asked for nothing it never"
+          " had — not a header, not a section, not a file",
+          rc == 0 and b.get("ok") is True, str(b.get("findings"))[:600])
+    check("and the info line counts them as prose-only",
+          any("2 prose-only (adopted)" in i for i in b.get("info", [])),
+          str(b.get("info")))
+    rc, b = run(["lint"])
+    check("the global lint is CLEAN too", rc == 0 and b.get("ok") is True,
+          str(b.get("findings"))[:600])
+
+    print("== --repair (c): a mission with specs but no wave gets one")
+    rc, b = run(["migrate", "--repair"])
+    rep = b.get("repair") or {}
+    backfilled = [w for w in rep.get("waves", []) if w["mission_name"] == A]
+    check("--repair backfills W1 from the mission's own task keys",
+          len(backfilled) == 1 and backfilled[0]["label"] == "W1"
+          and backfilled[0]["tasks"] == "T1"
+          and backfilled[0]["note"] == "backfilled", str(rep.get("waves"))[:400])
+    db = sqlite3.connect(str(ledger() / "mp.db"))
+    wave = db.execute("SELECT label, tasks, note FROM waves w JOIN missions m"
+                      " ON m.id=w.mission WHERE m.name=?", (A,)).fetchone()
+    db.close()
+    check("the wave is in the ledger", wave == ("W1", "T1", "backfilled"),
+          str(wave))
+    rc, b = run(["migrate", "--repair"])
+    check("--repair backfills nothing the second time",
+          (b.get("repair") or {}).get("waves") == [],
+          str(b.get("repair"))[:300])
+    rc, b = run(["calib", "triggers", "--mission", A])
+    row = b["tasks"][0]
+    check("a pre-v1.1 spec with no `touches-contract` header counts as yes,"
+          " with the note that says so",
+          row.get("assumed_touches_contract") is True
+          and row["touches_contract"] == "yes"
+          and "pre-v1.1" in row.get("note", ""), str(row)[:400])
+    rc, b = run(["doctor"])
+    check("doctor CLEAN after every repair", rc == 0 and b.get("ok") is True,
+          str(b.get("findings"))[:400])
+
+    print("== a v1.1.0 (schema v2) ledger migrates to v3 and replays whole")
+    downgrade_to_v2()
+    db = sqlite3.connect(str(ledger() / "mp.db"))
+    ver = db.execute("SELECT version FROM schema_meta").fetchone()[0]
+    runs_cols = {c[1] for c in db.execute("PRAGMA table_info(runs)")}
+    db.close()
+    check("the DB is a v1.1.0 database again",
+          ver == 2 and "binding" not in runs_cols and "expect" not in runs_cols,
+          f"v{ver} {sorted(runs_cols)}")
+    rc, b = run(["doctor"], rc=1)
+    check("v1.2 refuses to touch a v2 DB, and names the fix",
+          "run `mp migrate`" in (b.get("error") or ""), str(b)[:200])
+    rc, b = run(["migrate"])
+    check("v2 -> v3 adds the config table and recreates runs for its new"
+          " identity",
+          b.get("from") == 2 and b.get("version") == 3
+          and b.get("tables") == ["config"] and b.get("runs_recreated") is True
+          and "missions.closed_mode" in b["added"], str(b)[:500])
+    db = sqlite3.connect(str(ledger() / "mp.db"))
+    idx = db.execute("SELECT sql FROM sqlite_master WHERE type='table'"
+                     " AND name='runs'").fetchone()[0]
+    n_runs = db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    db.close()
+    check("the recreated runs table carries scope in its UNIQUE key, and kept"
+          " every row",
+          "UNIQUE (tree_hash, cmd, output_sha, scope)" in idx and n_runs >= 1,
+          idx[-120:])
+    rc, b = run(["rebuild"])
+    check("the whole mixed journal — v1, v1.1 and v1.2 lines — replays whole",
+          b.get("ok") is True and not b.get("replay_skips"), str(b)[:400])
+    rc, b = run(["doctor"])
+    check("doctor CLEAN on the twice-migrated ledger",
+          rc == 0 and b.get("ok") is True, str(b.get("findings"))[:400])
+    rc, b = run(["lint"])
+    check("lint CLEAN on it too", rc == 0 and b.get("ok") is True,
+          str(b.get("findings"))[:400])
+
     print()
     if FAILS:
         print(f"M4 MIGRATE: {len(FAILS)} FAILURE(S): {FAILS}")
         sys.exit(1)
-    print("M4 MIGRATE GATE PASSED — a v1.0.0 ledger upgrades in place, its"
-          " journal replays whole, and v1 and v1.1 events coexist")
+    print("M4 MIGRATE GATE PASSED — a v1.0.0 ledger upgrades to v3 in one go,"
+          " a v1.1.0 ledger follows it, `--repair` clears the three classes the"
+          " field reported, and the mixed journal replays whole")
 
 if __name__ == "__main__":
     main()

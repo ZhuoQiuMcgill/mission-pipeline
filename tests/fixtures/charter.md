@@ -4,6 +4,7 @@ category: Charter
 key: $mission
 round: 0
 version: $version
+$extra_header
 derives-from: $derives
 -->
 

@@ -3,7 +3,7 @@ mission: <Mission>
 category: CalibrationVerdict
 key: <W<n> aggregate cell | T<n> task cell>
 round: 0
-version: <NN>
+version: <NN — in a full cell the Calibrator seals one version and the Arbiter's ruling is the next>
 derives-from: <Charter artifact id>
 -->
 # Calibration Verdict — <Mission> · <wave <N> | task cell T<n>>
@@ -16,8 +16,11 @@ derives-from: <Charter artifact id>
 ## Convened
 <!-- calibrator-only | full. The Calibrator runs ALONE first. No anchored accusation →
      the Calibrator writes this file: `calibrator-only`, an empty accusations table, and
-     ALIGNED. That IS the wave's verdict. At least one anchored accusation → the PM
-     convenes the Challenger and the Arbiter, and the Arbiter writes this file: `full`. -->
+     ALIGNED — a calibrator-only cell has no other verdict. That IS the wave's verdict.
+     At least one anchored accusation → `full`, and this file is written TWICE: the
+     Calibrator seals its accusation list with the `pending` verdict line below, then the
+     PM convenes the Challenger and the Arbiter and the Arbiter seals the NEXT version
+     with the ruling, superseding it. -->
 **calibrator-only** / **full**
 
 ## Seats
@@ -40,6 +43,12 @@ derives-from: <Charter artifact id>
 
 ## Verdict
 **ALIGNED / SUSPICION / DRIFT**
+
+<!-- THE CALIBRATOR'S SEAL IN A FULL CELL: this section's first line reads
+     `pending — Challenger and Arbiter convened`
+     and nothing else changes. That seal derives the accusations' evidence rows and any
+     relay items at once — none of the starved seat's work waits on seats nobody has
+     convened yet — and records NO verdict. The Arbiter's version supersedes it. -->
 
 Routing — the engine, not a choice:
 - **ALIGNED** → the next wave opens.

@@ -29,7 +29,7 @@ There is no second copy: what you write in `| # | Acceptance criterion | Met? | 
 - `Met?` is `met` / `partial` / `missed`; `Type` is `R` / `F` / `D` / `X`; **one anchor per row** — a criterion resting on three anchors gets three rows repeating the same `#`.
 - Anchor forms: **R** → `run:<id>` · **F** → `charter:v<N>[:<ref>]`, `contract:<id>`, `project:<section>` · **D** → `artifact:<id>[:<section>]` · **X** → the verified URL.
 - **The Evidence cell is the anchor and nothing else** — no commentary, no quoted text, no trailing dash. What the anchor *shows* belongs in Required changes or Notes; the cell is a machine-readable pointer.
-- **Cite runs; do not re-run.** The Constructor's suite is already a recorded fact — cite its `run:<id>`. Re-run only to **dispute** one: record your own (`mp run record`) and say in the row what it disputes. Confirming a run someone already recorded buys nothing and costs a whole suite.
+- **Cite runs; do not re-run.** The Constructor's suite is already a recorded fact — cite its `run:<id>`. **On a `met` row cite the pass-after run, never the run recorded `--expect fail`**: a deliberate red batch anchors the fail-before half of the story and nothing else. Re-run only to **dispute** one: record your own (`mp run record … --result …`) and say in the row what it disputes — from a `git worktree`, never a `cp -a` of the delivered tree, whose inherited `.venv` still imports the unpatched source. Confirming a run someone already recorded buys nothing and costs a whole suite.
 
 ## Output
 
@@ -45,7 +45,9 @@ The engine derives the verdict, the evidence rows, the flag, the relay items, an
 
 **Out-of-frame risk vs Engine relay.** Out-of-frame is mandatory and about the **product** or the principal's intent — exactly one item, or "None — <reason>". An observation whose subject is the pipeline itself (the engine, the ledger, `mp`, another document's bookkeeping) is **not** a flag: it goes under `## Engine relay`, prefixed `defect:` / `inefficiency:` / `suggestion:`, and travels upstream.
 
-**Refusals you will meet.** `mp seal` names the rule; the document is what is wrong, so fix it and seal again — never route around a refusal. The four that catch a critique: a *met* row carrying only D or X evidence (it is not met — mark it partial and name the missing anchor); an `R` anchor to a `run:<id>` that does not exist (cite the report's Runs table, or record the run you actually made); a `D` anchor pointing at a GroupReport or Integration Note (summaries are never citable roots — cite the artifact the summary carries); a `charter:v<N>` version that does not exist. Full list: `references/substrate.md`.
+**Carrying a risk into the next round.** Re-issuing a critique reconciles its flags by text, so an unchanged risk keeps its id and its disposition. Write it as `- carried: flag:<id>` (or `- carried: <the flag's text>`) — a carried bullet never mints a second flag for one observation.
+
+**Refusals you will meet.** `mp seal` names the rule; the document is what is wrong, so fix it and seal again — never route around a refusal. The five that catch a critique: a *met* row carrying only D or X evidence (it is not met — mark it partial and name the missing anchor); an `R` anchor to a `run:<id>` that does not exist (cite the report's Runs table, or record the run you actually made); a `D` anchor pointing at a GroupReport or Integration Note (summaries are never citable roots — cite the artifact the summary carries); a `charter:v<N>` version that does not exist; a *met* row anchored to a run recorded `--expect fail` (cite the pass-after run). Full list: `references/substrate.md`.
 
 ## Decision rule
 

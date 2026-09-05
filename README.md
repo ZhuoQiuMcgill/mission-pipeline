@@ -11,7 +11,7 @@ Running one coding agent in a loop doesn't scale past a handful of tasks, and un
 - **Separate hands.** The agent that builds is never the agent that reviews, and neither is the agent that judges. Verdicts come with evidence.
 - **Bounded loops.** Every task gets at most N rounds (default 3) of build↔critique before it *must* escalate to a human decision — no infinite self-revision.
 - **Parallel without collisions.** A read-only Architect maps which tasks actually touch which files; tasks that collide never run in the same wave.
-- **The human is the close.** Integration and green tests don't end a mission — your hands-on acceptance does. Feedback re-enters the same mission.
+- **The human is the close.** Integration and green tests don't end a mission — your acceptance does: in person (sign-off mode), or by a standing delegation you ratified, with every closure listed for you to repudiate item by item (auto mode). Feedback re-enters the same mission.
 
 ## The shape
 
@@ -94,6 +94,7 @@ Since 1.1.0 nothing is typed twice: **agents write a document once and submit it
 - **The Charter is the anchor.** Each mission freezes its goal — your verbatim words plus read-backs you confirmed — before the mission's document web exists; only you can amend it, in conversation. Drift is judged against the Charter, never against what the paperwork has come to believe.
 - **Echoes are not evidence.** Agreement among derived documents adds zero evidential weight; every acceptance stands on at least one reality-anchored or fixed-point anchor, and reality anchors bind to the exact source state that produced them.
 - **Derive, don't declare.** Facts (versions, hashes, citations, rounds) are never typed by an agent — they are read from the documents. Only judgments are written by hand, once. A fact typed by a model is a defect by construction.
+- **Two closure modes, declared once.** Like a permission mode: `sign-off` (you accept each mission) or `auto` (the PM closes when the gate holds; you repudiate from the acts list). What still stops in both: a drift verdict, the suspicion ratchet, a Charter amendment. The PM never chooses the mode; a mission never stalls on procedure.
 - **Missions, not tickets.** Every piece of work is a mission — a goal *plus your acceptance of it*. A one-line fix is a small mission; a redesign is a big one with waves.
 
 ## Releases

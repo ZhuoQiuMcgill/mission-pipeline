@@ -1,10 +1,13 @@
 # Missions Registry
 
-<!-- One line per mission, DERIVED — `mp mission claim <name>` writes it, atomically, and
-`mp gate close` updates it at the principal's sign-off. Never edit this table by hand.
-Claim BEFORE creating worktrees or spawning any group: the claim is what keeps two
-concurrent missions from colliding on a name.
-Status: open → closed (principal sign-off only). -->
+<!-- One line per mission, DERIVED — sealing the mission's **Charter v1** writes it,
+atomically (the Charter IS the claim; its optional `branch:` header fills the branch
+column), and sealing the mission's **MissionClose** note closes it. Never edit this table
+by hand, and never look for a claim or close verb: there is none.
+The Charter seals before any worktree or group exists, which is what keeps two concurrent
+missions from colliding on a name.
+Status: open → closed. A repudiation — `mp supersede mission:<name> --by principal` —
+reopens the line. -->
 
 | Mission | Branch | Started | Status | Closed |
 |---|---|---|---|---|

@@ -27,8 +27,9 @@ derives-from: artifact:<TaskSpec id>, artifact:<DevReport id>
      The Evidence cell is THE ANCHOR AND NOTHING ELSE — no commentary, no quoted text, no
      trailing dash; what the anchor shows belongs in Required changes or Notes.
      A "met" resting only on D or X is REFUSED at seal (invariant 13) — mark it partial and
-     name the missing R or F anchor. Cite run ids from the report's Runs table; re-run only
-     to DISPUTE one, recording your own (mp run record) and saying so in Notes. -->
+     name the missing R or F anchor. Cite run ids from the report's Runs table — on a `met`
+     row the PASS-AFTER run, never one recorded --expect fail. Re-run only to DISPUTE one,
+     recording your own (mp run record … --result) and saying so in Notes. -->
 | # | Acceptance criterion | Met? | Evidence | Type |
 |---|---|---|---|---|
 | 1 | <criterion> | met / partial / missed | `run:<id>` | R |
@@ -49,8 +50,11 @@ derives-from: artifact:<TaskSpec id>, artifact:<DevReport id>
 <!-- Mandatory; never feeds the verdict. Exactly one bullet, or one starting
      "None — <reason>". The one thing that could be wrong about the PRODUCT or the
      principal's intent that neither the spec nor the report mentions. Derived into the
-     flag ledger at seal; the PM must disposition it (engine invariant 11). -->
-- <risk and why it matters> / None — <one-line reason the frame looks sound>.
+     flag ledger at seal; the PM must disposition it (engine invariant 11).
+     RE-ISSUE: this section reconciles against the previous version's flags by text — an
+     unchanged risk keeps its id and its disposition, and a carried bullet mints no second
+     flag for one observation. -->
+- <risk and why it matters> / - carried: flag:<id> / None — <one-line reason the frame looks sound>.
 
 ## Engine relay
 <!-- Optional. Observations whose subject is the pipeline itself — the engine, the

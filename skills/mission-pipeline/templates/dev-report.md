@@ -24,9 +24,14 @@ derives-from: artifact:<TaskSpec id>
 
 ## Runs
 <!-- One row per verification you executed and recorded:
-     mp run record --cmd "<command>" --log <file> [--tree <worktree path>]
+     mp run record --cmd "<command>" --log <file> --result pass|fail|mixed [--tree <worktree>]
+     --result on EVERY call: the row, not the log, is what a later seat reads.
      --tree whenever you built in a worktree: the run binds to the tree it judged, not the
-     mission tip. Every seat downstream cites these ids instead of re-running. -->
+     mission tip. --expect fail marks a deliberate fail-before batch — never a passing
+     anchor. --commit <sha> when the tree has already moved since the execution (declared,
+     not measured — record immediately when you can). A multi-step verification is a
+     script: record the SCRIPT PATH as the command and the engine hashes the script, so
+     the exact thing you ran can be re-run. Every seat downstream cites these ids. -->
 | Run | Command | Result |
 |---|---|---|
 | `run:<id>` | `<command>` | <pass / fail — counts, failures, skips> |
@@ -50,8 +55,12 @@ derives-from: artifact:<TaskSpec id>
 <!-- Mandatory — write "None." explicitly. Out-of-scope observations about the PRODUCT
      or the principal's intent; observations, not changes. Derived into the flag ledger at
      seal; the PM dispositions each (invariant 11). An observation about the engine, the
-     ledger, or `mp` is NOT a flag — see below. -->
-- <observation> / None.
+     ledger, or `mp` is NOT a flag — see below.
+     RE-ISSUE: this section RECONCILES against the previous version's flags by text — an
+     unchanged bullet keeps its flag id and its disposition. Say so outright, and a carried
+     bullet then creates no flag at all. Never write "round 1's flags still stand": that is
+     a bullet, so it becomes a flag about flags. -->
+- <observation> / - carried: flag:<id> / - carried: <the flag's text> / None.
 
 ## Engine relay
 <!-- Optional. Observations whose subject is the pipeline itself — the engine, the

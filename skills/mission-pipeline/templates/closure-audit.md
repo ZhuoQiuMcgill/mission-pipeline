@@ -29,4 +29,7 @@ Does the integrated result deliver the design decision's stated goal?
 
 ## Advisory verdict
 **DELIVERS / DELIVERS WITH GAPS / DOES NOT DELIVER** — <one line>
-<!-- Advisory: the principal judges. This feeds sign-off; it does not replace it. -->
+<!-- Advisory: the principal judges. This feeds the close; it never performs it. The
+     mission's MissionClose note cites this artifact by id (`artifact:<id>`), and while the
+     closure audit is on no mission closes without it — in auto mode this arms-length read
+     is what stands in for the principal's presence. -->

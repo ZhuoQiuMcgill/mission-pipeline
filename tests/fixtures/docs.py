@@ -12,9 +12,23 @@ from pathlib import Path
 
 FIX = Path(__file__).resolve().parent
 
+# Optional slots: a caller that says nothing about them gets an empty line,
+# never a literal `$placeholder` in a sealed document.
+DEFAULTS = {
+    "extra_header": "",   # Charter: optional `branch:` / `cap:` header lines
+    "audit": "- None",    # MissionClose: the ClosureAudit, when one is required
+    "acceptance": "",     # MissionClose: the principal's verbatim words
+    "delegation": "",     # MissionClose: the delegating standing contract
+    "outcome_text": "the mission delivered what its Charter asked for",
+    "relay": "",
+    "cell_criteria": "",  # CalibrationVerdict: an optional criteria table
+}
+
 def render(name, **kw):
     text = (FIX / f"{name}.md").read_text(encoding="utf-8")
-    return string.Template(text).safe_substitute(**kw)
+    fields = dict(DEFAULTS)
+    fields.update(kw)
+    return string.Template(text).safe_substitute(**fields)
 
 def write(root, relpath, name, **kw):
     """Render a fixture into <root>/<relpath> and return the absolute path."""

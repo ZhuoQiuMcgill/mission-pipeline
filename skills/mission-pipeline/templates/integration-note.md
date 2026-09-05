@@ -62,8 +62,9 @@ Compaction since last wave: yes
 ## Acts in your name
 <!-- Paste the output of `mp acts --mission <Mission>` — every act executed on the
      principal's behalf (amendments, ratifications, dispositions, a cleared verdict), each
-     with their verbatim words. Presented at sign-off for repudiation item by item
-     (invariant 12). An act with no verbatim quote was not authorized. -->
+     with their verbatim words. Handed over with the close for repudiation item by item —
+     in person under sign-off mode, read from `mp acts` afterwards under auto (invariant
+     12). An act with no verbatim quote was not authorized. -->
 ```
 <mp acts --mission <Mission> output, pasted verbatim>
 ```
@@ -77,14 +78,14 @@ Compaction since last wave: yes
 ## Closing gate
 <!-- Mission close only. The full-scope verification over the integrated result —
      invariant 10; task-level narrowing never narrows this. Record it with
-     `mp run record … --scope closing`; `mp gate close` comes later, on the principal's
-     sign-off — it is the act that marks the mission closed. -->
+     `mp run record … --scope closing --result pass`. What CLOSES the mission is sealing the
+     MissionClose note (templates/mission-close.md), which cites this same run. -->
 - Command(s): `<full-scope gate per PROJECT.md>`
 - **Run:** `run:<id>` · Result: <verbatim summary — counts, failures, skips> · Log: `<path>`
-- **`mp gate close`:** clean / refused — <the rule it named, and what was fixed>
+- **MissionClose:** `<the note's file>` — sealed <YYYY-MM-DD> / not yet — <the condition the seal named, and what is owed>
 
 ## Standing-contract candidates
 <!-- Entries drafted from this wave's flags, escalations, or failures. The principal
-     ratifies at sign-off; ratified entries bind from the next mission. (A Charter
+     ratifies them at the close; ratified entries bind from the next mission. (A Charter
      prohibition needs no entry here — sealing the Charter ratified it.) -->
 - <draft entry — origin> / None.

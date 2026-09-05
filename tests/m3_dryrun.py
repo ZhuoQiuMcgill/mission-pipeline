@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""M3 gate — the dry run, driven by DOCUMENTS (v1.1.0).
+"""M3 gate — the dry run, driven by DOCUMENTS (v1.2.0).
 
-A toy mission from claim to a closed gate using only the calls a v1.1 agent
-makes: `mp seal`, `mp run record`, `mp wave open`, `mp supersede`, `mp relay`,
+A toy mission from claim to close using only the calls a v1.2 agent makes:
+`mp seal`, `mp run record`, `mp wave open`, `mp supersede`, `mp relay`,
 `mp calib triggers|check|bundle`. Nothing is declared twice: every edge, every
 evidence row, every flag, every verdict, every round and every disposition is
-DERIVED from the markdown the seat had to write anyway.
+DERIVED from the markdown the seat had to write anyway — and so is the
+lifecycle: sealing the Charter v1 CLAIMS the mission, sealing the MissionClose
+note CLOSES it, and no `mission claim` / `mission close` / `gate close` command
+appears in the journal at all.
 
   L1  a Charter prohibition ratifies itself into a standing contract at seal;
       a Crititor anchors on it as F-type evidence (`contract:<id>`).
@@ -47,6 +50,9 @@ DECLARATION_ACTIONS = {
     "flag.dispose", "verdict.record", "round.open", "round.close",
     "charter.seal", "charter.amend", "contract.add", "gate.record",
     "fingerprint.take",
+    # v1.2: the lifecycle joins them — the Charter is the claim, the note is
+    # the close, and a harness classifier has no verb left to refuse.
+    "mission.claim", "mission.close", "gate.check", "gate.close",
 }
 
 def check(name, cond, detail=""):
@@ -107,9 +113,9 @@ def main():
     g("commit", "-qm", "init")
     run(["init"])
 
-    print("== kickoff: claim, Charter, ratified prohibitions")
-    run(["mission", "claim", M, "--cap", "3", "--branch", "mission/week03"])
+    print("== kickoff: the Charter IS the claim")
     rc, b = seal("Charter_v01.md", "charter", version=1, derives="none",
+                 extra_header="branch: mission/week03\ncap: 3",
                  goal="correctness over speed; never widen a tolerance to make"
                       " a test pass",
                  prohibitions="- never widen a test's tolerance to make it pass"
@@ -117,6 +123,11 @@ def main():
                  amendments="| v1 | 2026-08-31 | (initial seal) | — |")
     charter1 = b["artifact"]["id"]
     contracts = [c["id"] for c in b["contracts"]]
+    check("sealing the Charter v1 claimed the mission, with its header's"
+          " branch and cap",
+          (b.get("mission_claim") or {}).get("name") == M
+          and b["mission_claim"]["branch"] == "mission/week03"
+          and b["mission_claim"]["cap"] == 3, str(b.get("mission_claim")))
     check("L1 — the Charter's prohibitions ratify themselves at seal",
           len(contracts) == 2
           and b["contracts"][0]["origin"].startswith("charter:v1"),
@@ -406,6 +417,52 @@ def main():
           and "retry path is in scope" in chal["amendments"][1]["verbatim_quote"],
           str(chal.get("amendments"))[:300])
 
+    print("== the Calibrator seals its accusation list without a verdict")
+    # relay 17: in a full cell the verdict is the ARBITER's, so a Calibrator
+    # that had to wait for one could not seal at all — and its evidence rows
+    # and relay items stayed underived, in an unsealed file, indefinitely.
+    rc, b = seal("CalibrationVerdict_T1_v01.md", "calibverdict", rc=3, key="T1",
+                 version=1, derives=f"artifact:{charter2}",
+                 verdict="pending — Challenger and Arbiter convened",
+                 convened="calibrator-only", accusations="- one accusation")
+    check("`pending` in a calibrator-only cell is REFUSED — there is nobody"
+          " to wait for",
+          "[pending-verdict]" in b.get("reason", "")
+          and "ALIGNED" in b.get("reason", ""), b.get("reason", "")[:400])
+    rc, b = seal("CalibrationVerdict_T1_v01.md", "calibverdict", key="T1",
+                 version=1, derives=f"artifact:{charter2}",
+                 verdict="pending — Challenger and Arbiter convened",
+                 convened="full",
+                 accusations="- the memoization was never authorized by any"
+                             " spec in the wave",
+                 cell_criteria="\n## Criteria table\n\n"
+                               "| # | Acceptance criterion | Met? | Evidence |"
+                               " Type |\n|---|---|---|---|---|\n"
+                               f"| 1 | the memoization is authorized | missed |"
+                               f" charter:v2 | F |\n",
+                 relay="")
+    pending = b["artifact"]["id"]
+    check("the accusation list seals: evidence derives, and NO verdict is"
+          " recorded — the Arbiter has not ruled",
+          rc == 0 and len(b["evidence"]) == 1 and b["verdicts"] == [],
+          str(b)[:400])
+    rc, b = run(["calib", "check", "--mission", M])
+    check("`calib check` sees nothing to act on — a pending cell is not a"
+          " verdict",
+          rc == 0 and not any(c["key"] == "T1" for c in b["task_cells"]),
+          str(b.get("task_cells"))[:300])
+    rc, b = seal("CalibrationVerdict_T1_v02.md", "calibverdict", key="T1",
+                 version=2, derives=f"artifact:{pending}", verdict="ALIGNED",
+                 convened="full",
+                 accusations="- the memoization is authorized by the Charter's"
+                             " second priority; the accusation does not stand",
+                 relay="")
+    check("the Arbiter's version supersedes it and records the verdict",
+          b["verdicts"][0]["kind"] == "ALIGNED"
+          and b["verdicts"][0]["by_role"] == "arbiter"
+          and [s["id"] for s in b["supersede"] if s["kind"] == "artifact"]
+          == [pending], str(b)[:400])
+
     print("== the relay: the engine's own defect queue")
     run(["relay", "add", "--kind", "defect", "--text",
          "`mp status` does not show open waves", "--mission", M])
@@ -435,32 +492,62 @@ def main():
           all(a["words"] for a in b["acts"]
               if a["kind"] == "principal-supersession"), str(b["acts"])[:300])
 
-    print("== close: a closing run, then the hardened gate")
-    rc, b = run(["gate", "close", "--mission", M], rc=2)
-    check("the gate refuses with no closing run recorded",
-          any("closing-gate-logged" in f for f in b["failures"]),
-          str(b.get("failures"))[:300])
+    print("== close: a closing run, then the note that closes the mission")
+    rc, b = run(["gate", "close", "--mission", M], rc=3)
+    check("`mp gate close` is retired and says what to write instead",
+          "retired" in b.get("reason", "") and "MissionClose" in b.get("reason", ""),
+          b.get("reason", "")[:300])
+    rc, b = seal("MissionClose_v01.md", "missionclose", rc=3, version=1,
+                 derives=f"artifact:{note1}", closing_run="- None",
+                 acceptance="> close it")
+    check("the note refuses with no closing run recorded",
+          "closing-run" in b.get("reason", ""), b.get("reason", "")[:400])
     (TMP / "closing-gate.log").write_text("all 2 suites green\n")
     rc, b = run(["run", "record", "--cmd", "python3 -m pytest -q --full",
                  "--log", "closing-gate.log", "--scope", "closing",
-                 "--mission", M])
+                 "--mission", M, "--result", "pass"])
+    closing = b["id"]
     check("the closing run is recorded against the judged tree",
-          b.get("existing") is False and b["scope"] == "closing", str(b)[:200])
-    rc, b = run(["gate", "close", "--mission", M])
-    check("gate close PASSES and closes the mission",
-          rc == 0 and b.get("result") == "PASSED" and b.get("closed_at"),
-          str(b.get("failures"))[:400])
+          b.get("existing") is False and b["scope"] == "closing"
+          and b["result"] == "pass" and b["binding"] == "measured",
+          str(b)[:300])
+    rc, b = seal("MissionClose_v01.md", "missionclose", rc=3, version=1,
+                 derives=f"artifact:{note1}", closing_run=f"run:{closing}")
+    check("and refuses, in sign-off mode, without the principal's own words",
+          "principal-acceptance" in b.get("reason", ""),
+          b.get("reason", "")[:400])
+    rc, b = seal("MissionClose_v01.md", "missionclose", version=1,
+                 derives=f"artifact:{note1}", closing_run=f"run:{closing}",
+                 acceptance="> yes — this is what I asked for; close it",
+                 outcome_text="the loader reads the env exactly once, cold or"
+                              " warm")
+    mc = b.get("mission_close") or {}
+    check("sealing the note CLOSES the mission",
+          rc == 0 and mc.get("closed_at")
+          and mc.get("closed_in") == b["artifact"]["id"], str(mc)[:400])
     check("every closing check is recorded, one by one",
-          [c["check"] for c in b["checks"]]
-          == ["charter-sealed", "flags-disposed", "closing-gate-logged",
-              "source-unchanged", "lint-clean"]
-          and all(c["ok"] for c in b["checks"]), str(b.get("checks"))[:400])
+          [c["check"] for c in mc.get("checks", [])]
+          == ["charter-sealed", "flags-disposed", "closing-run",
+              "source-unchanged", "lint-clean", "principal-acceptance"]
+          and all(c["ok"] for c in mc["checks"]), str(mc.get("checks"))[:500])
+    rc, b = run(["status"])
+    check("the registry says closed",
+          [m for m in b["missions"] if m["name"] == M][0]["status"] == "closed")
+    rc, b = run(["acts", "--mission", M])
+    check("in sign-off mode the close adds nothing to the acts list —"
+          " the principal was in the room",
+          not [a for a in b["acts"] if a["kind"] == "mission-closed"],
+          str([a["kind"] for a in b["acts"]]))
 
     print("== the artifact WAS the event")
     jl = journal()
-    declared = [e for e in jl if e["action"] in DECLARATION_ACTIONS]
-    check("not one declaration verb was used in the whole mission",
-          declared == [], str([e["action"] for e in declared])[:300])
+    declared = [e for e in jl if e["action"] in DECLARATION_ACTIONS
+                and e["result"] == "OK"]
+    check("not one declaration or lifecycle verb did anything in the whole"
+          " mission — the retired `gate close` was journaled REFUSED",
+          declared == []
+          and [e["action"] for e in jl if e["action"] in DECLARATION_ACTIONS]
+          == ["gate.close"], str([e["action"] for e in declared])[:300])
     seals = [e for e in jl if e["action"] == "artifact.sealed"
              and e["result"] == "OK"]
     derived = sum(len(e["payload"][k]) for e in seals
