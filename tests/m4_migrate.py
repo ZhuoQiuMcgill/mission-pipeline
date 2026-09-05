@@ -328,6 +328,24 @@ def main():
     check("a v1.1 seal lands on top of a migrated v1 ledger",
           b.get("ok") is True and [r["n"] for r in b["rounds"]] == [1],
           str(b)[:300])
+    print("== lint's seal-parse rule binds the v1.1 seal, never the v1-era one")
+    rc, b = run(["lint", "--mission", M])
+    check("a migrated ledger lints CLEAN — the v1-era spec sealed by"
+          " `artifact.seal` is not asked for sections it never had",
+          rc == 0 and b.get("ok") is True
+          and not [f for f in b.get("findings", []) if f["rule"] == "seal-parse"],
+          str(b.get("findings"))[:400])
+    intact = (TMP / rel2).read_text()
+    (TMP / rel2).write_text(intact.replace("## Runs", "## Was runs", 1))
+    rc, b = run(["lint", "--mission", M], rc=2)
+    check("a v1.1-sealed document that lost a required section is still caught",
+          any(f["rule"] == "seal-parse" and "## runs" in f["message"]
+              for f in b.get("findings", [])), str(b.get("findings"))[:400])
+    (TMP / rel2).write_text(intact)
+    rc, b = run(["lint", "--mission", M])
+    check("restored, it lints CLEAN again", rc == 0 and b.get("ok") is True,
+          str(b.get("findings"))[:400])
+
     rc, b = run(["supersede", f"artifact:{dev}", "--by", "reality",
                  "--reason", "the v1-era report was rewritten in T2"])
     check("the v1.1 repair verb works on a v1-era row", b.get("ok") is True)

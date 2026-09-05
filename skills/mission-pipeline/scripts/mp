@@ -2558,7 +2558,12 @@ def lint_findings(conn, root, mission=None, ledger=None):
                 " produced it (rule 4); mp refuses this at seal, so this row"
                 " entered outside the write path")
 
-    # header <-> registry agreement, and the sealed document still parses
+    # header <-> registry agreement, and the sealed document still parses.
+    # The parse re-check applies only to documents sealed by the derivation
+    # seal (`artifact.sealed`, schema v2): a v1 `artifact.seal` recorded a hash,
+    # never sections, so a pre-migration document cannot "no longer" parse.
+    v2_sealed = (_v2_sealed_ids(Path(ledger) / "events.jsonl")
+                 if ledger else None)  # no ledger path: check every seal
     no_header, off_disk = 0, 0
     for a in scope:
         p = Path(a["path"])
@@ -2603,7 +2608,7 @@ def lint_findings(conn, root, mission=None, ledger=None):
                         f"{label(a)} mp:header derives-from '{tok}' is not a"
                         " registered artifact — ids come from `mp seal`, never"
                         " invented")
-        if a["sealed_at"]:
+        if a["sealed_at"] and (v2_sealed is None or a["id"] in v2_sealed):
             try:
                 _parse_check(conn, a, text)
             except Refused as r:
@@ -2613,6 +2618,28 @@ def lint_findings(conn, root, mission=None, ledger=None):
                 f" {no_header} carry no mp:header block;"
                 f" {off_disk} not readable on disk")
     return findings, info
+
+def _v2_sealed_ids(journal):
+    """Ids of artifacts sealed by the v2 derivation seal (`artifact.sealed`).
+    One pass over the journal; a v1 `artifact.seal` never derived sections."""
+    ids = set()
+    try:
+        with open(journal, encoding="utf-8") as fh:
+            for line in fh:
+                if '"artifact.sealed"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("action") != "artifact.sealed" or e.get("result") == "REFUSED":
+                    continue
+                art = (e.get("payload") or {}).get("artifact") or {}
+                if isinstance(art.get("id"), int):
+                    ids.add(art["id"])
+    except OSError:
+        pass
+    return ids
 
 PARSE_CHECK_SECTIONS = {
     "Critique": ("verdict", "criteria table", "out-of-frame risk"),
@@ -2902,9 +2929,13 @@ def cmd_calib_triggers(ctx, args):
     ch = conn.execute(
         "SELECT version, at FROM charter WHERE mission=? AND version>=2"
         " ORDER BY version DESC LIMIT 1", (mid,)).fetchone()
+    # Windows are ordered by the closing Integration Note's artifact id, not by
+    # the clock: seal timestamps have one-second resolution, so a spec sealed in
+    # the same second as the note it precedes would otherwise land "inside" it.
     notes = conn.execute(
-        "SELECT label, closed, compaction FROM waves WHERE mission=?"
-        " AND closed IS NOT NULL ORDER BY closed, id", (mid,)).fetchall()
+        "SELECT label, closed, compaction, closed_in FROM waves WHERE mission=?"
+        " AND closed IS NOT NULL ORDER BY closed_in, closed, id",
+        (mid,)).fetchall()
     specs = {}
     for aid, key, ver, sealed, rec, touch in conn.execute(
             "SELECT id, key, version, sealed_at, recovers, touches_contract"
@@ -2939,11 +2970,13 @@ def cmd_calib_triggers(ctx, args):
         if t in caps:
             fired.append({"trigger": "cap-pass",
                           "why": f"a Crititor PASS arrived at round {cap}, the cap"})
-        for i, (label, closed, comp) in enumerate(notes):
+        for i, (label, closed, comp, closed_in) in enumerate(notes):
             if (comp or "").lower() != "yes":
                 continue
-            nxt = notes[i + 1][1] if i + 1 < len(notes) else None
-            if s["sealed"] >= closed and (nxt is None or s["sealed"] < nxt):
+            nxt = notes[i + 1][3] if i + 1 < len(notes) else None
+            after = (s["artifact"] > closed_in) if closed_in else (s["sealed"] >= closed)
+            before_next = (nxt is None) or (s["artifact"] < nxt)
+            if after and before_next:
                 if (s["touches_contract"] or "").lower() == "yes":
                     fired.append({
                         "trigger": "post-compaction",

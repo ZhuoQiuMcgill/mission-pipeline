@@ -6,6 +6,24 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **`mp lint` no longer asks a v1.0.0-sealed document for sections it never had.** The
+  `seal-parse` rule re-checks a sealed document against the v1.1 section contract; on a
+  migrated ledger every document sealed by the retired `artifact.seal` (a hash, never
+  sections) came back as "no longer parses" — 110 findings on one mission, 163 across a
+  deployment — and `mp gate close` refuses on any finding, so no mission that began
+  before the migration could close mechanically. The rule now binds only documents
+  sealed by the v1.1 derivation seal (`artifact.sealed`), read once from the journal;
+  a v1.1 document that loses a required section is still caught (`tests/m4_migrate.py`).
+- **`mp calib triggers` orders the post-compaction window by artifact id, not by the
+  clock.** Seal timestamps have one-second resolution, so a spec sealed in the same
+  second as the Integration Note it precedes landed "inside" the note's window and fired
+  `post-compaction` — `tests/m3_dryrun.py` failed on main about one run in two. The
+  window is now bounded by the closing note's `closed_in` artifact id (the artifact is
+  the event), with the timestamp as the fallback for pre-`closed_in` rows.
+
 ## [1.1.0] — 2026-09-04
 
 The derivation release. Three days of real use of 1.0.0 (5 missions, 77 tasks, 3296
