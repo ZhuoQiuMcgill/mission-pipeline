@@ -1,68 +1,43 @@
-<!-- mp:header
-mission: <Mission>
-category: Critique
-key: T<n>
-round: <k>
-version: <NN>
-derives-from: artifact:<TaskSpec id>, artifact:<DevReport id>
--->
-<!-- Seal with one call: python3 <skill>/scripts/mp seal <this file>. The verdict,
-     evidence rows, flag, relay items and edges are all derived from the text below;
-     nothing is registered by hand. A refusal names the rule the document broke — fix the
-     document. See references/substrate.md. -->
-# Critique — T<n>: <Short Name>
+# Critique — schema 4
 
-- **Mission:** `<Mission>` · **Round:** <k> of <N> · **Version:** v<NN>
-- **Role:** Crititor · **Date:** <YYYY-MM-DD>
-- **Inputs:** spec `<file>` · mandatory reading <read? list> · report `<file>` · diff <ref/description>
+Read references/runtime-v4.md. Replace every placeholder using current packet ids and actual evidence. Choose the real outcome; a template is not a verdict. For revisions, add the current predecessor's id as `revises`. `seal` snapshots this complete document and supplies its source_blob and stable request id.
 
-## Verdict
-**PASS** / **CHANGES-REQUESTED**
+## Actual source and reasoning
 
-## Criteria table
-<!-- THIS TABLE IS THE EVIDENCE RECORD — there is no second copy anywhere.
-     Met?: met | partial | missed. Type: R → `run:<id>` · F → `charter:v<N>[:<ref>]`,
-     `contract:<id>`, `project:<section>` · D → `artifact:<id>[:<section>]` · X → the URL.
-     ONE ANCHOR PER ROW: a criterion on three anchors gets three rows repeating the same #.
-     The Evidence cell is THE ANCHOR AND NOTHING ELSE — no commentary, no quoted text, no
-     trailing dash; what the anchor shows belongs in Required changes or Notes.
-     A "met" resting only on D or X is REFUSED at seal (invariant 13) — mark it partial and
-     name the missing R or F anchor. Cite run ids from the report's Runs table — on a `met`
-     row the PASS-AFTER run, never one recorded --expect fail. Re-run only to DISPUTE one,
-     recording your own (mp run record … --result) and saying so in Notes. -->
-| # | Acceptance criterion | Met? | Evidence | Type |
+Describe the original authority, current delivery and concrete evidence read. Preserve true gaps and authorized stage ownership.
+
+## Acceptance criteria
+
+| # | criterion | status | anchor | type |
 |---|---|---|---|---|
-| 1 | <criterion> | met / partial / missed | `run:<id>` | R |
-| 1 | <same criterion, second anchor> | met | `charter:v1:§Prohibitions` | F |
+| obligation-id | Actual required outcome | met | Current controlled run/delivery id | R |
 
-## Required changes
-<!-- CHANGES-REQUESTED only. Numbered. Each item: what is wrong + what "fixed" looks like.
-     Specific and actionable or it doesn't belong here. -->
-1. **<what is wrong>** — fixed looks like: <observable state>.
+Use explicit sub-ids and criteria_map for multiple independent rows. Never let a later partial row disappear into an earlier met row.
 
-## Scope & deviation check
-- Out-of-scope touches found: <list / none>
-- Undeclared deviations found: <list / none>
-- Standing-contract violations found: <list / none>
-<!-- Any finding = automatic CHANGES-REQUESTED, regardless of code quality. -->
+## Single risk
 
-## Out-of-frame risk
-<!-- Mandatory; never feeds the verdict. Exactly one bullet, or one starting
-     "None — <reason>". The one thing that could be wrong about the PRODUCT or the
-     principal's intent that neither the spec nor the report mentions. Derived into the
-     flag ledger at seal; the PM must disposition it (engine invariant 11).
-     RE-ISSUE: this section reconciles against the previous version's flags by text — an
-     unchanged risk keeps its id and its disposition, and a carried bullet mints no second
-     flag for one observation. -->
-- <risk and why it matters> / - carried: flag:<id> / None — <one-line reason the frame looks sound>.
+- None
+
+## Noticed but not fixed
+
+- None
 
 ## Engine relay
-<!-- Optional. Observations whose subject is the pipeline itself — the engine, the
-     ledger, the substrate, another document's bookkeeping. One bullet each, prefixed
-     defect: / inefficiency: / suggestion:. Derived at seal, exported upstream; never into
-     the product's flag ledger. A flag about a flag belongs here. -->
-- inefficiency: <what costs more than it buys, with the artifact ids>
 
-## Notes
-<!-- Non-blocking. A better idea neither the criteria nor a written purpose requires. -->
-- <observation>
+- None
+
+```mp-json
+{
+  "action": "report.record",
+  "data": {
+    "kind": "critique",
+    "task": "task-id",
+    "admission": "admission-id",
+    "outcome": "PASS_OR_CHANGES_REQUESTED",
+    "round": 1,
+    "criteria": {
+      "obligation-id": "met"
+    }
+  }
+}
+```

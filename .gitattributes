@@ -1,0 +1,5 @@
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+skills/mission-pipeline/scripts/mp text eol=lf
+*.ps1 text eol=lf

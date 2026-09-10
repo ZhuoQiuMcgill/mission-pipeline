@@ -14,6 +14,7 @@ import csv
 import io
 import json
 import os
+os.environ['MP_COMPAT_V3'] = '1'  # Explicit released-schema regression; v4 ledgers reject this path.
 import subprocess
 import sys
 import tempfile
@@ -49,7 +50,7 @@ def check(name, cond, detail=""):
 
 def run(args, env, rc=0, json_mode=True):
     cmd = [sys.executable, MP] + (["--json"] if json_mode else []) + args
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=env)
     if r.returncode != rc:
         check(f"`mp {' '.join(args)}` rc={rc}", False,
               f"got {r.returncode}: {r.stdout.strip()[:300]} {r.stderr.strip()[:300]}")

@@ -3,3 +3,5 @@ Thumbs.db
 *.skill
 dist/
 data/
+__pycache__/
+*.py[cod]

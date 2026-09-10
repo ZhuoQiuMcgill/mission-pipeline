@@ -28,6 +28,7 @@ Run: python3 tests/m3_dryrun.py
 """
 import json
 import os
+os.environ['MP_COMPAT_V3'] = '1'  # Explicit released-schema regression; v4 ledgers reject this path.
 import subprocess
 import sys
 import tempfile
@@ -63,7 +64,7 @@ def check(name, cond, detail=""):
 
 def run(args, rc=0):
     r = subprocess.run([sys.executable, MP, "--json"] + args,
-                       capture_output=True, text=True, env=ENV)
+                       capture_output=True, text=True, encoding="utf-8", env=ENV)
     body = {}
     if r.stdout.strip():
         try:
@@ -103,7 +104,7 @@ def main():
     TMP = Path(tempfile.mkdtemp(prefix="mp-m3-"))
     ENV = dict(os.environ, MP_ROOT=str(TMP), MP_ACTOR="pm")
     g = lambda *a: subprocess.run(["git", "-C", str(TMP)] + list(a),
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, encoding="utf-8")
     g("init", "-q")
     g("config", "user.email", "t@t")
     g("config", "user.name", "t")

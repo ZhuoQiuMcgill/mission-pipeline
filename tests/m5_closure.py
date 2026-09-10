@@ -30,6 +30,7 @@ Run: python3 tests/m5_closure.py
 """
 import json
 import os
+os.environ['MP_COMPAT_V3'] = '1'  # Explicit released-schema regression; v4 ledgers reject this path.
 import sqlite3
 import subprocess
 import sys
@@ -61,7 +62,7 @@ def check(name, cond, detail=""):
 
 def run(args, rc=0):
     r = subprocess.run([sys.executable, MP, "--json"] + args,
-                       capture_output=True, text=True, env=ENV)
+                       capture_output=True, text=True, encoding="utf-8", env=ENV)
     body = {}
     if r.stdout.strip():
         try:
@@ -164,7 +165,7 @@ def main():
     TMP = Path(tempfile.mkdtemp(prefix="mp-m5-"))
     ENV = dict(os.environ, MP_ROOT=str(TMP), MP_ACTOR="pm")
     g = lambda *a: subprocess.run(["git", "-C", str(TMP)] + list(a),
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, encoding="utf-8")
     g("init", "-q")
     g("config", "user.email", "t@t")
     g("config", "user.name", "t")
@@ -504,14 +505,14 @@ def main():
     other = Path(tempfile.mkdtemp(prefix="mp-m5b-"))
     env2 = dict(os.environ, MP_ROOT=str(other), MP_ACTOR="pm")
     subprocess.run(["git", "-C", str(other), "init", "-q"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, encoding="utf-8")
     r = subprocess.run(
         [sys.executable, MP, "--json", "init", "--closure", "auto",
          "--audit", "on", "--quote", "close them yourself; audit every one"],
-        capture_output=True, text=True, env=env2)
+        capture_output=True, text=True, encoding="utf-8", env=env2)
     check("init accepts the declarations", r.returncode == 0, r.stdout[:300])
     r = subprocess.run([sys.executable, MP, "--json", "config", "get"],
-                       capture_output=True, text=True, env=env2)
+                       capture_output=True, text=True, encoding="utf-8", env=env2)
     got = json.loads(r.stdout.strip().splitlines()[-1])
     check("and a fresh ledger starts in auto mode with the audit on",
           got["config"] == {"closure": "auto", "audit": "on"}

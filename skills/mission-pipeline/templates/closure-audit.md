@@ -1,35 +1,31 @@
-<!-- mp:header
-mission: <Mission>
-category: ClosureAudit
-key: <Mission>
-round: 0
-version: <NN>
-derives-from: artifact:<DesignDoc id>, artifact:<final IntegrationNote id>
--->
-<!-- Seal with one call: python3 <skill>/scripts/mp seal <this file>. -->
-# Closure Audit — <Mission>
+# Closure Audit — schema 4
 
-- **Role:** Auditor · **Date:** <YYYY-MM-DD> · **Version:** v<NN>
-- **Model family:** <different from the working seats when available; otherwise the same model in a fresh session>
-- **Inputs:** design decision `<file>` · Integration Note `<file>` · the closing gate's `run:<id>` (command, log, and the tree it judged) · standing contracts · group reports <as needed>
+Read references/runtime-v4.md. Replace every placeholder using current packet ids and actual evidence. Choose the real outcome; a template is not a verdict. For revisions, add the current predecessor's id as `revises`. `seal` snapshots this complete document and supplies its source_blob and stable request id.
 
-## The question
-Does the integrated result deliver the design decision's stated goal?
+## Actual source and reasoning
 
-## Goal → delivered
-<!-- Quote the goal, element by element. Evidence, not narrative. -->
-| Goal element (quoted from the design decision) | Delivered? | Evidence |
-|---|---|---|
-| "<quoted line>" | yes / partial / no | `run:<id>`, artifact, gate line, or observed behavior |
+Describe the original authority, current delivery and concrete evidence read. Preserve true gaps and authorized stage ownership.
 
-## Frame risks
-<!-- What the mission's frame itself may have missed — assumptions every seat shared,
-     identities or contracts nothing verifies, evidence that proves less than it appears to. -->
-- <risk + evidence> / None found.
+List every real mandatory finding in the JSON findings array with source_blob, counterexample_blob, target and affected scope. Empty findings means the actual complete read found no mandatory gap.
 
-## Advisory verdict
-**DELIVERS / DELIVERS WITH GAPS / DOES NOT DELIVER** — <one line>
-<!-- Advisory: the principal judges. This feeds the close; it never performs it. The
-     mission's MissionClose note cites this artifact by id (`artifact:<id>`), and while the
-     closure audit is on no mission closes without it — in auto mode this arms-length read
-     is what stands in for the principal's presence. -->
+## Single risk
+
+- None
+
+## Noticed but not fixed
+
+- None
+
+## Engine relay
+
+- None
+
+```mp-json
+{
+  "action": "audit.record",
+  "data": {
+    "bundle": "bundle-id",
+    "findings": []
+  }
+}
+```

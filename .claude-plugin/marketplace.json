@@ -7,7 +7,7 @@
     {
       "name": "mission-pipeline",
       "source": "./",
-      "description": "Human-in-the-loop multi-agent engineering workflow with bounded build–critique–stabilize loops, wave-parallel task groups, Charter-anchored drift calibration at wave boundaries, a deterministic agent-internal substrate that derives every record from the documents agents write, and two closure modes — the principal accepts each mission in person, or delegates by standing contract and repudiates item by item."
+      "description": "Mission Pipeline 2: principal goals, delegated PM decisions, independent Supervisor review, immutable evidence and bounded repair/contest workflows. Native Windows/POSIX local CLI and an authenticated Linux/WSL managed controller with restricted execution."
     }
   ]
 }

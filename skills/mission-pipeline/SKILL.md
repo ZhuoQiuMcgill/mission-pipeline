@@ -1,164 +1,48 @@
 ---
 name: mission-pipeline
-description: "Human-in-the-loop multi-agent engineering workflow: a PM agent aligns with the principal, decomposes a mission into tasks, fans them out to parallel groups (Constructor builds, Crititor reviews, Stabilizer judges a bounded loop), schedules waves via a read-only Architect, and closes on the principal's acceptance after a full-scope closing gate — in person, or by standing delegation with item-by-item repudiation. Use when the user asks to run a mission, install or set up this pipeline in a project, spawn the role team (PM / Architect / Constructor / Crititor / Stabilizer / Calibrator / Challenger / Researcher / Auditor), run a build–critique–stabilize loop, calibrate a running mission against its frozen Charter, or coordinate multi-task parallel development. First run in a project: follow references/setup.md."
+description: Run supervised multi-agent engineering with scoped PM delegation, independently reviewed roots and plans, bounded build-critique-stabilize loops, current evidence and mandatory closure audit.
 ---
 
-# Mission Pipeline
+# Mission Pipeline 2
 
-An operating playbook for running engineering work through a team of specialist agents with a human principal in the loop. This file is the engine spine — read it fully when the skill triggers.
+Read `references/runtime-v4.md` before issuing commands, and `references/setup.md` for installation. Use this version's structured request protocol. The prior schema-3 free-form commands are compatibility-only and cannot operate on v4 state.
 
-**Precedence:** if the host project already runs this pipeline natively (its own role documents, e.g. under `.claude/roles/`), those govern and this skill defers. Otherwise this skill is the engine, and the project binds to it only through `.claude/mission-pipeline/PROJECT.md` (see *Binding contract*).
+The principal speaks in conversation; agents operate the workflow. The principal determines goals and reserved conditions. A recorded grant can authorize the PM to choose and revise small directions without another confirmation. Do not require literal user wording for each authorized chart, layout, algorithm, deduplication choice or local implementation. A change that conflicts with a reserved condition requires an actual authority change, or a repair that restores that condition.
 
-**Engine files are read-only.** Never edit this skill's files inside a host project. Project-specific rules live in PROJECT.md; upgrades replace engine files wholesale.
+## Authority and independent work
 
-## Concepts
+A0 is original principal intent and reserved conditions. A1 is its scoped delegation. A2 is a PM choice within that delegation. A3 is an implementation. Preserve these distinct sources. Agreement among derived documents does not create a new principal requirement.
 
-| Term | Meaning |
-|---|---|
-| **Principal** | The human. Owns the vision, makes final calls, closes missions — in person, or by standing delegation with item-by-item repudiation (*Closure modes*). |
-| **PM** | The hub agent between the principal and all specialists. Translates intent into plans; owns the *how*. Usually the agent reading this file. |
-| **Mission** | A coherent goal *plus the principal's acceptance of it*. The unit of work. Everything is a mission — even a one-task fix. |
-| **Task** | One self-contained work order inside a mission, ID `T1…Tn` (mission-scoped). |
-| **Group** | One task's execution cell: Constructor + Crititor + Stabilizer running a bounded loop. One group = one task. |
-| **Wave** | A set of groups safe to run in parallel (disjoint files, no unmet dependencies). Opened by `mp wave open W<n>` — one call per wave, single-wave missions included — and closed when its Integration Note seals. |
-| **Ledger** | The pipeline's paper trail on disk. All artifacts go there — see `references/ledger.md`. |
-| **Run** | One recorded execution of a verification command. Whoever executes it records it once (`mp run record --cmd … --log … --result …`, `--tree` in a worktree) and gets a `run:<id>`; every other seat **cites the id instead of re-running**. A run binds to the tree it judged. |
-| **Live record** | Every derived record is *live* until superseded — by `mp supersede` (the principal's word, or reality), or automatically by the next sealed version of its document. **Rules read live records only**; superseded ones stay in the journal as history, and whatever depended on one turns up in `mp worklist`. |
-| **Standing contract** | A ratified project invariant in the ledger's `CONTRACTS.md`. Binds every task like an acceptance criterion — whether or not the spec restates it — until the principal retires it. Charter prohibitions become standing contracts when the Charter seals. |
-| **Out-of-frame flag** | A routed observation about the **product** or the **principal's intent** that no document covers. Derived from the document that raises it; never feeds a verdict; reaches the PM verbatim and gets an explicit disposition. Silence is not disposal. |
-| **Carried flag** | A residue item that still stands from the previous version of its document. Re-issuing a document **reconciles** flags by text instead of re-deriving them: a matching bullet keeps its id and its disposition. `- carried: flag:<id>` (or `- carried: <the flag's text>`) says so explicitly, and never creates a flag. |
-| **Engine relay** | The upstream channel for observations about the **pipeline itself** — the engine, the ledger, the substrate. Filed in a document's `## Engine relay` section, derived at seal, exported with `mp relay export`. Paperwork about paperwork goes here, so the flag ledger stays about the product. |
-| **Charter** | The mission's frozen calibration basis: the goal in the principal's own words, sealed before decomposition. Only the principal amends it, and an amendment is a **new Charter file at the next version** — never an edit in place. Divergence without principal-anchored written authorization **is** drift, by definition. |
-| **Closure mode** | How this deployment closes a mission: **sign-off** (the principal accepts in person) or **auto** (the PM closes under a standing delegation; the principal repudiates afterwards). The principal declares it in PROJECT.md; the PM never chooses it. See *Closure modes*. |
-| **MissionClose** | The note whose seal closes a mission: the closing run, the Closure Audit when the audit is on, the principal's acceptance (sign-off) or the delegating contract (auto), and the outcome. Refused while anything the mode requires is missing. |
-| **Calibration cell** | A drift check against the sealed Charter. The starved **Calibrator runs alone first**; only an anchored accusation convenes the fed Challenger and the Arbiter, who rules **ALIGNED / SUSPICION / DRIFT**. Aggregate cell per wave boundary; task cell on trigger only. See *Calibration — the five layers*. |
-| **Evidence types** | Every criteria row in a verdict-bearing artifact carries one typed anchor: **R** `run:<id>` (reality — a recorded run) · **F** `charter:v<N>` / `contract:<id>` / `project:<section>` (fixed point, frozen before the mission web) · **D** `artifact:<id>` (derived — a mission-era document) · **X** a verified URL. D-only agreement is worth zero (invariant 13). See `references/substrate.md`. |
+An intake exists before an active mission. PM proposes a candidate, Supervisor reads the original intent and grant, and `root.activate` atomically activates the current independently matched candidate. A proposed Charter has no effective standing contracts. A standing contract requires a real principal constraint and explicit scope. Corrections within a valid grant need no fresh user authorization.
 
-## The cast
+PM records every goal-linked outcome, assigns feasible producers and explicit input/write/output paths, and obtains plan review and admission. Tasks that need a forbidden producer are not executable work orders; PM may repair the work order within its grant. Stage-specific work and future owners are legitimate when they match the actual authorized mission scope.
 
-Role files live in this skill's `roles/` directory. When spawning an agent, point it (absolute paths) at its role file + PROJECT.md + its task spec — nothing else is guaranteed to reach it.
+## Product loop
 
-| Role | One line | Spawned by |
-|---|---|---|
-| PM (`roles/pm.md`) | Aligns, designs, decomposes, schedules, integrates, reports. Never builds. | Principal |
-| Architect (`roles/architect.md`) | Read-only recon → structural map; then task list → parallel/blocker DAG, **seam detection**, and cold spec lint. Proposes; PM disposes. | PM |
-| Constructor (`roles/constructor.md`) | Builds + tests exactly to the task spec; records its runs. | PM (into a group) |
-| Crititor (`roles/crititor.md`) | Critiques the delivery against acceptance criteria and their written purposes → `PASS` / `CHANGES-REQUESTED`. | PM (into a group) |
-| Stabilizer (`roles/stabilizer.md`) | The PM's judgment inside one group: spot-checks that the evidence says what is claimed, judges the verdict, loops or escalates. | PM (into a group) |
-| Researcher (`roles/researcher.md`) | Optional. Adversarial external evidence before a decision. | Per PROJECT.md (default: PM-spawned fresh context, engine-fixed request; principal-run available as a binding) |
-| Auditor (`roles/auditor.md`) | Optional (`mp config set audit on`). One arms-length read before the close: does the integrated result deliver the written goal? | Per PROJECT.md (default: PM-spawned fresh context, artifacts-only inputs; principal-run available as a binding; a different model family preferred when available, never required) |
-| Calibrator (`roles/calibrator.md`) | The starved seat: accuses drift from the sealed Charter and `mp metrics` alone. **Runs alone first** — with no anchored accusation it writes the wave's ALIGNED verdict itself and the cell ends there. | PM — inputs engine-fixed via `mp calib bundle` |
-| Challenger (`roles/challenger.md`) | The fed seat: discharges each accusation with principal-anchored written authorization, or concedes. **Convened only after an anchored accusation exists.** | PM — inputs engine-fixed via `mp calib bundle` |
+Constructor builds through admitted write paths and controlled execution. Crititor checks evidence and every acceptance row; Stabilizer independently accepts or returns changes. Product rounds are bounded at three. Revisions name the current predecessor across rounds; renaming or replacing a task retains its lineage budget. Evidence dependencies differ from document ancestry.
 
-The cell's **Arbiter** is the Stabilizer role in a scoped seat (`roles/stabilizer.md`, *Arbiter seat*), convened with the Challenger — never any build group's Stabilizer in the same mission; a different model family preferred when available, never required.
+Verification executes an argv array in a frozen explicit input snapshot under the selected interpreter, cwd and relevant environment. Completion alone is not satisfaction. Required runs use explicit success predicates; a specific expected negative is different from an arbitrary crash. Logs and exported outputs retain original bytes in CAS. Posthoc declarations are historical evidence, not controlled execution proof. Independent reruns require a reason and consume a separate finite budget.
 
-## What agents never do by hand
+Each positive dispatch, claim, report, integration, consumption and close checks current state. A required output must be met or explicitly deferred/cancelled under a valid scoped authority. A deferred gap remains a gap; disclose its owner and reason rather than relabelling it as repaired. Live flags remain live when omitted. Retire, replace, reopen and dispose are separate recorded operations.
 
-Agents write documents; the engine derives the records. Every seat writes its artifact once, then submits it with a single call — `python3 <skill>/scripts/mp seal <path>` — and `mp` derives everything the ledger needs from the text: the artifact's identity from the `mp:header` block, evidence rows from the criteria table, flags from the Out-of-frame and Noticed-but-not-fixed sections, relay items from `## Engine relay`, the verdict, the round, the edges, the Integration Note's dispositions. **Nothing in the ledger is typed twice.** Rules run at seal — the one step nobody can skip — and a document that breaks one is REFUSED with the rule named: fix the document and seal again. A refusal is the engine speaking; never route around it (`references/substrate.md`). **The lifecycle is derived the same way:** sealing a **Charter v1** claims the mission, sealing a **MissionClose** note closes it — there is no `claim` verb and no `close` verb for anyone to type.
+## Supervision and recovery
 
-## Mission lifecycle
+Every seat can send an advisory or a structured mandatory counterexample directly. A mandatory report includes actual source/counterexample bytes, target, affected task/outcome or an omitted principal source span. Its receipt creates a pending-screen barrier, fence and review job in the same transaction. Ordinary suggestions do not block work; unrelated scopes remain usable.
 
-1. **Kickoff check.** Settle with the principal: *new mission, or continuation of an open one?* Feedback on work just delivered continues the same mission — it was never closed.
-2. **Align.** Restate the goal plainly; offer candidates when direction is open; never lock direction without the principal's confirmation. **Read back frame-level directives:** when the principal sets or changes verification policy, scope, a contract, a closure condition, or the round cap, read back the compiled policy — scope and boundary, two lines or less — and get confirmation before it enters any document. Detour to the Researcher if a decision needs evidence first.
-3. **Open the mission — by sealing its Charter.** Pick the name per PROJECT.md's mission-name scheme — typically `Week<NN>-<MissionName>`, where the week comes from the scheme settled at setup, **never invented** (no scheme recorded yet → resolve it first, `references/setup.md` §9). Resolve PROJECT.md's **Document map** if any slot in it is unset — never fan out without it. Create the mission folder skeleton, read `references/ledger.md` before writing anything, then **write and seal the Charter** (template: `templates/charter.md`) before decomposition. **Sealing Charter v1 claims the mission**: it derives the `MISSIONS.md` line — the optional header fields `branch:` and `cap:` fill in the mission branch and this mission's round cap — and it is what stops two concurrent missions colliding on a name. A mission may not fan out without a sealed Charter. Sealing v1 also **ratifies its `## Prohibitions` bullets into standing contracts** — one act, zero extra principal interaction. From sealing on, only the principal amends it, and an amendment is a **new Charter file at the next version**, carrying the principal's verbatim words in its amendment ledger.
-4. **Explore** *(large missions)*. Spawn the Architect → structural map (Pass 1). Read it before designing.
-5. **Design & decompose.** Write the design decision into the location the Document map names (default: the mission's `design/`), then one task spec per task into `tasks/` (template: `templates/task-spec.md`). Every spec declares its **wave** and whether it **touches a contract** — both are header fields, and both are read by the engine.
-6. **Schedule & veto** *(large missions)*. Same Architect, Pass 2 → dependency/collision DAG grouped into waves, **seam detection** (tasks that consume each other's output), and **the cold spec lint** (pointer requirements, unanchorable criteria, Charter contradictions, verification-scope regression, missing out-of-scope) plus **unstated assumptions**. The DAG's facts are the Architect's; the wave order and collision resolutions are the PM's. Then the **delta veto**: surface the lint and assumption findings to the principal **one item at a time, most critical first** — a top-level misalignment invalidates everything after it. Resolve each before showing the next; stop when the principal says proceed or the items stop being frame-level. Read `references/parallel.md` before fanning out — a wave with a seam gets a frozen seam contract and an integration round.
-7. **Execute in waves.** **`mp wave open W<n> --mission <name> --tasks …` before every fan-out** — one call per wave, single-wave missions included. It refuses while a DRIFT stands or the SUSPICION ratchet is fired; only the principal clears that. Then seal each TaskSpec (`mp seal` — refused if its wave is not open or its out-of-scope list is empty) and spawn one group per task; groups in a wave run in parallel. Each group runs the loop below and reports via its Stabilizer.
-8. **Integrate & report.** Run **`mp calib triggers`** at each Crititor `PASS` — the engine, not the PM, says which tasks earned a task-level cell — and convene those cells Calibrator-first, before that group's Stabilizer accepts. Judge each group report (accept → integrate; escalation → decide: re-plan, re-scope, one more scoped round, or take to the principal). Then the wave boundary: re-ground against the Charter (the ritual in `roles/pm.md`), spawn the **aggregate calibration cell** (missions of ≥2 waves) Calibrator-first, inputs engine-fixed via `mp calib bundle`, and write the wave's **Integration Note** (template: `templates/integration-note.md`): merges, escalation decisions, **an explicit disposition for every flag**, the re-grounding and compaction lines, the wave's verdict, `mp acts --mission` output, the footprint reconciliation. **Sealing the Note closes the wave.** Route on the verdict — **ALIGNED** → open the next wave; **SUSPICION** → disposition each incomplete chain; **DRIFT** → the affected fan-out is halted mechanically and the principal hears it at their next natural appearance, in goal language. When the last wave lands, report the outcome — high-level, honest about failures.
-9. **Close — by sealing the MissionClose note.** In both modes, first: run the **closing gate** — the full-scope verification PROJECT.md names — over the integrated result (task-level verification may have been narrowed; this gate may not) and record it, `mp run record … --scope closing --result pass`. Re-check the standing contracts; when the closure audit is on, hand the mission to the **Auditor** for its arms-length read. Then write the **MissionClose note** (template: `templates/mission-close.md`): **sealing it closes the mission**, and the seal refuses — naming the condition — while any flag is undisposed, the mission's lint has findings, the closing run is missing or no longer matches the tree, a required Closure Audit is absent, or the mode's own section is missing.
-   - **sign-off** — present the outcome, the flag ledger, the gate output, the Closure Audit, and the **repudiation list** (`mp acts --mission`: every act executed in the principal's name, repudiable item by item). The principal tries the result and accepts in one sentence; the PM seals the note with those words in `## Principal's acceptance`.
-   - **auto** — the PM seals the note itself, citing the delegating standing contract in `## Delegation`. The closure lands in `mp acts` like every other act taken in the principal's name; they read that list at their next natural appearance and repudiate item by item. `mp supersede mission:<name> --by principal --reason "<their verbatim words>"` **reopens the mission**, which re-enters step 8.
+Supervisor screens and verifies repairs. A PM RecoveryPermit authorizes bounded repair within existing authority while the case blocks normal consumption. It cannot waive a different hold or authorize closing. Two repairs per case, one merits Contest, one requested supplement and twelve corrective review calls per lineage bound recovery. Role jobs have a five-minute deadline and one transport recovery.
 
-   Problems found re-enter the same mission as new rounds or new tasks. Then ratify any drafted standing-contract entries and send the mission's engine observations upstream with `mp relay export`.
+A mandatory Auditor's substantive disagreement with dismissal, claimed repair or exception automatically creates one independent Contest. PM need not volunteer it. The broker applies the independent result directly, without a second Supervisor signature. DISMISS_ORIGINAL rejects a false accusation; REPAIR_VERIFIED preserves that the original issue was true while correcting an unjustified continuing hold. UPHOLD retains a bounded same-instance repair-compliance path. Missing input is not PASS.
 
-**Small-mission degradation:** for a couple of tasks, skip the Architect and separate Stabilizers — the PM holds the Stabilizer seat and runs the loop directly. Everything else (mission folder, task specs, the loop bounds, flag routing, the closing gate) still applies, and **one wave is still opened** — `mp wave open W1` — because that is where the calibration verdicts get their teeth. The Charter is still mandatory: a one-line fix mission has a one-paragraph Charter. Single-wave missions skip the aggregate calibration cell: the Auditor and the closing gate cover mission-end.
+Calibrator receives original authority, actual delivery bytes and authorized choices, without PM's argumentative defense. Task cells and aggregate waves have separate scopes. DRIFT and repeated aggregate SUSPICION create persistent latches. A later ALIGNED does not silently erase them. A principal release or an independent false-drift finding supplies the appropriate release authority.
 
-## Closure modes
+## Delivery and closure
 
-Two modes, like the harness's own permission modes. The principal **declares** one in PROJECT.md; the PM records it (`mp config set closure sign-off|auto --quote "<their words>"`) and otherwise reads it. Default: sign-off.
+Declared outputs are exported from execution and preserved as delivery objects. The bundle includes actual source documents, images/data, decisions, run inputs/logs and delivery snapshots; merely citing a DevReport is insufficient. Missing bytes yield INPUT_INCOMPLETE. Old packets cannot judge new delivery state.
 
-| | **sign-off** (default) | **auto** |
-|---|---|---|
-| Who closes | the principal, in person | the PM, under a standing contract that delegates closure |
-| The MissionClose note must carry | `## Principal's acceptance` — their verbatim words | `## Delegation` — `contract:<id>` of the live delegating contract |
-| The principal's part | receives the outcome and the repudiation list, tries the result, accepts in one sentence | never interrupted for procedure; repudiates item by item afterwards from `mp acts` |
-| Undoing a close | problems found reopen work as new rounds or tasks | the same — plus `mp supersede mission:<name> --by principal`, which reopens the mission |
+Closure requires all obligations and tasks to be qualified, live flags disposed, no applicable holds/latches, a satisfied canonical closing run, and current mandatory Auditor and Supervisor reviews over the actual complete bundle. PM closes only with a valid close grant; otherwise the principal makes that decision. Relay export creates a complete immutable artifact; never send it to another person without authorization.
 
-**The seal's conditions never vary by mode:** every flag disposed · the mission's own lint clean · a `--scope closing` run over the integrated tree that still matches it · the Closure Audit while the audit is on · the mode's own section present. Only the last of those differs between the columns above.
+## Host guarantees
 
-**What still stops the pipeline, identically in both modes:** a **DRIFT** halt, the **SUSPICION** ratchet, a **Charter amendment**. Auto mode removes procedural human dependencies, never substantive ones — an interruption that carries a judgement survives; an interruption that carries only paperwork does not.
+Native/local execution performs the same data and state checks, with self-asserted role provenance. Managed execution requires a functioning Linux/WSL allowlisted sandbox, trusted controller, private role pipes and a model transport exposing only broker tools. A role must not simultaneously have unrestricted host shell/filesystem tools. Do not claim managed isolation on an arbitrary host agent shell or a bearer file readable by every same-UID process.
 
-Why the lifecycle is derived rather than commanded: a harness permission classifier reads command names, so a verb called `claim` or `close` reads as a governance act and gets refused even when running it is the agent's job — which cost one field deployment several hours with everything prepared and nothing blocking on substance.
-
-## The group loop (max N rounds; default N=3)
-
-```
-task spec ──▶ CONSTRUCTOR builds + tests ──▶ report
-                    ▲                          │
-                    │                          ▼
-             send back with critique     CRITITOR critiques vs acceptance criteria
-                    │                          │  verdict: PASS / CHANGES-REQUESTED
-                    │                          ▼
-                    └──────────────── STABILIZER judges:
-                        PASS, spot-check clean  → accept, group report to PM  ✓
-                        PASS, spot-check fails  → critique back to CRITITOR (same round)
-                        CHANGES, round < N      → send back (same task ID, bump versions)
-                        CHANGES, round = N      → stop, escalate to PM  ⚠
-                        Constructor blocked     → escalate to PM (spec problems are the PM's)
-```
-
-- **Verdict ≠ judgment.** The Crititor renders the verdict; the Stabilizer (or the PM holding the seat) decides what happens. Neither builds; neither re-reviews.
-- **One run, many citations.** Whoever executes a verification records it once (`mp run record`); every other seat cites `run:<id>`. Re-run only to *dispute* a run — and record the re-run as its own, saying what it disputes.
-- **Accept only checked evidence.** Whether anchors *resolve* is the engine's job: `mp seal` refuses a row anchored to a run that does not exist, a "met" resting only on derived evidence, or a citation of a summary. Whether the cited thing **says what is claimed** is the Stabilizer's spot-check before any accept. Judging paperwork is not re-reviewing.
-- **Flags are derived, not carried.** Every critique carries an Out-of-frame risk; every report carries Noticed-but-not-fixed. Both enter the flag ledger when the document seals — no seat re-types them, and the group report has no flag section. The PM dispositions each by id. Flags never change a verdict.
-- **Escalation ladder:** Stabilizer → PM → principal. Each level exhausts its options before passing up; nobody skips a level; nobody loops past the bound.
-- Every round's artifacts go to the ledger under the mission, keyed by `T<n>`, versions bumped per round.
-
-## Calibration — the five layers
-
-Long missions drift by legal steps: no per-step check sees a trend, and agreement among derived documents corroborates nothing (invariant 13). The sealed Charter is the fixed point; five layers defend it:
-
-| Layer | Defense | When | Catches |
-|---|---|---|---|
-| L1 | Charter prohibitions, ratified into standing contracts at sealing | every task, every round | slice-judgeable violations — the Crititor already checks the registry |
-| L2 | Architect Pass 2 **Charter-lint** | before fan-out | specs or criteria contradicting a Charter line |
-| L3 | Task-level calibration cell | on trigger only (`mp calib triggers`) | delivery-level divergence in high-risk tasks |
-| L4 | PM **re-grounding ritual** | every wave boundary | drift *production* (compaction) — the only preventive layer |
-| L5 | **Aggregate calibration cell** — the main force | every wave boundary | monotone narrowing; task-set ≠ goal |
-
-- **Calibrator first, the rest only on cause.** The Calibrator runs **alone**. If it files **no anchored accusation**, that *is* the wave's verdict: it writes the CalibrationVerdict itself — ALIGNED, `## Convened: calibrator-only` — and the cell is over. A calibrator-only cell is **always ALIGNED** — the seat that found nothing to anchor has nothing to rule on. Only an anchored accusation convenes the Challenger and the Arbiter (`## Convened: full`), and there the Calibrator seals its accusation list first: same file, `## Convened: full`, a `## Verdict` whose first line begins `pending — Challenger and Arbiter convened`. That seal derives its evidence and relay rows and records **no** verdict; the Arbiter's version supersedes it. A cheap cell is the normal case.
-- **Two legal accusation shapes, nothing else:** *trend* (must cite `mp metrics` output) and *contradiction* (must quote a Charter line). Anything unanchored is a Note. So is anything whose subject is a **ledger artifact** — a wrong section label, a stale pointer, a count in another document: that is paperwork, not drift in the work, and it belongs in Notes or `## Engine relay`. Absolute coverage — "the tasks don't add up to the goal *yet*" — is the Auditor's question at close, never the cell's.
-- **Verdicts have teeth, and the engine outranks the project.** `mp wave open` **refuses** while a DRIFT stands, or while two consecutive SUSPICION verdicts stand (the ratchet). Only the principal clears one: the PM runs `mp supersede verdict:<id> --by principal --reason "<their verbatim words>"` on their word, recorded verbatim and listed in `mp acts`. **No standing contract, project rule, or PROJECT.md binding overrides this** — a project rule that says "do not stop" does not outrank a calibration halt; the collision itself is what the principal is shown. DRIFT halts the affected fan-out only; unaffected work continues.
-- **Task-cell triggers are computed, not remembered.** `mp calib triggers` reports them; the PM never checks by hand. They are: a **recovery task** (the spec's `recovers:` field) · a spec sealed **after a Charter amendment** · a `PASS` arriving **at the round cap** · a spec sealed **after a compaction** — bounded: only for specs sealed after the compaction and before the next completed re-grounding, and only when the spec's `touches-contract` is `yes`. *Touches a contract* means the task changes something other tasks or the product depend on — an interface, a data shape, a verification path; a prose-only or records-only task does not. Contradiction shape only (a single slice has no trend). The cell interposes between a Crititor `PASS` and the Stabilizer's accept; a DRIFT enters the loop as an external binding fact the Crititor cites → automatic `CHANGES-REQUESTED`. Cell rounds never consume the group's round budget.
-- **Inputs are engine-fixed:** every seat reads exactly what `mp calib bundle` assembles by rule from the ledger. The PM spawns the cell and reads its verdict — never curates, filters, or supplements what it sees.
-
-## Invariants — the engine, not configuration
-
-Changing any of these is forking the methodology, not configuring it:
-
-1. **Separate hands.** Build, critique, and judgment are three different agents (or seats). No self-review, no judge edits.
-2. **Align first.** No direction locked without the principal's confirmation.
-3. **Verdict ≠ judgment.** Critique produces evidence and a verdict; the Stabilizer/PM decides.
-4. **Bounded rounds, then escalate.** Never loop past the round cap; never accept failing work to force a close.
-5. **Out-of-scope is mandatory.** A task spec without an explicit out-of-scope list is unfinished.
-6. **Undeclared deviation = automatic fail**, regardless of code quality.
-7. **One voice per group.** Everything a group says upward goes through its Stabilizer.
-8. **Architect proposes; PM disposes.** Code facts are the Architect's; decisions are the PM's.
-9. **The principal closes the mission** — in person (sign-off mode), or by standing delegation with item-by-item repudiation (auto mode). The mode is the principal's declaration in PROJECT.md; the PM never chooses it. Integration and reporting do not close a mission.
-10. **Reality closes the evidence.** No mission closes without one full-scope verification run over the integrated result. Task-level verification may be narrowed for speed; the closing gate may not.
-11. **Flags route; silence is not disposal.** Out-of-frame flags and noticed-but-not-fixed items reach the PM verbatim, and each receives an explicit, recorded disposition.
-12. **The principal converses; agents operate.** Every principal decision must be expressible and deliverable in one plain sentence. Any pipeline step that requires the principal to execute an instruction, operate a tool, or absorb machinery detail is an engine defect, not a configuration option.
-13. **Echoes are not evidence.** Agreement among derived artifacts adds no evidential weight. No acceptance stands without at least one reality-anchored or fixed-point anchor, and reality anchors bind to the source state that produced them.
-
-## Binding contract
-
-`.claude/mission-pipeline/PROJECT.md` (created at setup from `templates/PROJECT.md`) is the **only** file a project edits. It fills declared slots — principal, ground-rule docs, the document map (mission-rationale location, standing-contracts registry), tech constraints, verification commands and the closing gate, commit policy, model picks, round cap, naming prefix, ledger location, Researcher and Auditor bindings — and may add project rules. It may **not** restate or override the lifecycle, the loop, or the invariants. On any conflict, the engine wins — including over a standing contract that would absorb a calibration halt.
-
-## References
-
-- `references/setup.md` — **first run in a project**: install steps + the setup interview that fills PROJECT.md.
-- `references/ledger.md` — ledger location, layout, naming, the artifact-is-the-event model, and the path-anchoring rule. **Read before writing any artifact.**
-- `references/parallel.md` — waves, collision handling, worktree discipline, seam contracts and the integration round. **Read before fanning out groups.**
-- `references/substrate.md` — the deterministic substrate and the `mp` toolbelt (invoked `python3 <skill>/scripts/mp …`): the document contract, the seal, runs, supersession, the command surface. **Read before any `mp` command.** **Agent-internal — the principal never runs `mp` (invariant 12).**
-- `templates/` — artifact templates: charter, task-spec, dev-report, critique, group-report, arch-plan, integration-note, calibration-verdict, closure-audit, mission-close, standing-contracts, missions-registry, PROJECT.md.
+Use the complete installed package, not a copied single script. Never edit the installed engine as a project workaround. Source-repository maintenance explicitly requested by the user is separate authorized engineering work. Preserve real ledgers and raw historical inputs during diagnosis; use isolated fixtures and declared migrations.

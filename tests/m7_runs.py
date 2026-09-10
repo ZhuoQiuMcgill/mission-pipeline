@@ -35,6 +35,7 @@ Run: python3 tests/m7_runs.py
 """
 import json
 import os
+os.environ['MP_COMPAT_V3'] = '1'  # Explicit released-schema regression; v4 ledgers reject this path.
 import subprocess
 import sys
 import tempfile
@@ -61,7 +62,7 @@ def check(name, cond, detail=""):
 
 def run(args, rc=0):
     r = subprocess.run([sys.executable, MP, "--json"] + args,
-                       capture_output=True, text=True, env=ENV)
+                       capture_output=True, text=True, encoding="utf-8", env=ENV)
     body = {}
     if r.stdout.strip():
         try:
@@ -96,7 +97,7 @@ def log(name, text):
 
 def git(*a):
     return subprocess.run(["git", "-C", str(TMP)] + list(a),
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, encoding="utf-8").stdout.strip()
 
 
 # ---------------------------------------------------------------- the gate

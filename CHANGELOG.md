@@ -6,6 +6,32 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [2.0.0] — 2026-09-09
+
+The supervised-engine release. An independent Supervisor checks original intent, PM delegation, task admission and closure. Counterexamples, repair, independent review and current execution evidence now share one bounded workflow.
+
+### Breaking changes
+- The normal CLI uses structured requests and journal schema 4. Python 3.12+ and the complete skill directory, including `scripts/mp_runtime/`, are required; copying the old standalone script is insufficient.
+- Managed execution requires a trusted JSONL controller and functioning Linux/WSL bubblewrap isolation. Native/local role labels remain self-asserted provenance.
+- Legacy ledgers use explicit migration and adoption. Historical approvals remain history until requalified; migration preserves raw evidence and closed missions. Review `migrate --plan` before migration; publishing or installing this release does not migrate a live ledger.
+
+### Added
+- Independent Supervisor root/plan/closure review, scoped PM delegation, atomic mandatory-counterexample barriers and automatic independent Auditor contests.
+- Current read receipts and bounded review rebasing; persistent independent reviewer lineage supports repair verification after a controller restart.
+- Immutable input, output and log evidence; explicit execution predicates, mandatory closure bundles/audits and a supported read-only field adapter.
+- Native PowerShell entry, UTF-8 JSON Windows/WSL bridge, persistent root mappings and explicit writer-environment handoff.
+
+### Fixed
+- Principal project contracts apply across missions, retain necessary original sources and cannot be weakened by candidate scope, omission or duplicate order. Explicit authorized retirement and delegated PM correction remain usable.
+- Calibration and positive reports bind current code, products, runs and authority. Acceptance and consumption bookkeeping do not invalidate their own prerequisites.
+- Current required attempts govern reuse and acceptance. New pending or failed attempts cannot borrow old PASS results. Actual timeouts and supported execution errors have durable terminal states, idempotent retrieval and bounded recovery.
+- Multi-line acceptance parsing preserves partial outcomes; lifecycle, flags, scoped holds, crash recovery and legacy overlays preserve their distinct semantics.
+- Windows/WSL special strings, encoding, CRLF identity, long paths, working directories, SQLite handles, concurrent ownership, interpreter/import origins, dependency repair and environment contamination are covered by actual execution tests.
+
+### Validation
+- All 22 test entry points passed on native Windows and Ubuntu WSL, alongside five independent ownership, CLI and 330-character-path probes.
+- Independent Constructor/Crititor/Stabilizer review accepted implementation round 4 with no unresolved established blockers. Original runtime archives and historical task state were preserved.
+
 ## [1.2.0] — 2026-09-05
 
 The closure-modes release. Two more days of field use (PR #4) found the pipeline

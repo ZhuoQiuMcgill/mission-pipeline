@@ -1,7 +1,7 @@
 {
   "name": "mission-pipeline",
-  "description": "Human-in-the-loop multi-agent engineering workflow: a PM aligns with the principal, decomposes missions into tasks, fans them out to parallel groups (Constructor builds, Crititor reviews, Stabilizer judges a bounded loop), schedules waves via a read-only Architect, calibrates each wave boundary against a frozen mission Charter, and closes on the principal's acceptance — in person, or by standing delegation with item-by-item repudiation — state derived from the documents agents write by a deterministic, agent-internal substrate (one seal call per artifact; append-only journal + rebuildable SQLite).",
-  "version": "1.2.0",
+  "description": "Supervised engineering with scoped PM delegation, independently reviewed roots and plans, bounded repair/contest, immutable execution evidence, mandatory closure audit, and native Windows / WSL managed runtime.",
+  "version": "2.0.0",
   "author": {
     "name": "Zhuo Qiu"
   },
