@@ -1,4 +1,4 @@
-# Closure Audit — schema 4
+# Obligation Defer — schema 4
 
 Read references/runtime-v4.md. Replace every placeholder using current packet ids and actual evidence. Choose the real outcome; a template is not a verdict. For revisions, add the current predecessor's id as `revises`. `seal` snapshots this complete document and supplies its source_blob and stable request id.
 
@@ -6,7 +6,7 @@ Read references/runtime-v4.md. Replace every placeholder using current packet id
 
 Describe the original authority, current delivery and concrete evidence read. Preserve true gaps and authorized stage ownership.
 
-List every real mandatory finding in the JSON findings array with source_blob, counterexample_blob, target and affected scope. PASS requires an empty findings array; FINDINGS requires at least one. Missing bundle bytes are INPUT_INCOMPLETE, never an implicit PASS.
+A deferral is a disclosed gap with a responsible owner, never a repair, and it needs a grant carrying the defer permission. It is reported in the mission.close outcomes. Store the reason text as its own blob with `blob put` and name that sha256 in reason_blob; sealing this document supplies source_blob, not reason_blob.
 
 ## Single risk
 
@@ -22,11 +22,13 @@ List every real mandatory finding in the JSON findings array with source_blob, c
 
 ```mp-json
 {
-  "action": "audit.record",
+  "action": "obligation.defer",
   "data": {
-    "bundle": "bundle-id",
-    "outcome": "PASS_OR_FINDINGS_OR_INPUT_INCOMPLETE",
-    "findings": []
+    "obligation": "obligation-id",
+    "grant": "grant-id",
+    "domain": "method",
+    "owner": "responsible-owner",
+    "reason_blob": "reason-CAS"
   }
 }
 ```

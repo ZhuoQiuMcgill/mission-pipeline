@@ -6,6 +6,123 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [2.1.0] — 2026-09-13
+
+The usability release. 2.0.0 shipped an engine that was correct and, in the field, unusable.
+Three ordinary `task.record` revisions while a case was open exhausted the rebase budget, and
+every one of the nine recovery actions was then refused, so the mission could never close. The
+twelve-call correction budget was per mission rather than per case, which made the thirteenth
+case terminal. Screening and contest jobs expired after 300 seconds while local subagents
+routinely take longer, `job.resume` needed a prior `jobs.expire` and misreported
+`BUDGET_EXHAUSTED`, and after two resumes only dismissal remained. A hand-written
+`run.begin`/`run.finish` submitted with `--actor controller` was recorded as controlled
+execution and closed a mission with no process running. And the manual told nobody how to
+operate any of it: 48 lines of SKILL.md, role files of seven to nine lines, no worked example
+anywhere, and the only two manual calibration triggers undocumented. No schema change, no new
+record shape, and existing 2.0 ledgers keep working. Rationale record:
+`docs/design/DesignDoc_UsableRuntime_2.1_2026-09-13_v01.md`.
+
+### Fixed
+- **Rebase exhaustion no longer deadlocks a mission.** A third changed-head rebase closes the
+  current case with `status: "TARGET_REPLACED"`, releases its barrier, deactivates its permits,
+  supersedes any pending contest, and opens a successor case carrying the same mission, lineage,
+  scope, target, counterexample, audit stance and repair count, with a fresh screening job.
+  `review.rebase` returns `{"case": <new>, "superseded": "<old id>"}`.
+- **The correction budget is per case.** `issue.screen` and `contest.decide` charge
+  `<case id>:correction` with a cap of twelve. A mission-level `<lineage>:correction_total`
+  counter is kept for reporting only and has no cap.
+- **Review deadlines match the mode.** `project.configure` stores `review_deadline_seconds`,
+  default 86400 local and 300 managed, minimum 60. Every screening, contest, supplement, resume
+  and repair-compliance deadline uses it, and the UPHOLD repair window is `max(86400, value)`.
+  `job.resume` accepts a PENDING or AWAIT_REPAIR job whose deadline has passed with no prior
+  `jobs.expire`, keeps the two-resume cap, and reports `REVIEW_EXPIRED` with a `recovery` text
+  when the cap is spent. `issue.screen` and `contest.decide` auto-resume an expired job inside
+  the same transaction while a resume remains.
+- **Dismissal is contestable and cannot pre-empt a contest.** `case.resolve` refuses
+  `CONTEST_PENDING` while a contest is PENDING or INPUT_INCOMPLETE, and refuses
+  `SCREENING_REQUIRED` for a DISMISSED outcome on a case with no `screening_author`.
+  `case.contest` is open to pm and to every reporting role.
+- **`controller` is the executor's internal identity.** The CLI, the field adapter and
+  `bridge.serve_one` refuse actor role `controller` with `ROLE_FORBIDDEN`, including through
+  `MP_ACTOR`. `runner.execute` and the managed broker still construct it in process.
+- **A blanket PM decision no longer invalidates accepted work.** A decision that lists no
+  `tasks` applies to a task only when that task has no current ACCEPTED acceptance created
+  before the decision. All call sites use the same rule.
+- **Files in `write_paths` are inside the product digest.** The calibration basis is task
+  outputs plus task write paths plus required-run inputs, deduplicated and order-stable, so a
+  helper rewritten after acceptance invalidates the cell that judged it.
+- **A dead run can be aborted from another session.** `run.abort` by pm or controller is allowed
+  when the run is RUNNING and its lease has expired: `EXPIRED`, `satisfied: false`,
+  `failure_code: "RUN_LEASE_EXPIRED"`. The owner-session path is unchanged.
+- **Reports without a criteria table no longer bypass the check.** `report.record` refuses
+  `CRITERIA_TABLE_REQUIRED` for a task with obligations and an outcome of COMPLETE, PASS or
+  ACCEPTED when the document carries no criteria rows.
+- **Closed outcome sets.** `audit.record.outcome` is PASS, FINDINGS or INPUT_INCOMPLETE, with
+  PASS requiring zero findings; `close.review.outcome` is PASS, FAIL or INPUT_INCOMPLETE;
+  `flag.raise` is limited to pm and the reporting roles and requires a root or intake;
+  `mission.close` requires the audit outcome to be PASS or FINDINGS.
+- **`delivery.record` cannot overwrite exported output.** It refuses `EXPORTED_OUTPUT` when the
+  current delivery for that path was produced by a run.
+- **Writer identity survives a machine rename.** `environment_id()` hashes the platform family
+  and a token from `<config dir>/mission-pipeline/writer-id`, created with random hex on first
+  use. The old hostname formula is retained as `legacy_environment_id()` and still accepted, and
+  `maintenance recover` rewrites the owner record to the new identity.
+- **Per-write cost.** `recover()` verifies only the journal tail past a `verified_seq` watermark
+  held in `runtime_meta`; the full replay comparison stays in `doctor` and `rebuild`.
+  `source_manifest` identity_version 3 takes git blob ids for clean tracked files and hashes
+  only what `git status` reports as changed.
+
+### Added
+- **`obligation.cancel`**, pm with a `defer` grant or principal: `{obligation, grant, domain,
+  owner, reason_blob}` sets `AUTHORIZED_CANCELLED` with the deferral fields plus `cancelled_by`.
+  The status was read in five places and written nowhere.
+- **Mid-mission migration continuity.** `adoption_plan` reports `acceptances`: every ACCEPTED
+  verdict from a sealed GroupReport with its legacy mission, task key, artifact, sha256 and
+  sequence. `legacy.adopt` adopts all VERIFIED overlays of the legacy mission when `artifacts`
+  is omitted. New `legacy.accept` (pm) takes `{mission, obligation, legacy_artifact}` and sets
+  the obligation MET with `evidence: "legacy:<artifact>"` and `assurance: "legacy-recorded"`;
+  `mission.close` accepts such obligations and `bundle.record` includes the adopted overlays.
+- **`maintenance takeover --confirm <project id>`**, principal only, claims a ledger whose owner
+  environment is unreachable: new environment, epoch plus one, `takeover_from` recorded.
+- **`references/walkthrough.md`**: one complete single-task mission through the public CLI,
+  every request with its command line and the response fields that matter, then the 1.2 to 2.1
+  mid-mission upgrade and the recovery commands.
+- **Nine templates**: plan review, close review, issue screening, case resolution, contest
+  decision, recovery permit, obligation deferral, obligation cancellation and legacy acceptance,
+  with matching `template_catalog.EXAMPLES` entries.
+
+### Changed
+- **Honest execution labels.** A local run records `assurance="local-execution"` instead of
+  `local-controlled-execution`. Every check that accepted the old label accepts both. The
+  documentation states plainly that local execution freezes inputs, captures logs and outputs,
+  and does not contain the process.
+- **Seal conveniences in local mode.** `mp seal` sets `source_blob` only when the block does not
+  name one and always records `document_blob`; validates list sections only for `report.record`;
+  fills `contract_scope_digest`, `review_basis`, `admission`, `critique` and `revises` when they
+  are absent; marks `reading_assurance="self-asserted"` when it filled a review field; and
+  echoes the submitted request. Managed seal behaviour is unchanged.
+- **Managed mode is documented as experimental.** The sandbox, broker and JSONL protocol are
+  implemented and tested, but no model driver ships in this repository. README, SKILL.md,
+  setup, substrate and the plugin descriptions say so.
+- **The operating manual is back.** SKILL.md carries the cast with each seat's exact actions,
+  the lifecycle in order with the request and the seal alternative per step, a refusal table
+  with the fix for each code, closure, calibration, the counterexample path, fourteen numbered
+  invariants and a plain statement of local versus managed assurance. Every role file states its
+  inputs, its exact actions, the refusals it will meet and what it never does.
+- **Hygiene.** `scripts/mp` becomes a launcher: `--bridge-stdio`, `MP_COMPAT_V3=1` to
+  `legacy_v3.main`, otherwise the v4 CLI. The v3 guard and exit codes move into `legacy_v3.py`.
+
+### Validation
+- All existing entry points plus the new tests pass on WSL; the walkthrough is executed end to
+  end through the public CLI; the real 421-event 1.2 ledger migrates, adopts its open mission,
+  accepts a legacy obligation and closes under v4 on a copy. Native Windows is re-run by the
+  maintainer before field deployment.
+- `tests/m9_migration.py` skips its real-data test with a message when the ignored corpus is
+  absent and gains a synthetic fixture test that builds a v3 ledger under `MP_COMPAT_V3=1`,
+  migrates it, adopts it, accepts a legacy obligation and closes under v4.
+  `tests/m1_acceptance.py` exits 0 with `SKIP` when its corpus is absent, so the public suite
+  runs on a clean checkout anywhere.
+
 ## [2.0.0] — 2026-09-09
 
 The supervised-engine release. An independent Supervisor checks original intent, PM delegation, task admission and closure. Counterexamples, repair, independent review and current execution evidence now share one bounded workflow.

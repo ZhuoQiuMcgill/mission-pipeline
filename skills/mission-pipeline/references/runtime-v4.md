@@ -1,129 +1,335 @@
 # Runtime v4 request contract
 
-`scripts/mp` is the normal entry. It imports the adjacent `mp_runtime` package. All normal output is one UTF-8 JSON object. Use an explicit interpreter and root; arbitrary text belongs in JSON data, not shell source.
+The complete typed request surface of schema 4. `references/walkthrough.md` is the worked example; this document is the contract each step is checked against.
+
+## 1. Entry and identity
+
+`scripts/mp` is the normal entry. It imports the adjacent `mp_runtime` package; a standalone copy of the script is unsupported. Use an explicit interpreter and an explicit `--root`.
 
 ```text
 python <skill>/scripts/mp --root <project> --actor pm api --request-file request.json
 python <skill>/scripts/mp --root <project> --actor pm api --stdio
-python <skill>/scripts/mp --root <project> seal document.md
+python <skill>/scripts/mp --root <project> --actor supervisor seal document.md
 ```
 
-Local actor labels describe provenance and are not authentication. Managed role identity is assigned by the trusted broker; a role cannot submit an actor, session or authenticated flag. Every mutation has a stable `request_id`, `action` and `data` object. Reusing an id with different content is a conflict. Keep the same id after an uncertain response. `receipt` retrieves its committed result; do not infer success from attempted prose or a REFUSED result.
+Local actor labels are provenance, not authentication. Managed role identity is assigned by the trusted broker, and a role cannot submit an actor, a session or an authenticated flag.
+
+`controller` is the executor's internal identity, not an operator role. The CLI, the field adapter and `bridge.serve_one` refuse actor role `controller` with `ROLE_FORBIDDEN` ("controller is the executor's internal identity"), including through `MP_ACTOR`. `runner.execute` and the managed broker still construct it in process, which is how a run is recorded.
+
+## 2. Request envelope and receipts
+
+Every mutation carries a stable `request_id`, an `action` and a `data` object. Reusing an id with different content is a conflict. Keep the same id after an uncertain response.
 
 ```json
 {"request_id":"choice-001","action":"decision.record","data":{"mission":"m","grant":"g","domain":"method","choice":"Use a readable bar chart","effects":{"format":"bar-chart"},"rationale_blob":"<CAS SHA256>"}}
 ```
 
-## Authorities and roots
+`receipt` retrieves a committed result. Do not infer success from attempted prose or from a REFUSED body. Arbitrary text belongs in JSON data, never in reconstructed shell source.
 
-The trusted principal ingress accepts `authority.record` with `source_blob`, stable goal ids and reserved `constraints`. `grant.record` links an authority to a scope (`mission-id` or `project`), domains, permissions (`choose`, `revise`, `defer`, `close`), optional expiry and reserved conditions. `authority.amend` explicitly replaces the current principal source; `grant.revoke` immediately invalidates uses of that grant.
+## 3. Authorities, grants and standing contracts
 
-PM uses `intake.create`, then `root.propose` with goals and proposed contracts. Revisions name the current candidate via `revises`. A new intake for an existing mission names `revises_intake`. Supervisor submits `root.review` with MATCH, MISMATCH or INPUT_INCOMPLETE after reading actual source bytes. `root.activate` names that current candidate and review, and `revises_root` for an active revision. Candidate review and activation are separate: no candidate creates an effective contract before activation. Each contract identifies its principal authority, reserved clause and mission/project scope.
+The trusted principal ingress accepts `authority.record` with `source_blob`, stable goal ids and reserved `constraints`. `constraint_scopes` keys a declared constraint to `mission` or `project`; omitted entries mean mission scope. `constraint_policies` may add per-clause `applicability` (`missions`, `exclude_missions`), a finite Unix `expiry` and `precedence:"principal"`.
 
-PM records A2 choices with `decision.record`, its grant/domain, actual effects, rationale CAS and optional predecessor. A2 choices are revisable under the same valid grant. Only a real principal authority amendment changes A0.
+`grant.record` links an authority to a scope (a mission id or `project`), `domains`, `permissions` from `choose`, `revise`, `defer` and `close`, an optional `expires` and optional reserved conditions. A grant cannot override a principal constraint or a standing contract.
 
-## Plans, work and evidence
+`authority.amend` explicitly replaces the current principal source. `grant.revoke` immediately invalidates uses of that grant. `contract.retire` needs the contract's owning current authority and a new original `source_blob`; another mission's authority cannot retire it.
 
-`plan.record` carries every original goal and obligation `{id,goal,description}`. `task.record` carries mission, obligations, grant/domain, required effects, allowed effects, input CAS ids, exact `write_paths`, delivery `outputs`, dependencies and wave. The first wave exists at activation; successors require prior integration and calibration. `plan.review` checks the actual plan/tasks; `task.admit` produces a current admission. Requirements must be registered before that review because they change the task. A changed plan, task, authority or accepted dependency needs re-admission.
+Standing contracts use one applicability interpretation everywhere: grant checks, root review and activation, plan review and admission, positive gates, scoped review bases, role packets and relay. A contract's `mission` is provenance; `project` and migrated `legacy_project` apply across missions. Native constraints combine conjunctively, and conflicting active conditions need a principal correction rather than the newest mission silently winning.
 
-`environment.register` names the actual interpreter, expected version if applicable, modules/project modules, relevant non-secret values and optional Linux `runtime_root`. `requirement.record` names task, argv array, cwd, explicit input path references, environment id, predicate, scope and output mappings. Predicates are `overall_pass`, `expected_negative` with a specific nonzero code/diagnostic, or `check_set` with exact required checks. A closing requirement has `scope: "closing"`.
+Before a local `root.review` or `plan.review`, call `contracts.snapshot` with `mission`, read the named contract and owning-authority sources, and submit the returned `contract_scope_digest`. A missing or stale digest refuses `STALE_CONTRACT_REVIEW`.
 
-Constructor claims a current dispatch ticket, submits source with the broker's `submit_blob`, and uses `work.write` with task/admission/path/source_blob/expected_sha256. It writes only the reviewed exact paths, never pipeline state. These are product working files; authoritative workflow history is separately journaled. A changed working-file head refuses replacement rather than overwriting another edit.
+## 4. Intakes, candidates and activation
 
-`run.execute` freezes declared inputs, checks the actual interpreter/import origins, and executes argv with no shell interpolation. Managed preflight itself runs in the same allowlisted isolation. The working input tree is read-only; `MP_OUTPUT_DIR` identifies writable output. Output mappings `{path,destination}` preserve declared artifacts to reviewed delivery paths and CAS. Missing or changed outputs do not qualify. Local and managed runs use the same leases, finite takeover, heartbeat, total deadline, logs and success predicates. Independent reruns specify `purpose: "independent_check"` and a reason. A late result stays historical and cannot satisfy a gate.
+PM uses `intake.create`, then `root.propose` with goals and proposed contracts. A revision names the current candidate through `revises`; a new intake for an existing mission names `revises_intake`.
 
-`report.record` takes kind development/critique/acceptance, task, source_blob, outcome, round, criteria and explicit `revises` for a predecessor. Positive critique/acceptance requires admission, current controlled verification, all required outcomes met and a current development report; acceptance also cites the current independent critique. A Markdown criteria table must agree with the structured criteria. Use stable obligation ids or an explicit complete `criteria_map`; conflicting duplicate ids require sub-ids. Failure and partial reports remain recordable.
+`root.review` (supervisor) submits MATCH, MISMATCH or INPUT_INCOMPLETE after reading the actual source bytes. MATCH refuses `GOAL_COVERAGE_GAP` when the goal inventories differ, and compiles the candidate against the principal's own scopes.
 
-`task.replace` records a new task linked to its predecessor while retaining obligations and lineage budget. `obligation.defer` names a valid defer grant, domain, owner and reason_blob; its status is AUTHORIZED_DEFERRED, never verified-fixed. `consume` and `wave.integrate` recheck current acceptance, source, verification, authority and holds.
+`root.activate` names that current candidate and review, plus `revises_root` for an active revision. Candidate review and activation are separate: no candidate creates an effective contract before activation. Activation is atomic, installs the principal's project constraints even if the candidate omitted them, and opens wave 1.
 
-## Counterexamples, budgets and calibration
+Every candidate occurrence is checked before deduplication: project cannot become mission-only, mission-only cannot become project, and reordered or repeated clauses cannot suppress the principal scope. A wrong draft receives MISMATCH and is corrected by PM under the existing authority, without a full root cycle.
 
-Root MATCH and activation use the same principal-driven contract compiler. Every candidate occurrence is checked before deduplication: project cannot become mission-only, mission-only cannot become project, and reordered or repeated clauses cannot suppress the principal scope. A wrong draft can receive MISMATCH and be corrected by PM under the existing authority. Project clauses omitted from a candidate are still compiled from the principal record.
+## 5. Decisions
 
-Required verification selects the latest attempt for that requirement, including incomplete and unsuccessful states, before evaluating its predicate. Ordinary reuse considers only this current attempt; it cannot skip a timeout or pending attempt to borrow an earlier PASS. A live attempt returns pending. Same-key ordinary takeover remains bounded to generation two; explicit independent_check has the existing two-call lineage budget. Recovery after a non-qualified verification also has a two-call task-lineage budget, matched by verification fields rather than request or requirement names. Unrelated and non-required diagnostics are excluded from required qualification and calibration dependencies.
+`decision.record` carries the grant, domain, actual `effects`, a `rationale_blob`, the `choice` and an optional predecessor through `revises`. A2 choices are revisable under the same valid grant; only a principal amendment changes A0.
 
-After a real process timeout the controller stores TIMED_OUT; startup and supported execution errors store EXECUTION_FAILED with exact available stdout/stderr CAS, failure code and detail. These are non-qualified terminal records. Repeating the same request after recovery returns its original failure without launching another process; use an authorized bounded new attempt to retry. Normal completed nonzero output is COMPLETE with its declared predicate evaluated, so expected-negative can still qualify. Late owner/generation results remain historical. New reports cannot promote an unfinished/failed required attempt into PASS or ACCEPTED; once the actual current attempt succeeds, normal current reports and any required calibration can restore consumption and closure.
+`decision.record` may limit `tasks` to mission task ids. Omission means the decision applies to that domain going forward. It applies to a task only when the task has no current ACCEPTED acceptance created before the decision, so a blanket decision does not retro-invalidate finished work. Revisions inherit the previous scope unless it is explicitly changed.
 
-`issue.report` distinguishes ADVISORY from MANDATORY_COUNTEREXAMPLE. Mandatory input includes mission, source_blob, counterexample_blob, target, affected task/obligation ids, or a resolved omitted principal source quote. One receipt creates the case, scoped PENDING_SCREEN barrier, fence and screening job. Duplicate facts reuse their case. Ordinary suggestions and unrelated tasks are not globally frozen.
+## 6. Plans, tasks and admission
 
-Supervisor uses `issue.screen` and `case.resolve`. PM can create a `recovery.permit` for at most two repairs inside the existing grant; normal consumption and closing remain blocked. A repair task can run and receive independent product acceptance under its own hold. `VERIFIED_FIXED` names actual repair tasks or a corrected pre-active candidate, and must address the original counterexample. A candidate can be corrected/reviewed before activation, avoiding a root-review cycle.
+`plan.record` carries every original goal and obligations as `{id, goal, description}`. Each obligation must trace to a goal and each goal needs a producing obligation.
 
-Mandatory Auditor disagreement with dismissal, claimed repair or exception automatically creates a unique Contest. `contest.decide` belongs to a fresh independent Stabilizer endpoint. DISMISS_ORIGINAL, REPAIR_VERIFIED and AUTHORIZED_EXCEPTION_VERIFIED apply directly. UPHOLD retains the original issue and permits bounded same-instance repair compliance; MODIFY_SCOPE narrows the actual affected scope. INPUT_INCOMPLETE permits one requested `case.supplement`, not a fresh merits contest. A Supervisor cannot overwrite the independent final result. False-DRIFT dismissal releases its associated latch directly; a later ordinary ALIGNED does not erase a true latch.
+`task.record` carries mission, obligations, grant, domain, required `effects`, `allowed_effects`, input CAS ids, exact `write_paths`, delivery `outputs`, `dependencies`, `wave` and an optional `required_runs`. Updating an existing id requires `revises` with the task's current digest. `recovers` and `touches_contract` are the two manual calibration triggers.
 
-The default bounds are three product rounds, two case repairs, one merits contest, one requested supplement, twelve corrective review calls per lineage, five-minute independent jobs and one transport retry. `job.resume` is bounded and retains the independent reviewer lineage while replacing the endpoint generation. `rule.record` requires an established case, applicability and counterexamples; rules are explicitly retired when invalid.
+`task.replace` records a new task linked to its predecessor, retaining obligations and lineage budget.
 
-`bundle.record` collects original authority, grants, actual delivery documents/data/images, task and decision sources, controlled run inputs/logs and exported outputs. Required declared delivery paths cannot be omitted. Missing CAS yields INPUT_INCOMPLETE. Calibration uses the current bundle and explicit wave/task scope. Task cells never interrupt the aggregate wave sequence. DRIFT and repeated aggregate SUSPICION latch until a legitimate release. Source bytes and authority remain available to the Calibrator; PM's argumentative case defense is excluded from its role packet.
+`plan.review` (supervisor) checks the actual plan and tasks. `task.admit` produces the current admission, freezing the task digest, the authority digest, the dependency digest and the mission fence. Requirements must be registered before the review, because they change the task. A changed plan, task, authority or accepted dependency needs re-admission.
 
-## Closure, relay and adapter
+The first wave exists at activation. `wave.open` for a successor requires the previous wave CLOSED and a completed aggregate calibration. `wave.integrate` rechecks every task's acceptance and required runs before closing a wave.
 
-Build a current bundle, obtain `audit.record` and `close.review`, and then `mission.close` with a qualified closing_run and delegated close grant (or principal identity). No unresolved mandatory case can disappear between auditing and closing: every positive transaction rechecks the scoped barriers. Authorized gaps remain disclosed in the returned outcomes. `mission.reopen` is an explicit principal action.
+## 7. Environments and requirements
 
-`relay <mission>` produces an immutable complete relay artifact without sending it. `render` creates the derived current view. The supported field adapter is `python -m mp_runtime.field_adapter --root ... --request-file ...` with the script package on PYTHONPATH (or imported by a trusted host). Its read-only SQL helper allows reads only, never DDL, migration or writes. Rendering happens outside the lock; publication rechecks epoch/sequence inside it. A successful business commit with a stale/unwritable view returns `committed: true, view_stale: true`, not a fake rollback.
+`environment.register` names the actual interpreter, an optional `expected_version`, modules and project modules, relevant non-secret values, and an optional Linux `runtime_root`.
 
-## Managed JSONL transport
+`requirement.record` names task, argv array, cwd, explicit input path references, environment id, predicate, scope and output mappings. Predicates are `overall_pass`, `expected_negative` with a specific nonzero exit code and diagnostic, or `check_set` with exact required checks. A closing requirement has `scope: "closing"`.
 
-The trusted controller launches an argv-configured process with private pipes and sends `{"packet": ...}`. Its driver sends either `{"tool_calls":[...]}` or `{"final_document":"..."}`. Tools are `read_blob`, `submit_blob`, `submit` and `refresh_packet`. Each read returns original bytes as base64. The trusted model transport turns text/image bytes into its model's actual input format. The broker enforces packet scope, role actions, path scope, epoch, actual required reads and finite tool/step/deadline budgets. It supplies input-read receipts and identity; model-authored identity fields do not authenticate anything.
+`env create` can take `dependency_lock` and `wheelhouse` inside its declared cwd. It creates a fresh venv, bootstraps that venv's pip, installs only local wheels with `--require-hashes --no-index`, records the lock hash and verifies actual import origins. It never installs globally and never guesses a missing package.
 
-`mp_runtime.reference_driver` is an executable framing example. A production driver may call an external model API, but must not give that model parallel unrestricted host tools. The repository's integration tests execute the real JSONL framing, source reads, product writes, isolated imports/commands, artifact export and role-gated closure; they do not claim that an external model can never make a semantic mistake.
+## 8. Product writes
 
-## Failure and recovery taxonomy
+Constructor claims a current dispatch ticket, submits source as a blob, and uses `work.write` with task, admission, path, `source_blob` and `expected_sha256`. It writes only the reviewed exact paths and never pipeline state. A changed working-file head refuses `STALE_PRODUCT_HEAD` rather than overwriting another edit.
 
-Deterministic source/authority/scope/predicate refusals are corrected, not retried with new ids. BUSY_RETRYABLE has at most two retries. COMMIT_DURABLE_RECOVERY_REQUIRED means the journal already committed; recover the same receipt. Old generations and stale packets cannot finish current work. Storage corruption, missing projection and manifest recovery are distinct from semantic partial rows and legitimate workflow holds.
+Product file changes and exported output installations are journaled effects. No file changes before its event is durable. A completion receipt is persisted after installation and before projection commit. Recovery accepts the intended bytes or applies them against the recorded previous hash, and refuses to overwrite an intervening edit (`RECOVERY_PRODUCT_CONFLICT`).
 
-`doctor`, `rebuild`, `maintenance recover`, explicit owner `handoff`/`accept`, scoped legacy adoption and before-business `rollback` are the supported recovery paths. Bootstrap publishes a complete nonempty owner directory atomically and READY last. A recovery manifest is preserved so a missing manifest does not cause an existing journal to be overwritten as a fresh ledger. The frozen schema-3 dispatcher preserves historical semantics; new overlays never rewrite the old journal or silently upgrade old PASS decisions.
+## 9. Execution
 
-## Additional protocol and recovery details
+`run.execute` freezes the declared inputs, checks the actual interpreter and import origins, and executes argv with no shell interpolation. The working input tree is read-only and `MP_OUTPUT_DIR` identifies writable output. Output mappings `{path, destination}` preserve declared artifacts to reviewed delivery paths and CAS. Missing or changed outputs do not qualify.
 
-`read_blobs` accepts up to 64 packet references within the eight MiB frame bound. Reads return original bytes as base64 and count toward the same 128-tool budget. Pipe writes as well as reads have a deadline. A transport that stops reading cannot hang the controller. Normal replies and typed requests are objects; malformed, duplicate-key, nonfinite, truncated and oversized JSON frames are refused.
+Completion is not satisfaction. `status: "COMPLETE"` plus `satisfied: true` is what positive gates read, and `satisfied` comes from the requirement's predicate. A normal completed nonzero exit is COMPLETE with its predicate evaluated, so an expected negative can still qualify.
 
-Product file changes and exported output installations are journaled effects. No file changes before its event is durable. A completion receipt is persisted after installation, before projection commit. Recovery accepts intended bytes or applies them against the recorded previous hash; it refuses to overwrite an intervening edit. `RECOVERY_PRODUCT_CONFLICT` requires preserving/reconciling those bytes before retrying the same request. Rebuild checks completion receipts and does not reinstall completed historical writes. Migration retains the frozen adoption event in CAS before publishing its bootstrap owner, so interruption cannot publish READY without legacy overlays and the release bridge.
+### Execution assurance labels
 
-Same-round report corrections with unchanged source, criteria, outcome and product are `report_annotation` records (`annotation_blob`) and preserve the qualified source head. Substantive changes require the next bounded round. Task replacement carries the product lineage and cannot reset its budget. Ticket fences include applicable cases/latches and authority; unrelated task issues do not invalidate an already queued ticket. UPHOLD allows the same independent reviewer lineage up to two repair checks within a bounded one-day repair window; merits review jobs remain five minutes and transport recovery remains bounded.
+| Label | Means |
+|---|---|
+| `controller-execution` | The managed controller executed it inside the allowlisted sandbox |
+| `local-execution` | The local executor froze the declared inputs, checked the interpreter and captured logs and outputs. The process was **not** contained: it had the home directory and the network |
+| `posthoc-declared` | A finish recorded without the executor. Historical evidence only; refuses `EXECUTION_ASSURANCE_REQUIRED` at a required gate |
 
-### Current review readings and bounded rebase
+Ledgers written by 2.0 carry `local-controlled-execution` for the middle row. Every check that accepts the new label accepts the old one.
 
-`issue.screen`, `case.resolve`, `contest.decide`, `audit.agree`, `latch.release` and `review.rebase` require a `review_basis`. In local mode, call `review.snapshot` with `{"case":"<id>"}` or `{"latch":"<id>"}`, read the referenced source blobs, and retain the returned basis in the later submission. Local identity/read claims remain self-asserted. The trusted principal console likewise submits an explicit current snapshot for a latch override; it is principal intent, not an authenticated model reading receipt.
+### Leases, takeover and abort
 
-Managed packets contain `review_bases`. The broker retains only a basis actually delivered by the initial packet or explicit `refresh_packet`, and requires actual blob reads before attaching it to a submission. An internal lookup, a previous write's result, or merely refreshing metadata does not count as reading newly introduced material. The writer compares that exact basis again under its commit lock. It covers the original case, current target, current applicable authority/grants (including expiry), task evidence, scoped barriers/latches and job generation. An unrelated journal event does not invalidate the reading. A stale refusal commits no release or budget charge; use the original receipt for an exact already-committed retry.
+Local and managed runs use the same leases, finite takeover, heartbeat, total deadline, logs and success predicates. Same-key ordinary takeover is bounded to generation two; `purpose: "independent_check"` with a concrete `reason` has its own two-call lineage budget, and recovery after a non-qualified verification has another.
 
-The supported `field_adapter` uses the same requests: submit `review.snapshot` through its `--request-file`, retain the returned `review_basis`, read its blobs using the original-byte CAS interface, then supply that basis in the later request file. Adapter `invoke` passes the request to the same Engine/writer and does not manufacture a current reading. For a managed ledger, use the trusted console/role protocol (or `managed.run` over the WSL bridge); a local adapter actor cannot become an authenticated reviewer.
+`run.abort` by the owning session is unchanged. A dead run left RUNNING by a crashed session can be aborted from any session by pm or controller once `lease_until` has passed: the run becomes `EXPIRED` with `satisfied:false` and `failure_code:"RUN_LEASE_EXPIRED"`.
 
-When the target or authority changes, reread the new packet, submit `review.rebase` for the same case, then explicitly refresh and read its updated packet before judging. At most two changed-head rebases are durable per case. The case's original `fact` and `target_digest` remain intact; `review_rebases` records reader and old/new bases. Exhaustion retains the scoped hold. Auditor agreement is also tied to the same evidence dependencies, so an old agreement cannot authorize a later changed repair.
+After a real process timeout the controller stores TIMED_OUT; startup and supported execution errors store EXECUTION_FAILED with the exact available stdout and stderr in CAS, a failure code and a detail. These are non-qualified terminal records: repeating the same request returns the original failure without launching another process. Late owner or generation results stay historical and cannot satisfy a gate.
 
-### Driver exit and independent repair compliance
+### Deliveries
 
-After UPHOLD/MODIFY_SCOPE the job is AWAIT_REPAIR. A normal driver final response clears its durable occupancy and does not spend a failure retry; the endpoint is retired. After PM's authorized recovery permit, actual repair execution and current independent PASS/ACCEPTED, invoke `managed run --job <original-case>:contest --repair-file <json> --driver-config <config>`. The repair file names `{"repair_tasks":["<task>"]}` or a current independently matched pre-active `candidate`. No Supervisor signature is needed. The same fields and `counterexample_eliminated:true` belong in the independent driver's REPAIR_VERIFIED submission.
+`run.export` installs a run's declared outputs to the reviewed delivery paths. `delivery.record` is the constructor's path for a file that is not run output; it refuses `EXPORTED_OUTPUT` when the current delivery for that path was produced by a run. A hand-recorded file never replaces controlled output.
 
-The controller checks real repair qualification before dispatch, atomically claims a new endpoint/generation and preserves the original reviewer lineage, merits decision, two-repair cap and twelve-review budget. Two reconstructed controllers cannot occupy the same job. Old endpoints and stale-generation retirement/failure messages are refused. The job's `decisions` history records endpoint/generation/basis for UPHOLD and the later compliance decision. The compliance decision checks the assigned repair and current evidence again before releasing the hold. An unfinished repair, revoked grant, unread new input, wrong reviewer or expired job cannot release it. Transport failures have one retry through bounded `job.resume`; successful phase transitions do not consume that retry.
+## 10. Reports
 
-## Registered canonical execution
+`report.record` takes `kind` of development, critique or acceptance, plus task, `source_blob`, outcome, round, criteria and an explicit `revises` for a predecessor.
 
-The principal console accepts `canonical.register`. Required fields are `id`, `kind` (`command` or `compose`), absolute `executor_argv`, `executor_files`, and `expected_version`; `version_args` defaults to `["--version"]`. Executor scripts must be installed outside the writable product tree and are pinned by bytes. A command profile provides fixed `command` argv elements, where whole elements `{work}` and `{out}` name frozen inputs and output staging. A Compose profile fixes `compose_file`, `service`, and `required_inputs`. Only declared non-secret `values` enter the environment. Roles cannot register executors or change profile arguments.
+A report for a task that has obligations, with outcome COMPLETE, PASS or ACCEPTED, refuses `CRITERIA_TABLE_REQUIRED` when the document contains no criteria rows. The Markdown table must agree with the structured criteria (`CRITERIA_SOURCE_CONFLICT`), and every written row must map to an obligation (`CRITERIA_MAPPING_GAP`). Use stable obligation ids, or explicit sub-ids with a complete `criteria_map`.
 
-A requirement selects that environment with `argv:["{canonical}"]` and includes its fixed inputs. The controller checks actual executor/version bytes and environment identity, freezes inputs, invokes the profile, stores binary logs and predicates, and exports declared output through the journaled delivery path. The run records `execution_kind:canonical_profile_execution`; the external executor is a trusted host component and is not described as a bubblewrap process. A generic command adapter must implement its registered containment contract; do not register an arbitrary product script as that adapter.
+Positive critique and acceptance require the admission, current controlled verification, all required outcomes met and the current development report. Acceptance also cites the current independent PASS critique, written by a different session. Failure and partial reports remain recordable.
 
-Compose configuration parsing itself runs inside the Linux/WSL allowlist sandbox before resolved effects are checked. No host home, credential file, or Docker socket is visible to this parser. Resolved builds/mounts must use frozen inputs; host namespaces, privileges, devices, external secret/config mounts and sockets are rejected. The effective service uses read-only inputs, writable `/out`, no network, and no dependencies started implicitly. Effective configuration is immutable execution evidence. A registered Docker executor then runs this approved service. Missing Docker/image/runtime capabilities are explicit failures requiring that exact environment to be provisioned; they never substitute the local Python executor. Integration fixtures exercise the actual adapter protocol and parser containment without starting production services.
+Three product rounds per lineage. A same-round correction with unchanged source, criteria, outcome and product is a `report_annotation` (`annotation_blob`) that preserves the qualified head; a substantive change needs the next bounded round (`SUBSTANTIVE_REVISION_REQUIRES_ROUND`). Task replacement carries the product lineage and cannot reset its budget.
 
-## Native Windows paths and dependency recovery
+Noticed-but-not-fixed items become live flags at record time; relay items become relay records. `flag.raise` is limited to pm and the reporting roles and requires the mission to have a root or an intake. `flag.change` performs retire, replace, reopen and dispose as separate recorded operations, and a FIXED disposition must cite current accepted product evidence.
 
-Git identity reads disable fsmonitor/hooks and clean/process filters from all configuration layers, discard ambient `GIT_*` routing and command-config overrides, and retain binary path parsing. Normal checkout settings such as `core.autocrlf` remain effective. Repository configuration cannot execute a host filter during preflight before the managed sandbox. This restriction applies to identity reads; it does not alter the product's checked-out bytes or invoke Git writes.
+## 11. Obligations and their disposition
 
-Principal `authority.record` accepts `constraint_scopes` keyed by a declared constraint with values `mission` or `project`. Omitted entries mean mission scope. A reviewed candidate cannot turn a mission constraint into a project standing contract; activation rechecks the principal scope before creating any root or contract. Explicit project authority permits project contracts. Normal PM decisions remain scoped, revisable decisions under their grant.
+An obligation is REQUIRED, then MET by an ACCEPTED report, or disposed explicitly.
 
-Standing contracts use one applicability interpretation at grant checks, root review/activation, plan review/admission, positive gates, scoped review bases, role packets and relay. A contract's `mission` is provenance; `project` and migrated `legacy_project` apply across missions. Native constraints combine conjunctively: conflicting active conditions require a principal correction, rather than silently choosing the newest mission's authority. Mission constraints remain local. The principal may set `constraint_policies` per clause with `applicability:{"missions":[...],"exclude_missions":[...]}`, finite Unix `expiry`, and `precedence:"principal"`. Omitted applicability is project-wide for project contracts. PM candidates cannot invent these policies, expiry, or scope. Principal project constraints are installed during atomic activation even if a candidate omits its contract list.
+`obligation.defer` (pm, `defer` permission or principal) names the grant, domain, owner and `reason_blob`, and sets AUTHORIZED_DEFERRED. `obligation.cancel` takes the same fields and sets AUTHORIZED_CANCELLED with `cancelled_by`. Both are disclosed gaps with a responsible owner, never verified-fixed, and both are returned in the close outcomes.
 
-New candidates and authority replacements preserve existing standing contracts. The owning principal explicitly retires one using `contract.retire` with `contract`, the active owning `authority` (or its explicit replacement lineage), and a new original `source_blob` recording the instruction. Retirement is journaled; original text/value and provenance remain. Another mission's authority cannot retire it. To replace a condition, retire it explicitly and activate the reviewed replacement principal condition. Expired, retired and non-applicable contracts are excluded from current gates. Active legacy text is preserved with its exact original event bytes and `legacy-recorded` assurance; migration does not invent structured clause values or upgrade old attestations into managed principal authentication.
+`consume` and `wave.integrate` recheck current acceptance, source, verification, authority and holds.
 
-Before local `root.review` or `plan.review`, call `contracts.snapshot` with `mission`, read its required contract/owning-authority records and source CAS bytes, then submit the returned `contract_scope_digest`. The supported adapter and bridge use the same request. Managed callers read their delivered packet; the broker supplies this digest in its actual-read receipt and never refreshes a submitted judgment silently. Necessary cross-mission contracts and owning principal sources are included, but unrelated roots, grants, tasks and reports are not imported from those missions. Related contract changes invalidate old MATCH, admission/tickets and review bases; unrelated ledger sequence changes do not. Existing PM decisions are rechecked against newly applicable contracts at positive gates. `decision.record` may limit `tasks` to mission task ids; omission means all tasks of that domain, and revisions inherit the previous scope unless explicitly changed.
+## 12. Counterexamples, cases and barriers
 
-Mandatory task calibration now records `dependency_digest` for the current TaskSpec, applicable PM decisions/authority/contracts, declared source inputs, actual output bytes, required run/environment records, current deliveries and current development/critique reports. Bundles include the actual frozen input files, not only a manifest hash; managed Calibrators must read those bytes. ACCEPTED records the qualifying cell. Acceptance, consumption, dependencies and repair compliance recheck the same current basis. A new run or actual product B with unchanged TaskSpec cannot borrow A's ALIGNED cell. Read B's new bundle, produce a new cell and renew the relevant reports/acceptance. Acceptance and obligation accounting, consumption records, annotations and unrelated task decisions are deliberately excluded from that basis, so successful acceptance does not invalidate itself. True DRIFT latches remain separate and need their existing explicit release; merely preparing a new bundle/cell cannot erase them. Historical reports/cells lacking these current-product bindings remain history and require fresh qualification before positive reuse.
+`issue.report` distinguishes ADVISORY from MANDATORY_COUNTEREXAMPLE. A mandatory report needs mission, `source_blob`, `counterexample_blob`, a `target` that resolves to exactly one object (name `target_kind` if ambiguous), and either affected `tasks` and `obligations` or a resolvable `authority_span` quote.
 
-`PathRef` supports `root_id`, `relative_segments`, `origin_platform` and optional display metadata. `capabilities.execution_root` and managed packets expose the current root id. The id binds the resolved execution directory, device/inode and Git common-directory identity; working checkouts remain distinct. A PathRef for another root is refused before input or output access. Frozen cwd/output aliases retain the original logical binding. String paths remain an explicit-root compatibility form.
+One receipt creates the case, the scoped PENDING_SCREEN barrier, the fence and the screening job, in the same transaction. Duplicate facts reuse their case. Ordinary suggestions and unrelated tasks are never globally frozen.
 
-On Windows, `mp bridge wsl` resolves its target using the actual distribution's `wslpath`, probes the Linux root and ledger project, and persistently registers both filesystem identities plus the selected distribution/interpreter/entry. The default registration is under `.claude/mission-pipeline/bridge-mappings`; `--mapping-file` selects a separate controller-owned registration. Subsequent calls recheck both identities and project, translate only PathRef root ids covered by that registration, and verify the target root again in the server. Wrong/stale bindings return `ROOT_MAPPING_MISMATCH`. After an intentional root replacement, choose a new registration file after inspecting the actual new root; do not silently retarget the old file. This registration is configuration, not a bearer credential. The stdio server remains a trusted-console transport; roles receive only their private broker endpoint.
+Barrier phases that block a positive use are PENDING_SCREEN, ESTABLISHED_HOLD, CONTEST_PENDING, SCREENING_UNAVAILABLE and UNRESOLVED_LIMIT. A blocked positive use refuses `SCOPED_BARRIER` with the case id and the phase.
 
-All Engine-based entries, including the supported field adapter and bridge, resolve the same `mp.json` ledger binding. Use a root-relative ledger path for a shared Windows/WSL project. An absolute path from the other platform is refused; it is never interpreted as a same-named local directory. Root/project mapping does not bypass owner epoch fencing, and the supported handoff protocol is still required before changing the writer environment.
+## 13. Screening, permits and resolution
 
-Win32 extended paths are retained for file I/O and percent-encoded as complete pathnames in read-only SQLite URIs. Since CreateProcess still limits its current-directory string, a long local cwd receives a private short NTFS junction created with Win32 APIs. The process sees the same directory; provenance records the resolved path. Cleanup removes only the generated junction. Frozen execution staging uses a short temporary root. Network cwd aliases are not guessed; use a declared local execution root or WSL bridge. Current worktree discovery uses `--show-toplevel`; a shared ledger is an explicit mp.json binding, and execution-root identity remains distinct in run receipts.
+`issue.screen` (supervisor) submits ESTABLISHED or DISMISSED. Dismissing a case an Auditor raised opens a Contest instead of resolving it.
 
-`env create` can take `dependency_lock` and `wheelhouse`, both inside its declared cwd. It creates a fresh venv, bootstraps that venv's pip, installs only local wheels with `--require-hashes --no-index`, records the lock hash, and verifies actual import origins. It never installs globally or guesses missing packages. Existing/copied environments remain intact. A missing ensurepip component, bad lock, absent wheel or wrong dependency remains a specific environment failure until the declared source is corrected and a fresh environment succeeds.
+`recovery.permit` (pm) authorizes at most two repairs per case inside the existing grant, for a bounded time. Normal consumption and closing stay blocked. A repair task can run and receive independent product acceptance under that hold. A permit cannot waive a different hold and cannot authorize closing.
+
+`case.resolve` (supervisor) ends the case with DISMISSED, VERIFIED_FIXED or AUTHORIZED_EXCEPTION.
+
+- It refuses `CONTEST_PENDING` while a contest is PENDING or INPUT_INCOMPLETE. A Supervisor cannot pre-empt an independent decision.
+- It refuses `SCREENING_REQUIRED` for DISMISSED on a case with no `screening_author`. An unscreened case cannot be dismissed.
+- VERIFIED_FIXED names actual repair tasks or a corrected pre-active candidate, and must address the original counterexample.
+- AUTHORIZED_EXCEPTION needs a real scoped defer grant.
+
+## 14. Contest
+
+`case.contest` is open to pm and to every reporting role: constructor, crititor, stabilizer, auditor, calibrator, challenger, architect, researcher and supervisor. The case must be DISMISSED, ESTABLISHED, VERIFIED_FIXED or AUTHORIZED_EXCEPTION, and not already `independent_final`. One contest per case.
+
+A mandatory Auditor's substantive disagreement with a dismissal, a claimed repair or an exception creates that contest automatically; PM need not volunteer it and cannot suppress it.
+
+`contest.decide` belongs to a fresh independent Stabilizer endpoint, and the result applies directly with no second Supervisor signature.
+
+| Outcome | Effect |
+|---|---|
+| `DISMISS_ORIGINAL` | The accusation was false. Releases a latch this case created |
+| `REPAIR_VERIFIED` | The original issue was true and the current repair eliminated it. Preserves the established history |
+| `AUTHORIZED_EXCEPTION_VERIFIED` | A real scoped defer authority covers the gap |
+| `UPHOLD` | The issue stands. The job becomes AWAIT_REPAIR with a repair window of at least one day |
+| `MODIFY_SCOPE` | Narrows a false overbroad hold. It can never expand the reported scope |
+| `INPUT_INCOMPLETE` | Buys one requested `case.supplement`, not a fresh merits contest |
+
+A Supervisor cannot overwrite an independent final result (`CONTEST_FINAL`). `audit.agree` binds the agreement to the same evidence dependencies, so an old agreement cannot authorize a later changed repair.
+
+## 15. Jobs, deadlines and resume
+
+`project.configure` stores `review_deadline_seconds`: 86400 in local mode, 300 in managed mode, or an explicit integer of at least 60. Every screening, contest, supplement, resume and repair-compliance deadline uses it. The UPHOLD repair window is `max(86400, value)`.
+
+`job.resume` (controller or pm) also accepts a PENDING or AWAIT_REPAIR job whose deadline has passed, with no prior `jobs.expire`. It keeps the two-resume cap, replaces the endpoint generation and retains the independent reviewer lineage. When the cap is spent it reports `REVIEW_EXPIRED` with a `recovery` text.
+
+`issue.screen` and `contest.decide` on an expired job auto-resume inside the same transaction when a resume remains: generation plus one, `auto_resumed: true`. With no resume left they refuse `REVIEW_EXPIRED`. `jobs.expire` remains for controllers.
+
+Transport failures have one bounded retry; successful phase transitions do not consume it. Two reconstructed controllers cannot occupy the same job, and stale-generation retirement or failure messages are refused.
+
+## 16. Review readings, rebase and successor cases
+
+`issue.screen`, `case.resolve`, `contest.decide`, `audit.agree`, `latch.release` and `review.rebase` each require a `review_basis`.
+
+In local mode, call `review.snapshot` with `{"case":"<id>"}` or `{"latch":"<id>"}`, read the referenced source blobs, and retain the returned basis in the later submission. Local identity and read claims remain self-asserted. Managed packets contain `review_bases`, and the broker retains only a basis actually delivered and actually read.
+
+The basis covers the original case, the current target, the current applicable authority and grants including expiry, task evidence, scoped barriers and latches, and the job generation. An unrelated journal event does not invalidate the reading. A stale refusal commits no release and no budget charge.
+
+When the target or the authority changes, reread the new packet and submit `review.rebase` for the same case, then refresh and read its updated packet before judging. The case's original `fact` and `target_digest` stay intact; `review_rebases` records the reader and the old and new bases.
+
+At most two changed-head rebases are durable per case. On the third, the engine does not deadlock. It closes the current case with `status:"TARGET_REPLACED"`, releases its barrier, deactivates its permits, marks any pending contest SUPERSEDED and completes that job. It then creates a successor case with the same mission, lineage, scope, target, target_kind, source blob, counterexample blob, audit flag and audit stance, a new `target_digest` and `fact`, `supersedes` pointing at the old case, the repair count carried over, `status:"REPORTED_PENDING_SCREEN"`, a PENDING_SCREEN barrier, a fresh screening job and `review_head` at the current basis head. The response is `{"case": <new case>, "superseded": "<old id>"}`.
+
+## 17. Budgets
+
+| Budget | Cap | Key |
+|---|---|---|
+| Product rounds | 3 | task lineage |
+| Case repairs | 2 | case |
+| Merits contests | 1 | case |
+| Requested supplements | 1 | case |
+| Corrective review calls | 12 | `<case id>:correction`, charged by `issue.screen` and `contest.decide` |
+| Durable review rebases | 2 | case, then a successor case |
+| Job resumes | 2 | job |
+| Run takeover generations | 2 | requirement key |
+| Independent reruns | 2 | task lineage |
+
+The correction budget is per case, so an unrelated later case starts fresh. A mission-level `<lineage>:correction_total` counter is kept for reporting only and has no cap.
+
+`rule.record` requires an established case, an applicability statement and counterexamples; rules are explicitly retired when invalid.
+
+## 18. Required verification and reuse
+
+Required verification selects the latest attempt for that requirement, including incomplete and unsuccessful states, before evaluating its predicate. Ordinary reuse considers only this current attempt: it cannot skip a timeout or a pending attempt to borrow an earlier PASS. A live attempt returns pending.
+
+Unrelated and non-required diagnostics are excluded from required qualification and from calibration dependencies. New reports cannot promote an unfinished or failed required attempt into PASS or ACCEPTED. Once the actual current attempt succeeds, normal current reports and any required calibration restore consumption and closure.
+
+## 19. Calibration
+
+`bundle.record` collects the original authority, grants, actual delivery documents, data and images, task and decision sources, controlled run inputs and logs, and exported outputs. Required declared delivery paths cannot be omitted. Missing CAS yields `INPUT_INCOMPLETE`. Bundles include the actual frozen input files, not only a manifest hash.
+
+`calibration.record` uses the current bundle at an explicit wave or task scope. Outcomes are ALIGNED, SUSPICION, DRIFT and INPUT_INCOMPLETE. Task cells never interrupt the aggregate wave sequence. DRIFT, and a second consecutive aggregate SUSPICION, create a mandatory case and a latch together.
+
+The calibration basis for a task is the current TaskSpec, the applicable PM decisions, authority and contracts, the declared source inputs, the actual output bytes, the required run and environment records, the current deliveries and the current development and critique reports.
+
+The product file set in that basis is the task's `outputs`, plus the task's `write_paths`, plus the required runs' declared inputs, deduplicated and order-stable. A helper listed only in `write_paths` is therefore covered: rewriting it invalidates the cell and the acceptance that rests on it.
+
+Acceptance and obligation accounting, consumption records, annotations and unrelated task decisions are deliberately excluded from the basis, so successful acceptance does not invalidate itself. A new run, or a different product with an unchanged TaskSpec, cannot borrow the old ALIGNED cell.
+
+`latch.release` belongs to the principal, or to the Stabilizer whose contest ended DISMISS_ORIGINAL on that latch's case. A later ordinary ALIGNED never erases a true latch.
+
+## 20. Closure
+
+Build a current bundle, obtain `audit.record` and `close.review`, then submit `mission.close` with a qualified `closing_run` and a delegated close grant, or as the principal.
+
+`audit.record.outcome` is PASS, FINDINGS or INPUT_INCOMPLETE. PASS requires zero findings and FINDINGS at least one; the outcome is derived when absent. `close.review.outcome` is PASS, FAIL or INPUT_INCOMPLETE.
+
+`mission.close` requires the audit outcome to be PASS or FINDINGS, the close review to be PASS over the same current bundle, every obligation met or explicitly disposed, every task accepted or wholly excepted, no live OPEN flag, no applicable barrier or latch, and a COMPLETE satisfied run whose requirement has `scope: "closing"` with its inputs still current.
+
+No unresolved mandatory case can disappear between auditing and closing: every positive transaction rechecks the scoped barriers. Authorized gaps remain disclosed in the returned `outcomes`. `mission.reopen` is an explicit principal action.
+
+`relay <mission>` produces an immutable complete relay artifact without sending it. `render` creates the derived current view; rendering happens outside the lock and publication rechecks epoch and sequence inside it. A successful business commit with a stale or unwritable view returns `committed: true, view_stale: true`, never a fake rollback.
+
+## 21. Seal
+
+`mp seal <document>` reads a Markdown document, finds its ```mp-json``` block, stores the whole document in CAS and submits the request. The default `request_id` is `seal-<sha256 of the document>`.
+
+In local mode seal is also a convenience layer. It:
+
+- sets `source_blob` only when the block does not already name one, and always records `document_blob`;
+- validates list sections only for `report.record`, so an unrelated section no longer refuses the whole document;
+- fills `contract_scope_digest` for a root or plan review when the field is absent;
+- fills `review_basis` for the six review actions when the field is absent;
+- fills `admission` with the task's latest admission, `critique` with the task's current PASS critique for an acceptance, and `revises` with the current report of the same kind;
+- marks `reading_assurance: "self-asserted"` when it filled a review field;
+- echoes the submitted request in its output.
+
+Managed seal behaviour is unchanged: the broker's packet supplies those fields and the read receipt, and nothing is refreshed silently at commit.
+
+## 22. Writer identity and ownership
+
+`environment_id()` is `sha256(platform family, token)[:24]`, where the token is read from `<config dir>/mission-pipeline/writer-id` and created with random hex on first use. The config directory is `$XDG_CONFIG_HOME` or `~/.config` on POSIX and `%APPDATA%` on Windows. A hostname change, a WSL distribution rename, or a cron or systemd launch no longer changes the identity.
+
+`legacy_environment_id()` keeps the old hostname-based formula, and `owner()` accepts either, so existing ledgers keep working. `maintenance recover` rewrites the owner record to the new id.
+
+`maintenance takeover --confirm <project id>` requires `--actor principal` and claims a ledger whose owner environment is unreachable: a new environment, epoch plus one, and `takeover_from` recorded. The project id must match the ledger's own.
+
+A ledger has one writer environment. `maintenance handoff --target-environment <id>` followed by `maintenance accept` on the destination is the planned move; every handoff increments the epoch and fences old sessions.
+
+## 23. Per-write cost
+
+`recover()` verifies only the journal tail past a watermark: `verified_seq` plus a byte offset held in `runtime_meta`. The full replay comparison stays in `doctor` and `rebuild`, which is where you want it.
+
+`source_manifest` uses identity_version 3. Clean tracked files take their git blob id from `git ls-files -s -z`; only files that `git status` reports as changed are hashed with sha256. A large tracked tree no longer costs a full hash on every run.
+
+## 24. Migration and legacy continuity
+
+`migrate --plan` inspects a legacy ledger without changing it and reports `source_seq`, `journal_sha256`, the calibration `bridge`, the `missions` inventory, the compiled `contracts`, the per-artifact `overlays` with status VERIFIED, LEGACY_UNHASHED, HASH_MISMATCH or UNAVAILABLE, and `acceptances`: every ACCEPTED verdict recovered from a sealed GroupReport, with its legacy mission, task key, artifact, sha256 and sequence.
+
+`migrate` preserves the original journal and documents, freezes the legacy writer, imports the released dispatcher's replay semantics, and installs the semantic overlays and the calibration-release history before publishing READY. Migration retains the frozen adoption event in CAS before publishing its bootstrap owner, so an interruption cannot publish READY without the legacy overlays and the release bridge.
+
+`legacy.adopt` (pm or principal) names the v4 `mission`, the `legacy_mission` and a `source_blob`. Omitting `artifacts` adopts every VERIFIED overlay of that legacy mission. A closed legacy mission stays closed without an explicit principal reopening. `root.activate` refuses `LEGACY_SCOPE_ADOPTION_REQUIRED` while an open legacy scope of the same name is unadopted.
+
+`legacy.accept` (pm) takes `{mission, obligation, legacy_artifact}`. It requires the adopted scope, a VERIFIED overlay and a matching acceptance from the adoption plan, and sets the obligation MET with `evidence: "legacy:<artifact>"` and `assurance: "legacy-recorded"`. `mission.close` accepts obligations settled this way, and `bundle.record` includes the adopted overlay blobs so the Auditor reads the real bytes.
+
+Active legacy text keeps its exact original event bytes and its `legacy-recorded` assurance. Migration never invents structured clause values and never upgrades an old attestation into managed principal authentication. `rollback` is available only before the first v4 business transition, and preserves the retired v4 evidence.
+
+## 25. Managed transport (experimental)
+
+Managed mode is implemented and tested, but **no model driver ships in this repository**. Treat it as experimental until a trusted transport exists for your deployment.
+
+The trusted controller launches an argv-configured process with private pipes and sends `{"packet": ...}`. The driver replies with `{"tool_calls":[...]}` or `{"final_document":"..."}`. Tools are `read_blob`, `read_blobs`, `submit_blob`, `submit` and `refresh_packet`; each read returns original bytes as base64 and counts toward the same 128-tool budget. `read_blobs` accepts up to 64 references inside the eight MiB frame bound.
+
+The broker enforces packet scope, role actions, path scope, epoch, actual required reads and finite tool, step and deadline budgets. It supplies input-read receipts and identity; model-authored identity fields authenticate nothing. One `managed run` is one packet, at most 32 steps and 300 seconds.
+
+`mp_runtime.reference_driver` is an executable framing example, not a production driver. A production driver may call an external model API, but must not give that model parallel unrestricted host tools. `parallel_host_tools: false` in the driver configuration documents the host contract; the operator has to actually remove the other tools.
+
+After UPHOLD or MODIFY_SCOPE the job is AWAIT_REPAIR. A normal driver final response clears its durable occupancy without spending a failure retry. After a PM recovery permit, actual repair execution and current independent acceptance, a fresh controller invokes `managed run --job <case>:contest --repair-file <json> --driver-config <config>` with `{"repair_tasks":["<task>"]}` or a current independently matched pre-active `candidate`. No Supervisor signature is needed, and the compliance decision rechecks the assigned repair and the current evidence before releasing the hold.
+
+## 26. Registered canonical execution
+
+The principal console accepts `canonical.register` with `id`, `kind` (`command` or `compose`), absolute `executor_argv`, `executor_files` and `expected_version`; `version_args` defaults to `["--version"]`. Executor scripts are installed outside the writable product tree and pinned by bytes. A command profile fixes `command` argv elements where whole elements `{work}` and `{out}` name frozen inputs and output staging; a compose profile fixes `compose_file`, `service` and `required_inputs`. Roles cannot register executors or change profile arguments.
+
+A requirement selects that environment with `argv:["{canonical}"]` and includes its fixed inputs. The run records `execution_kind: "canonical_profile_execution"`. The external executor is a trusted host component and is not a bubblewrap process.
+
+Compose configuration parsing itself runs inside the Linux/WSL allowlist sandbox before resolved effects are checked. No host home, credential file or Docker socket is visible to that parser. Resolved builds and mounts must use frozen inputs; host namespaces, privileges, devices, external secret or config mounts and sockets are rejected. Missing Docker, image or runtime capability is an explicit failure that never falls back to the local Python executor.
+
+## 27. Paths, Windows and the WSL bridge
+
+`PathRef` supports `root_id`, `relative_segments`, `origin_platform` and optional display metadata. The root id binds the resolved execution directory, the device and inode, and the Git common-directory identity. A PathRef for another root is refused before input or output access. String paths remain an explicit-root compatibility form.
+
+Git identity reads disable fsmonitor, hooks and clean or process filters from every configuration layer, discard ambient `GIT_*` routing and retain binary path parsing. Normal checkout settings such as `core.autocrlf` remain effective.
+
+On Windows, `mp bridge wsl` resolves its target with the distribution's `wslpath`, probes the Linux root and ledger project, and persistently registers both filesystem identities plus the distribution, interpreter and entry. The default registration is `.claude/mission-pipeline/bridge-mappings`; `--mapping-file` selects a separate controller-owned registration. Wrong or stale bindings return `ROOT_MAPPING_MISMATCH`. This registration is configuration, not a bearer credential.
+
+**After upgrading the skill, re-register the bridge mappings before the first cross-platform request.** A mapping file written by an older release is not assumed compatible, and a silent retarget of an old file is exactly the failure the identity recheck exists to prevent.
+
+All Engine-based entries resolve the same `mp.json` ledger binding. Use a root-relative ledger path for a shared Windows/WSL project; an absolute path from the other platform is refused rather than reinterpreted.
+
+Win32 extended paths are retained for file I/O and percent-encoded as complete pathnames in read-only SQLite URIs. A long local cwd receives a private short NTFS junction created with Win32 APIs, and cleanup removes only the generated junction. Network cwd aliases are not guessed: use a declared local execution root or the WSL bridge.
+
+## 28. Field adapter
+
+The supported adapter is `python -m mp_runtime.field_adapter --root ... --request-file ...` with the script package on PYTHONPATH, or imported by a trusted host. Its read-only SQL helper allows reads only, never DDL, migration or writes.
+
+The adapter submits `review.snapshot` and `contracts.snapshot` through the same `--request-file`, retains the returned basis or digest, reads the blobs through the original-byte CAS interface, then supplies them in the later request. `invoke` passes the request to the same Engine and writer, and never manufactures a current reading. A local adapter actor cannot become an authenticated reviewer; a managed ledger needs the trusted console or role protocol.
+
+## 29. Failure and recovery taxonomy
+
+Deterministic source, authority, scope and predicate refusals are corrected, not retried with new ids. `BUSY_RETRYABLE` has at most two retries. `COMMIT_DURABLE_RECOVERY_REQUIRED` means the journal already committed: recover the same receipt. Old generations and stale packets cannot finish current work.
+
+Storage corruption, a missing projection and manifest recovery are distinct from semantic partial rows and from legitimate workflow holds. `doctor`, `rebuild`, `maintenance recover`, `maintenance takeover`, explicit owner `handoff` and `accept`, scoped legacy adoption and before-business `rollback` are the supported recovery paths.
+
+Bootstrap publishes a complete nonempty owner directory atomically and READY last. A recovery manifest is preserved so a missing manifest does not cause an existing journal to be overwritten as a fresh ledger. The frozen schema-3 dispatcher preserves historical semantics, and new overlays never rewrite the old journal or silently upgrade old PASS decisions.
+
+Malformed, duplicate-key, nonfinite, truncated and oversized JSON frames are refused. Pipe writes as well as reads have a deadline, so a transport that stops reading cannot hang the controller.

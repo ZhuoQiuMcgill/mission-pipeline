@@ -6,6 +6,8 @@ Read references/runtime-v4.md. Replace every placeholder using current packet id
 
 Describe the original authority, current delivery and concrete evidence read. Preserve true gaps and authorized stage ownership.
 
+MATCH binds this exact candidate to this exact authority, and nothing is effective until root.activate. In local mode `seal` fills `contract_scope_digest` from the current contract snapshot and records reading_assurance: self-asserted; read the named contract and authority sources yourself before sealing.
+
 ## Single risk
 
 - None
