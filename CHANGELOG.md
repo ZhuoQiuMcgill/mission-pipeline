@@ -41,26 +41,41 @@ record shape, and existing 2.0 ledgers keep working. Rationale record:
 - **Dismissal is contestable and cannot pre-empt a contest.** `case.resolve` refuses
   `CONTEST_PENDING` while a contest is PENDING or INPUT_INCOMPLETE, and refuses
   `SCREENING_REQUIRED` for a DISMISSED outcome on a case with no `screening_author`.
-  `case.contest` is open to pm and to every reporting role.
+  `case.contest` is open to pm and to every reporting role, on any case that is not replaced
+  by a successor (`CASE_NOT_CONTESTABLE`) and not already final (`CONTEST_FINAL`), so a
+  screening nobody reached in time can still go to an independent Stabilizer. `case.supplement`
+  is also open to the Challenger, whose defence of a calibration accusation is exactly the one
+  bounded supplement.
 - **`controller` is the executor's internal identity.** The CLI, the field adapter and
   `bridge.serve_one` refuse actor role `controller` with `ROLE_FORBIDDEN`, including through
-  `MP_ACTOR`. `runner.execute` and the managed broker still construct it in process.
+  `MP_ACTOR`. `runner.execute` and the managed broker still construct it in process, and
+  `run.execute` itself is accepted only from a constructor, crititor or stabilizer seat, matching
+  the managed role table.
 - **A blanket PM decision no longer invalidates accepted work.** A decision that lists no
-  `tasks` applies to a task only when that task has no current ACCEPTED acceptance created
-  before the decision. All call sites use the same rule.
+  `tasks` applies to a task only when that task has no ACCEPTED acceptance, current or
+  superseded, created before the decision, so the rule stays stable across later rounds. All
+  call sites use the same rule.
 - **Files in `write_paths` are inside the product digest.** The calibration basis is task
   outputs plus task write paths plus required-run inputs, deduplicated and order-stable, so a
-  helper rewritten after acceptance invalidates the cell that judged it.
+  helper rewritten after acceptance invalidates the cell that judged it. A write path that
+  resolves inside private runtime state is skipped there; `work.write` refuses it anyway.
 - **A dead run can be aborted from another session.** `run.abort` by pm or controller is allowed
   when the run is RUNNING and its lease has expired: `EXPIRED`, `satisfied: false`,
   `failure_code: "RUN_LEASE_EXPIRED"`. The owner-session path is unchanged.
 - **Reports without a criteria table no longer bypass the check.** `report.record` refuses
-  `CRITERIA_TABLE_REQUIRED` for a task with obligations and an outcome of COMPLETE, PASS or
-  ACCEPTED when the document carries no criteria rows.
+  `CRITERIA_TABLE_REQUIRED` for a task with obligations when the document carries no criteria
+  rows and the outcome is PASS or ACCEPTED, or COMPLETE with declared `criteria`. A development
+  report that claims nothing is still recordable.
 - **Closed outcome sets.** `audit.record.outcome` is PASS, FINDINGS or INPUT_INCOMPLETE, with
-  PASS requiring zero findings; `close.review.outcome` is PASS, FAIL or INPUT_INCOMPLETE;
-  `flag.raise` is limited to pm and the reporting roles and requires a root or intake;
-  `mission.close` requires the audit outcome to be PASS or FINDINGS.
+  PASS requiring zero findings; `close.review.outcome` and `plan.review.outcome` are PASS, FAIL
+  or INPUT_INCOMPLETE and only PASS admits; `flag.raise` is limited to pm and the reporting
+  roles and requires a root or intake; `mission.close` refuses `AUDIT_OUTCOME_REQUIRED` unless
+  the audit outcome is PASS or FINDINGS. `project.configure` refuses `INVALID_REVIEW_DEADLINE`
+  for a deadline that is not an integer of at least 60.
+- **Plan review coverage reads obligation status.** `MISSING_PRODUCER` applies only to
+  obligations still REQUIRED; one already MET (including through `legacy.accept`), deferred or
+  cancelled needs no producing task, so a migrated mission plans its delivered and remaining work
+  in one plan. The refusal now lists the `missing` obligations.
 - **`delivery.record` cannot overwrite exported output.** It refuses `EXPORTED_OUTPUT` when the
   current delivery for that path was produced by a run.
 - **Writer identity survives a machine rename.** `environment_id()` hashes the platform family
@@ -100,7 +115,8 @@ record shape, and existing 2.0 ledgers keep working. Rationale record:
   name one and always records `document_blob`; validates list sections only for `report.record`;
   fills `contract_scope_digest`, `review_basis`, `admission`, `critique` and `revises` when they
   are absent; marks `reading_assurance="self-asserted"` when it filled a review field; and
-  echoes the submitted request. Managed seal behaviour is unchanged.
+  returns the request it submitted as `submitted_request` beside the result. Managed seal
+  behaviour is unchanged.
 - **Managed mode is documented as experimental.** The sandbox, broker and JSONL protocol are
   implemented and tested, but no model driver ships in this repository. README, SKILL.md,
   setup, substrate and the plugin descriptions say so.
@@ -113,10 +129,16 @@ record shape, and existing 2.0 ledgers keep working. Rationale record:
   `legacy_v3.main`, otherwise the v4 CLI. The v3 guard and exit codes move into `legacy_v3.py`.
 
 ### Validation
-- All existing entry points plus the new tests pass on WSL; the walkthrough is executed end to
-  end through the public CLI; the real 421-event 1.2 ledger migrates, adopts its open mission,
-  accepts a legacy obligation and closes under v4 on a copy. Native Windows is re-run by the
-  maintainer before field deployment.
+- All 24 entry points (`m1_smoke` through `m23_continuity`, including the new
+  `m22_usable_workflow` with 25 cases and `m23_continuity`) pass on Ubuntu WSL with Python
+  3.14.4. Part 1 of the walkthrough was executed verbatim through the public CLI: 22 requests
+  from `authority.record` to `mission.close`, root CLOSED, doctor clean, every run recorded as
+  `local-execution`. The real 421-event 1.2 ledger migrates, adopts its open mission, accepts
+  its six delivered obligations through `legacy.accept` and closes under v4 on a copy
+  (`m23_continuity`). Measured: per-write cost flat at about 1.3 ms across 600 writes instead of
+  growing from 2 ms to 12 ms; `source_manifest` on this repository 1.10 s to 0.51 s. Native
+  Windows was not re-run in this release and must be re-run by the maintainer before field
+  deployment.
 - `tests/m9_migration.py` skips its real-data test with a message when the ignored corpus is
   absent and gains a synthetic fixture test that builds a v3 ledger under `MP_COMPAT_V3=1`,
   migrates it, adopts it, accepts a legacy obligation and closes under v4.
