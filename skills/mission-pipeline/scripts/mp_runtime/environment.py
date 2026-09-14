@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import platform
+import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -28,8 +29,77 @@ print(json.dumps(result,ensure_ascii=True))
 """
 
 
+_WRITER_TOKENS = {}
+
+
+def config_home():
+    """The per-user configuration directory that holds the writer identity token."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Roaming")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "mission-pipeline"
+
+
+def writer_token_path():
+    return config_home() / "writer-id"
+
+
+def writer_token():
+    """A stable per-installation writer secret.
+
+    The 2.0 identity hashed the hostname and WSL distribution, so a PC rename or
+    a cron/systemd launch that lost WSL_DISTRO_NAME locked the ledger out with no
+    in-band recovery. The token is written once and survives both.
+    """
+    override = os.environ.get("MP_WRITER_ID", "").strip()
+    path = writer_token_path()
+    key = "env:" + override if override else "file:" + str(path)
+    if key in _WRITER_TOKENS:
+        return _WRITER_TOKENS[key]
+    token = override
+    if not token:
+        try:
+            token = path.read_bytes().decode("ascii").strip()
+        except (OSError, UnicodeError):
+            token = ""
+    if not token:
+        token = secrets.token_hex(16)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(fd, (token + "\n").encode("ascii"))
+            finally:
+                os.close(fd)
+        except FileExistsError:
+            try:
+                token = path.read_bytes().decode("ascii").strip() or token
+            except (OSError, UnicodeError):
+                pass
+        except OSError:
+            # No writable configuration home: keep the pre-2.1 machine identity
+            # rather than inventing a new one on every process.
+            token = "volatile:" + legacy_environment_id()
+    _WRITER_TOKENS[key] = token
+    return token
+
+
+def platform_family():
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform.startswith("win"):
+        return "win32"
+    return "darwin" if sys.platform == "darwin" else sys.platform
+
+
 def environment_id():
-    # An identity of the writer platform, not role authentication.
+    # An identity of the writer installation, not role authentication.
+    return hashlib.sha256(json_bytes([platform_family(), writer_token()])).hexdigest()[:24]
+
+
+def legacy_environment_id():
+    """The 2.0.0 formula; still accepted so existing owner records keep working."""
     distro = os.environ.get("WSL_DISTRO_NAME", "")
     return hashlib.sha256(json_bytes([platform.node(), sys.platform, distro])).hexdigest()[:24]
 

@@ -77,6 +77,29 @@ def calibration_bridge(events):
     return {"latches": latches, "unresolved": unresolved, "verdicts": verdicts}
 
 
+def legacy_acceptances(events, missions):
+    """Every recorded v3 acceptance verdict, as an adoptable credit.
+
+    A sealed GroupReport carries the stabilizer's ACCEPTED verdict for one task
+    cell. That judgement was earned once; 2.1 lets the PM credit it instead of
+    re-running the whole chain for work the legacy mission already finished.
+    """
+    items = []
+    for event in events:
+        if event.get("result") != "OK" or event.get("action") != "artifact.sealed":
+            continue
+        payload = event.get("payload", {})
+        artifact = payload.get("artifact") or {}
+        if not any(v.get("kind") == "ACCEPTED" for v in payload.get("verdicts", [])):
+            continue
+        mission = artifact.get("mission")
+        items.append({"legacy_mission": mission,
+                      "mission_name": (missions.get(mission) or {}).get("name"),
+                      "task_key": artifact.get("key"), "artifact": artifact.get("id"),
+                      "sha256": artifact.get("sha256"), "seq": event["seq"]})
+    return items
+
+
 def adoption_plan(ledger, source_root=None):
     ledger = Path(ledger)
     journal = ledger / "events.jsonl"
@@ -121,7 +144,9 @@ def adoption_plan(ledger, source_root=None):
         if not source.exists() and not path.is_absolute() and path.parts[:1] == (".claude",):
             source = root.joinpath(*path.parts[1:])
         expected = artifact.get("sha256")
-        item = {"artifact": aid, "path": str(path), "expected_sha256": expected, "status": "UNAVAILABLE"}
+        item = {"artifact": aid, "mission": artifact.get("mission"), "key": artifact.get("key"),
+                "category": artifact.get("category"), "path": str(path),
+                "expected_sha256": expected, "status": "UNAVAILABLE"}
         if source.is_file():
             content = source.read_bytes()
             actual = hashlib.sha256(content).hexdigest()
@@ -135,6 +160,7 @@ def adoption_plan(ledger, source_root=None):
         overlays.append(item)
     return {"source_seq": len(events), "journal_sha256": hashlib.sha256(raw).hexdigest(),
             "bridge": bridge, "overlays": overlays, "missions": missions, "contracts": list(contracts.values()),
+            "acceptances": legacy_acceptances(events, missions),
             "legacy_event_count": len(events), "ready": not bridge["unresolved"]}
 
 

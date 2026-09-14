@@ -1,11 +1,13 @@
 import base64
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from v4_support import ROOT, Fixture, refuses
@@ -301,6 +303,44 @@ class BoundaryTests(unittest.TestCase):
                 else:
                     self.assertEqual("RELEASED", engine.object("barrier", case["id"])["phase"])
                     f.call("pm", "task.dispatch", admission=f.admission)
+
+    def test_write_cost_follows_the_journal_tail_not_its_length(self):
+        """S16: every write used to re-read, re-checksum and re-compare the whole
+        journal. The watermark keeps the tail verified; full replay stays in
+        doctor(), rebuild() and `maintenance recover`."""
+        store = self.f.engine.store
+        engine = self.f.engine.with_actor(Actor("principal", "seat:principal"))
+        times = []
+        for i in range(600):
+            start = time.perf_counter()
+            engine.mutate("project.configure", {"mode": "local"}, "cost-probe-" + str(i))
+            times.append(time.perf_counter() - start)
+        first, last = sum(times[:100]) / 100, sum(times[-100:]) / 100
+        self.assertLessEqual(last, 2 * first,
+                             "per-write cost grew with journal length: %.4fs -> %.4fs" % (first, last))
+        with contextlib.closing(store.connect(readonly=True)) as conn:
+            mark = store.watermark(conn)
+        segment = store.path / store.manifest()["segments"][-1]["path"]
+        self.assertEqual(store.inspect()["seq"], mark["verified_seq"])
+        self.assertEqual(segment.stat().st_size, mark["offset"])
+        self.assertEqual(store.manifest()["segments"], mark["segments"])
+        # No watermark, or one that does not match the projection: verify in full.
+        with contextlib.closing(store.connect()) as conn:
+            conn.execute("DELETE FROM runtime_meta WHERE key='journal_watermark'")
+            conn.commit()
+        self.assertFalse(store.tail_recover())
+        store.recover()
+        self.assertTrue(store.doctor()["ok"])
+        # The tail path trusts its watermark; the full paths still catch a
+        # projection written outside the write path.
+        with contextlib.closing(store.connect()) as conn:
+            conn.execute("UPDATE runtime_objects SET body=? WHERE kind='config'", ('{"id":"project","mode":"forged"}',))
+            conn.commit()
+        store.recover()
+        refuses(self, "DATABASE_DIVERGENCE", lambda: store.recover(full=True))
+        refuses(self, "DATABASE_DIVERGENCE", lambda: store.doctor())
+        self.assertTrue(store.rebuild()["ok"])
+        self.assertTrue(store.doctor()["ok"])
 
 
 if __name__ == "__main__":

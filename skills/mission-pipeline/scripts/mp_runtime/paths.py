@@ -145,32 +145,16 @@ def git_path(raw):
 
 
 def source_manifest(tree, ledger=None):
+    """Identity of the tree actually judged.
+
+    A clean tracked file already has a content identity git computed when it was
+    staged: the index blob id. Only paths git status reports as changed are read
+    and hashed, so the cost follows the working change, not the repository size.
+    """
     tree = Path(tree).resolve()
     commit = git_text(["rev-parse", "--verify", "HEAD^{commit}"], tree).strip()
-    entries = []
-    names = git_bytes(["ls-files", "-z"], tree).split(b"\0")
-    for raw in sorted(n for n in names if n):
-        try:
-            rel = git_path(raw)
-            path = io_path(tree / rel)
-            if rel.startswith(".claude/") or (ledger and contained(path, ledger)):
-                continue
-            if not path.exists() and not path.is_symlink():
-                # A tracked deletion is an actual, reproducible source state.
-                data_hash, kind = None, "deleted"
-            elif path.is_symlink():
-                data_hash = hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest()
-                kind = "symlink"
-            else:
-                data_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-                kind = "file"
-        except (OSError, UnicodeError) as exc:
-            raise RuntimeRefusal("SOURCE_INCOMPLETE", "Tracked source cannot be read losslessly",
-                                 path_bytes=base64.b64encode(raw).decode("ascii")) from exc
-        entries.append({"path_b64": base64.b64encode(raw).decode("ascii"),
-                        "sha256": data_hash, "kind": kind})
     status = git_bytes(["status", "--porcelain=v1", "-z"], tree).split(b"\0")
-    dirty, i = False, 0
+    reported, dirty, i = set(), False, 0
     while i < len(status):
         row = status[i]
         i += 1
@@ -181,11 +165,49 @@ def source_manifest(tree, ledger=None):
             rel = git_path(raw)
         except UnicodeError as exc:
             raise RuntimeRefusal("SOURCE_INCOMPLETE", "Git status path is not representable") from exc
+        reported.add(raw)
         if not rel.startswith(".claude/") and not (ledger and contained(tree / rel, ledger)):
             dirty = True
         if b"R" in code or b"C" in code:
-            i += 1  # -z rename emits destination then original path.
-    return {"identity_version": 2, "commit_sha": commit, "dirty": int(dirty),
+            # -z rename emits destination then original path; both are changed.
+            if i < len(status):
+                reported.add(status[i])
+            i += 1
+    index = []
+    for row in git_bytes(["ls-files", "-s", "-z"], tree).split(b"\0"):
+        if not row:
+            continue
+        head, tab, raw = row.partition(b"\t")
+        fields = head.split(b" ")
+        if not tab or len(fields) != 3 or len(fields[1]) != 40:
+            raise RuntimeRefusal("SOURCE_INCOMPLETE", "Git index entry is not representable",
+                                 path_bytes=base64.b64encode(row).decode("ascii"))
+        index.append((raw, fields[0], fields[1]))
+    entries = []
+    for raw, mode, blob in sorted(index):
+        try:
+            rel = git_path(raw)
+            path = io_path(tree / rel)
+            if rel.startswith(".claude/") or (ledger and contained(path, ledger)):
+                continue
+            kind = "symlink" if mode == b"120000" else "file"
+            if raw not in reported:
+                entry = {"path_b64": base64.b64encode(raw).decode("ascii"),
+                         "git_blob": blob.decode("ascii"), "kind": kind}
+            elif not path.exists() and not path.is_symlink():
+                # A tracked deletion is an actual, reproducible source state.
+                entry = {"path_b64": base64.b64encode(raw).decode("ascii"), "sha256": None, "kind": "deleted"}
+            elif path.is_symlink():
+                entry = {"path_b64": base64.b64encode(raw).decode("ascii"),
+                         "sha256": hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest(), "kind": "symlink"}
+            else:
+                entry = {"path_b64": base64.b64encode(raw).decode("ascii"),
+                         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "kind": "file"}
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeRefusal("SOURCE_INCOMPLETE", "Tracked source cannot be read losslessly",
+                                 path_bytes=base64.b64encode(raw).decode("ascii")) from exc
+        entries.append(entry)
+    return {"identity_version": 3, "commit_sha": commit, "dirty": int(dirty),
             "tree_hash": hashlib.sha256(json_bytes(entries)).hexdigest(),
             "git_tree": None if dirty else git_text(["rev-parse", "HEAD^{tree}"], tree).strip(),
             "entries": entries, "complete": True}

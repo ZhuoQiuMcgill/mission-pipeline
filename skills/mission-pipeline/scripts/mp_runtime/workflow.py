@@ -387,16 +387,62 @@ class Workflow:
         if old["status"] == "closed" and (self.actor.role != "principal" or not d.get("reopen")):
             refuse("LEGACY_MISSION_CLOSED", "Closed history stays closed without a new principal reopening")
         self.blob(d["source_blob"])
-        for aid in d.get("artifacts", []):
-            overlay = self.get("semantic_overlay", aid)
-            if overlay["status"] != "VERIFIED":
-                refuse("LEGACY_EVIDENCE_UNAVAILABLE", "Unavailable legacy bytes cannot be adopted as current evidence")
+        if d.get("artifacts") is None:
+            # Omitted: adopt the whole verified evidence of that legacy mission.
+            artifacts = []
+            for item in inventory.get("overlays", []):
+                if str(item.get("mission")) == str(d["legacy_mission"]) and item["status"] == "VERIFIED" \
+                        and str(item["artifact"]) not in artifacts:
+                    artifacts.append(str(item["artifact"]))
+        else:
+            artifacts = [str(aid) for aid in d["artifacts"]]
+            for aid in artifacts:
+                overlay = self.get("semantic_overlay", aid)
+                if overlay["status"] != "VERIFIED":
+                    refuse("LEGACY_EVIDENCE_UNAVAILABLE", "Unavailable legacy bytes cannot be adopted as current evidence")
+        adopted = [a for a in inventory.get("acceptances", [])
+                   if str(a["legacy_mission"]) == str(d["legacy_mission"]) and str(a["artifact"]) in artifacts]
         for latch in self.rows("legacy_latch"):
             if str(latch["mission"]) == str(d["legacy_mission"]):
                 self.put("latch", "legacy:" + latch["id"], dict(latch, mission=d["mission"], tasks=[], legacy_recorded=True))
         scope = self.put("legacy_scope", d["mission"], dict(mission=d["mission"], legacy_mission=d["legacy_mission"],
-                         source_blob=d["source_blob"], artifacts=d.get("artifacts", []), current_acceptance="REQUIRES_REQUALIFICATION"))
+                         source_blob=d["source_blob"], artifacts=artifacts, acceptances=adopted,
+                         current_acceptance="REQUIRES_REQUALIFICATION"))
         return {"scope": scope}
+
+    def do_legacy_accept(self, d):
+        """Credit one recorded v3 acceptance to one current obligation.
+
+        The bytes are the adopted, hash-verified legacy document; the judgement is
+        the stabilizer's sealed ACCEPTED verdict. Both are named on the obligation
+        as `legacy-recorded`, never as evidence this runtime itself qualified.
+        """
+        self.only("pm")
+        scope = self.optional("legacy_scope", d["mission"])
+        if not scope:
+            refuse("LEGACY_SCOPE_ADOPTION_REQUIRED", "Adopt this legacy scope before crediting its recorded acceptances")
+        artifact = str(d["legacy_artifact"])
+        if artifact not in [str(a) for a in scope.get("artifacts", [])]:
+            refuse("LEGACY_EVIDENCE_UNAVAILABLE", "This artifact is not part of the adopted legacy scope", artifact=artifact)
+        overlay = self.get("semantic_overlay", artifact)
+        if overlay["status"] != "VERIFIED":
+            refuse("LEGACY_EVIDENCE_UNAVAILABLE", "Unavailable legacy bytes cannot satisfy a current obligation")
+        matching = [a for a in scope.get("acceptances", []) if str(a["artifact"]) == artifact]
+        if not matching:
+            refuse("LEGACY_ACCEPTANCE_MISSING", "No sealed legacy ACCEPTED verdict cites this artifact", artifact=artifact)
+        acceptance = matching[-1]
+        if acceptance.get("sha256") != overlay.get("source_sha256"):
+            refuse("LEGACY_EVIDENCE_UNAVAILABLE", "Adopted bytes differ from the sealed acceptance hash", artifact=artifact)
+        ob = self.get("obligation", d["obligation"])
+        if ob["mission"] != d["mission"]:
+            refuse("CROSS_MISSION_REFERENCE", "Obligation belongs to another mission")
+        if ob["status"] != "REQUIRED":
+            refuse("STALE_HEAD", "Only a required obligation takes a recorded legacy acceptance", status=ob["status"])
+        self.qualify(d["mission"], obligations=[ob["id"]])
+        return {"obligation": self.update("obligation", ob["id"], status="MET",
+                evidence="legacy:" + artifact, assurance="legacy-recorded",
+                accepted_task_key=acceptance.get("task_key"), legacy_acceptance=acceptance,
+                legacy_scope=scope["mission"], source_blob=overlay.get("source_blob"))}
 
     def do_decision_record(self, d):
         self.only("pm")
@@ -1514,6 +1560,13 @@ class Workflow:
                     import json
                     for item in json.loads(self.store.blobs.get(value["input_blob"])):
                         required[item["blob"]] = {"blob": item["blob"], "path": "run:" + id + "/input/" + item["path"]}
+        # Adopted legacy evidence is part of what this closure delivers, and keeps
+        # its own name even when a v4 record cites the same bytes.
+        for scope in self.rows("legacy_scope", mission=d["mission"]):
+            for aid in scope.get("artifacts", []):
+                overlay = self.optional("semantic_overlay", aid) or {}
+                if overlay.get("source_blob"):
+                    required[overlay["source_blob"]] = {"blob": overlay["source_blob"], "path": "legacy:" + str(aid)}
         for task in self.rows("task", mission=d["mission"]):
             for output in task.get("outputs", []):
                 deliveries = self.rows("delivery", task=task["id"], path=output, current=True)

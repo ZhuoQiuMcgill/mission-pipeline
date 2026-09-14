@@ -9,11 +9,19 @@ from mp_runtime.migration import adoption_plan, migrate, calibration_bridge, rea
 from mp_runtime.storage import RuntimeStore
 from mp_runtime.workflow import Actor
 
+# Ignored field data: the 1.2 production ledger and its oracle live outside the
+# repository, so the public suite reports these two as skipped instead of failing.
+ORACLE = ROOT / "data/analysis/engine-repair-20260909/legacy-oracle.json"
+FIELD_LEDGER = ROOT / "data/analysis/pm-evidence-expansion-20260909/source/latest/mission-pipeline/ledger/events.jsonl"
+FIELD_DATA = unittest.skipUnless(ORACLE.exists() and FIELD_LEDGER.exists(),
+                                 "ignored field data not present (data/analysis/...): real-ledger checks skipped")
+
 
 class MigrationTests(unittest.TestCase):
+    @FIELD_DATA
     def test_real_421_history_and_rebuild(self):
-        oracle = json.loads((ROOT / "data/analysis/engine-repair-20260909/legacy-oracle.json").read_text(encoding="utf-8"))
-        source = ROOT / "data/analysis/pm-evidence-expansion-20260909/source/latest/mission-pipeline/ledger/events.jsonl"
+        oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
+        source = FIELD_LEDGER
         raw, events = read_legacy(source)
         self.assertEqual(oracle["source_sha256"], hashlib.sha256(raw).hexdigest())
         self.assertEqual(421, len(events))
@@ -118,8 +126,9 @@ class MigrationTests(unittest.TestCase):
             store.initialize()
             self.assertTrue(store.doctor()["ok"])
 
+    @FIELD_DATA
     def test_adoption_crashes_restore_bridge_before_ready_and_retry_once(self):
-        source = ROOT / "data/analysis/pm-evidence-expansion-20260909/source/latest/mission-pipeline/ledger/events.jsonl"
+        source = FIELD_LEDGER
         for phase in ("bootstrap_prepared", "bootstrap_owner", "bootstrap_manifest", "bootstrap_database"):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory(prefix="mp-adoption-fault-") as td:
                 store = RuntimeStore(Path(td))

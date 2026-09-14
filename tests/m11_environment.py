@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -11,7 +12,9 @@ from mp_runtime.process import run_bytes, json_bytes
 from mp_runtime.paths import source_manifest, resolve_ref, contained, root_identity
 from mp_runtime.markdown import document_fields
 from mp_runtime.field_adapter import readonly_query, snapshot, publish
-from mp_runtime.environment import environment_id, create_environment, inspect_environment, canonical_command, clean_env
+from mp_runtime.environment import (environment_id, legacy_environment_id, create_environment,
+                                     inspect_environment, canonical_command, clean_env)
+from mp_runtime.workflow import Actor
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -289,6 +292,104 @@ class EnvironmentTests(unittest.TestCase):
             changed = source_manifest(worktree)
             self.assertEqual(initial["commit_sha"], changed["commit_sha"])
             self.assertNotEqual(initial["tree_hash"], changed["tree_hash"])
+
+    def test_writer_identity_is_an_installation_token_not_the_hostname(self):
+        """S15: a PC rename or a cron launch without WSL_DISTRO_NAME moved the 2.0
+        identity and locked the ledger out. The token file does not move."""
+        module = str(ROOT / "skills/mission-pipeline/scripts")
+        probe = ("import json,sys;sys.path.insert(0,sys.argv[1]);"
+                 "from mp_runtime.environment import environment_id, legacy_environment_id, writer_token_path;"
+                 "print(json.dumps([environment_id(), legacy_environment_id(), str(writer_token_path())]))")
+        with tempfile.TemporaryDirectory(prefix="mp-writer-id-") as td:
+            home = Path(td)
+            base = {k: v for k, v in os.environ.items() if k != "MP_WRITER_ID"}
+            base["XDG_CONFIG_HOME"] = str(home)
+            base["APPDATA"] = str(home)
+            def identity(**overrides):
+                result = run_bytes([sys.executable, "-c", probe, module], env=dict(base, **overrides))
+                self.assertEqual(0, result.returncode, result.stderr)
+                return json.loads(result.stdout)
+            first = identity()
+            token_file = home / "mission-pipeline" / "writer-id"
+            self.assertTrue(token_file.exists(), first[2])
+            self.assertEqual(32, len(token_file.read_text(encoding="ascii").strip()))
+            if os.name != "nt":
+                self.assertEqual(0o600, token_file.stat().st_mode & 0o777)
+            renamed = identity(WSL_DISTRO_NAME="a-renamed-distribution")
+            self.assertEqual(first[0], renamed[0])
+            self.assertNotEqual(first[1], renamed[1])
+            self.assertEqual(first[0], identity(MP_WRITER_ID=token_file.read_text().strip())[0])
+            elsewhere = identity(XDG_CONFIG_HOME=str(home / "other"), APPDATA=str(home / "other"))
+            self.assertNotEqual(first[0], elsewhere[0])
+
+    def test_takeover_claims_an_unreachable_owner_and_recover_upgrades_a_2_0_record(self):
+        f = Fixture()
+        self.addCleanup(f.close)
+        f.setup()
+        store = f.engine.store
+        owner = json.loads(store.owner_path.read_bytes())
+        store.owner_path.write_bytes(json_bytes(dict(owner, environment="a-machine-that-no-longer-exists")))
+        refuses(self, "WRITER_ENVIRONMENT_MISMATCH", lambda: f.call("principal", "project.configure", mode="local"))
+        refuses(self, "WRITER_ENVIRONMENT_MISMATCH", lambda: store.maintenance("recover"))
+        principal, pm = Actor("principal", "cli:principal"), Actor("pm", "cli:pm")
+        refuses(self, "ROLE_FORBIDDEN",
+                lambda: store.maintenance("takeover", confirm=owner["project"], actor=pm))
+        refuses(self, "TAKEOVER_CONFIRMATION_REQUIRED",
+                lambda: store.maintenance("takeover", confirm="not-this-project", actor=principal))
+        claimed = store.maintenance("takeover", confirm=owner["project"], actor=principal)["owner"]
+        self.assertEqual(owner["epoch"] + 1, claimed["epoch"])
+        self.assertEqual("a-machine-that-no-longer-exists", claimed["takeover_from"])
+        self.assertEqual(environment_id(), claimed["environment"])
+        f.call("principal", "project.configure", mode="local")
+        refuses(self, "TAKEOVER_NOT_REQUIRED",
+                lambda: store.maintenance("takeover", confirm=owner["project"], actor=principal))
+        # A 2.0 owner record still writes, and recover adopts the stable id.
+        store.owner_path.write_bytes(json_bytes(dict(claimed, environment=legacy_environment_id())))
+        f.call("principal", "project.configure", mode="local")
+        store.maintenance("recover")
+        upgraded = json.loads(store.owner_path.read_bytes())
+        self.assertEqual(environment_id(), upgraded["environment"])
+        self.assertEqual(legacy_environment_id(), upgraded["environment_upgraded_from"])
+        self.assertTrue(store.doctor()["ok"])
+
+    def test_clean_tracked_files_take_their_git_blob_identity(self):
+        """S16: only what `git status` reports is opened and hashed."""
+        with tempfile.TemporaryDirectory(prefix="mp-manifest-v3-") as td:
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            def git(*args):
+                result = run_bytes(["git", *args], cwd=repo)
+                self.assertEqual(0, result.returncode, result.stderr)
+                return result.stdout
+            git("init", "-q")
+            (repo / "a.txt").write_bytes(b"alpha\n")
+            (repo / "b.txt").write_bytes(b"beta\n")
+            if os.name != "nt":
+                os.symlink("a.txt", repo / "link")
+            git("add", "-A")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "one")
+            clean = source_manifest(repo)
+            self.assertEqual(3, clean["identity_version"])
+            entries = {base64.b64decode(e["path_b64"]).decode(): e for e in clean["entries"]}
+            for name, entry in entries.items():
+                self.assertNotIn("sha256", entry)
+                self.assertEqual(40, len(entry["git_blob"]), name)
+            self.assertEqual(git("hash-object", "a.txt").decode().strip(), entries["a.txt"]["git_blob"])
+            if os.name != "nt":
+                self.assertEqual("symlink", entries["link"]["kind"])
+            (repo / "b.txt").write_bytes(b"beta\r\n")
+            dirty = source_manifest(repo)
+            changed = {base64.b64decode(e["path_b64"]).decode(): e for e in dirty["entries"]}
+            self.assertEqual(entries["a.txt"], changed["a.txt"])
+            self.assertEqual(hashlib.sha256(b"beta\r\n").hexdigest(), changed["b.txt"]["sha256"])
+            self.assertEqual(1, dirty["dirty"])
+            self.assertIsNone(dirty["git_tree"])
+            self.assertNotEqual(clean["tree_hash"], dirty["tree_hash"])
+            (repo / "b.txt").unlink()
+            removed = source_manifest(repo)
+            gone = {base64.b64decode(e["path_b64"]).decode(): e for e in removed["entries"]}
+            self.assertEqual({"sha256": None, "kind": "deleted"},
+                             {k: v for k, v in gone["b.txt"].items() if k != "path_b64"})
 
 
 if __name__ == "__main__":

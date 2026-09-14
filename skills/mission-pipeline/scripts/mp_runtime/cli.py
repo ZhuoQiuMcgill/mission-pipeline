@@ -126,10 +126,11 @@ def main(argv=None):
             return 0
         if command == "maintenance":
             p = argparse.ArgumentParser(prog="mp maintenance")
-            p.add_argument("operation", choices=["recover", "quiesce", "handoff", "accept"])
+            p.add_argument("operation", choices=["recover", "quiesce", "handoff", "accept", "takeover"])
             p.add_argument("--target-environment")
+            p.add_argument("--confirm", help="takeover only: the exact project id of the ledger being claimed")
             m = p.parse_args(rest)
-            output(engine.store.maintenance(m.operation, m.target_environment))
+            output(engine.store.maintenance(m.operation, m.target_environment, confirm=m.confirm, actor=engine.actor))
             return 0
         if not engine.store.manifest_path.exists():
             raise RuntimeRefusal("V4_INITIALIZATION_REQUIRED", "Initialize schema 4 or migrate the existing legacy ledger")

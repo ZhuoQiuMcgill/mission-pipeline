@@ -84,11 +84,14 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+from .process import git_text, RuntimeRefusal, utf8_console
+from .paths import source_manifest, contained
+from .storage import install_database
 
 SCHEMA_VERSION = 3
 
@@ -141,10 +144,10 @@ def jdump(obj):
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 def run_git(args, cwd=None):
-    r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or "git failed")
-    return r.stdout
+    try:
+        return git_text(args, cwd)
+    except RuntimeRefusal as exc:
+        raise RuntimeError(exc.detail) from exc
 
 class Refused(Exception):
     """A validated, journaled refusal — the enforcement layer speaking."""
@@ -619,7 +622,7 @@ def _is_pipeline_state(rel, root, ledger):
         return True
     try:
         p = (Path(root) / rel).resolve()
-        return str(p).startswith(str(Path(ledger).resolve()) + os.sep)
+        return contained(p, ledger)
     except OSError:
         return False
 
@@ -627,6 +630,15 @@ def _fingerprint_of(tree, ledger):
     """commit + dirty + byte-level tree hash of the tree ACTUALLY JUDGED. The
     tree is the parameter: binding reality to the mission tip is what made the
     field run one suite five times (§4.3)."""
+    try:
+        manifest = source_manifest(tree, ledger)
+    except RuntimeRefusal as exc:
+        raise Refused(f"[{exc.code}] {exc.detail}") from exc
+    return {k: manifest[k] for k in ("commit_sha", "dirty", "tree_hash", "git_tree")}
+
+
+def _legacy_fingerprint_of(tree, ledger):
+    """Historical identity algorithm, retained only for migration comparisons."""
     tree = str(tree)
     try:
         commit = run_git(["rev-parse", "HEAD"], cwd=tree).strip()
@@ -4279,7 +4291,10 @@ def cmd_doctor(ctx, args):
         findings.append(f"foreign_key_check: {len(fk)} violation(s)")
     # journal ↔ DB divergence: rebuild to temp and diff (the state layer's diff -r)
     if ctx.journal.exists() and parse_err == 0:
-        tmp = Path(tempfile.mkstemp(suffix=".db", prefix="mp-doctor-")[1])
+        tmp_fd, tmp_name = tempfile.mkstemp(suffix=".db", prefix="mp-doctor-")
+        os.close(tmp_fd)
+        tmp = Path(tmp_name)
+        rconn = None
         try:
             skips = []
             rconn = replay(ctx.journal, tmp, skips)
@@ -4297,6 +4312,8 @@ def cmd_doctor(ctx, args):
                         f" replay yields {len(b[t])} — the DB was written outside"
                         " the write path")
         finally:
+            if rconn is not None:
+                rconn.close()
             tmp.unlink(missing_ok=True)
     # seal verification: tamper-evidence over sealed artifacts
     for aid, path, sha in conn.execute(
@@ -4334,7 +4351,8 @@ def cmd_rebuild(ctx, args):
         bak = ctx.db_path.with_suffix(".bak")
         if ctx.db_path.exists():
             shutil.copy2(ctx.db_path, bak)
-        os.replace(tmp, ctx.db_path)
+        install_database(tmp, ctx.db_path)
+        tmp.unlink()
     human = f"rebuilt from journal: {n} events (previous DB at {bak.name})"
     for seq, action, err in skips:
         human += (f"\n  WARN replay-skip seq={seq} {action}: {err}"
@@ -4882,7 +4900,23 @@ def single(ctx, actor, action, args_dict):
     emit(commit_actions(ctx, actor, [(action, args_dict)]))
 
 def main(argv=None):
-    raise RuntimeError("Frozen schema-3 dispatcher is replay-only; use the guarded mp compatibility entry")
+    """The frozen schema-3 dispatcher: one v3 source, entered only through `mp`.
+
+    The v4 launcher reaches this on MP_COMPAT_V3=1 and propagates the integer
+    exit code. `replay` is imported from here by the schema-4 migration.
+    """
+    utf8_console()
+    # Explicit v3 regression/import compatibility NEVER writes a migrated v4 ledger.
+    compat_ctx = Ctx()
+    if (compat_ctx.ledger / "runtime-manifest.json").exists() or (compat_ctx.ledger / ".writer-owner").exists():
+        die("v3 compatibility cannot access a schema-4 writer; use the v4 workflow", 3)
+    try:
+        result = dispatch(argv)
+    except RuntimeError as exc:
+        die(str(exc))
+    return result if isinstance(result, int) else 0
+
+def dispatch(argv=None):
     global JSON_MODE
     args = build_parser().parse_args(argv)
     JSON_MODE = args.json
@@ -5014,8 +5048,3 @@ def main(argv=None):
                        "verified_by": a.verified_by, "ratified": a.ratified})
     die(f"unhandled command {args.cmd}")
 
-if __name__ == "__main__":
-    try:
-        main()
-    except RuntimeError as e:
-        die(str(e))

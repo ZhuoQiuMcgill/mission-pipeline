@@ -13,8 +13,10 @@ import time
 import uuid
 from pathlib import Path
 
-from .environment import environment_id
+from .environment import environment_id, legacy_environment_id
 from .process import RuntimeRefusal, json_bytes
+
+WATERMARK = "journal_watermark"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta(version INTEGER NOT NULL);
@@ -160,14 +162,21 @@ class RuntimeStore:
         if self.fault:
             self.fault(name)
 
+    @staticmethod
+    def known_environments():
+        """A 2.0 owner record names the old machine-derived id; both are this writer."""
+        return (environment_id(), legacy_environment_id())
+
     def owner(self, write=False):
         try:
             owner = json.loads(self.owner_path.read_bytes().decode("utf-8"))
         except (OSError, ValueError) as exc:
             raise RuntimeRefusal("BOOTSTRAP_INCOMPLETE", "Owner manifest is incomplete; use trusted maintenance") from exc
-        if write and owner["environment"] != environment_id():
+        if write and owner["environment"] not in self.known_environments():
             raise RuntimeRefusal("WRITER_ENVIRONMENT_MISMATCH", "Use the owner environment broker/bridge",
-                                 owner_environment=owner["environment"])
+                                 owner_environment=owner["environment"], current_environment=environment_id(),
+                                 recovery="Run maintenance recover here, or claim an unreachable owner with "
+                                          "--actor principal maintenance takeover --confirm <project id>")
         if owner["state"] != "READY":
             code = "BOOTSTRAP_INCOMPLETE" if owner["state"] == "BOOTSTRAP" else "OWNER_QUIESCED"
             raise RuntimeRefusal(code, "Writer environment is not ready")
@@ -220,12 +229,44 @@ class RuntimeStore:
         atomic_bytes(self.owner_path, json_bytes(owner))
         return self.inspect()
 
-    def maintenance(self, operation, target_environment=None):
+    def active_runs(self):
+        return [v["data"] for (k, _), v in self.read().items()
+                if k == "run" and v["data"]["status"] == "RUNNING" and v["data"]["deadline"] > time.time()]
+
+    def takeover(self, owner, confirm, actor):
+        """Claim a ledger whose owner environment no longer exists (renamed PC, lost distro)."""
+        role = actor.get("role") if isinstance(actor, dict) else getattr(actor, "role", None)
+        if role != "principal":
+            raise RuntimeRefusal("ROLE_FORBIDDEN", "Only the principal claims a ledger from an unreachable writer environment")
+        if not confirm or confirm != owner.get("project"):
+            raise RuntimeRefusal("TAKEOVER_CONFIRMATION_REQUIRED",
+                                 "Confirm the exact project id recorded in .writer-owner/owner.json")
+        previous = owner["environment"]
+        if previous in self.known_environments():
+            raise RuntimeRefusal("TAKEOVER_NOT_REQUIRED", "This environment already owns the ledger; use maintenance recover")
+        with ShortLock(self.path / ".runtime.lock"):
+            latest = json.loads(self.owner_path.read_bytes().decode("utf-8"))
+            if latest != owner:
+                raise RuntimeRefusal("STALE_EPOCH", "Owner record changed while claiming it")
+            self.recover(full=True)
+            if self.active_runs():
+                raise RuntimeRefusal("ACTIVE_EXECUTION", "A leased execution is still live; wait for its deadline or abort it")
+            owner.update(environment=environment_id(), epoch=owner["epoch"] + 1, state="READY",
+                         target_environment=None, takeover_from=previous, takeover_at=time.time())
+            manifest = self.manifest()
+            manifest["epoch"] = owner["epoch"]
+            self.save_manifest(manifest)
+            atomic_bytes(self.owner_path, json_bytes(owner))
+        return {"ok": True, "owner": owner}
+
+    def maintenance(self, operation, target_environment=None, confirm=None, actor=None):
         """Trusted CLI only. Handoff is an explicit fenced two-environment protocol."""
         owner = json.loads(self.owner_path.read_bytes().decode("utf-8"))
         current_env = environment_id()
+        if operation == "takeover":
+            return self.takeover(owner, confirm, actor)
         if operation == "accept":
-            if owner["state"] != "HANDOFF" or owner.get("target_environment") != current_env:
+            if owner["state"] != "HANDOFF" or owner.get("target_environment") not in self.known_environments():
                 raise RuntimeRefusal("HANDOFF_SCOPE", "Only the named destination environment can accept")
             with ShortLock(self.path / ".runtime.lock"):
                 latest = json.loads(self.owner_path.read_bytes().decode("utf-8"))
@@ -236,12 +277,14 @@ class RuntimeStore:
                 manifest = self.manifest()
                 manifest["epoch"] = owner["epoch"]
                 self.save_manifest(manifest)
-                self.recover()
+                self.recover(full=True)
                 owner.update(state="READY", target_environment=None)
                 atomic_bytes(self.owner_path, json_bytes(owner))
             return self.inspect()
-        if owner["environment"] != current_env:
-            raise RuntimeRefusal("WRITER_ENVIRONMENT_MISMATCH", "Maintenance must run in the current owner environment")
+        if owner["environment"] not in self.known_environments():
+            raise RuntimeRefusal("WRITER_ENVIRONMENT_MISMATCH", "Maintenance must run in the current owner environment",
+                                 owner_environment=owner["environment"], current_environment=current_env,
+                                 recovery="Claim an unreachable owner with --actor principal maintenance takeover --confirm <project id>")
         with ShortLock(self.path / ".runtime.lock"):
             owner = json.loads(self.owner_path.read_bytes().decode("utf-8"))
             if operation == "recover":
@@ -262,21 +305,23 @@ class RuntimeStore:
                                         segments=[{"path": "segments/000001.jsonl", "limit": None}])
                         atomic_bytes(self.path / manifest["segments"][0]["path"], b"")
                         self.save_manifest(manifest)
-                self.recover()
+                self.recover(full=True)
                 if self.manifest().get("legacy") and ("readiness", "legacy") not in self.read():
                     raise RuntimeRefusal("MIGRATION_INCOMPLETE", "Resume migration from its frozen source before readiness")
                 owner.update(state="READY", epoch=owner["epoch"] + 1)
+                if owner["environment"] != current_env:
+                    # A 2.0 owner record still names the machine-derived id; adopt the stable one.
+                    owner.update(environment=current_env, environment_upgraded_from=owner["environment"])
             elif operation in ("quiesce", "handoff"):
                 if owner["state"] != "READY":
                     raise RuntimeRefusal("OWNER_QUIESCED", "Owner is not ready")
-                active = [v["data"] for (k, _), v in self.read().items() if k == "run" and v["data"]["status"] == "RUNNING" and v["data"]["deadline"] > time.time()]
-                if active:
+                if self.active_runs():
                     raise RuntimeRefusal("ACTIVE_EXECUTION", "Finish or expire active execution before handing off")
-                if operation == "handoff" and (not target_environment or target_environment == current_env):
+                if operation == "handoff" and (not target_environment or target_environment in self.known_environments()):
                     raise RuntimeRefusal("HANDOFF_SCOPE", "Name a different destination environment id")
                 owner.update(state="HANDOFF" if operation == "handoff" else "QUIESCED", target_environment=target_environment)
             else:
-                raise RuntimeRefusal("INVALID_MAINTENANCE", "Use recover, quiesce, handoff or accept")
+                raise RuntimeRefusal("INVALID_MAINTENANCE", "Use recover, quiesce, handoff, accept or takeover")
             atomic_bytes(self.owner_path, json_bytes(owner))
         return {"ok": True, "owner": owner}
 
@@ -318,39 +363,74 @@ class RuntimeStore:
         atomic_bytes(self.path / "runtime-manifest.recovery.json", raw)
         atomic_bytes(self.manifest_path, raw)
 
-    def events(self, repair_tail=False):
+    @staticmethod
+    def parse_events(raw, expected, repair):
+        """Decode complete journal lines only; report the exact byte offset consumed."""
+        events, offset = [], 0
+        for line in raw.splitlines(keepends=True):
+            if not line.endswith(b"\n"):
+                if not repair:
+                    raise RuntimeRefusal("JOURNAL_INCOMPLETE_TAIL", "Incomplete journal tail; writer recovery required")
+                return events, offset, True
+            try:
+                event = json.loads(line.decode("utf-8"))
+                checksum = event.pop("checksum")
+                if digest(event) != checksum or event["seq"] != expected or event["version"] != 4:
+                    raise ValueError("checksum/version/sequence mismatch")
+                event["checksum"] = checksum
+            except (UnicodeError, ValueError, KeyError) as exc:
+                raise RuntimeRefusal("JOURNAL_CORRUPTION", "Complete journal event is invalid; no events skipped") from exc
+            events.append(event)
+            expected += 1
+            offset += len(line)
+        return events, offset, False
+
+    def segment_bytes(self, segment):
+        raw = (self.path / segment["path"]).read_bytes()
+        return raw[:segment["limit"]] if segment["limit"] is not None else raw
+
+    def scan(self, repair_tail=False):
+        """Every event, plus the byte offset consumed in the published last segment."""
         manifest, events = self.manifest(), []
-        expected = 1
-        changed = False
+        changed, tail = False, 0
         for segment in manifest["segments"]:
-            raw = (self.path / segment["path"]).read_bytes()
-            if segment["limit"] is not None:
-                raw = raw[:segment["limit"]]
-            offset = 0
-            for line in raw.splitlines(keepends=True):
-                if not line.endswith(b"\n"):
-                    if segment is not manifest["segments"][-1] or not repair_tail:
-                        raise RuntimeRefusal("JOURNAL_INCOMPLETE_TAIL", "Incomplete journal tail; writer recovery required")
-                    segment["limit"] = offset
-                    changed = True
-                    break
-                try:
-                    event = json.loads(line.decode("utf-8"))
-                    checksum = event.pop("checksum")
-                    if digest(event) != checksum or event["seq"] != expected or event["version"] != 4:
-                        raise ValueError("checksum/version/sequence mismatch")
-                    event["checksum"] = checksum
-                except (UnicodeError, ValueError, KeyError) as exc:
-                    raise RuntimeRefusal("JOURNAL_CORRUPTION", "Complete journal event is invalid; no events skipped") from exc
-                events.append(event)
-                expected += 1
-                offset += len(line)
+            last = segment is manifest["segments"][-1]
+            parsed, offset, partial = self.parse_events(self.segment_bytes(segment), len(events) + 1,
+                                                        repair_tail and last)
+            if partial:
+                segment["limit"] = offset
+                changed = True
+            events.extend(parsed)
+            if last:
+                tail = offset
         if changed:
             item = {"path": f"segments/{len(manifest['segments']) + 1:06}.jsonl", "limit": None}
             atomic_bytes(self.path / item["path"], b"")
             manifest["segments"].append(item)
             self.save_manifest(manifest)
-        return events
+            tail = 0
+        return events, manifest, tail
+
+    def events(self, repair_tail=False):
+        return self.scan(repair_tail=repair_tail)[0]
+
+    @staticmethod
+    def watermark(conn):
+        row = conn.execute("SELECT value FROM runtime_meta WHERE key=?", (WATERMARK,)).fetchone()
+        try:
+            mark = json.loads(row[0]) if row else None
+        except ValueError:
+            return None
+        if not isinstance(mark, dict) or not isinstance(mark.get("verified_seq"), int) \
+                or not isinstance(mark.get("offset"), int) or not isinstance(mark.get("segments"), list):
+            return None
+        return mark
+
+    @staticmethod
+    def set_watermark(conn, seq, segments, offset):
+        """Proof that the journal was verified and applied through `seq`/`offset`."""
+        value = json_bytes({"verified_seq": seq, "segments": segments, "offset": offset}).decode("utf-8")
+        conn.execute("INSERT OR REPLACE INTO runtime_meta VALUES(?,?)", (WATERMARK, value))
 
     @staticmethod
     def apply(conn, event):
@@ -392,9 +472,44 @@ class RuntimeStore:
             self.checkpoint("after_product_effect")
         atomic_bytes(receipt, json_bytes({"checksum": event["checksum"]}))
 
-    def recover(self):
-        events = self.events(repair_tail=True)
-        legacy = self.manifest().get("legacy")
+    def tail_recover(self):
+        """Apply only the journal past the verified watermark.
+
+        The full replay comparison is a linear cost on every write; it stays in
+        doctor(), rebuild() and `maintenance recover`, which is where an
+        out-of-band projection change is actually looked for.
+        """
+        if not self.db_path.exists():
+            return False
+        manifest = self.manifest()
+        conn = self.connect()
+        try:
+            mark = self.watermark(conn)
+            if not mark or mark["segments"] != manifest["segments"] or mark["verified_seq"] < 1:
+                return False
+            top = conn.execute("SELECT COALESCE(MAX(seq),0) FROM runtime_events").fetchone()[0]
+            if top != mark["verified_seq"]:
+                return False
+            raw, offset = self.segment_bytes(manifest["segments"][-1]), mark["offset"]
+            if offset > len(raw) or (offset and raw[offset - 1:offset] != b"\n"):
+                return False
+            events, consumed, partial = self.parse_events(raw[offset:], top + 1, True)
+            if partial:
+                return False  # An interrupted append needs the manifest repair in scan().
+            for event in events:
+                self.apply_effects(event)
+                self.apply(conn, event)
+            self.set_watermark(conn, top + len(events), manifest["segments"], offset + consumed)
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def recover(self, full=False):
+        if not full and self.tail_recover():
+            return
+        events, manifest, tail = self.scan(repair_tail=True)
+        legacy = manifest.get("legacy")
         if legacy and not events and legacy.get("bootstrap_event_blob"):
             raw = self.blobs.get(legacy["bootstrap_event_blob"])
             event = json.loads(raw)
@@ -406,7 +521,7 @@ class RuntimeStore:
             if segment.stat().st_size:
                 raise RuntimeRefusal("MIGRATION_INCOMPLETE", "Refuse to overwrite a nonempty adoption segment")
             atomic_bytes(segment, raw)
-            events = [event]
+            events, tail = [event], len(raw)
         if legacy and not self.db_path.exists():
             from .legacy_v3 import replay
             journal = self.path / legacy["path"]
@@ -445,6 +560,7 @@ class RuntimeStore:
                       for k, i, r, body in conn.execute("SELECT kind,id,revision,body FROM runtime_objects")}
             if expected != actual:
                 raise RuntimeRefusal("DATABASE_DIVERGENCE", "Unjournaled projection changes require rebuild before writing")
+            self.set_watermark(conn, len(events), manifest["segments"], tail)
             conn.commit()
         finally:
             conn.close()
@@ -501,19 +617,27 @@ class RuntimeStore:
             event = dict(version=4, seq=seq, request_id=rid, payload_hash=payload_hash,
                          actor=actor, epoch=owner["epoch"], at=time.time(), request=request, actions=actions, effects=effects, result=result)
             event["checksum"] = digest(event)
+            manifest = self.manifest()
+            raw_event = json_bytes(event)
             conn = self.connect()
             durable = False
             try:
+                mark = self.watermark(conn)
                 self.apply(conn, event)
                 self.checkpoint("before_append")
-                segment = self.path / self.manifest()["segments"][-1]["path"]
+                segment = self.path / manifest["segments"][-1]["path"]
                 with open(segment, "ab") as stream:
-                    stream.write(json_bytes(event))
+                    stream.write(raw_event)
                     stream.flush()
                     os.fsync(stream.fileno())
                 durable = True
                 self.checkpoint("after_fsync")
                 self.apply_effects(event)
+                # The tail stays verified without re-reading the whole journal.
+                if mark and mark["verified_seq"] == seq - 1 and mark["segments"] == manifest["segments"]:
+                    self.set_watermark(conn, seq, manifest["segments"], mark["offset"] + len(raw_event))
+                else:
+                    conn.execute("DELETE FROM runtime_meta WHERE key=?", (WATERMARK,))
                 conn.commit()
                 self.checkpoint("after_commit")
             except Exception as exc:
@@ -529,10 +653,10 @@ class RuntimeStore:
 
     def rebuild(self):
         with self.lock():
-            events = self.events(repair_tail=True)
+            events, manifest, tail = self.scan(repair_tail=True)
             temp = self.db_path.with_name(".rebuild-" + uuid.uuid4().hex + ".db")
             try:
-                legacy = self.manifest().get("legacy")
+                legacy = manifest.get("legacy")
                 if legacy:
                     from .legacy_v3 import replay
                     journal = self.path / legacy["path"]
@@ -548,6 +672,7 @@ class RuntimeStore:
                     for event in events:
                         self.apply_effects(event)
                         self.apply(conn, event)
+                    self.set_watermark(conn, len(events), manifest["segments"], tail)
                     conn.commit()
                 finally:
                     conn.close()
