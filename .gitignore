@@ -5,3 +5,6 @@ dist/
 data/
 __pycache__/
 *.py[cod]
+
+# a data symlink in a worktree is ignored like the directory
+data
