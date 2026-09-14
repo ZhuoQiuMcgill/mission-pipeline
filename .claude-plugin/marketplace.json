@@ -7,7 +7,7 @@
     {
       "name": "mission-pipeline",
       "source": "./",
-      "description": "Mission Pipeline 2: principal goals, delegated PM decisions, independent Supervisor review, immutable evidence and bounded repair/contest workflows. Native Windows/POSIX local CLI and an authenticated Linux/WSL managed controller with restricted execution."
+      "description": "Mission Pipeline 2: principal goals, delegated PM decisions, independent Supervisor review, immutable evidence and bounded repair/contest workflows. Native Windows/POSIX local CLI with a complete worked walkthrough; the Linux/WSL managed controller is experimental and needs a trusted model transport that is not shipped here."
     }
   ]
 }

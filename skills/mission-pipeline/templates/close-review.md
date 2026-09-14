@@ -1,4 +1,4 @@
-# Closure Audit — schema 4
+# Close Review — schema 4
 
 Read references/runtime-v4.md. Replace every placeholder using current packet ids and actual evidence. Choose the real outcome; a template is not a verdict. For revisions, add the current predecessor's id as `revises`. `seal` snapshots this complete document and supplies its source_blob and stable request id.
 
@@ -6,7 +6,7 @@ Read references/runtime-v4.md. Replace every placeholder using current packet id
 
 Describe the original authority, current delivery and concrete evidence read. Preserve true gaps and authorized stage ownership.
 
-List every real mandatory finding in the JSON findings array with source_blob, counterexample_blob, target and affected scope. PASS requires an empty findings array; FINDINGS requires at least one. Missing bundle bytes are INPUT_INCOMPLETE, never an implicit PASS.
+Read the actual complete bundle, not a summary of it. Outcomes are PASS, FAIL and INPUT_INCOMPLETE; missing bytes are INPUT_INCOMPLETE. Only PASS lets mission.close proceed.
 
 ## Single risk
 
@@ -22,11 +22,10 @@ List every real mandatory finding in the JSON findings array with source_blob, c
 
 ```mp-json
 {
-  "action": "audit.record",
+  "action": "close.review",
   "data": {
     "bundle": "bundle-id",
-    "outcome": "PASS_OR_FINDINGS_OR_INPUT_INCOMPLETE",
-    "findings": []
+    "outcome": "PASS_OR_FAIL_OR_INPUT_INCOMPLETE"
   }
 }
 ```

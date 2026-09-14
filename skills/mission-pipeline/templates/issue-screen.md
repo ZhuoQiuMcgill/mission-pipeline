@@ -1,4 +1,4 @@
-# Closure Audit — schema 4
+# Issue Screen — schema 4
 
 Read references/runtime-v4.md. Replace every placeholder using current packet ids and actual evidence. Choose the real outcome; a template is not a verdict. For revisions, add the current predecessor's id as `revises`. `seal` snapshots this complete document and supplies its source_blob and stable request id.
 
@@ -6,7 +6,7 @@ Read references/runtime-v4.md. Replace every placeholder using current packet id
 
 Describe the original authority, current delivery and concrete evidence read. Preserve true gaps and authorized stage ownership.
 
-List every real mandatory finding in the JSON findings array with source_blob, counterexample_blob, target and affected scope. PASS requires an empty findings array; FINDINGS requires at least one. Missing bundle bytes are INPUT_INCOMPLETE, never an implicit PASS.
+ESTABLISHED keeps the scoped hold and opens the repair path. DISMISSED ends the case, and an Auditor's case goes to an independent Contest instead of being dismissed here. In local mode `seal` fills `review_basis` from the current review snapshot; read the referenced blobs yourself before sealing.
 
 ## Single risk
 
@@ -22,11 +22,10 @@ List every real mandatory finding in the JSON findings array with source_blob, c
 
 ```mp-json
 {
-  "action": "audit.record",
+  "action": "issue.screen",
   "data": {
-    "bundle": "bundle-id",
-    "outcome": "PASS_OR_FINDINGS_OR_INPUT_INCOMPLETE",
-    "findings": []
+    "case": "case-id",
+    "outcome": "ESTABLISHED_OR_DISMISSED"
   }
 }
 ```

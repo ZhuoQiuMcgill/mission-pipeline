@@ -183,3 +183,23 @@ All 22 existing entry points plus the new tests pass on WSL; the walkthrough is 
 end through the public CLI; the real 421-event 1.2 ledger migrates, adopts its open mission,
 accepts a legacy task and closes under v4 (on a copy); native Windows is re-run by the maintainer
 before field deployment (this session cannot run Windows).
+
+## 5. Document map
+
+What each document is for, so a future change lands in one place instead of three.
+
+| Document | Audience | Contains | Does not contain |
+|---|---|---|---|
+| `skills/mission-pipeline/SKILL.md` | the agent operating a mission | the cast with each seat's exact actions, the lifecycle in order, the refusal table with fixes, closure, calibration, the counterexample path, the invariants, the assurance statement | full field lists, transport details, installation |
+| `references/walkthrough.md` | an operator running their first mission, or upgrading one | every request of a complete single-task mission with its command line and response fields, the 1.2 mid-mission upgrade, the recovery commands | the exhaustive contract |
+| `references/runtime-v4.md` | an agent that needs the exact rule | the typed request surface: required fields, outcome sets, digests, budgets, deadlines, seal behaviour, identity, migration, managed transport, failure taxonomy | worked examples, installation |
+| `references/setup.md` | whoever installs or moves a deployment | interpreters, root and ledger binding, writer identity and ownership, managed controller, WSL bridge and post-upgrade re-registration, product environments, principal bindings | the request contract |
+| `references/ledger.md` | anyone inspecting on-disk state | what each path in the ledger directory is, what lives outside it, read-only inspection discipline | workflow semantics |
+| `references/parallel.md` | the PM and the Architect before a fan-out | waves, disjoint write scopes, the write-path side of the calibration basis, holds and unrelated work, seams | anything single-task missions need |
+| `references/substrate.md` | a reader deciding which surface to use | v4 versus frozen schema-3 compatibility, and the two execution substrates named honestly | new detail of its own |
+| `roles/*.md` | the seat being spawned | purpose, inputs to read, exact actions with templates, refusals it will meet, what it never does | the lifecycle, which is SKILL.md's |
+| `templates/*.md` | any seat about to submit a judgement | the document shape plus an `mp-json` block with every required field as a placeholder | prose that a verdict should carry instead |
+| `README.md` | someone evaluating or upgrading the plugin | what changed in this release, the upgrade path, install, supported environments, validation | operating instructions |
+| `CHANGELOG.md` | the maintainer and returning users | the defect each change repairs, in release order | design rationale, which lives in `docs/design/` |
+
+Rules of thumb. A fact about **what the engine does** belongs in `runtime-v4.md` and is referenced elsewhere, never restated with different words. A fact about **how to do it** belongs in the walkthrough. A rule a seat must not break belongs in its role file and, if it is structural, in SKILL.md's invariants. When SKILL.md and a role file disagree, SKILL.md governs; when SKILL.md and `runtime-v4.md` disagree, the code decides and both are wrong.
