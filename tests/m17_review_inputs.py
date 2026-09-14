@@ -76,7 +76,8 @@ class ReviewInputsTests(unittest.TestCase):
         result = broker.tool(seat, {"tool": "submit", "request": request})
         self.assertEqual("DISMISSED", result["case"]["status"])
         self.assertTrue(broker.tool(seat, {"tool": "submit", "request": request})["reused"])
-        self.assertEqual(1, f.engine.object("budget", case["lineage"] + ":correction")["count"])
+        self.assertEqual(1, f.engine.object("budget", case["id"] + ":correction")["count"])
+        self.assertEqual(1, f.engine.object("budget", case["lineage"] + ":correction_total")["count"])
 
     def test_case_authority_and_scoped_fence_changes_reject_but_unrelated_seq_does_not(self):
         f = self.f
@@ -107,9 +108,24 @@ class ReviewInputsTests(unittest.TestCase):
             self.revised_task(f.engine.store.blobs.put(("revision " + str(i)).encode()))
             f.call("supervisor", "review.rebase", case=case["id"])
         self.revised_task(f.engine.store.blobs.put(b"third revision"))
-        refuses(self, "BUDGET_EXHAUSTED", lambda: f.call("supervisor", "review.rebase", case=case["id"]))
+        # The third durable reading replaces the target instead of deadlocking the case.
+        result = f.call("supervisor", "review.rebase", case=case["id"])
+        successor = result["case"]
+        self.assertEqual(case["id"], result["superseded"])
+        self.assertNotEqual(case["id"], successor["id"])
         self.assertEqual(case["target_digest"], f.engine.object("case", case["id"])["target_digest"])
-        self.assertEqual("PENDING_SCREEN", f.engine.object("barrier", case["id"])["phase"])
+        self.assertEqual(2, len(f.engine.object("case", case["id"])["review_rebases"]))
+        self.assertEqual("TARGET_REPLACED", f.engine.object("case", case["id"])["status"])
+        self.assertEqual("RELEASED", f.engine.object("barrier", case["id"])["phase"])
+        self.assertEqual(case["id"], successor["supersedes"])
+        self.assertNotEqual(case["fact"], successor["fact"])
+        self.assertEqual("PENDING_SCREEN", f.engine.object("barrier", successor["id"])["phase"])
+        self.assertEqual("PENDING", f.engine.object("job", successor["id"] + ":screen")["status"])
+        # The successor is still a real barrier; the same scope stays blocked until it resolves.
+        refuses(self, "SCOPED_BARRIER", lambda: f.call("pm", "task.dispatch", admission=f.admission))
+        f.call("supervisor", "issue.screen", case=successor["id"], outcome="DISMISSED", source_blob=f.blob)
+        f.review_admit()
+        self.assertIn("ticket", f.call("pm", "task.dispatch", admission=f.admission))
 
     def test_all_case_release_and_scope_shrink_actions_check_the_delivered_revision(self):
         f = self.f

@@ -89,8 +89,10 @@ def main(argv=None):
     parser.add_argument("--actor", default="pm")
     parser.add_argument("--request-file", required=True)
     args = parser.parse_args(argv)
-    engine = Engine(args.root, Actor(args.actor, "local-adapter:" + args.actor))
     try:
+        if args.actor == "controller":
+            raise RuntimeRefusal("ROLE_FORBIDDEN", "controller is the executor's internal identity")
+        engine = Engine(args.root, Actor(args.actor, "local-adapter:" + args.actor))
         result = invoke(engine, read_json_bytes(Path(args.request_file).read_bytes()))
     except RuntimeRefusal as exc:
         sys.stdout.buffer.write(json_bytes(exc.body()))

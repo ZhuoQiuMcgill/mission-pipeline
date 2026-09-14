@@ -84,6 +84,8 @@ def serve_one():
     root = request.get("root")
     if not isinstance(root, str) or not root.startswith("/"):
         raise RuntimeRefusal("PATH_MAPPING_REQUIRED", "Bridge root must be an explicitly registered WSL absolute path")
+    if request.get("role") == "controller":
+        raise RuntimeRefusal("ROLE_FORBIDDEN", "controller is the executor's internal identity")
     actor = Actor(request.get("role", "pm"), "bridge-local:" + request.get("role", "pm"))
     from .paths import root_identity
     engine = Engine(root, actor)

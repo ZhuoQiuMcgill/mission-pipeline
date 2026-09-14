@@ -1,4 +1,10 @@
-"""Frozen explicit inputs and a real, allowlisted bubblewrap executor."""
+"""Frozen explicit inputs and a real, allowlisted bubblewrap executor.
+
+Managed execution is contained (bubblewrap, no network, allowlisted mounts) and is
+recorded as "controller-execution". Local execution freezes the declared inputs,
+captures logs and outputs and binds them to the run, but it does NOT contain the
+process: it is recorded as "local-execution" and never claims containment.
+"""
 import hashlib
 import json
 import os
@@ -86,6 +92,10 @@ def inspect_managed_environment(executable, work, modules, project_modules, valu
 
 
 def execute(engine, data):
+    if engine.actor.role not in ("constructor", "crititor", "stabilizer"):
+        # run.execute is dispatched before any workflow role check and then substitutes the
+        # internal executor identity; the requesting seat is checked here instead.
+        raise RuntimeRefusal("ROLE_FORBIDDEN", "Only a constructor, crititor or stabilizer seat starts a verification run")
     requirement = engine.object("requirement", data["requirement"])
     profile = engine.object("environment", requirement["environment"])
     state = engine.store.read()

@@ -55,6 +55,45 @@ def request_args(rest):
     return value, a, extra
 
 
+def seal_fill(engine, state, request):
+    """Local seal convenience: supply the reading fields the document does not carry."""
+    from .review import REVIEW_ACTIONS
+    action, data = request.get("action"), request["data"]
+    def rows(object_kind, **match):
+        return [row["data"] for (k, _), row in state.items()
+                if k == object_kind and all(row["data"].get(a) == b for a, b in match.items())]
+    read = []
+    if action in ("root.review", "plan.review") and "contract_scope_digest" not in data:
+        kind = "candidate" if action == "root.review" else "plan"
+        target = state.get((kind, str(data.get(kind))))
+        if target:
+            data["contract_scope_digest"] = engine.handle({"action": "contracts.snapshot",
+                    "data": {"mission": target["data"]["mission"]}})["contract_scope_digest"]
+            read.append("contract_scope_digest")
+    if action in REVIEW_ACTIONS and "review_basis" not in data:
+        subject = {key: data[key] for key in ("case", "latch") if key in data}
+        if len(subject) == 1:
+            data["review_basis"] = engine.handle({"action": "review.snapshot", "data": subject})["review_basis"]
+            read.append("review_basis")
+    task = data.get("task")
+    if action == "report.record" and isinstance(task, str):
+        if "admission" not in data:
+            admissions = rows("admission", task=task)
+            if admissions:
+                data["admission"] = max(admissions, key=lambda row: row.get("created", 0))["id"]
+        if "revises" not in data and data.get("kind"):
+            previous = rows("report", task=task, kind=data["kind"], current=True)
+            if previous:
+                data["revises"] = previous[-1]["id"]
+        if data.get("kind") == "acceptance" and "critique" not in data:
+            passes = rows("report", task=task, kind="critique", outcome="PASS", current=True)
+            if passes:
+                data["critique"] = passes[-1]["id"]
+    if read:  # The reader is the author's own seat, not an independent ingress.
+        data.setdefault("reading_assurance", "self-asserted")
+    return read
+
+
 def output(value):
     sys.stdout.buffer.write(json_bytes(value))
     sys.stdout.buffer.flush()
@@ -65,6 +104,8 @@ def main(argv=None):
     try:
         if sys.version_info < (3, 12):
             raise RuntimeRefusal("UNSUPPORTED_PYTHON", "The v4 runtime requires Python 3.12 or newer")
+        if args.actor == "controller":
+            raise RuntimeRefusal("ROLE_FORBIDDEN", "controller is the executor's internal identity")
         from .paths import io_path
         root = io_path(Path(args.root).resolve() if args.root else root_path(), force=True)
         engine = Engine(root, Actor(args.actor, args.session or "local:" + args.actor))
@@ -83,7 +124,7 @@ def main(argv=None):
                     "execution_root": root_identity(root),
                     "python_version": list(sys.version_info[:3]), "platform": sys.platform,
                     "bwrap_binary_available": bool(shutil.which("bwrap")), "managed_ready": "requires successful managed probe and trusted driver",
-                    "local": "data/workflow checks; no role authentication",
+                    "local": "data/workflow checks; no role authentication; local execution freezes inputs and captures logs and outputs but does not contain the process (assurance local-execution)",
                     "managed": "Linux/WSL controller, private endpoint and bwrap; no parallel unrestricted host tools",
                     "commands": ["init", "api", "seal", "query", "blob", "doctor", "rebuild", "migrate", "rollback", "maintenance", "render", "relay", "env", "bridge", "managed"],
                     "actions": sorted(name[3:].replace("_", ".") for name in dir(__import__("mp_runtime.workflow", fromlist=["Workflow"]).Workflow)
@@ -169,15 +210,25 @@ def main(argv=None):
             if len(rest) != 1:
                 raise RuntimeRefusal("INVALID_INPUT", "seal takes one document containing an mp-json request")
             raw = Path(rest[0]).read_bytes()
-            fields = document_fields(raw)
             text = raw.decode("utf-8-sig")
             match = re.search(r"```mp-json\s*\n(.*?)\n```", text, re.S)
             if not match:
                 raise RuntimeRefusal("V4_DOCUMENT_REQUIRED", "Use the v2 template's mp-json block; legacy seal cannot bypass root review or admission")
             request = read_json_bytes(match[1].encode("utf-8"))
             request.setdefault("request_id", "seal-" + hashlib.sha256(raw).hexdigest())
-            request.setdefault("data", {})["source_blob"] = engine.store.blobs.put(raw)
-            output(engine.handle(request))
+            data = request.setdefault("data", {})
+            state = engine.store.read()
+            blob = engine.store.blobs.put(raw)
+            if (state.get(("config", "project"), {}).get("data") or {}).get("mode") == "managed":
+                document_fields(raw)
+                data["source_blob"] = blob
+            else:
+                # Local seal: list sections are a report's contract, not every action's.
+                document_fields(raw, legacy=request.get("action") != "report.record")
+                data.setdefault("source_blob", blob)
+                data["document_blob"] = blob
+                seal_fill(engine, state, request)
+            output(dict(engine.handle(request), submitted_request=request))
         elif command == "api":
             request, _, _ = request_args(rest)
             output(engine.handle(request))

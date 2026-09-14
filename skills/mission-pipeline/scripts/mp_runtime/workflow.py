@@ -29,6 +29,14 @@ ROLES = {"principal", "pm", "constructor", "crititor", "stabilizer", "supervisor
 BLOCKED = {"PENDING_SCREEN", "ESTABLISHED_HOLD", "CONTEST_PENDING",
            "SCREENING_UNAVAILABLE", "UNRESOLVED_LIMIT"}
 TERMINAL_TASK = {"ACCEPTED", "AUTHORIZED_CANCELLED", "AUTHORIZED_DEFERRED", "REPLACED"}
+# Every seat that may report a counterexample may also contest one and raise a flag.
+REPORTER_ROLES = ("constructor", "crititor", "stabilizer", "auditor", "calibrator",
+                  "challenger", "architect", "researcher", "supervisor")
+CONTESTABLE = {"REPORTED_PENDING_SCREEN", "DISMISSED", "ESTABLISHED", "VERIFIED_FIXED",
+               "AUTHORIZED_EXCEPTION", "UNRESOLVED_LIMIT", "INPUT_INCOMPLETE"}
+# "local-controlled-execution" is the 2.0 spelling of a local executor run; it is read, never written.
+EXECUTED_ASSURANCE = ("controller-execution", "local-controlled-execution", "local-execution")
+REVIEW_DEADLINE = {"local": 86400, "managed": 300}
 
 
 def refuse(code, detail, **fields):
@@ -83,10 +91,44 @@ class Workflow:
         head = d["review_basis"]["head"]
         if case.get("review_head") == head:
             return {"case": case, "reused": True}
+        if (self.optional("budget", case["id"] + ":review_rebase") or {}).get("count", 0) >= 2:
+            return self.supersede(case, head)
         self.charge(case["id"], "review_rebase", 2)
         history = case.get("review_rebases", []) + [{"from": case.get("review_head"), "to": head,
                   "basis": d["review_basis"], "reader": self.actor.record(), "time": self.now}]
         return {"case": self.update("case", case["id"], review_head=head, review_rebases=history)}
+
+    def supersede(self, case, head):
+        """A third reading replaces the target instead of deadlocking the case.
+
+        The original identity (fact, target_digest, history) is never rewritten; the
+        successor carries the same counterexample against the current target reading.
+        """
+        target_digest = digest(self.get(case["target_kind"], case["target"]))
+        fact = digest([case["lineage"], sorted(case["scope"].get("obligations", [])), case.get("authority_span"),
+                       case["target_kind"], case["target"], target_digest, case["counterexample_blob"], head])
+        new = self.create("case", dict(mission=case["mission"], lineage=case["lineage"], fact=fact,
+                          target=case["target"], target_kind=case["target_kind"], target_digest=target_digest,
+                          source_blob=case["source_blob"], counterexample_blob=case["counterexample_blob"],
+                          scope=case["scope"], status="REPORTED_PENDING_SCREEN",
+                          audit=case.get("audit", False), audit_stance=case.get("audit_stance"),
+                          established=False, independent_final=False, repairs=case.get("repairs", 0),
+                          supersedes=case["id"]))
+        new = self.update("case", new["id"], author=case["author"], rebased_by=self.actor.record())
+        for job in self.rows("job", case=case["id"]):
+            if job["status"] != "COMPLETE":
+                self.update("job", job["id"], status="COMPLETE", occupied=False, superseded_by=new["id"])
+        contest = self.optional("contest", case["id"])
+        if contest and contest["status"] in ("PENDING", "INPUT_INCOMPLETE"):
+            self.update("contest", case["id"], status="SUPERSEDED", superseded_by=new["id"])
+        for permit in self.rows("permit", case=case["id"]):
+            self.update("permit", permit["id"], active=False)
+        self.update("case", case["id"], status="TARGET_REPLACED", superseded_by=new["id"])
+        self.barrier(case, "RELEASED")
+        self.barrier(new, "PENDING_SCREEN")
+        self.job(new, "screen", self.review_seconds())
+        new = self.update("case", new["id"], review_head=review_basis(self.state, {"case": new["id"]})["head"])
+        return {"case": new, "superseded": case["id"]}
 
     def only(self, *roles):
         if self.actor.role not in roles:
@@ -132,6 +174,32 @@ class Workflow:
         if row["count"] >= cap:
             refuse("BUDGET_EXHAUSTED", "Finite correction budget exhausted", category=category)
         self.put("budget", key, {"count": row["count"] + 1})
+
+    def tally(self, key):
+        """Uncapped mission counter kept for reporting; only per-case keys are capped."""
+        row = self.optional("budget", key) or {"count": 0}
+        self.put("budget", key, {"count": row["count"] + 1})
+
+    def review_seconds(self):
+        config = self.optional("config", "project") or {}
+        value = config.get("review_deadline_seconds")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 60:
+            return value
+        return REVIEW_DEADLINE.get(config.get("mode"), REVIEW_DEADLINE["local"])
+
+    def auto_resume(self, job):
+        """A merely late review resumes in place; only the resume budget is finite."""
+        if self.now <= job["deadline"]:
+            return job
+        if job.get("resumes", 0) >= 2:
+            refuse("REVIEW_EXPIRED", "The review deadline elapsed and its bounded resumes are spent",
+                   job=job["id"], recovery="case.contest or recovery.permit")
+        holder = bool(job.get("instance")) and job["instance"] == self.actor.session
+        return self.update("job", job["id"], status="PENDING", auto_resumed=True,
+                           generation=job["generation"] if holder else job["generation"] + 1,
+                           instance=job["instance"] if holder else None,
+                           resumes=job.get("resumes", 0) + 1,
+                           deadline=self.now + self.review_seconds())
 
     def fence(self, mission):
         return (self.optional("fence", mission) or {}).get("value", 0)
@@ -223,7 +291,11 @@ class Workflow:
             refuse("INVALID_MODE", "Mode must be local or managed")
         if mode == "managed" and not self.actor.authenticated:
             refuse("AUTHENTICATED_ENDPOINT_REQUIRED", "Managed mode is established by the trusted controller")
-        return {"config": self.put("config", "project", {"mode": mode, "version": 4})}
+        seconds = d.get("review_deadline_seconds", REVIEW_DEADLINE[mode])
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 60:
+            refuse("INVALID_REVIEW_DEADLINE", "review_deadline_seconds must be an integer of at least 60")
+        return {"config": self.put("config", "project", {"mode": mode, "version": 4,
+                "review_deadline_seconds": seconds})}
 
     def do_authority_record(self, d):
         self.only("principal")
@@ -463,9 +535,14 @@ class Workflow:
                                revises=d.get("revises"), tasks=targets, current=True), d.get("id"))
         return {"decision": decision}
 
-    @staticmethod
-    def decision_applies(decision, task):
-        return decision["domain"] == task["domain"] and (not decision.get("tasks") or task["id"] in decision["tasks"])
+    def decision_applies(self, decision, task):
+        """A blanket decision governs future work; it never reopens an earlier acceptance."""
+        if decision["domain"] != task["domain"]:
+            return False
+        if decision.get("tasks"):
+            return task["id"] in decision["tasks"]
+        accepted = self.rows("report", task=task["id"], kind="acceptance", outcome="ACCEPTED")
+        return not any(report["created"] < decision["created"] for report in accepted)
 
     def do_plan_record(self, d):
         self.only("pm")
@@ -553,6 +630,8 @@ class Workflow:
         tasks = [self.get("task", tid) for tid in d["tasks"]]
         if any(t["mission"] != plan["mission"] for t in tasks):
             refuse("CROSS_MISSION_REFERENCE", "Plan review includes another mission")
+        if d["outcome"] not in ("PASS", "FAIL", "INPUT_INCOMPLETE"):
+            refuse("INVALID_VERDICT", "Plan review outcome must be PASS, FAIL or INPUT_INCOMPLETE")
         if d["outcome"] == "PASS":
             covered = set()
             for task in tasks:
@@ -566,8 +645,14 @@ class Workflow:
                 for item in task["inputs"]:
                     self.blob(item)
                 covered.update(task["obligations"])
+            # An outcome already met (a legacy acceptance included) or authorized away needs no
+            # new producer; only a REQUIRED obligation does.
+            covered.update(oid for oid in plan["obligations"]
+                           if (self.optional("obligation", oid) or {}).get("status") in
+                           ("MET", "AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED"))
             if not set(plan["obligations"]).issubset(covered):
-                refuse("MISSING_PRODUCER", "Every required outcome needs an authorized producer")
+                refuse("MISSING_PRODUCER", "Every required outcome needs an authorized producer",
+                       missing=sorted(set(plan["obligations"]) - covered))
         review = self.create("review", dict(kind="plan", mission=plan["mission"], target=plan["id"],
                               target_digest=digest([plan, tasks]), tasks=d["tasks"],
                               authority_digest=self.authority_digest(plan["mission"]),
@@ -719,7 +804,7 @@ class Workflow:
             refuse("INVALID_SCOPE", "Counterexample target belongs to another mission")
         target_digest = digest(target)
         fact = digest([lineage, sorted(obligations), d.get("authority_span"), target_kind, d["target"], target_digest, d["counterexample_blob"]])
-        old = self.rows("case", fact=fact)
+        old = [case for case in self.rows("case", fact=fact) if case["status"] != "TARGET_REPLACED"]
         if old:
             case = old[0]
             if self.actor.role == "auditor" and not case.get("audit") and not case.get("independent_final"):
@@ -736,7 +821,7 @@ class Workflow:
                            audit_stance="NEGATIVE" if self.actor.role == "auditor" else None,
                            established=False, independent_final=False, repairs=0), d.get("id"))
         self.barrier(case, "PENDING_SCREEN")
-        self.job(case, "screen", 300)
+        self.job(case, "screen", self.review_seconds())
         case = self.update("case", case["id"], review_head=review_basis(self.state, {"case": case["id"]})["head"])
         return {"case": case}
 
@@ -756,12 +841,14 @@ class Workflow:
         self.only("supervisor")
         case = self.get("case", d["case"])
         job = self.get("job", case["id"] + ":screen")
-        if job["status"] != "PENDING" or self.now > job["deadline"]:
+        if job["status"] != "PENDING":
             refuse("STALE_REVIEW", "Screening job is no longer pending")
         if job.get("instance") and job["instance"] != self.actor.session:
             refuse("INDEPENDENCE_REQUIRED", "Only the assigned screening endpoint may decide")
+        job = self.auto_resume(job)
         self.blob(d["source_blob"])
-        self.charge(case["lineage"], "correction", 12)
+        self.charge(case["id"], "correction", 12)
+        self.tally(case["lineage"] + ":correction_total")
         self.update("job", job["id"], status="COMPLETE")
         case = self.update("case", case["id"], screening_author=self.actor.record())
         if d["outcome"] == "ESTABLISHED":
@@ -808,7 +895,7 @@ class Workflow:
                 if not permits or not reports or reports[-1]["created"] < permits[-1]["created"]:
                     refuse("REPAIR_NOT_VERIFIED", "Repair dispatch needs current accepted work under this case's recovery permission")
             job = self.update("job", job["id"], status="PENDING", phase="REPAIR_COMPLIANCE",
-                              generation=job["generation"] + 1, deadline=self.now + 300,
+                              generation=job["generation"] + 1, deadline=self.now + self.review_seconds(),
                               repair=repair, instance=None)
         if job["status"] != "PENDING" or self.now >= job["deadline"]:
             refuse("STALE_REVIEW", "A finished or expired job cannot be dispatched")
@@ -847,9 +934,15 @@ class Workflow:
     def do_job_resume(self, d):
         self.only("controller", "pm")
         job = self.get("job", d["job"])
-        if job["status"] not in ("UNAVAILABLE", "EXPIRED") or job.get("failures", 0) >= 2 or job.get("resumes", 0) >= 2:
+        late = job["status"] in ("PENDING", "AWAIT_REPAIR") and self.now >= job["deadline"]
+        if not late and job["status"] not in ("UNAVAILABLE", "EXPIRED"):
             refuse("BUDGET_EXHAUSTED", "No bounded role transport recovery remains")
-        self.update("job", job["id"], status="PENDING", occupied=False, instance=None, generation=job["generation"] + 1, resumes=job.get("resumes", 0) + 1, deadline=self.now + 300)
+        if job.get("resumes", 0) >= 2:
+            refuse("REVIEW_EXPIRED", "This review job has spent its bounded resumes",
+                   job=job["id"], recovery="case.contest or recovery.permit")
+        if job.get("failures", 0) >= 2:
+            refuse("BUDGET_EXHAUSTED", "No bounded role transport recovery remains")
+        self.update("job", job["id"], status="PENDING", occupied=False, instance=None, generation=job["generation"] + 1, resumes=job.get("resumes", 0) + 1, deadline=self.now + self.review_seconds())
         case = self.get("case", job["case"])
         self.barrier(case, "PENDING_SCREEN" if job["kind"] == "screen" else "CONTEST_PENDING")
         return {"job": self.get("job", job["id"])}
@@ -858,7 +951,7 @@ class Workflow:
         old = self.optional("contest", case["id"])
         if old:
             return {"contest": old, "reused": True}
-        count = (self.optional("budget", case["lineage"] + ":correction") or {}).get("count", 0)
+        count = (self.optional("budget", case["id"] + ":correction") or {}).get("count", 0)
         if count >= 12:
             self.update("case", case["id"], status="UNRESOLVED_LIMIT")
             self.barrier(case, "UNRESOLVED_LIMIT")
@@ -868,12 +961,21 @@ class Workflow:
                          if self.optional("root", case["mission"]) else None, repair_checks=0))
         self.update("case", case["id"], status="CONTESTED")
         self.barrier(case, "CONTEST_PENDING")
-        self.job(case, "contest", 300)
+        self.job(case, "contest", self.review_seconds())
         return {"contest": item}
 
     def do_case_contest(self, d):
-        self.only("pm", "auditor", "constructor", "crititor", "stabilizer")
-        return self.contest(self.get("case", d["case"]))
+        self.only("pm", *REPORTER_ROLES)
+        case = self.get("case", d["case"])
+        if case.get("independent_final"):
+            refuse("CONTEST_FINAL", "This case already has its independent final decision")
+        existing = self.optional("contest", case["id"])
+        if existing:
+            return {"contest": existing, "reused": True}
+        if case["status"] not in CONTESTABLE:
+            refuse("CASE_NOT_CONTESTABLE", "Only a reported, unresolved or decided case can be contested",
+                   case=case["id"], status=case["status"])
+        return self.contest(case)
 
     def do_recovery_permit(self, d):
         self.only("pm")
@@ -931,6 +1033,13 @@ class Workflow:
         case = self.get("case", d["case"])
         if case.get("independent_final"):
             refuse("CONTEST_FINAL", "A Supervisor cannot overwrite an independent final decision")
+        contest = self.optional("contest", case["id"])
+        if contest and contest["status"] in ("PENDING", "INPUT_INCOMPLETE"):
+            refuse("CONTEST_PENDING", "An independent contest decides this case; a Supervisor cannot pre-empt it",
+                   case=case["id"], contest=contest["status"])
+        if d.get("outcome") == "DISMISSED" and not case.get("screening_author"):
+            refuse("SCREENING_REQUIRED", "Dismissal requires a recorded screening decision on this case",
+                   case=case["id"])
         self.blob(d["source_blob"])
         payload = {k: v for k, v in d.items() if k not in ("input_receipt", "review_basis")}
         dependencies = [r for r in d["review_basis"]["refs"] if r[0] not in ("case", "job")]
@@ -961,10 +1070,11 @@ class Workflow:
         case = self.get("case", d["case"])
         contest = self.get("contest", case["id"])
         job = self.get("job", case["id"] + ":contest")
-        if job["status"] not in ("PENDING", "AWAIT_REPAIR") or self.now >= job["deadline"]:
+        if job["status"] not in ("PENDING", "AWAIT_REPAIR"):
             refuse("STALE_REVIEW", "Independent review job expired; use its bounded recovery")
         if job.get("instance") and job["instance"] != self.actor.session:
             refuse("INDEPENDENCE_REQUIRED", "Only the assigned independent job endpoint may decide")
+        job = self.auto_resume(job)
         if self.actor.session == case["author"]["session"] or self.actor.session == (case.get("screening_author") or {}).get("session"):
             refuse("INDEPENDENCE_REQUIRED", "Contest needs a fresh independent instance")
         compliance = contest["status"] == "UPHOLD"
@@ -979,7 +1089,8 @@ class Workflow:
             if job.get("repair") and any(d.get(key) != value for key, value in job["repair"].items()):
                 refuse("REPAIR_NOT_VERIFIED", "Compliance must address the repair inputs assigned to this generation")
         self.blob(d["source_blob"])
-        self.charge(case["lineage"], "correction", 12)
+        self.charge(case["id"], "correction", 12)
+        self.tally(case["lineage"] + ":correction_total")
         outcome = d["outcome"]
         if outcome == "UPHOLD":
             self.update("case", case["id"], status="ESTABLISHED", established=True)
@@ -1012,11 +1123,11 @@ class Workflow:
                     repair_checks=contest["repair_checks"] + int(compliance), source_blob=d["source_blob"])
         self.update("case", case["id"], independent_final=outcome not in ("UPHOLD", "MODIFY_SCOPE", "INPUT_INCOMPLETE"))
         self.update("job", job["id"], status="AWAIT_REPAIR" if outcome in ("UPHOLD", "MODIFY_SCOPE") else "COMPLETE",
-                    deadline=self.now + 86400 if outcome in ("UPHOLD", "MODIFY_SCOPE") else job["deadline"])
+                    deadline=self.now + max(86400, self.review_seconds()) if outcome in ("UPHOLD", "MODIFY_SCOPE") else job["deadline"])
         return {"case": self.get("case", case["id"]), "supervisor_signature_required": False}
 
     def do_case_supplement(self, d):
-        self.only("pm", "constructor", "auditor")
+        self.only("pm", "constructor", "auditor", "challenger")
         case = self.get("case", d["case"])
         contest = self.get("contest", case["id"])
         if contest["status"] != "INPUT_INCOMPLETE":
@@ -1024,7 +1135,7 @@ class Workflow:
         self.blob(d["source_blob"])
         self.update("case", case["id"], supplement_blob=d["source_blob"])
         self.update("contest", case["id"], status="PENDING")
-        self.update("job", case["id"] + ":contest", status="PENDING", deadline=self.now + 300)
+        self.update("job", case["id"] + ":contest", status="PENDING", deadline=self.now + self.review_seconds())
         self.barrier(case, "CONTEST_PENDING")
         return {"case": self.get("case", case["id"])}
 
@@ -1126,7 +1237,7 @@ class Workflow:
             self.charge(task.get("lineage", task["id"]), "independent_run", 2)
         else:
             for item in ([latest] if latest and latest["key"] == key else []):
-                if item["status"] == "COMPLETE" and item["satisfied"] and item["assurance"] in ("controller-execution", "local-controlled-execution"):
+                if item["status"] == "COMPLETE" and item["satisfied"] and item["assurance"] in EXECUTED_ASSURANCE:
                     self.blob(item["stdout_blob"])
                     try:
                         self.current_run(item, outputs=not (item.get("outputs_blob") and not self.rows("delivery", run=item["id"])))
@@ -1165,11 +1276,18 @@ class Workflow:
                       ("argv", "cwd", "inputs", "environment", "predicate", "scope", "outputs", "required")}])
 
     def do_run_abort(self, d):
-        self.only("controller")
+        self.only("controller", "pm")
         run = self.get("run", d["run"])
         for field in ("stdout_blob", "stderr_blob"):
             self.blob(d[field])
-        if run["owner_session"] != self.actor.session or run["generation"] != d["generation"] or run["status"] != "RUNNING":
+        owner = run["owner_session"] == self.actor.session and run["generation"] == d.get("generation")
+        if not owner and run["status"] == "RUNNING" and run["lease_until"] < self.now:
+            # The owning session is gone; the expired lease is the evidence, not a claimed result.
+            return {"run": self.update("run", run["id"], status="EXPIRED", satisfied=False,
+                        failure_code="RUN_LEASE_EXPIRED", failure_detail=d.get("detail", "Execution lease expired"),
+                        stdout_blob=d["stdout_blob"], stderr_blob=d["stderr_blob"],
+                        aborted_by=self.actor.record(), finished_at=self.now)}
+        if not owner or run["status"] != "RUNNING":
             return {"late_result": self.create("late_run_result", dict(d, status="LATE", satisfied=False))}
         return {"run": self.update("run", run["id"], status="TIMED_OUT" if d["code"] == "EXECUTION_TIMEOUT" else "EXECUTION_FAILED",
                     satisfied=False, assurance="controller-failure", failure_code=d["code"], failure_detail=d["detail"],
@@ -1207,7 +1325,8 @@ class Workflow:
         else:
             checks = d.get("checks", {})
             satisfied = d["exit_code"] == 0 and all(checks.get(k) == v for k, v in predicate["checks"].items())
-        assurance = ("controller-execution" if self.actor.authenticated else "local-controlled-execution") if self.actor.role == "controller" else "posthoc-declared"
+        # Local execution freezes inputs and captures logs and outputs; it does not contain the process.
+        assurance = ("controller-execution" if self.actor.authenticated else "local-execution") if self.actor.role == "controller" else "posthoc-declared"
         if req.get("outputs") and not d.get("outputs_blob"):
             satisfied = False
         if d.get("outputs_blob"):
@@ -1334,6 +1453,10 @@ class Workflow:
             if observed != d.get("criteria", {}):
                 refuse("CRITERIA_SOURCE_CONFLICT", "Structured criteria cannot contradict or omit source-table rows")
         outcome = d["outcome"]
+        if not parsed and task["obligations"] and outcome in ("COMPLETE", "PASS", "ACCEPTED") \
+                and (outcome != "COMPLETE" or d.get("criteria")):
+            refuse("CRITERIA_TABLE_REQUIRED", "A completed or positive report needs its criteria table in the source document",
+                   task=task["id"], outcome=outcome)
         allowed_outcomes = {"development": {"COMPLETE", "PARTIAL", "FAILED", "BLOCKED"},
                             "critique": {"PASS", "CHANGES_REQUESTED", "CHANGES-REQUESTED", "FAIL", "BLOCKED"},
                             "acceptance": {"ACCEPTED", "CHANGES_REQUESTED", "CHANGES-REQUESTED", "UNRESOLVED_LIMIT", "BLOCKED"}}
@@ -1440,20 +1563,33 @@ class Workflow:
         authority = self.get("authority", self.get("root", task["mission"])["authority"])
         decisions = [x for x in self.rows("decision", mission=task["mission"], current=True)
                      if self.decision_applies(x, task)]
-        requirements, runs, paths = [], [], list(task.get("outputs", []))
+        private_state = (self.store.path, self.store.source_root / ".claude", self.store.source_root / ".git")
+        requirements, runs, paths = [], [], []
+        for ref in task.get("outputs", []):
+            if ref not in paths:
+                paths.append(ref)
+        for ref in task.get("write_paths", []):
+            # A file a reviewed task may rewrite is part of its actual product; private
+            # state is not, and work.write refuses it anyway.
+            if ref in paths or any(contained(resolve_ref(self.store.source_root, ref), private)
+                                   for private in private_state):
+                continue
+            paths.append(ref)
         for rid in task["required_runs"]:
             req = self.get("requirement", rid)
             if not req["required"]:
                 continue
             profile = self.get("environment", req["environment"])
             requirements.append([req, profile])
-            paths += req.get("inputs", [])
+            for ref in req.get("inputs", []):
+                if ref not in paths:
+                    paths.append(ref)
             run = self.latest_attempt(rid)
             runs.append(run)
         files = []
         for ref in paths:
             path = resolve_ref(self.store.source_root, ref)
-            if any(contained(path, private) for private in (self.store.path, self.store.source_root / ".claude", self.store.source_root / ".git")):
+            if any(contained(path, private) for private in private_state):
                 refuse("PRIVATE_INPUT_FORBIDDEN", "Calibration cannot inspect private state as product input")
             files.append([ref, hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() and not path.is_symlink() else None])
         result = {"task": task, "authority": authority, "grant": self.get("grant", task["grant"]),
@@ -1487,7 +1623,24 @@ class Workflow:
                     deferred_owner=d["owner"], reason_blob=d["reason_blob"], verified_fixed=False)
         return {"obligation": self.get("obligation", ob["id"])}
 
+    def do_obligation_cancel(self, d):
+        """Cancellation is the second authorized exit; it is never silent completion."""
+        self.only("pm", "principal")
+        ob = self.get("obligation", d["obligation"])
+        self.grant(d["grant"], d["domain"], ob["mission"], permission="defer")
+        if not d.get("owner") or not d.get("reason_blob"):
+            refuse("DEFERRAL_INCOMPLETE", "Authorized cancellation needs responsibility and an explicit reason")
+        self.blob(d["reason_blob"])
+        self.update("obligation", ob["id"], status="AUTHORIZED_CANCELLED", grant=d["grant"],
+                    domain=d["domain"], deferred_owner=d["owner"], reason_blob=d["reason_blob"],
+                    cancelled_by=self.actor.record(), verified_fixed=False)
+        return {"obligation": self.get("obligation", ob["id"])}
+
     def do_flag_raise(self, d):
+        self.only("pm", *REPORTER_ROLES)
+        if not self.optional("root", d["mission"]) and not self.rows("intake", mission=d["mission"]):
+            refuse("MISSING_REFERENCE", "A flag needs a mission with an active root or a pre-active intake",
+                   mission=d["mission"])
         self.blob(d["source_blob"])
         return {"flag": self.create("flag", dict(mission=d["mission"], text=d["text"], source_blob=d["source_blob"],
                                status="OPEN", live=True, disposition=None), d.get("id"))}
@@ -1609,6 +1762,10 @@ class Workflow:
         if d["path"] not in task.get("outputs", []):
             refuse("UNDECLARED_DELIVERY", "Delivery must be one of the task's reviewed output paths")
         for old in self.rows("delivery", task=task["id"], path=d["path"], current=True):
+            if old.get("run"):
+                refuse("EXPORTED_OUTPUT", "This path's current delivery came from a qualified run; export the run again instead of declaring bytes",
+                       path=d["path"], run=old["run"])
+        for old in self.rows("delivery", task=task["id"], path=d["path"], current=True):
             self.update("delivery", old["id"], current=False)
         return {"delivery": self.create("delivery", dict(task=task["id"], mission=task["mission"],
                         path=d["path"], source_blob=self.blob(d["source_blob"]), current=True))}
@@ -1700,13 +1857,23 @@ class Workflow:
         if bundle["status"] != "READY":
             refuse("INPUT_INCOMPLETE", "Closure audit requires actual complete inputs")
         self.blob(d["source_blob"])
+        outcome = d.get("outcome")
+        if outcome is not None and outcome not in ("PASS", "FINDINGS", "INPUT_INCOMPLETE"):
+            refuse("INVALID_VERDICT", "Audit outcome must be PASS, FINDINGS or INPUT_INCOMPLETE")
         findings = []
         for finding in d.get("findings", []):
             issue = self.do_issue_report(dict(finding, mission=bundle["mission"]))
             findings.append(issue.get("case", issue.get("advisory"))["id"])
+        derived = "FINDINGS" if findings else "PASS"
+        if outcome is None:
+            outcome = derived
+        elif outcome != "INPUT_INCOMPLETE" and outcome != derived:
+            refuse("INVALID_VERDICT", "Audit outcome contradicts its own findings",
+                   outcome=outcome, findings=len(findings))
         audit = self.create("audit", dict(mission=bundle["mission"], bundle=bundle["id"], findings=findings,
                            source_blob=d["source_blob"], authority_digest=self.authority_digest(bundle["mission"]),
-                           status="COMPLETE"), d.get("id"))
+                           outcome=outcome,
+                           status="INPUT_INCOMPLETE" if outcome == "INPUT_INCOMPLETE" else "COMPLETE"), d.get("id"))
         return {"audit": audit}
 
     def do_close_review(self, d):
@@ -1716,6 +1883,8 @@ class Workflow:
         self.blob(d["source_blob"])
         if bundle["status"] != "READY":
             refuse("INPUT_INCOMPLETE", "Closure review needs actual inputs")
+        if d["outcome"] not in ("PASS", "FAIL", "INPUT_INCOMPLETE"):
+            refuse("INVALID_VERDICT", "Close review outcome must be PASS, FAIL or INPUT_INCOMPLETE")
         review = self.create("review", dict(kind="close", target=bundle["id"], target_digest=digest(bundle),
                               authority_digest=self.authority_digest(bundle["mission"]), outcome=d["outcome"],
                               source_blob=d["source_blob"]), d.get("id"))
@@ -1748,6 +1917,9 @@ class Workflow:
         bundle = self.get("bundle", d["bundle"])
         self.current_bundle(bundle)
         audit = self.get("audit", d["audit"])
+        if (audit.get("outcome") or ("FINDINGS" if audit["findings"] else "PASS")) not in ("PASS", "FINDINGS"):
+            refuse("AUDIT_OUTCOME_REQUIRED", "Closure needs a completed closure audit outcome of PASS or FINDINGS",
+                   audit=audit["id"], outcome=audit.get("outcome"))
         review = self.get("review", d["review"])
         current_auth = self.authority_digest(mission)
         if bundle["mission"] != mission or audit["bundle"] != bundle["id"] or audit["authority_digest"] != current_auth \

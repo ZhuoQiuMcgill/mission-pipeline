@@ -17,7 +17,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(f.run["satisfied"])
         f.call("pm", "consume", admission=f.admission)
         (f.root / "verify.py").write_text("print('changed')\n", encoding="utf-8")
-        refuses(self, "STALE_EXECUTION_INPUT", lambda: f.call("crititor", "report.record", kind="critique", task="t", outcome="PASS", admission=f.admission, source_blob=f.blob, criteria={"o": "met"}))
+        stated = next(v["data"]["source_blob"] for (k, _), v in f.engine.store.read().items()
+                      if k == "report" and v["data"]["kind"] == "development")
+        refuses(self, "STALE_EXECUTION_INPUT", lambda: f.call("crititor", "report.record", kind="critique", task="t", outcome="PASS", admission=f.admission, source_blob=stated, criteria={"o": "met"}))
 
     def test_pending_barrier_and_automatic_independent_contest(self):
         f = self.f

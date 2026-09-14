@@ -108,7 +108,8 @@ class JobRecoveryTests(unittest.TestCase):
         self.assertEqual(1, len(f.engine.object("case", self.case["id"])["review_rebases"]))
         self.assertEqual(["UPHOLD", "REPAIR_VERIFIED"], [x["outcome"] for x in contest["decisions"]])
         self.assertFalse(result["supervisor_signature_required"])
-        self.assertEqual(3, f.engine.object("budget", self.case["lineage"] + ":correction")["count"])
+        self.assertEqual(3, f.engine.object("budget", self.case["id"] + ":correction")["count"])
+        self.assertEqual(3, f.engine.object("budget", self.case["lineage"] + ":correction_total")["count"])
         refuses(self, "STALE_REVIEW", lambda: fresh.job_seat(self.job, {"repair_tasks": ["t"]}))
         self.close_mission()
 
