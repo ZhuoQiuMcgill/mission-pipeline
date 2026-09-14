@@ -10,6 +10,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from . import VERSION, SCHEMA
 from .engine import Engine
 from .environment import inspect_environment
 from .markdown import document_fields
@@ -115,12 +116,12 @@ def main(argv=None):
             if ("config", "project") not in engine.store.read():
                 result = engine.with_actor(Actor("principal", "local:init")).mutate(
                     "project.configure", {"mode": "local"}, "project-config-initial")
-            output(dict(result, version="2.0.0", schema=4, mode="local", assurance="self-asserted"))
+            output(dict(result, version=VERSION, schema=SCHEMA, mode="local", assurance="self-asserted"))
             return 0
         if command == "capabilities":
             import shutil
             from .paths import root_identity
-            output({"ok": True, "version": "2.0.0", "schema": 4, "interpreter": sys.executable,
+            output({"ok": True, "version": VERSION, "schema": SCHEMA, "interpreter": sys.executable,
                     "execution_root": root_identity(root),
                     "python_version": list(sys.version_info[:3]), "platform": sys.platform,
                     "bwrap_binary_available": bool(shutil.which("bwrap")), "managed_ready": "requires successful managed probe and trusted driver",
