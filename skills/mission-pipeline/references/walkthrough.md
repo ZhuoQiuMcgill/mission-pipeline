@@ -166,7 +166,7 @@ The Supervisor calls `contracts.snapshot` again, then:
           "source_blob": "$PLANREVIEW_DOC", "contract_scope_digest": "<digest>"}}
 ```
 
-PASS checks the grant for every task, every applicable decision, that required effects are a subset of allowed effects (`INFEASIBLE_TASK`), that every declared input blob exists, and that every obligation in the plan has a producer (`MISSING_PRODUCER`). Template: `templates/plan-review.md`.
+PASS checks the grant for every task, every applicable decision, that required effects are a subset of allowed effects (`INFEASIBLE_TASK`), that every declared input blob exists, and that every obligation in the plan that is still REQUIRED has a producer (`MISSING_PRODUCER`); an obligation already MET, deferred or cancelled needs no task, which is what lets a migrated mission plan its delivered work in the same plan. Template: `templates/plan-review.md`.
 
 ```json
 {"request_id": "admit-1", "action": "task.admit", "data": {"id": "ad1", "task": "t", "review": "pr1"}}

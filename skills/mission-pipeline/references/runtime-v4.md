@@ -52,7 +52,7 @@ Every candidate occurrence is checked before deduplication: project cannot becom
 
 `decision.record` carries the grant, domain, actual `effects`, a `rationale_blob`, the `choice` and an optional predecessor through `revises`. A2 choices are revisable under the same valid grant; only a principal amendment changes A0.
 
-`decision.record` may limit `tasks` to mission task ids. Omission means the decision applies to that domain going forward. It applies to a task only when the task has no current ACCEPTED acceptance created before the decision, so a blanket decision does not retro-invalidate finished work. Revisions inherit the previous scope unless it is explicitly changed.
+`decision.record` may limit `tasks` to mission task ids. Omission means the decision applies to that domain going forward. It applies to a task only when the task has no ACCEPTED acceptance, current or superseded, created before the decision, so a blanket decision does not retro-invalidate finished work and the rule stays stable across later rounds. Revisions inherit the previous scope unless it is explicitly changed.
 
 ## 6. Plans, tasks and admission
 
@@ -151,7 +151,7 @@ Barrier phases that block a positive use are PENDING_SCREEN, ESTABLISHED_HOLD, C
 
 ## 14. Contest
 
-`case.contest` is open to pm and to every reporting role: constructor, crititor, stabilizer, auditor, calibrator, challenger, architect, researcher and supervisor. The case must be DISMISSED, ESTABLISHED, VERIFIED_FIXED or AUTHORIZED_EXCEPTION, and not already `independent_final`. One contest per case.
+`case.contest` is open to pm and to every reporting role: constructor, crititor, stabilizer, auditor, calibrator, challenger, architect, researcher and supervisor. Any case that is not `TARGET_REPLACED` and not already `independent_final` can be contested, including one still waiting to be screened or one that hit `UNRESOLVED_LIMIT`; a replaced case refuses `CASE_NOT_CONTESTABLE`, a final one `CONTEST_FINAL`. One contest per case; a second request returns the existing contest as `reused`.
 
 A mandatory Auditor's substantive disagreement with a dismissal, a claimed repair or an exception creates that contest automatically; PM need not volunteer it and cannot suppress it.
 
@@ -252,7 +252,7 @@ In local mode seal is also a convenience layer. It:
 - fills `review_basis` for the six review actions when the field is absent;
 - fills `admission` with the task's latest admission, `critique` with the task's current PASS critique for an acceptance, and `revises` with the current report of the same kind;
 - marks `reading_assurance: "self-asserted"` when it filled a review field;
-- echoes the submitted request in its output.
+- returns the request it actually submitted as `submitted_request` beside the engine result.
 
 Managed seal behaviour is unchanged: the broker's packet supplies those fields and the read receipt, and nothing is refreshed silently at commit.
 

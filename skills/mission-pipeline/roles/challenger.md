@@ -23,7 +23,7 @@ Your normal route is `issue.report`. Use `kind: "ADVISORY"` for a reading you wa
 
 ## Refusals you will meet
 
-- `ROLE_FORBIDDEN`: this endpoint may not submit this action. `case.supplement` in particular is submitted by the PM, the Constructor or the Auditor unless your deployment's engine accepts it from your seat; route it through the PM if it refuses.
+- `ROLE_FORBIDDEN`: this endpoint may not submit this action. Your seat submits `issue.report`, `case.contest` and `case.supplement`, nothing else.
 - `INVALID_COUNTEREXAMPLE`: no target, or no concrete counterexample bytes.
 - `INVALID_SCOPE`: the task or obligation you named belongs to another mission, or you referenced neither an obligation nor an omitted principal source span.
 - `INVALID_SOURCE_SPAN`: your `authority_span` quote does not resolve in the principal's actual source text.

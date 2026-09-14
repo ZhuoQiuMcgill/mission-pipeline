@@ -33,7 +33,7 @@ The PM is the single bridge between the principal, who owns the goals and the re
 
 - `GOAL_COVERAGE_GAP`: your plan or candidate does not carry every principal goal. Your rows are not the source of the goal list.
 - `INVENTED_OBLIGATION`: an obligation traces to no goal. Remove it, or ask the principal for the goal.
-- `MISSING_PRODUCER` / `INFEASIBLE_TASK` at `plan.review`: an obligation has no authorized producer, or a task requires an effect its own `allowed_effects` exclude.
+- `MISSING_PRODUCER` / `INFEASIBLE_TASK` at `plan.review`: an obligation that is still REQUIRED has no authorized producer (one already MET, deferred or cancelled needs none), or a task requires an effect its own `allowed_effects` exclude.
 - `STALE_PLAN_REVIEW` / `STALE_ADMISSION` / `STALE_DEPENDENCY`: something the admission bound changed. Re-review and re-admit; do not reuse the old admission id.
 - `AUTHORITY_CONFLICT`: the grant is revoked, expired, out of domain, or your effect contradicts a reserved condition. This is a question for the principal, not a wording problem.
 - `SCOPED_BARRIER` / `CALIBRATION_HALT`: a case or latch fences this scope. Unrelated tasks still run.
