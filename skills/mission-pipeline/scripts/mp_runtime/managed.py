@@ -38,10 +38,17 @@ ROLE_ACTIONS = {
 ROLE_ACTIONS["pm"].update({"legacy.adopt", "task.replace", "wave.open", "wave.integrate", "context.compacted", "job.resume", "case.supplement"})
 ROLE_ACTIONS["constructor"].add("case.supplement")
 ROLE_ACTIONS["auditor"].add("case.supplement")
+ROLE_ACTIONS["challenger"].add("case.supplement")
 ROLE_ACTIONS["supervisor"].update({"rule.record", "rule.retire"})
 ROLE_ACTIONS["stabilizer"].update({"rule.record", "rule.retire"})
 for _review_role in ("supervisor", "stabilizer", "auditor"):
     ROLE_ACTIONS[_review_role].add("review.rebase")
+ROLE_ACTIONS["pm"].update({"obligation.cancel", "legacy.accept"})
+# Every seat that may report a counterexample may also contest one and raise a flag.
+for _reporter in ("constructor", "crititor", "stabilizer", "auditor", "calibrator",
+                  "challenger", "architect", "researcher", "supervisor"):
+    ROLE_ACTIONS[_reporter].update({"case.contest", "flag.raise"})
+ROLE_ACTIONS["pm"].add("flag.raise")
 
 
 class ManagedBroker:

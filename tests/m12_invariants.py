@@ -89,7 +89,8 @@ class InvariantTests(unittest.TestCase):
     def test_no_positive_acceptance_without_pass_and_round_reset(self):
         f = self.f
         f.setup()
-        refuses(self, "REQUIRED_VERIFICATION_UNSATISFIED", lambda: f.call("stabilizer", "report.record", kind="acceptance", task="t", outcome="ACCEPTED", admission=f.admission, source_blob=f.blob, criteria={"o": "met"}, critique="missing"))
+        refuses(self, "REQUIRED_VERIFICATION_UNSATISFIED", lambda: f.call("stabilizer", "report.record", kind="acceptance", task="t", outcome="ACCEPTED", admission=f.admission, source_blob=f.table, criteria={"o": "met"}, critique="missing"))
+        refuses(self, "CRITERIA_TABLE_REQUIRED", lambda: f.call("stabilizer", "report.record", kind="acceptance", task="t", outcome="ACCEPTED", admission=f.admission, source_blob=f.blob, criteria={"o": "met"}, critique="missing"))
         report = f.call("constructor", "report.record", kind="development", task="t", outcome="COMPLETE", source_blob=f.blob, round=1)["report"]
         report2 = f.call("constructor", "report.record", kind="development", task="t", outcome="COMPLETE", source_blob=f.blob, round=2, revises=report["id"])["report"]
         refuses(self, "STALE_HEAD", lambda: f.call("constructor", "report.record", kind="development", task="t", outcome="COMPLETE", source_blob=f.blob, round=2, revises=report["id"]))

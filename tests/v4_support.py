@@ -21,6 +21,10 @@ class Fixture:
         self.n = itertools.count()
         self.managed = managed
         self.blob = self.engine.store.blobs.put(b"Principal: deliver a usable report; PM may choose and revise the method.")
+        # S11: a completed or positive report carries its criteria table in its own source.
+        self.table = self.engine.store.blobs.put(
+            b"# Report\n| # | criterion | status | anchor | type |\n|---|---|---|---|---|\n"
+            b"| o | actual usable report | met | controlled output | R |\n")
         self.call("principal", "project.configure", mode="local")
 
     def close(self):
