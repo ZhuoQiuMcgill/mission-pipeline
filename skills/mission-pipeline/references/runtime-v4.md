@@ -52,7 +52,7 @@ Every candidate occurrence is checked before deduplication: project cannot becom
 
 `decision.record` carries the grant, domain, actual `effects`, a `rationale_blob`, the `choice` and an optional predecessor through `revises`. A2 choices are revisable under the same valid grant; only a principal amendment changes A0.
 
-`decision.record` may limit `tasks` to mission task ids. Omission means the decision applies to that domain going forward. It applies to a task only when the task has no ACCEPTED acceptance, current or superseded, created before the decision, so a blanket decision does not retro-invalidate finished work and the rule stays stable across later rounds. Revisions inherit the previous scope unless it is explicitly changed.
+`decision.record` may limit `tasks` to mission task ids of the decision's own `domain`. A decision never applies to a task of another domain, so naming one refuses `DECISION_DOMAIN_MISMATCH` with the `task`, its `task_domain` and the `decision_domain`; this also holds for the tasks a revision inherits. Record the choice in the task's domain, under a grant that covers it, or leave that task out. Omission means the decision applies to that domain going forward. It applies to a task only when the task has no ACCEPTED acceptance, current or superseded, created before the decision, so a blanket decision does not retro-invalidate finished work and the rule stays stable across later rounds. Revisions inherit the previous scope unless it is explicitly changed.
 
 ## 6. Plans, tasks and admission
 

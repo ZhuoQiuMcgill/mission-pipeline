@@ -149,5 +149,37 @@ class BundleSnapshotsFollowAdmission(FieldRepairTest):
         self.assertEqual(("INPUT_INCOMPLETE", "t2"), (refused.code, refused.context["task"]))
 
 
+class DecisionDomainMatchesItsTasks(FieldRepairTest):
+    """A decision naming a task of another domain would govern nothing, so it is refused."""
+
+    def decide(self, **data):
+        f = self.f
+        return f.call("pm", "decision.record", mission="m", effects={"layout": "narrow"}, rationale_blob=f.blob,
+                      choice="a choice about named tasks", **data)
+
+    def test_naming_a_task_of_another_domain_is_refused_with_both_domains(self):
+        f = self.f
+        f.setup()
+        f.call("pm", "task.record", id="t-content", mission="m", obligations=["o"], grant="g", domain="content",
+               effects=["write-report"], allowed_effects=["write-report"], inputs=[f.blob], source_blob=f.blob,
+               write_paths=["text.md"], outputs=["text.md"])
+        for tasks in (["t-content"], ["t", "t-content"]):
+            with self.subTest(tasks=tasks):
+                with self.assertRaises(RuntimeRefusal) as caught:
+                    self.decide(id="d-mixed", grant="g", domain="method", tasks=tasks)
+                self.assertEqual("DECISION_DOMAIN_MISMATCH", caught.exception.code)
+                self.assertEqual({"task": "t-content", "task_domain": "content", "decision_domain": "method"},
+                                 caught.exception.context)
+        self.assertNotIn("d-mixed", [id for kind, id in f.engine.store.read() if kind == "decision"])
+        self.assertEqual(["t"], self.decide(id="d-method", grant="g", domain="method", tasks=["t"])["decision"]["tasks"])
+        f.call("principal", "grant.record", id="g-content", authority="a", source_blob=f.blob, scope="m",
+               domains=["method", "content"], permissions=["choose", "revise"])
+        self.decide(id="d-content", grant="g-content", domain="content", tasks=["t-content"])
+        # A revision inherits its predecessor's tasks, and is held to the same rule.
+        refuses(self, "DECISION_DOMAIN_MISMATCH",
+                lambda: self.decide(id="d-moved", grant="g-content", domain="method", revises="d-content"))
+        self.assertTrue(f.engine.object("decision", "d-content")["current"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

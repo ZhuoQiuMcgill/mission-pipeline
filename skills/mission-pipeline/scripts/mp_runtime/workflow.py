@@ -535,6 +535,14 @@ class Workflow:
             self.update("decision", previous["id"], current=False)
         if not isinstance(targets, list) or any(not isinstance(tid, str) or self.get("task", tid)["mission"] != d["mission"] for tid in targets):
             refuse("CROSS_MISSION_REFERENCE", "Decision tasks must belong to its mission")
+        for tid in targets:
+            # decision_applies never applies a decision to a task of another domain; naming one
+            # would record authority that governs nothing.
+            task_domain = self.get("task", tid)["domain"]
+            if task_domain != d["domain"]:
+                refuse("DECISION_DOMAIN_MISMATCH", "A decision applies only to tasks of its own domain; record it "
+                       "in the task's domain or leave that task out", task=tid, task_domain=task_domain,
+                       decision_domain=d["domain"])
         decision = self.create("decision", dict(mission=d["mission"], grant=grant["id"],
                                grant_digest=digest(grant), domain=d["domain"], effects=d.get("effects", {}),
                                rationale_blob=self.blob(d["rationale_blob"]), choice=d["choice"],

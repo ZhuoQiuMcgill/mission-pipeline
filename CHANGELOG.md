@@ -26,6 +26,11 @@ shape; `tests/m24_field_repairs.py` holds one regression test class per fix.
   Because an admission is not in the bundle's delivery digest, `calibration.record` (except
   an INPUT_INCOMPLETE verdict) and `mission.close` recheck the same rule, so a task admitted
   after the bundle is still held to its outputs.
+- **A decision naming another domain's task is refused.** `decision.record` accepted `tasks`
+  whose domain differed from the decision's, and `decision_applies` then never applied it, so
+  the PM held a record that authorized nothing. It now refuses `DECISION_DOMAIN_MISMATCH` with
+  the `task`, its `task_domain` and the `decision_domain`, including for the tasks a revision
+  inherits. Nothing in the runtime applies a decision across domains.
 
 ## [2.1.0] — 2026-09-13
 

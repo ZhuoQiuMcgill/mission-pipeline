@@ -27,7 +27,7 @@ The PM is the single bridge between the principal, who owns the goals and the re
 | Close | `bundle.record`, `mission.close` | `templates/mission-close.md` |
 | Upgrade a 1.2 mission | `legacy.adopt`, `legacy.accept` | `templates/legacy-accept.md` |
 
-`decision.record` may limit `tasks`. Omitting `tasks` applies the decision to the whole domain from now on; it does not invalidate a task already accepted before the decision was created.
+`decision.record` may limit `tasks`, all of the decision's own domain; a decision never applies to a task of another domain, so naming one refuses `DECISION_DOMAIN_MISMATCH`. Omitting `tasks` applies the decision to the whole domain from now on; it does not invalidate a task already accepted before the decision was created.
 
 ## Refusals you will meet
 
