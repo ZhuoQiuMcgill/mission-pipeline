@@ -42,6 +42,12 @@ shape; `tests/m24_field_repairs.py` holds one regression test class per fix.
   keyed by task id, with `admission` (ADMITTED, STALE or NOT_ADMITTED) and `admission_id`,
   `acceptance` (ACCEPTED, STALE or NOT_ACCEPTED) and `acceptance_report`, plus a `note` saying
   what the stored status means. Nothing derived is stored.
+- **A requirement id is listed once.** `requirement.record` appended its id to
+  `task.required_runs` even when the task spec already listed it, leaving rows such as
+  `["r-fig", "r-rep", "r-fig", "r-rep"]` and changing the task digest. A listed id is no longer
+  appended, so that task row and its digest are unchanged; an unlisted id is appended once, as
+  before. `task.record` still stores the list the PM sends, so a row already doubled is repaired
+  by the next task revision that lists each id once.
 
 ## [2.1.0] — 2026-09-13
 

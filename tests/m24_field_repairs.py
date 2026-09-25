@@ -257,5 +257,29 @@ class TaskQueryReportsAdmission(FieldRepairTest):
                          self.query("t")["derived"]["t"])
 
 
+class RequirementIdsAreListedOnce(FieldRepairTest):
+    """Recording a requirement the task spec already lists does not list it twice."""
+
+    def requirement(self, id, task):
+        self.f.call("pm", "requirement.record", id=id, task=task, argv=["{python}", "check.py"], inputs=["check.py"],
+                    environment="env")
+
+    def test_a_listed_requirement_keeps_the_task_and_an_unlisted_one_is_appended_once(self):
+        f = self.f
+        f.setup()
+        f.call("pm", "task.record", id="t2", mission="m", obligations=["o"], grant="g", domain="method",
+               effects=["write-report"], allowed_effects=["write-report"], inputs=[f.blob], source_blob=f.blob,
+               write_paths=["check.py"], outputs=[], required_runs=["r-fig", "r-rep"])
+        spec = f.engine.object("task", "t2")
+        self.requirement("r-fig", "t2")
+        self.requirement("r-rep", "t2")
+        self.assertEqual(spec, f.engine.object("task", "t2"))
+        self.assertEqual(["r-fig", "r-rep"], f.engine.object("task", "t2")["required_runs"])
+        self.requirement("r-extra", "t2")
+        added = f.engine.object("task", "t2")
+        self.assertEqual(["r-fig", "r-rep", "r-extra"], added["required_runs"])
+        self.assertNotEqual(digest(spec), digest(added))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

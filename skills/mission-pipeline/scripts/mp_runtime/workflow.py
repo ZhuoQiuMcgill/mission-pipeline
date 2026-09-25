@@ -1201,7 +1201,9 @@ class Workflow:
                                  outputs=d.get("outputs", []),
                                  environment=d["environment"], predicate=predicate,
                                  scope=d.get("scope", "task"), required=d.get("required", True)), d.get("id"))
-        self.update("task", task["id"], required_runs=task["required_runs"] + [requirement["id"]])
+        if requirement["id"] not in task["required_runs"]:
+            # A task spec that already lists this id keeps its row, and so its digest, unchanged.
+            self.update("task", task["id"], required_runs=task["required_runs"] + [requirement["id"]])
         return {"requirement": requirement}
 
     def do_environment_register(self, d):
