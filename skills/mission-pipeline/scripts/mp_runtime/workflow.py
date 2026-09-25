@@ -37,6 +37,7 @@ CONTESTABLE = {"REPORTED_PENDING_SCREEN", "DISMISSED", "ESTABLISHED", "VERIFIED_
 # "local-controlled-execution" is the 2.0 spelling of a local executor run; it is read, never written.
 EXECUTED_ASSURANCE = ("controller-execution", "local-controlled-execution", "local-execution")
 REVIEW_DEADLINE = {"local": 86400, "managed": 300}
+WRITE_LIMIT = 8 * 1024 * 1024  # bytes per work.write file; stated in references/runtime-v4.md section 8
 # What the engine writes onto an obligation when a report meets it, `obligation.defer` or
 # `obligation.cancel` disposes it, or `legacy.accept` credits it. A plan re-record restates
 # the PM's `{id, goal, description}` and keeps these with the status.
@@ -1817,8 +1818,9 @@ class Workflow:
         if d.get("expected_sha256") != current:
             refuse("STALE_PRODUCT_HEAD", "Working file changed; re-read before replacing it")
         raw = self.store.blobs.get(d["source_blob"])
-        if len(raw) > 8 * 1024 * 1024:
-            refuse("INVALID_INPUT", "A scoped write exceeds the tool size limit")
+        if len(raw) > WRITE_LIMIT:
+            refuse("INVALID_INPUT", "work.write takes at most " + str(WRITE_LIMIT) + " bytes (8 MiB) per file; this file is "
+                   + str(len(raw)) + " bytes", limit=WRITE_LIMIT, size=len(raw), path=d["path"])
         return {"write": self.create("work_change", dict(task=task["id"], mission=task["mission"],
                        path=d["path"], previous_sha256=current, source_blob=d["source_blob"], install_effect=True))}
 

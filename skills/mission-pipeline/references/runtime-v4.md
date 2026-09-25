@@ -78,6 +78,8 @@ The first wave exists at activation. `wave.open` for a successor requires the pr
 
 Constructor claims a current dispatch ticket, submits source as a blob, and uses `work.write` with task, admission, path, `source_blob` and `expected_sha256`. It writes only the reviewed exact paths and never pipeline state. A changed working-file head refuses `STALE_PRODUCT_HEAD` rather than overwriting another edit.
 
+One `work.write` installs at most 8 MiB (8,388,608 bytes). A larger `source_blob` refuses `INVALID_INPUT`, and the refusal carries `limit`, the file's `size` and its `path`. Split such a file, or have a controlled run produce it as a declared output.
+
 Product file changes and exported output installations are journaled effects. No file changes before its event is durable. A completion receipt is persisted after installation and before projection commit. Recovery accepts the intended bytes or applies them against the recorded previous hash, and refuses to overwrite an intervening edit (`RECOVERY_PRODUCT_CONFLICT`).
 
 ## 9. Execution

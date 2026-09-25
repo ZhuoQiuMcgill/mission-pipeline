@@ -2,6 +2,7 @@
 
 One test class per repaired defect, each driven through the normal v4 requests.
 """
+import hashlib
 import unittest
 from unittest.mock import patch
 
@@ -179,6 +180,29 @@ class DecisionDomainMatchesItsTasks(FieldRepairTest):
         refuses(self, "DECISION_DOMAIN_MISMATCH",
                 lambda: self.decide(id="d-moved", grant="g-content", domain="method", revises="d-content"))
         self.assertTrue(f.engine.object("decision", "d-content")["current"])
+
+
+class WriteLimitIsStated(FieldRepairTest):
+    """The 8 MiB work.write cap is unchanged; its refusal now names the limit and the size."""
+
+    def test_an_oversized_write_names_the_limit_and_the_file_size(self):
+        f = self.f
+        f.setup()
+        limit = 8 * 1024 * 1024
+        current = hashlib.sha256((f.root / "verify.py").read_bytes()).hexdigest()
+        oversized = f.engine.store.blobs.put(b"x" * (limit + 1))
+        with self.assertRaises(RuntimeRefusal) as caught:
+            f.call("constructor", "work.write", task="t", admission=f.admission, path="verify.py",
+                   source_blob=oversized, expected_sha256=current)
+        refused = caught.exception
+        self.assertEqual("INVALID_INPUT", refused.code)
+        self.assertIn("8388608 bytes (8 MiB)", refused.detail)
+        self.assertIn("8388609 bytes", refused.detail)
+        self.assertEqual({"limit": limit, "size": limit + 1, "path": "verify.py"}, refused.context)
+        at_limit = f.engine.store.blobs.put(b"x" * limit)
+        f.call("constructor", "work.write", task="t", admission=f.admission, path="verify.py",
+               source_blob=at_limit, expected_sha256=current)
+        self.assertEqual(limit, (f.root / "verify.py").stat().st_size)
 
 
 if __name__ == "__main__":

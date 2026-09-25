@@ -31,6 +31,10 @@ shape; `tests/m24_field_repairs.py` holds one regression test class per fix.
   the PM held a record that authorized nothing. It now refuses `DECISION_DOMAIN_MISMATCH` with
   the `task`, its `task_domain` and the `decision_domain`, including for the tasks a revision
   inherits. Nothing in the runtime applies a decision across domains.
+- **The `work.write` size limit is stated.** A file over 8 MiB was refused `INVALID_INPUT`
+  ("exceeds the tool size limit") with the limit written nowhere. The limit is unchanged; it is
+  now documented in `runtime-v4.md`, SKILL.md and the Constructor role, and the refusal names
+  it and the file's size, with `limit`, `size` and `path` fields.
 
 ## [2.1.0] — 2026-09-13
 

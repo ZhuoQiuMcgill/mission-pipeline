@@ -30,6 +30,7 @@ The development report carries a criteria table with a real status per row: met,
 - `WRITE_SCOPE_CONFLICT`: the path is not in the task's reviewed `write_paths`. Ask the PM to revise the task; do not write elsewhere.
 - `STALE_PRODUCT_HEAD`: the file changed since you read it. Re-read, recompute the hash, write again. Never overwrite another seat's edit.
 - `PRIVATE_INPUT_FORBIDDEN`: you named ledger, `.claude` or `.git` state as a product path.
+- `INVALID_INPUT` from `work.write`: the file exceeds the 8 MiB per-write limit (`limit` and `size` are in the refusal). Split it, or produce it as a declared run output.
 - `STALE_ADMISSION` / `STALE_DEPENDENCY`: the task, its authority or a predecessor changed. Wait for re-admission.
 - `REQUIRED_VERIFICATION_UNSATISFIED`: the latest attempt for a required run is pending, failed or missing.
 - `STALE_EXECUTION_INPUT` / `STALE_EXECUTION_OUTPUT`: a frozen input or a delivered output changed after the run. Run it again.

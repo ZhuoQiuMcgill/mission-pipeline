@@ -71,6 +71,7 @@ A refusal is a JSON object with `ok:false`, a `code` and a `detail`. Determinist
 | `STALE_ADMISSION` / `STALE_DEPENDENCY` | The admitted task, its authority or a consumed predecessor changed | `task.admit` again on the current task |
 | `STALE_PRODUCT_HEAD` | The working file changed since you read it | Re-read the file, recompute `expected_sha256`, write again |
 | `WRITE_SCOPE_CONFLICT` | The path is not in the task's reviewed `write_paths` | Have the PM revise the task and re-admit |
+| `INVALID_INPUT` from `work.write` | The file is larger than the 8 MiB (8,388,608-byte) per-write limit; the refusal carries `limit` and `size` | Split the file, or produce it as a declared output of a controlled run |
 | `REQUIRED_VERIFICATION_UNSATISFIED` | The latest attempt for a required run is pending, failed or missing | Run it; a new report cannot promote a failed attempt |
 | `CRITERIA_TABLE_REQUIRED` | A COMPLETE, PASS or ACCEPTED report for a task with obligations has no criteria rows | Add the criteria table to the document and seal again |
 | `CRITERIA_SOURCE_CONFLICT` | The structured `criteria` contradict or omit a table row | Make them agree; a later partial row never disappears into an earlier met row |
