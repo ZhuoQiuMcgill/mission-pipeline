@@ -6,6 +6,19 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+Runtime defects a downstream mission relayed after 2.1.0. No schema change and no new record
+shape; `tests/m24_field_repairs.py` holds one regression test class per fix.
+
+### Fixed
+- **A plan re-record keeps every disposition.** `plan.record` kept only an existing
+  obligation's `status`, so a deferred or cancelled obligation lost `grant`, `domain`,
+  `deferred_owner` and `reason_blob` (and a met one its `evidence`), and `mission.close` then
+  failed with an uncaught `KeyError: 'grant'`. The re-record now restates only the PM's text.
+  A row already stripped by 2.1.0 refuses `DEFERRAL_INCOMPLETE` at close, naming the
+  obligation; submitting the same `obligation.defer` or `obligation.cancel` again repairs it.
+
 ## [2.1.0] — 2026-09-13
 
 The usability release. 2.0.0 shipped an engine that was correct and, in the field, unusable.

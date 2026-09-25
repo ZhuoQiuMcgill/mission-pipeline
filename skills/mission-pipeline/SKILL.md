@@ -76,6 +76,7 @@ A refusal is a JSON object with `ok:false`, a `code` and a `detail`. Determinist
 | `CURRENT_DEVELOPMENT_REQUIRED` | The critique or acceptance does not sit on the current development report | Record the development report for the current product first |
 | `CURRENT_INDEPENDENT_PASS_REQUIRED` | The acceptance cites a stale critique, or the same session wrote both | Get a current PASS from a different seat |
 | `UNMET_OBLIGATION` | A positive report or a consumption has an obligation not met | Meet it, or `obligation.defer` / `obligation.cancel` under a defer grant |
+| `DEFERRAL_INCOMPLETE` | A deferral or cancellation names no owner or reason, or at close a disposition has lost its grant and domain (a 2.1.0 plan re-record stripped them) | Submit the same `obligation.defer` or `obligation.cancel` again with grant, domain, owner and `reason_blob` |
 | `SCOPED_BARRIER` | An unresolved counterexample fences this task or obligation | Screen the case, repair under a permit, or work an unrelated scope |
 | `CALIBRATION_HALT` | An active DRIFT or ratchet latch covers this scope | `latch.release` by the principal, or an independent DISMISS_ORIGINAL |
 | `STALE_REVIEW_INPUT` | A review was submitted without the current `review_basis` | `review.snapshot`, read the blobs, resubmit |

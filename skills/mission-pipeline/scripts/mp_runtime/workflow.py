@@ -37,6 +37,12 @@ CONTESTABLE = {"REPORTED_PENDING_SCREEN", "DISMISSED", "ESTABLISHED", "VERIFIED_
 # "local-controlled-execution" is the 2.0 spelling of a local executor run; it is read, never written.
 EXECUTED_ASSURANCE = ("controller-execution", "local-controlled-execution", "local-execution")
 REVIEW_DEADLINE = {"local": 86400, "managed": 300}
+# What the engine writes onto an obligation when a report meets it, `obligation.defer` or
+# `obligation.cancel` disposes it, or `legacy.accept` credits it. A plan re-record restates
+# the PM's `{id, goal, description}` and keeps these with the status.
+OBLIGATION_DISPOSITION = ("evidence", "assurance", "grant", "domain", "deferred_owner", "reason_blob",
+                          "verified_fixed", "cancelled_by", "accepted_task_key", "legacy_acceptance",
+                          "legacy_scope", "source_blob")
 
 
 def refuse(code, detail, **fields):
@@ -556,8 +562,10 @@ class Workflow:
             old = self.optional("obligation", item["id"])
             if old and old["mission"] != d["mission"]:
                 refuse("CROSS_MISSION_REFERENCE", "Obligation belongs to another mission")
-            self.put("obligation", item["id"], dict(item, mission=d["mission"],
-                     status=(old or {}).get("status", "REQUIRED")))
+            row = dict(item, mission=d["mission"], status=(old or {}).get("status", "REQUIRED"))
+            if row["status"] != "REQUIRED":
+                row.update({key: old[key] for key in OBLIGATION_DISPOSITION if key in old})
+            self.put("obligation", item["id"], row)
         if set(x["goal"] for x in d["obligations"]) != set(auth["goals"]):
             refuse("GOAL_COVERAGE_GAP", "Every principal goal needs a production obligation")
         plan = self.create("plan", dict(mission=d["mission"], goals=d["goals"],
@@ -1899,6 +1907,11 @@ class Workflow:
             if obligation["status"] not in ("MET", "AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED"):
                 refuse("UNMET_OBLIGATION", "Mission has an unmet required outcome", obligation=obligation["id"])
             if obligation["status"] in ("AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED"):
+                if not obligation.get("grant") or not obligation.get("domain"):
+                    # A 2.1.0 plan re-record dropped these fields; the disposition is recorded again.
+                    refuse("DEFERRAL_INCOMPLETE", "This disposition has lost its grant and domain; record it again "
+                           "with obligation.defer or obligation.cancel", obligation=obligation["id"],
+                           status=obligation["status"])
                 self.grant(obligation["grant"], obligation["domain"], mission, permission="defer")
         for task in self.rows("task", mission=mission):
             if task["status"] == "REPLACED":

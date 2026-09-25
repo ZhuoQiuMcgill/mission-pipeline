@@ -56,7 +56,7 @@ Every candidate occurrence is checked before deduplication: project cannot becom
 
 ## 6. Plans, tasks and admission
 
-`plan.record` carries every original goal and obligations as `{id, goal, description}`. Each obligation must trace to a goal and each goal needs a producing obligation.
+`plan.record` carries every original goal and obligations as `{id, goal, description}`. Each obligation must trace to a goal and each goal needs a producing obligation. Recording a plan again restates that text only: an obligation already MET, AUTHORIZED_DEFERRED or AUTHORIZED_CANCELLED keeps its status and every field its disposition wrote (`evidence`, `assurance`, `grant`, `domain`, `deferred_owner`, `reason_blob`, `cancelled_by` and the `legacy.accept` fields).
 
 `task.record` carries mission, obligations, grant, domain, required `effects`, `allowed_effects`, input CAS ids, exact `write_paths`, delivery `outputs`, `dependencies`, `wave` and an optional `required_runs`. Updating an existing id requires `revises` with the task's current digest. `recovers` and `touches_contract` are the two manual calibration triggers.
 
@@ -125,6 +125,8 @@ Noticed-but-not-fixed items become live flags at record time; relay items become
 An obligation is REQUIRED, then MET by an ACCEPTED report, or disposed explicitly.
 
 `obligation.defer` (pm, `defer` permission or principal) names the grant, domain, owner and `reason_blob`, and sets AUTHORIZED_DEFERRED. `obligation.cancel` takes the same fields and sets AUTHORIZED_CANCELLED with `cancelled_by`. Both are disclosed gaps with a responsible owner, never verified-fixed, and both are returned in the close outcomes.
+
+`mission.close` rechecks each disposition's grant with the `defer` permission. A 2.1.0 plan re-record stripped `grant` and `domain` from disposed obligations; such a row refuses `DEFERRAL_INCOMPLETE` at close, naming the obligation, and is repaired by submitting the same `obligation.defer` or `obligation.cancel` again.
 
 `consume` and `wave.integrate` recheck current acceptance, source, verification, authority and holds.
 
