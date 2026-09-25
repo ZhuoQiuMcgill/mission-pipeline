@@ -1728,11 +1728,8 @@ class Workflow:
                 overlay = self.optional("semantic_overlay", aid) or {}
                 if overlay.get("source_blob"):
                     required[overlay["source_blob"]] = {"blob": overlay["source_blob"], "path": "legacy:" + str(aid)}
-        for task in self.rows("task", mission=d["mission"]):
-            for output in task.get("outputs", []):
-                deliveries = self.rows("delivery", task=task["id"], path=output, current=True)
-                if not deliveries:
-                    refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output)
+        for tid, output in self.undelivered_outputs(d["mission"]):
+            refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output, task=tid)
         items, unavailable = [], []
         for item in list(required.values()) + d.get("items", []):
             try:
@@ -1746,6 +1743,25 @@ class Workflow:
                             calibration_dependencies={t["id"]: digest(self.calibration_basis(t)) for t in self.rows("task", mission=d["mission"])},
                             status="INPUT_INCOMPLETE" if unavailable else "READY"), d.get("id"))
         return {"bundle": bundle}
+
+    def undelivered_outputs(self, mission):
+        """Declared outputs a task could have delivered but has no current snapshot for.
+
+        Only an admission of the task's current digest can export or record a delivery, and a
+        run leaves its evidence behind. A task with neither has produced nothing yet, so its
+        declared outputs cannot hold a bundle for earlier work hostage; once it is admitted or
+        has run, every declared output needs its snapshot again.
+        """
+        missing = []
+        for task in self.rows("task", mission=mission):
+            current = digest(task)
+            if not any(a.get("target_digest") == current for a in self.rows("admission", task=task["id"])) \
+                    and not self.rows("run", task=task["id"]):
+                continue
+            for output in task.get("outputs", []):
+                if not self.rows("delivery", task=task["id"], path=output, current=True):
+                    missing.append((task["id"], output))
+        return missing
 
     def delivery_digest(self, mission):
         kinds = {"root", "task", "obligation", "decision", "delivery", "report", "run", "flag"}
@@ -1819,6 +1835,10 @@ class Workflow:
             refuse("INVALID_VERDICT", "Invalid calibration outcome")
         if bundle["status"] != "READY" and d["outcome"] != "INPUT_INCOMPLETE":
             refuse("INPUT_INCOMPLETE", "Missing actual delivery inputs cannot be called aligned")
+        if d["outcome"] != "INPUT_INCOMPLETE":
+            # A task admitted after the bundle was recorded is held to its declared outputs here.
+            for tid, output in self.undelivered_outputs(bundle["mission"]):
+                refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output, task=tid)
         if bundle["authority_digest"] != self.authority_digest(bundle["mission"]):
             refuse("STALE_BUNDLE", "Calibration authority has changed")
         self.blob(d["source_blob"])
@@ -1924,6 +1944,10 @@ class Workflow:
                 self.task_acceptance(task)
             if not excepted and not any(r["target_digest"] == digest(task) for r in accepted):
                 refuse("UNFINISHED_TASK", "Every required task needs current acceptance or authorized disposition")
+        # An admission is not part of the bundle's delivery digest, so a task admitted after
+        # the bundle was recorded is rechecked here rather than trusted to that bundle.
+        for tid, output in self.undelivered_outputs(mission):
+            refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output, task=tid)
         for flag in self.rows("flag", mission=mission):
             if flag["live"] and flag["status"] == "OPEN":
                 refuse("OPEN_FLAG", "A live product flag has no disposition")

@@ -220,6 +220,8 @@ Unrelated and non-required diagnostics are excluded from required qualification 
 
 `bundle.record` collects the original authority, grants, actual delivery documents, data and images, task and decision sources, controlled run inputs and logs, and exported outputs. Required declared delivery paths cannot be omitted. Missing CAS yields `INPUT_INCOMPLETE`. Bundles include the actual frozen input files, not only a manifest hash.
 
+A declared output is required once its task could have produced it: the task has an admission of its current digest, or any recorded run. Without a current delivery for that path the bundle refuses `INPUT_INCOMPLETE` with the `path` and the `task`. A task with neither, such as a later wave's task not yet admitted, has produced nothing, so its outputs do not block a bundle for earlier work; it is still unfinished work that `wave.integrate` and `mission.close` refuse. An admission is not part of a bundle's delivery digest, so `calibration.record` (every outcome except INPUT_INCOMPLETE) and `mission.close` recheck the same rule against a task admitted after the bundle was recorded.
+
 `calibration.record` uses the current bundle at an explicit wave or task scope. Outcomes are ALIGNED, SUSPICION, DRIFT and INPUT_INCOMPLETE. Task cells never interrupt the aggregate wave sequence. DRIFT, and a second consecutive aggregate SUSPICION, create a mandatory case and a latch together.
 
 The calibration basis for a task is the current TaskSpec, the applicable PM decisions, authority and contracts, the declared source inputs, the actual output bytes, the required run and environment records, the current deliveries and the current development and critique reports.

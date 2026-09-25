@@ -89,7 +89,7 @@ A refusal is a JSON object with `ok:false`, a `code` and a `detail`. Determinist
 | `AUDIT_OUTCOME_REQUIRED` | The audit named at close is INPUT_INCOMPLETE | Complete the bundle and record a PASS or FINDINGS audit |
 | `INVALID_REVIEW_DEADLINE` | `review_deadline_seconds` is not an integer of at least 60 | Configure a real number of seconds |
 | `STALE_BUNDLE` | Delivered bytes, evidence or authority changed after the bundle | `bundle.record` again, then re-audit and re-review |
-| `INPUT_INCOMPLETE` | Required bytes are missing from the bundle | Restore or re-export them; missing input is never a PASS |
+| `INPUT_INCOMPLETE` | Required bytes are missing from the bundle, or an admitted or executed task's declared output (`path`, `task`) has no delivery snapshot | Restore or re-export them; missing input is never a PASS |
 | `CLOSURE_REVIEW_REQUIRED` | The audit or close review is missing, stale or not PASS | Rebuild the bundle and obtain both current reviews |
 | `CLOSING_RUN_UNSATISFIED` | No completed, satisfied run with `scope: "closing"` | Execute the closing requirement over the integrated result |
 | `OPEN_FLAG` | A live product flag has no disposition | `flag.change` with retire, replace, reopen or dispose |
@@ -112,7 +112,7 @@ Authorized gaps are returned in the close `outcomes`, with owner and reason. A d
 
 ## Calibration
 
-`bundle.record` collects original authority, grants, source documents, decisions, run inputs and logs, and the delivery snapshots. Citing a DevReport is not a bundle; missing bytes make the bundle INPUT_INCOMPLETE.
+`bundle.record` collects original authority, grants, source documents, decisions, run inputs and logs, and the delivery snapshots. Citing a DevReport is not a bundle; missing bytes make the bundle INPUT_INCOMPLETE. A task's declared outputs need their delivery snapshots once the task has an admission of its current digest or any recorded run; a later task that has not started yet does not block a bundle for earlier work.
 
 `calibration.record` judges one scope: a task cell (`task` plus `wave`) or an aggregate wave cell (`wave` alone). Outcomes are ALIGNED, SUSPICION, DRIFT and INPUT_INCOMPLETE. The Calibrator receives the principal's original words, the authorized A2 decisions and the actual delivered bytes; the PM's argumentative defence is not part of that basis.
 

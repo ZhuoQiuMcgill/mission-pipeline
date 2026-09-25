@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from v4_support import Fixture, refuses
+from mp_runtime.process import RuntimeRefusal
 
 
 class FieldRepairTest(unittest.TestCase):
@@ -85,6 +86,67 @@ class PlanRecordKeepsDispositions(FieldRepairTest):
         refuses(self, "DEFERRAL_INCOMPLETE", self.close_mission)
         f.call("pm", "obligation.defer", obligation="later", grant="g", domain="method", owner="pm", reason_blob=f.blob)
         self.assertEqual("CLOSED", self.close_mission()["status"])
+
+
+class BundleSnapshotsFollowAdmission(FieldRepairTest):
+    """Declared outputs need snapshots once their task could have produced them, not before."""
+
+    def record_task(self, id, obligations, outputs, wave=1):
+        f = self.f
+        f.call("pm", "task.record", id=id, mission="m", obligations=obligations, grant="g", domain="method",
+               effects=["write-report"], allowed_effects=["write-report"], inputs=[f.blob], source_blob=f.blob,
+               write_paths=outputs, outputs=outputs, wave=wave)
+
+    def refusal(self, call):
+        with self.assertRaises(RuntimeRefusal) as caught:
+            call()
+        return caught.exception
+
+    def test_a_later_waves_unadmitted_outputs_do_not_block_an_earlier_waves_bundle(self):
+        f = self.f
+        f.setup()
+        self.record_task("t-next", ["o"], ["appendix.txt"], wave=2)
+        f.accept()
+        bundle = f.call("pm", "bundle.record", mission="m", target="wave-1", items=[])["bundle"]
+        self.assertEqual("READY", bundle["status"])
+        cell = f.call("calibrator", "calibration.record", bundle=bundle["id"], wave=1, outcome="ALIGNED",
+                      source_blob=f.blob)["calibration"]
+        self.assertEqual("ALIGNED", cell["outcome"])
+        # The unstarted task is still unfinished work: the close refuses it by name.
+        refuses(self, "CURRENT_ACCEPTANCE_REQUIRED", self.close_mission)
+
+    def test_an_admitted_task_with_a_missing_delivery_still_refuses_the_bundle(self):
+        f = self.f
+        f.setup()
+        self.record_task("t2", ["o"], ["appendix.txt"])
+        f.call("supervisor", "plan.review", id="pr-t2", plan="p", tasks=["t", "t2"], outcome="PASS", source_blob=f.blob)
+        f.call("pm", "task.admit", id="ad-t2", task="t2", review="pr-t2")
+        f.accept()
+        refused = self.refusal(lambda: f.call("pm", "bundle.record", mission="m", target="close", items=[]))
+        self.assertEqual(("INPUT_INCOMPLETE", "appendix.txt", "t2"),
+                         (refused.code, refused.context["path"], refused.context["task"]))
+
+    def test_a_task_admitted_after_the_bundle_is_held_to_its_outputs_at_calibration_and_close(self):
+        f = self.f
+        f.setup()
+        f.call("pm", "plan.record", id="p2", mission="m", goals=["usable-report"], source_blob=f.blob,
+               obligations=[dict(id="o", goal="usable-report", description="actual usable report"),
+                            dict(id="extra", goal="usable-report", description="a withdrawn appendix")])
+        f.call("pm", "obligation.cancel", obligation="extra", grant="g", domain="method", owner="pm", reason_blob=f.blob)
+        self.record_task("t2", ["extra"], ["appendix.txt"])
+        f.accept()
+        bundle = f.call("pm", "bundle.record", mission="m", target="close", items=[])["bundle"]
+        audit = f.call("auditor", "audit.record", bundle=bundle["id"], source_blob=f.blob, findings=[])["audit"]
+        review = f.call("supervisor", "close.review", bundle=bundle["id"], source_blob=f.blob, outcome="PASS")["review"]
+        f.call("supervisor", "plan.review", id="pr-t2", plan="p2", tasks=["t2"], outcome="PASS", source_blob=f.blob)
+        f.call("pm", "task.admit", id="ad-t2", task="t2", review="pr-t2")
+        refuses(self, "INPUT_INCOMPLETE", lambda: f.call("calibrator", "calibration.record", bundle=bundle["id"],
+                wave=1, outcome="ALIGNED", source_blob=f.blob))
+        self.assertEqual("INPUT_INCOMPLETE", f.call("calibrator", "calibration.record", bundle=bundle["id"], wave=1,
+                         outcome="INPUT_INCOMPLETE", source_blob=f.blob)["calibration"]["outcome"])
+        refused = self.refusal(lambda: f.call("pm", "mission.close", mission="m", bundle=bundle["id"], audit=audit["id"],
+                               review=review["id"], closing_run=f.run["id"], grant="g", domain="method", source_blob=f.blob))
+        self.assertEqual(("INPUT_INCOMPLETE", "t2"), (refused.code, refused.context["task"]))
 
 
 if __name__ == "__main__":

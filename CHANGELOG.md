@@ -18,6 +18,14 @@ shape; `tests/m24_field_repairs.py` holds one regression test class per fix.
   failed with an uncaught `KeyError: 'grant'`. The re-record now restates only the PM's text.
   A row already stripped by 2.1.0 refuses `DEFERRAL_INCOMPLETE` at close, naming the
   obligation; submitting the same `obligation.defer` or `obligation.cancel` again repairs it.
+- **A task that has not started no longer blocks every bundle.** `bundle.record` refused
+  `INPUT_INCOMPLETE` while any task of the mission declared an output without a delivery,
+  including a later wave's task not yet admitted, so the bundle an earlier wave's aggregate
+  cell needed could not be built. A declared output now needs its snapshot once its task has
+  an admission of its current digest or any recorded run, and the refusal names the `task`.
+  Because an admission is not in the bundle's delivery digest, `calibration.record` (except
+  an INPUT_INCOMPLETE verdict) and `mission.close` recheck the same rule, so a task admitted
+  after the bundle is still held to its outputs.
 
 ## [2.1.0] — 2026-09-13
 
