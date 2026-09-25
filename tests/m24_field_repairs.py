@@ -3,11 +3,17 @@
 One test class per repaired defect, each driven through the normal v4 requests.
 """
 import hashlib
+import json
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
-from v4_support import Fixture, refuses
+from v4_support import ROOT, Fixture, refuses
 from mp_runtime.process import RuntimeRefusal
+from mp_runtime.storage import digest
+
+MP = ROOT / "skills/mission-pipeline/scripts/mp"
 
 
 class FieldRepairTest(unittest.TestCase):
@@ -203,6 +209,52 @@ class WriteLimitIsStated(FieldRepairTest):
         f.call("constructor", "work.write", task="t", admission=f.admission, path="verify.py",
                source_blob=at_limit, expected_sha256=current)
         self.assertEqual(limit, (f.root / "verify.py").stat().st_size)
+
+
+class TaskQueryReportsAdmission(FieldRepairTest):
+    """`query task` keeps the stored row and adds the admission and acceptance a reader means."""
+
+    def query(self, id=None):
+        return self.f.engine.handle({"action": "query", "data": {"kind": "task", "id": id}})
+
+    def cli_query(self, id):
+        result = subprocess.run([sys.executable, str(MP), "--root", str(self.f.root), "--actor", "pm", "query", "task", id],
+                                capture_output=True, cwd=ROOT.parent, timeout=60)
+        self.assertEqual(0, result.returncode, (result.stdout, result.stderr))
+        return json.loads(result.stdout)
+
+    def test_admission_and_acceptance_are_derived_beside_the_unchanged_stored_row(self):
+        f = self.f
+        f.setup()
+        f.call("pm", "task.record", id="t-later", mission="m", obligations=["o"], grant="g", domain="method",
+               effects=["write-report"], allowed_effects=["write-report"], inputs=[f.blob], source_blob=f.blob,
+               write_paths=["appendix.txt"], outputs=["appendix.txt"], wave=2)
+        reply = self.query("t")
+        self.assertEqual(f.engine.object("task", "t"), reply["object"])
+        self.assertEqual("NOT_ADMITTED", reply["object"]["status"])
+        self.assertIn("record status", reply["note"])
+        self.assertEqual({"admission": "ADMITTED", "admission_id": f.admission, "acceptance": "NOT_ACCEPTED",
+                          "acceptance_report": None}, reply["derived"]["t"])
+        accepted = f.accept()["report"]
+        admitted_and_accepted = {"admission": "ADMITTED", "admission_id": f.admission, "acceptance": "ACCEPTED",
+                                 "acceptance_report": accepted["id"]}
+        self.assertEqual(admitted_and_accepted, self.query("t")["derived"]["t"])
+        cli = self.cli_query("t")
+        self.assertEqual("NOT_ADMITTED", cli["object"]["status"])
+        self.assertEqual(admitted_and_accepted, cli["derived"]["t"])
+        listed = self.query()
+        self.assertEqual({"t", "t-later"}, set(listed["derived"]))
+        self.assertEqual({"admission": "NOT_ADMITTED", "admission_id": None, "acceptance": "NOT_ACCEPTED",
+                          "acceptance_report": None}, listed["derived"]["t-later"])
+        # A changed authority stales the admission of an unchanged task, not its acceptance.
+        f.call("principal", "grant.record", id="g-more", authority="a", source_blob=f.blob, scope="m",
+               domains=["method"], permissions=["choose"])
+        self.assertEqual(dict(admitted_and_accepted, admission="STALE"), self.query("t")["derived"]["t"])
+        # The stored row's digest still serves `revises`; the revision stales both derived states.
+        task = self.query("t")["object"]
+        f.call("pm", "task.record", **dict(task, revises=digest(task), inputs=[f.blob, f.table]))
+        self.assertEqual(dict(admitted_and_accepted, admission="STALE", acceptance="STALE"),
+                         self.query("t")["derived"]["t"])
 
 
 if __name__ == "__main__":

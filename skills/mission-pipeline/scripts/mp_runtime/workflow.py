@@ -56,6 +56,13 @@ class Workflow:
         if actor.role not in ROLES:
             refuse("UNKNOWN_ROLE", "Unknown role")
 
+    @classmethod
+    def reader(cls, store, state):
+        """A read-only view of one committed state for derived query fields; it never transitions."""
+        view = cls.__new__(cls)
+        view.store, view.actor, view.state = store, None, state
+        return view
+
     def apply(self, state, request):
         self.state, self.request = state, request
         self.now = time.time()
@@ -1572,6 +1579,37 @@ class Workflow:
             cell_id = (self.optional("acceptance_qualification", report["id"]) or {}).get("calibration", report.get("calibration"))
             self.current_calibration(task, cell_id)
         return report
+
+    def task_states(self, tasks):
+        """Admission and acceptance as a reader means them, derived at query time; nothing is stored.
+
+        A task row's own `status` is its record status: NOT_ADMITTED from `task.record` until
+        `task.replace` sets REPLACED. It is not the admission state. ADMITTED here means an
+        admission names the task's current digest and the current authority; ACCEPTED means the
+        current acceptance report is ACCEPTED over the current digest. Every positive use still
+        rechecks dependencies, holds, runs and product bytes.
+        """
+        authority, states = {}, {}
+        for task in tasks:
+            current = digest(task)
+            if task["mission"] not in authority:
+                authority[task["mission"]] = self.authority_digest(task["mission"])
+            admissions = sorted(self.rows("admission", task=task["id"]), key=lambda a: a.get("created", 0))
+            live = [a for a in admissions if a.get("target_digest") == current
+                    and a.get("authority_digest") == authority[task["mission"]]]
+            reports = sorted(self.rows("report", task=task["id"], kind="acceptance", current=True),
+                             key=lambda r: r.get("created", 0))
+            report = reports[-1] if reports else None
+            if report and report["outcome"] == "ACCEPTED":
+                acceptance = "ACCEPTED" if report.get("target_digest") == current else "STALE"
+            else:
+                acceptance = "NOT_ACCEPTED"
+            states[task["id"]] = {
+                "admission": "ADMITTED" if live else "STALE" if admissions else "NOT_ADMITTED",
+                "admission_id": (live or admissions)[-1]["id"] if admissions else None,
+                "acceptance": acceptance,
+                "acceptance_report": report["id"] if report else None}
+        return states
 
     def calibration_basis(self, task, reports=True):
         """Product dependencies exclude acceptance/obligation bookkeeping and other tasks."""

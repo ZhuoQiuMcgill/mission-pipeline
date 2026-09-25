@@ -35,6 +35,13 @@ shape; `tests/m24_field_repairs.py` holds one regression test class per fix.
   ("exceeds the tool size limit") with the limit written nowhere. The limit is unchanged; it is
   now documented in `runtime-v4.md`, SKILL.md and the Constructor role, and the refusal names
   it and the file's size, with `limit`, `size` and `path` fields.
+- **`query task` says whether a task is admitted and accepted.** The stored `status` of a task
+  is its record status (`NOT_ADMITTED` until `task.replace` sets `REPLACED`), so the query
+  printed `NOT_ADMITTED` for admitted and accepted tasks. The stored rows and the ledger are
+  unchanged, and their digests still serve `revises`. A task query now adds a `derived` map
+  keyed by task id, with `admission` (ADMITTED, STALE or NOT_ADMITTED) and `admission_id`,
+  `acceptance` (ACCEPTED, STALE or NOT_ACCEPTED) and `acceptance_report`, plus a `note` saying
+  what the stored status means. Nothing derived is stored.
 
 ## [2.1.0] — 2026-09-13
 

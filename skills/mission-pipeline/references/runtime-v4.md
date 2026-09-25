@@ -62,6 +62,8 @@ Every candidate occurrence is checked before deduplication: project cannot becom
 
 `task.replace` records a new task linked to its predecessor, retaining obligations and lineage budget.
 
+A task row's stored `status` is its record status: `NOT_ADMITTED` from `task.record` until `task.replace` sets `REPLACED`. It is not the admission state. `query task [<id>]` returns the stored rows unchanged, so their digests still serve `revises`, plus a `derived` map keyed by task id: `admission` is ADMITTED when an admission names the task's current digest and the current authority, STALE when admissions exist but none does, otherwise NOT_ADMITTED, with `admission_id`; `acceptance` is ACCEPTED when the current acceptance report is ACCEPTED over the current digest, STALE when it is ACCEPTED over an older digest, otherwise NOT_ACCEPTED, with `acceptance_report`. These fields are computed at query time and never stored; every positive use still rechecks dependencies, holds, runs and product bytes.
+
 `plan.review` (supervisor) checks the actual plan and tasks. `task.admit` produces the current admission, freezing the task digest, the authority digest, the dependency digest and the mission fence. Requirements must be registered before the review, because they change the task. A changed plan, task, authority or accepted dependency needs re-admission.
 
 The first wave exists at activation. `wave.open` for a successor requires the previous wave CLOSED and a completed aggregate calibration. `wave.integrate` rechecks every task's acceptance and required runs before closing a wave.

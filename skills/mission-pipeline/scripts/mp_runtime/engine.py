@@ -70,10 +70,22 @@ class Engine:
             data = dict(data, source_blob=self.store.blobs.put(path.read_bytes()))
             return self.mutate(action, data, request["request_id"])
         if action == "query":
+            state = self.store.read()
             if data.get("id"):
-                return {"ok": True, "object": self.object(data["kind"], data["id"])}
-            return {"ok": True, "objects": [v["data"] for (kind, _), v in self.store.read().items()
-                                             if not data.get("kind") or kind == data["kind"]]}
+                row = state.get((data["kind"], str(data["id"])))
+                if not row:
+                    raise RuntimeRefusal("MISSING_REFERENCE", "No such runtime object", kind=data["kind"], id=data["id"])
+                result = {"ok": True, "object": row["data"]}
+            else:
+                result = {"ok": True, "objects": [v["data"] for (kind, _), v in state.items()
+                                                  if not data.get("kind") or kind == data["kind"]]}
+            if data.get("kind") == "task":
+                # Stored rows are returned unchanged, so their digests still serve `revises`.
+                tasks = [result["object"]] if data.get("id") else result["objects"]
+                result["derived"] = Workflow.reader(self.store, state).task_states(tasks)
+                result["note"] = ("A task's stored status is its record status (NOT_ADMITTED until task.replace "
+                                  "sets REPLACED), not its admission; derived gives admission and acceptance")
+            return result
         if action == "receipt":
             return {"ok": True, "receipt": self.store.receipt(data["request_id"])}
         if action == "run.execute":

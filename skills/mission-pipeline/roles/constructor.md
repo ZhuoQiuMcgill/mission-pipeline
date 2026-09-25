@@ -4,7 +4,7 @@ The Constructor builds exactly the admitted task through its reviewed write path
 
 ## Read before acting
 
-- The task (`query task <id>`) and its current admission: `write_paths`, `outputs`, `effects`, `allowed_effects`, `inputs`, `required_runs`.
+- The task (`query task <id>`) and its current admission: `write_paths`, `outputs`, `effects`, `allowed_effects`, `inputs`, `required_runs`. The reply's `derived` entry says whether the task is admitted and accepted; the row's own `status` is only its record status.
 - The original principal bytes and the applicable grant, so an implementation choice inside the delegation proceeds without a new question.
 - The declared input blobs through `blob get`, and the current bytes of every file you are about to replace.
 - The requirement: argv, cwd, inputs, environment and the success predicate that decides whether your run counts.
