@@ -6,6 +6,95 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [3.0.0] — 2026-09-30
+
+### Added
+- Execution/exploration routing per subtask, mixed parent task graphs, priorities,
+  accepted-output dependencies, explicit decision edges and future milestones.
+- Immutable versioned work receipts, scoped executable review/admission, Architect
+  prerequisite readiness, worker claims, parallel scope enforcement and compact
+  completion records. Execution uses one independent integrated acceptance, with
+  specialist Crititor review conditional on the contract. Exploration keeps its
+  full evidence/review/calibration chain.
+- PM-issued Secretary delegation with scope, current authority, scheduling range,
+  finite action budget and expiry. Secretary can issue reviewed work directly,
+  coordinate approved producers and repairs, or escalate decisions to PM.
+- Read-only qualified queue and receipt/candidate snapshots. Recorded acceptance
+  and current qualification are separate; scheduling metadata is outside contracts.
+- Scoped task bundles, compact default packets and report queries, explicit full
+  ledger reads, managed product reads and honest local-execution provenance.
+- Explicit task dispositions and shared three-cycle lineage budgets across route
+  changes/replacements. Final closure still requires the complete mission bundle,
+  Auditor/Supervisor reviews, a current closing run and valid closure authority.
+
+### Fixed
+- Replacing active work releases its predecessor's write ownership while keeping
+  immutable receipt history and the shared lineage cycle budget.
+- Exploration acceptance rechecks explicit prerequisites; changed inputs preserve
+  recorded acceptance but block current qualification and dependent work.
+- Independent execution checks can refresh evidence without changing an identical
+  fast-mode product or spending another construction cycle. Acceptance binds the
+  latest qualified runs, and a failed independent check blocks it.
+- Release archives use the packaged tree's version and refuse mismatched runtime
+  metadata or missing receipt workflow files before writing an asset.
+- Executable checks must be fully defined before review/admission; full definitions
+  and environments are bound, preventing a prelisted id from introducing an
+  unreviewed check under an old admission.
+- Released legacy close payloads use their actual id shape. Rejected replay
+  transactions are disclosed and excluded from semantic overlays, governing
+  contracts, calibration history and acceptance credits; original history is kept.
+- Git-normalised CRLF conversions remain visible in source identity even when
+  Git calls the checkout clean. Native bridge role checks precede path mapping;
+  migration regression fixtures support Windows long paths during cleanup.
+
+### Compatibility
+- Runtime and installation metadata are 3.0.0; storage remains schema 4. Historical
+  tasks retain their policy. Local roles remain self-asserted; the managed model
+  transport is still supplied separately.
+
+### Included field repairs
+
+Runtime defects a downstream mission relayed after 2.1.0;
+`tests/m24_field_repairs.py` holds one regression test class per fix.
+
+### Fixed
+- **A plan re-record keeps every disposition.** `plan.record` kept only an existing
+  obligation's `status`, so a deferred or cancelled obligation lost `grant`, `domain`,
+  `deferred_owner` and `reason_blob` (and a met one its `evidence`), and `mission.close` then
+  failed with an uncaught `KeyError: 'grant'`. The re-record now restates only the PM's text.
+  A row already stripped by 2.1.0 refuses `DEFERRAL_INCOMPLETE` at close, naming the
+  obligation; submitting the same `obligation.defer` or `obligation.cancel` again repairs it.
+- **A task that has not started no longer blocks every bundle.** `bundle.record` refused
+  `INPUT_INCOMPLETE` while any task of the mission declared an output without a delivery,
+  including a later wave's task not yet admitted, so the bundle an earlier wave's aggregate
+  cell needed could not be built. A declared output now needs its snapshot once its task has
+  an admission of its current digest or any recorded run, and the refusal names the `task`.
+  Because an admission is not in the bundle's delivery digest, `calibration.record` (except
+  an INPUT_INCOMPLETE verdict) and `mission.close` recheck the same rule, so a task admitted
+  after the bundle is still held to its outputs.
+- **A decision naming another domain's task is refused.** `decision.record` accepted `tasks`
+  whose domain differed from the decision's, and `decision_applies` then never applied it, so
+  the PM held a record that authorized nothing. It now refuses `DECISION_DOMAIN_MISMATCH` with
+  the `task`, its `task_domain` and the `decision_domain`, including for the tasks a revision
+  inherits. Nothing in the runtime applies a decision across domains.
+- **The `work.write` size limit is stated.** A file over 8 MiB was refused `INVALID_INPUT`
+  ("exceeds the tool size limit") with the limit written nowhere. The limit is unchanged; it is
+  now documented in `runtime-v4.md`, SKILL.md and the Constructor role, and the refusal names
+  it and the file's size, with `limit`, `size` and `path` fields.
+- **`query task` says whether a task is admitted and accepted.** The stored `status` of a task
+  is its record status (`NOT_ADMITTED` until `task.replace` sets `REPLACED`), so the query
+  printed `NOT_ADMITTED` for admitted and accepted tasks. The stored rows and the ledger are
+  unchanged, and their digests still serve `revises`. A task query now adds a `derived` map
+  keyed by task id, with `admission` (ADMITTED, STALE or NOT_ADMITTED) and `admission_id`,
+  `acceptance` (ACCEPTED, STALE or NOT_ACCEPTED) and `acceptance_report`, plus a `note` saying
+  what the stored status means. Nothing derived is stored.
+- **A requirement id is listed once.** `requirement.record` appended its id to
+  `task.required_runs` even when the task spec already listed it, leaving rows such as
+  `["r-fig", "r-rep", "r-fig", "r-rep"]` and changing the task digest. A listed id is no longer
+  appended, so that task row and its digest are unchanged; an unlisted id is appended once, as
+  before. `task.record` still stores the list the PM sends, so a row already doubled is repaired
+  by the next task revision that lists each id once.
+
 ## [2.1.0] — 2026-09-13
 
 The usability release. 2.0.0 shipped an engine that was correct and, in the field, unusable.

@@ -102,7 +102,8 @@ def execute(engine, data):
     managed = state.get(("config", "project"), {}).get("data", {}).get("mode") == "managed"
     actor = Actor("controller", "executor:" + engine.actor.session, engine.actor.authenticated)
     executor = engine.with_actor(actor)
-    executor.mutate("run.authorize", {"requirement": requirement["id"], "admission": data["admission"]}, data["request_id"] + ":authorize")
+    requester = {"requester_session": engine.actor.session, "requester_role": engine.actor.role}
+    executor.mutate("run.authorize", dict(requirement=requirement["id"], admission=data["admission"], **requester), data["request_id"] + ":authorize")
     with tempfile.TemporaryDirectory(prefix="mp-execution-") as temp:
         stage = Path(temp)
         work, output = stage / "work", stage / "out"
@@ -169,7 +170,7 @@ def execute(engine, data):
         environment_blob = engine.store.blobs.put(json_bytes(environment))
         begin = executor.mutate("run.begin", dict(requirement=requirement["id"], admission=data["admission"],
                     source_blob=source_record, input_blob=manifest, environment_blob=environment_blob,
-                    purpose=data.get("purpose"), reason=data.get("reason"), deadline_seconds=data.get("timeout", 3600)),
+                    purpose=data.get("purpose"), reason=data.get("reason"), deadline_seconds=data.get("timeout", 3600), **requester),
                     data["request_id"] + ":begin")
         # A durable begin receipt is immutable; its embedded RUNNING object is
         # historical after finish. Return the actual current run on request retry.
@@ -185,7 +186,7 @@ def execute(engine, data):
             if run["status"] == "RUNNING" and run["lease_until"] <= time.time():
                 takeover = executor.mutate("run.begin", dict(requirement=requirement["id"], admission=data["admission"],
                     source_blob=source_record, input_blob=manifest, environment_blob=environment_blob,
-                    deadline_seconds=data.get("timeout", 3600)), data["request_id"] + ":takeover")
+                    deadline_seconds=data.get("timeout", 3600), **requester), data["request_id"] + ":takeover")
                 run = engine.object("run", takeover["run"]["id"])
                 if takeover.get("reused") or takeover.get("pending"):
                     return dict(takeover, run=run, pending=run["status"] == "RUNNING")

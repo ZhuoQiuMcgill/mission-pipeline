@@ -11,6 +11,8 @@ from .process import RuntimeRefusal, read_json_bytes, json_bytes, run_bytes
 def call_wsl(request, distribution="Ubuntu", executable="/usr/bin/python3", entry=None, mapping_file=None):
     if not isinstance(request, dict):
         raise RuntimeRefusal("INVALID_INPUT", "Bridge request must be an object")
+    if request.get("role") == "controller":
+        raise RuntimeRefusal("ROLE_FORBIDDEN", "controller is the executor's internal identity")
     if os.name != "nt":
         raise RuntimeRefusal("WINDOWS_BRIDGE_REQUIRED", "This client entry is the native Windows to WSL bridge")
     if not entry or not entry.startswith("/") or any("\0" in x for x in (entry, executable, distribution)):
@@ -78,14 +80,14 @@ def serve_one():
     request = read_json_bytes(sys.stdin.buffer.read(8 * 1024 * 1024 + 1))
     if not isinstance(request, dict):
         raise RuntimeRefusal("INVALID_INPUT", "Bridge request must be an object")
+    if request.get("role") == "controller":
+        raise RuntimeRefusal("ROLE_FORBIDDEN", "controller is the executor's internal identity")
     if request.get("action") == "bridge.echo":
         from .environment import environment_id
         return {"ok": True, "data": request["data"], "platform": sys.platform, "environment_id": environment_id()}
     root = request.get("root")
     if not isinstance(root, str) or not root.startswith("/"):
         raise RuntimeRefusal("PATH_MAPPING_REQUIRED", "Bridge root must be an explicitly registered WSL absolute path")
-    if request.get("role") == "controller":
-        raise RuntimeRefusal("ROLE_FORBIDDEN", "controller is the executor's internal identity")
     actor = Actor(request.get("role", "pm"), "bridge-local:" + request.get("role", "pm"))
     from .paths import root_identity
     engine = Engine(root, actor)

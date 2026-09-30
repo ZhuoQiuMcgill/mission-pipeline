@@ -122,6 +122,7 @@ def main(argv=None):
             import shutil
             from .paths import root_identity
             output({"ok": True, "version": VERSION, "schema": SCHEMA, "interpreter": sys.executable,
+                    "workflow_policies": ["fast", "exploration", "v4"],
                     "execution_root": root_identity(root),
                     "python_version": list(sys.version_info[:3]), "platform": sys.platform,
                     "bwrap_binary_available": bool(shutil.which("bwrap")), "managed_ready": "requires successful managed probe and trusted driver",

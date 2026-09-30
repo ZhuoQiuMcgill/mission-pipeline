@@ -51,6 +51,9 @@ class Engine:
         if not isinstance(request, dict) or not isinstance(request.get("action"), str) or not isinstance(request.get("data", {}), dict):
             raise RuntimeRefusal("INVALID_INPUT", "A request needs a string action and object data")
         action, data = request.get("action"), request.get("data", {})
+        if action in ("queue.snapshot", "receipt.snapshot", "acceptance.snapshot"):
+            from .fast import inspect
+            return inspect(self, action, data)
         if action == "contracts.snapshot":
             from .contracts import contract_digest, required_records
             state = self.store.read()
@@ -70,10 +73,30 @@ class Engine:
             data = dict(data, source_blob=self.store.blobs.put(path.read_bytes()))
             return self.mutate(action, data, request["request_id"])
         if action == "query":
+            state = self.store.read()
             if data.get("id"):
-                return {"ok": True, "object": self.object(data["kind"], data["id"])}
-            return {"ok": True, "objects": [v["data"] for (kind, _), v in self.store.read().items()
-                                             if not data.get("kind") or kind == data["kind"]]}
+                row = state.get((data["kind"], str(data["id"])))
+                if not row:
+                    raise RuntimeRefusal("MISSING_REFERENCE", "No such runtime object", kind=data["kind"], id=data["id"])
+                result = {"ok": True, "object": row["data"]}
+            else:
+                result = {"ok": True, "objects": [v["data"] for (kind, _), v in state.items()
+                                                  if not data.get("kind") or kind == data["kind"]]}
+            if data.get("kind") == "task":
+                # Stored rows are returned unchanged, so their digests still serve `revises`.
+                tasks = [result["object"]] if data.get("id") else result["objects"]
+                result["derived"] = Workflow.reader(self.store, state).task_states(tasks)
+                result["note"] = ("A task's stored status is its record status (NOT_ADMITTED until task.replace "
+                                  "sets REPLACED), not its admission; derived gives admission and acceptance")
+            if data.get("kind") == "report" and not data.get("full", False):
+                def compact(value):
+                    return {k: v for k, v in value.items() if k != "source_fields"}
+                if data.get("id"):
+                    result["object"] = compact(result["object"])
+                else:
+                    result["objects"] = [compact(value) for value in result["objects"]]
+                result["note"] = "Original source is in source_blob; full:true includes parsed source fields"
+            return result
         if action == "receipt":
             return {"ok": True, "receipt": self.store.receipt(data["request_id"])}
         if action == "run.execute":

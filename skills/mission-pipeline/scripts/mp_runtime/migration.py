@@ -104,6 +104,18 @@ def adoption_plan(ledger, source_root=None):
     ledger = Path(ledger)
     journal = ledger / "events.jsonl"
     raw, events = read_legacy(journal)
+    # An OK envelope can contain a transaction that the released dispatcher rolls
+    # back. Preserve the journal, but derive semantic credit only from committed
+    # transactions. The plan is read-only even when the source already has a DB.
+    import tempfile
+    from .legacy_v3 import replay
+    skipped = []
+    with tempfile.TemporaryDirectory(prefix="mp-qualified-legacy-") as temporary:
+        connection = replay(journal, Path(temporary) / "projection.db", skipped)
+        connection.close()
+    rejected = {seq for seq, _, _ in skipped}
+    source_count = len(events)
+    events = [event for event in events if event["seq"] not in rejected]
     bridge = calibration_bridge(events)
     artifacts, missions, contracts = {}, {}, {}
     source_lines = raw.splitlines(keepends=True)
@@ -123,7 +135,11 @@ def adoption_plan(ledger, source_root=None):
         if event["action"] == "mission.claim":
             missions[p["id"]] = dict(p, status="open")
         if event["action"] == "mission.close":
-            missions.setdefault(p["mission"], {"id": p["mission"]})["status"] = "closed"
+            # The released 1.x dispatcher journals `mission.close` as {id, name, closed_at}
+            # (the same `id` as `mission.claim`); a `mission` field appears only in the
+            # sealed-MissionClose form handled below.
+            mid = p.get("mission", p.get("id"))
+            missions.setdefault(mid, {"id": mid})["status"] = "closed"
         if event["action"] == "artifact.sealed":
             a = p.get("artifact")
             if a:
@@ -158,10 +174,11 @@ def adoption_plan(ledger, source_root=None):
             else:
                 item["status"] = "HASH_MISMATCH"
         overlays.append(item)
-    return {"source_seq": len(events), "journal_sha256": hashlib.sha256(raw).hexdigest(),
+    return {"source_seq": source_count, "journal_sha256": hashlib.sha256(raw).hexdigest(),
             "bridge": bridge, "overlays": overlays, "missions": missions, "contracts": list(contracts.values()),
             "acceptances": legacy_acceptances(events, missions),
-            "legacy_event_count": len(events), "ready": not bridge["unresolved"]}
+            "legacy_event_count": source_count, "ready": not bridge["unresolved"],
+            "replay_skipped": [{"seq": seq, "action": action, "error": error} for seq, action, error in skipped]}
 
 
 def adoption_state(plan):
@@ -279,14 +296,20 @@ def _migrate(store, plan, actor):
                 "original": "events.jsonl", "backup": "legacy/before-v4.db"}
     from .legacy_v3 import replay
     projection = store.path / "legacy" / "replayed-v3.db"
-    connection = replay(frozen, projection)
+    # The released dispatcher's replay tolerates a malformed historical line the
+    # way its live path did — rolled back whole, reported, never fatal (its own
+    # `rebuild` and `doctor` pass a list for exactly this). Import that
+    # semantics unchanged and keep the record of what was skipped.
+    skipped = []
+    connection = replay(frozen, projection, skipped)
     connection.close()
     install_database(projection, store.db_path)
+    metadata["replay_skipped"] = [{"seq": seq, "action": action, "error": error} for seq, action, error in skipped]
     def bootstrap(target, conn):
         target.apply(conn, event)
         atomic_bytes(target.path / target.manifest()["segments"][0]["path"], json_bytes(event))
     request = {"request_id": "migration-" + plan["journal_sha256"], "action": "migration.install", "data": plan}
-    result = {"ok": True, "ready": True, "legacy_events": plan["source_seq"]}
+    result = {"ok": True, "ready": True, "legacy_events": plan["source_seq"], "replay_skipped": len(skipped)}
     event = dict(version=4, seq=1, request_id=request["request_id"], payload_hash=digest(request), request=request,
                  actor=actor.record(), epoch=1, at=time.time(), result=result,
                  actions=[dict(op="put", kind=k, id=i, revision=1, body=row["data"])
@@ -294,7 +317,7 @@ def _migrate(store, plan, actor):
     event["checksum"] = digest(event)
     metadata["bootstrap_event_blob"] = store.blobs.put(json_bytes(event))
     store.initialize(legacy=metadata, bootstrap=bootstrap)
-    return {"ok": True, "ready": True, "legacy_events": plan["source_seq"]}
+    return result
 
 
 def install_adoption(store, plan, actor):
@@ -303,7 +326,7 @@ def install_adoption(store, plan, actor):
     request = {"request_id": "migration-" + plan["journal_sha256"], "action": "migration.install", "data": plan}
     def callback(state):
         state.update(adoption_state(plan))
-        return {"ok": True, "ready": True, "legacy_events": plan["source_seq"]}
+        return {"ok": True, "ready": True, "legacy_events": plan["source_seq"], "replay_skipped": len(plan.get("replay_skipped", []))}
     return store.transact(request, actor.record(), callback)
 
 
@@ -332,7 +355,7 @@ def rollback(store):
             raise RuntimeRefusal("LEGACY_SOURCE_CHANGED", "Rollback source bytes are unavailable")
         from .legacy_v3 import replay
         projection = store.path / "legacy" / "rollback-v3.db"
-        conn = replay(journal, projection)
+        conn = replay(journal, projection, [])
         conn.close()
         install_database(projection, store.db_path)
         retired.mkdir(exist_ok=True)

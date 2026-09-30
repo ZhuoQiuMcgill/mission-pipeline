@@ -1,13 +1,15 @@
 ---
 name: mission-pipeline
-description: Run supervised multi-agent engineering with scoped PM delegation, independently reviewed roots and plans, bounded build-critique-stabilize loops, current evidence and mandatory closure audit. Start from references/walkthrough.md for a complete worked mission.
+description: Run traceable engineering with PM user alignment, prioritised execution and exploration subtasks, delegated Secretary coordination, Architect readiness and independent acceptance. Use fast receipts for decided construction and the full evidence workflow for exploration.
 ---
 
-# Mission Pipeline 2
+# Mission Pipeline 3
 
-Mission Pipeline runs engineering work through separate agent seats: one builds, one critiques, one accepts, and an independent Supervisor checks that the work still matches what the principal actually asked for. Every judgement is a typed JSON request to a deterministic runtime that journals it with the original source bytes, so a PASS, an ACCEPTED or an ALIGNED goes stale by computation as soon as its inputs, outputs, runs, decisions or authority change. The principal talks in conversation; agents operate the runtime.
+PM aligns with the principal and turns requirements into a prioritised dependency graph. Classify each executable subtask as **execution** (the relevant design and criteria are decided) or **exploration** (findings are needed for a decision). A parent can contain both. A specified experiment can be execution; interpreting its data to choose a design can be exploration. Failed implementation checks ordinarily remain execution repairs.
 
-Read `references/walkthrough.md` first: it is one complete single-task mission, every request and response, through the public CLI. `references/runtime-v4.md` is the full request contract, `references/setup.md` the installation and recovery paths. The schema-3 free-form commands are compatibility-only and cannot operate on v4 state.
+For execution, a delegated Secretary issues the reviewed receipt, an Architect checks actual prerequisites, scoped Constructors build, and one independent Stabilizer accepts the integrated result. Exploration keeps the development, Crititor and Stabilizer chain and its calibration gates. Both keep user authority, independent root and planning review, bounded repairs, counterexamples and final closure audit. Original sources and all attempts stay in the journal and CAS.
+
+Read [references/fast-mode.md](references/fast-mode.md) for the 3.0 receipt contract and operating sequence. Read `references/walkthrough.md` for the full exploration/legacy lifecycle. `references/runtime-v4.md` covers shared authority, recovery and closure; `references/setup.md` covers installation. Schema-3 free-form commands cannot operate on v4 state. The 3.0 package preserves schema 4 and historical policy meanings; old tasks without a work type keep the v4 workflow.
 
 Every request looks like this, and every response is one UTF-8 JSON object:
 
@@ -22,6 +24,7 @@ Role files are in `roles/`. Point a spawned agent at its role file, PROJECT.md a
 
 | Role | One line | Actions it may submit |
 |---|---|---|
+| Secretary (`roles/secretary.md`) | Coordinate within PM delegation; escalate design choices; keep PM ledger access intact. | `receipt.issue`, `receipt.dispatch`, `secretary.coordinate`, read-only snapshots |
 | principal | Owns goals and reserved conditions. Speaks in conversation; the PM records the words. | `authority.record`, `authority.amend`, `grant.record`, `grant.revoke`, `contract.retire`, `environment.register`, `canonical.register`, `project.configure`, `latch.release`, `mission.close`, `mission.reopen`, `legacy.adopt` |
 | PM (`roles/pm.md`) | Translates intent into a plan, dispatches, integrates, closes. Never builds, never judges a product. | `intake.create`, `root.propose`, `root.activate`, `decision.record`, `plan.record`, `task.record`, `task.replace`, `task.admit`, `requirement.record`, `wave.open`, `wave.integrate`, `task.dispatch`, `consume`, `recovery.permit`, `case.contest`, `case.supplement`, `obligation.defer`, `obligation.cancel`, `flag.raise`, `flag.change`, `bundle.record`, `jobs.expire`, `job.resume`, `run.abort`, `context.compacted`, `legacy.adopt`, `legacy.accept`, `mission.close` |
 | Supervisor (`roles/supervisor.md`) | The independent seat at three checkpoints: root, plan, close. Also screens counterexamples. | `root.review`, `plan.review`, `close.review`, `issue.screen`, `case.resolve`, `review.rebase`, `rule.record`, `rule.retire`, `issue.report`, `case.contest` |
@@ -36,7 +39,20 @@ Role files are in `roles/`. Point a spawned agent at its role file, PROJECT.md a
 
 `controller` is the executor's internal identity. It is constructed in process by `run.execute` and by the managed broker; a CLI, adapter or bridge request with `--actor controller` (or `MP_ACTOR=controller`) is refused `ROLE_FORBIDDEN`.
 
-## Lifecycle, in order
+## Receipt lifecycle
+
+For execution: PM alignment and reviewed graph → Secretary issue → Architect
+prerequisite check → scoped Constructor claims/build/verification → compact worker
+completion → one independent acceptance → qualified queue unlocks. Exploration
+uses the same coordination and keeps the full evidence chain. See
+[fast-mode](references/fast-mode.md) for fields, role permissions and exact actions.
+PM also submits `secretary.delegate`, `schedule.record`, `task.dispose`; Architect
+submits `readiness.record`; Constructors use `receipt.claim`, `completion.record`;
+Stabilizer uses `acceptance.record` for execution. Use
+[`templates/receipt-task.md`](templates/receipt-task.md) for new routed work.
+The cast's shared actions remain available where their policy permits them.
+
+## Full exploration and historical v4 lifecycle
 
 Each step names its request, its submitter, what the engine checks, and the template that `mp seal <document>` submits for you. Seal takes a Markdown document containing a fenced ```mp-json``` block, stores the whole document as the `source_blob`, and submits that request.
 
@@ -46,7 +62,7 @@ Each step names its request, its submitter, what the engine checks, and the temp
 4. **Propose the root.** `root.propose` (pm), template `templates/charter.md`. A candidate creates no contract.
 5. **Review the root.** `root.review` (supervisor) with MATCH, MISMATCH or INPUT_INCOMPLETE, template `templates/supervisor-review.md`. The engine compares the candidate goal inventory with the principal's (`GOAL_COVERAGE_GAP`) and requires a current `contract_scope_digest`; in local mode `seal` fills that field after `contracts.snapshot`.
 6. **Activate.** `root.activate` (pm) naming the candidate and the MATCH review. Activation is atomic: it creates the root, compiles the principal's standing contracts and opens wave 1. A stale candidate, authority or contract scope refuses `STALE_ROOT_REVIEW`.
-7. **Record PM choices.** `decision.record` (pm) with grant, domain, actual `effects`, `rationale_blob` and optional `tasks`. A decision that lists no tasks applies to the whole domain going forward and does not invalidate work accepted before it.
+7. **Record PM choices.** `decision.record` (pm) with grant, domain, actual `effects`, `rationale_blob` and optional `tasks`, which must be tasks of the decision's own domain (`DECISION_DOMAIN_MISMATCH`). A decision that lists no tasks applies to the whole domain going forward and does not invalidate work accepted before it.
 8. **Plan.** `plan.record` (pm) carrying every principal goal and one obligation per goal (`GOAL_COVERAGE_GAP`, `INVENTED_OBLIGATION`). Then `task.record` (template `templates/task-spec.md`) with obligations, grant, domain, required and allowed effects, input blobs, exact `write_paths`, delivery `outputs`, dependencies and wave. `environment.register` (principal) names the real interpreter; `requirement.record` (pm) fixes argv, cwd, inputs, environment, success predicate and output mappings, with `scope: "closing"` for the mission gate.
 9. **Review the plan and admit.** `plan.review` (supervisor) with PASS, template `templates/plan-review.md`; the engine checks that every obligation still REQUIRED has an authorized producer (`MISSING_PRODUCER`; an obligation already MET, deferred or cancelled needs none) and that no task requires an excluded effect (`INFEASIBLE_TASK`). Outcomes are PASS, FAIL and INPUT_INCOMPLETE; only PASS admits. `task.admit` (pm) then produces the current admission. A changed plan, task, authority or accepted dependency needs re-admission.
 10. **Dispatch.** `task.dispatch` (pm) creates a fenced ticket; `task.claim` (constructor) claims it. Both recheck barriers and latches. A single-task mission can go straight to `work.write` with the admission.
@@ -65,17 +81,20 @@ A refusal is a JSON object with `ok:false`, a `code` and a `detail`. Determinist
 |---|---|---|
 | `ROLE_FORBIDDEN` | This seat cannot submit this action, or `--actor controller` was used | Submit from the role in the cast table above |
 | `AUTHORITY_CONFLICT` | The grant is revoked, expired, out of domain, or the effect contradicts a reserved condition | Ask the principal for `authority.amend`, or choose an effect inside the grant |
+| `DECISION_DOMAIN_MISMATCH` | A `decision.record` names a task whose domain differs from the decision's; it would never apply to that task | Record the decision in the task's domain under a grant that covers it, or leave the task out |
 | `STALE_CONTRACT_REVIEW` | A root or plan review carried no current `contract_scope_digest` | `contracts.snapshot`, read the named sources, resubmit; `mp seal` fills it in local mode |
 | `STALE_ROOT_REVIEW` / `STALE_PLAN_REVIEW` | The candidate, plan, task set or authority changed after the review | Re-review the current object, then activate or admit |
 | `STALE_ADMISSION` / `STALE_DEPENDENCY` | The admitted task, its authority or a consumed predecessor changed | `task.admit` again on the current task |
 | `STALE_PRODUCT_HEAD` | The working file changed since you read it | Re-read the file, recompute `expected_sha256`, write again |
 | `WRITE_SCOPE_CONFLICT` | The path is not in the task's reviewed `write_paths` | Have the PM revise the task and re-admit |
+| `INVALID_INPUT` from `work.write` | The file is larger than the 8 MiB (8,388,608-byte) per-write limit; the refusal carries `limit` and `size` | Split the file, or produce it as a declared output of a controlled run |
 | `REQUIRED_VERIFICATION_UNSATISFIED` | The latest attempt for a required run is pending, failed or missing | Run it; a new report cannot promote a failed attempt |
 | `CRITERIA_TABLE_REQUIRED` | A COMPLETE, PASS or ACCEPTED report for a task with obligations has no criteria rows | Add the criteria table to the document and seal again |
 | `CRITERIA_SOURCE_CONFLICT` | The structured `criteria` contradict or omit a table row | Make them agree; a later partial row never disappears into an earlier met row |
 | `CURRENT_DEVELOPMENT_REQUIRED` | The critique or acceptance does not sit on the current development report | Record the development report for the current product first |
 | `CURRENT_INDEPENDENT_PASS_REQUIRED` | The acceptance cites a stale critique, or the same session wrote both | Get a current PASS from a different seat |
 | `UNMET_OBLIGATION` | A positive report or a consumption has an obligation not met | Meet it, or `obligation.defer` / `obligation.cancel` under a defer grant |
+| `DEFERRAL_INCOMPLETE` | A deferral or cancellation names no owner or reason, or at close a disposition has lost its grant and domain (a 2.1.0 plan re-record stripped them) | Submit the same `obligation.defer` or `obligation.cancel` again with grant, domain, owner and `reason_blob` |
 | `SCOPED_BARRIER` | An unresolved counterexample fences this task or obligation | Screen the case, repair under a permit, or work an unrelated scope |
 | `CALIBRATION_HALT` | An active DRIFT or ratchet latch covers this scope | `latch.release` by the principal, or an independent DISMISS_ORIGINAL |
 | `STALE_REVIEW_INPUT` | A review was submitted without the current `review_basis` | `review.snapshot`, read the blobs, resubmit |
@@ -88,7 +107,7 @@ A refusal is a JSON object with `ok:false`, a `code` and a `detail`. Determinist
 | `AUDIT_OUTCOME_REQUIRED` | The audit named at close is INPUT_INCOMPLETE | Complete the bundle and record a PASS or FINDINGS audit |
 | `INVALID_REVIEW_DEADLINE` | `review_deadline_seconds` is not an integer of at least 60 | Configure a real number of seconds |
 | `STALE_BUNDLE` | Delivered bytes, evidence or authority changed after the bundle | `bundle.record` again, then re-audit and re-review |
-| `INPUT_INCOMPLETE` | Required bytes are missing from the bundle | Restore or re-export them; missing input is never a PASS |
+| `INPUT_INCOMPLETE` | Required bytes are missing from the bundle, or an admitted or executed task's declared output (`path`, `task`) has no delivery snapshot | Restore or re-export them; missing input is never a PASS |
 | `CLOSURE_REVIEW_REQUIRED` | The audit or close review is missing, stale or not PASS | Rebuild the bundle and obtain both current reviews |
 | `CLOSING_RUN_UNSATISFIED` | No completed, satisfied run with `scope: "closing"` | Execute the closing requirement over the integrated result |
 | `OPEN_FLAG` | A live product flag has no disposition | `flag.change` with retire, replace, reopen or dispose |
@@ -111,13 +130,13 @@ Authorized gaps are returned in the close `outcomes`, with owner and reason. A d
 
 ## Calibration
 
-`bundle.record` collects original authority, grants, source documents, decisions, run inputs and logs, and the delivery snapshots. Citing a DevReport is not a bundle; missing bytes make the bundle INPUT_INCOMPLETE.
+`bundle.record` collects original authority, grants, source documents, decisions, run inputs and logs, and the delivery snapshots. Citing a DevReport is not a bundle; missing bytes make the bundle INPUT_INCOMPLETE. A task's declared outputs need their delivery snapshots once the task has an admission of its current digest or any recorded run; a later task that has not started yet does not block a bundle for earlier work.
 
 `calibration.record` judges one scope: a task cell (`task` plus `wave`) or an aggregate wave cell (`wave` alone). Outcomes are ALIGNED, SUSPICION, DRIFT and INPUT_INCOMPLETE. The Calibrator receives the principal's original words, the authorized A2 decisions and the actual delivered bytes; the PM's argumentative defence is not part of that basis.
 
 DRIFT creates a mandatory case and a latch at once. Two consecutive aggregate SUSPICION verdicts trip the same ratchet. A latch releases through `latch.release` by the principal, or by a Stabilizer whose contest ended DISMISS_ORIGINAL on that latch's case. A later ALIGNED verdict never erases a standing latch.
 
-Task calibration is mandatory when `task.record` sets `recovers` (this task repairs a case), or when the root has been revised, or when `touches_contract` is set after a recorded `context.compacted`. Those two fields are the only manual triggers; everything else is computed.
+Exploration and historical v4 task calibration is mandatory when `task.record` sets `recovers` (this task repairs a case), or when the root has been revised, or when `touches_contract` is set after a recorded `context.compacted`. Execution uses the receipt acceptance gate; active formal cases and latches still apply.
 
 ## Counterexamples and recovery
 
@@ -137,7 +156,7 @@ The path is: case, barrier, screening, permit, repair, resolve or contest.
 
 Changing one of these is forking the method, not configuring it.
 
-1. **Separate hands.** Build, critique and acceptance are three seats. An acceptance whose critique came from the same session refuses `CURRENT_INDEPENDENT_PASS_REQUIRED`.
+1. **Separate hands.** Constructors and acceptance are different actor instances. Execution uses one independent acceptance; an additional Crititor is required when `specialist_review` is declared. Exploration keeps three separate seats. The Architect checks prerequisites and does not accept delivery.
 2. **The principal converses; agents operate.** Every principal decision is expressible in one plain sentence. A step that asks the principal to run a command is an engine defect, not a configuration.
 3. **Echoes are not evidence.** Agreement among derived documents creates no principal requirement and no acceptance. Positive gates need a satisfied run and the actual delivered bytes.
 4. **Approvals bind to what they judged.** Target, product, authority, dependency, contract-scope and review digests are recomputed at every positive use. A stale approval is refused, never silently reused.

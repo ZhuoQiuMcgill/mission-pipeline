@@ -1,10 +1,10 @@
 ---
-description: Initialize Mission Pipeline 2 with explicit runtime capabilities, safe legacy migration and a reviewed binding proposal.
+description: Initialize Mission Pipeline 3 with explicit capabilities, execution/exploration routing, safe migration and reviewed bindings.
 ---
 
-# Initialize Mission Pipeline 2
+# Initialize Mission Pipeline 3
 
-Read `${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/references/setup.md` and follow it. Read `${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/references/walkthrough.md` before running the first mission: it is the complete request sequence, including the mid-mission upgrade path for a 1.2 deployment. Use the installed package's absolute script path and an explicit project root. Keep `scripts/mp_runtime/` and all role, template and reference files alongside `scripts/mp`; the package is not a single-file installation.
+Read `${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/references/setup.md` and follow it. Read `${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/references/fast-mode.md` for new execution/exploration routing. The full exploration and historical request sequence, including the mid-mission upgrade path for a 1.2 deployment, is in `${CLAUDE_PLUGIN_ROOT}/skills/mission-pipeline/references/walkthrough.md`. Use the installed package's absolute script path and an explicit project root. Keep `scripts/mp_runtime/` and all role, template and reference files alongside `scripts/mp`; the package is not a single-file installation.
 
 Scout the existing project read-only, preserve its conventions and its existing principal authorization, then fill any missing bindings. Do not repeat an already answered permission question. If an existing PROJECT.md and v4 manifest are present, inspect their bindings and state without overwriting them.
 

@@ -148,8 +148,9 @@ def source_manifest(tree, ledger=None):
     """Identity of the tree actually judged.
 
     A clean tracked file already has a content identity git computed when it was
-    staged: the index blob id. Only paths git status reports as changed are read
-    and hashed, so the cost follows the working change, not the repository size.
+    staged: the index blob id. Hash changed files and files whose working EOL
+    differs from the index. Git can call a CRLF conversion clean even though the
+    actual bytes differ; that conversion must remain visible in evidence identity.
     """
     tree = Path(tree).resolve()
     commit = git_text(["rev-parse", "--verify", "HEAD^{commit}"], tree).strip()
@@ -174,6 +175,14 @@ def source_manifest(tree, ledger=None):
                 reported.add(status[i])
             i += 1
     index = []
+    normalized = set()
+    for row in git_bytes(["ls-files", "--eol", "-z"], tree).split(b"\0"):
+        if not row:
+            continue
+        head, tab, raw = row.partition(b"\t")
+        fields = head.split()
+        if tab and len(fields) >= 2 and fields[0][2:] != fields[1][2:]:
+            normalized.add(raw)
     for row in git_bytes(["ls-files", "-s", "-z"], tree).split(b"\0"):
         if not row:
             continue
@@ -191,7 +200,7 @@ def source_manifest(tree, ledger=None):
             if rel.startswith(".claude/") or (ledger and contained(path, ledger)):
                 continue
             kind = "symlink" if mode == b"120000" else "file"
-            if raw not in reported:
+            if raw not in reported and raw not in normalized:
                 entry = {"path_b64": base64.b64encode(raw).decode("ascii"),
                          "git_blob": blob.decode("ascii"), "kind": kind}
             elif not path.exists() and not path.is_symlink():

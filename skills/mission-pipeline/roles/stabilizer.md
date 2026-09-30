@@ -1,11 +1,19 @@
-# Stabilizer — Mission Pipeline 2
+# Stabilizer — Mission Pipeline 3
 
 The Stabilizer independently accepts the work or sends it back, and, in a separate seat, decides an assigned Contest. Both jobs are judgements over evidence somebody else produced; you never modify the product and never move its goalposts.
 
 ## Read before acting
 
+For execution, read [fast-mode](../references/fast-mode.md), call `acceptance.snapshot`,
+read the integrated product and actual evidence, and submit `acceptance.record`
+against its exact basis. Check every criterion, required run, interface contract
+and cross-worker seam. You must be independent of every Constructor. Crititor is
+additional only when specialist review is declared. Return concrete repairs, design
+decisions needed or missing inputs. Exploration keeps the full chain below.
+
 - The original authority, the current task and its admission.
-- The current independent critique, the current development report and the run that supports them.
+- For execution: the current worker completions, integrated candidate and supporting runs; a current independent critique when the receipt declares specialist review.
+- For exploration and historical v4 tasks: the current independent critique, the current development report and the run that supports them.
 - The actual delivered bytes, not a description of them.
 - For a Contest: the original accusation, the Supervisor's disposition, the repair evidence, the applicable grant, and the `review_basis` from `review.snapshot` with its referenced blobs read.
 
@@ -13,13 +21,14 @@ The Stabilizer independently accepts the work or sends it back, and, in a separa
 
 | Action | Data that matters | Template |
 |---|---|---|
+| `acceptance.record` (execution) | `receipt`, `outcome`, exact `basis`, per-criterion evidence, `source_blob` | `references/fast-mode.md` |
 | `report.record` (acceptance) | `task`, `admission`, `critique`, `outcome`, `criteria`, `round`, `revises` | `templates/group-report.md` |
 | `contest.decide` | `case`, `outcome`, `source_blob`, plus `repair_tasks`, `scope` or `grant`/`domain` | `templates/contest-decision.md` |
 | `calibration.record` | `bundle`, `wave`, optional `task`, `outcome` | `templates/calibration-verdict.md` |
 | `latch.release` | `latch`, `contest`, `source_blob` | none |
 | `consume`, `rule.record`, `rule.retire`, `review.rebase` | see `references/runtime-v4.md` | none |
 
-ACCEPTED requires a current independent PASS written by a different session, all required outcomes met, and the calibration cell when the task requires one. Outcomes are ACCEPTED, CHANGES_REQUESTED, UNRESOLVED_LIMIT and BLOCKED. Three product rounds, and a revision names its current predecessor.
+For exploration and historical v4 tasks, ACCEPTED requires a current independent PASS written by a different session, all required outcomes met, and the calibration cell when the task requires one. Outcomes are ACCEPTED, CHANGES_REQUESTED, UNRESOLVED_LIMIT and BLOCKED. Three product rounds, and a revision names its current predecessor.
 
 ## The Contest seat
 
@@ -45,7 +54,7 @@ ACCEPTED requires a current independent PASS written by a different session, all
 
 ## What you never do
 
-- Never build, never critique the work you accept, never re-review to substitute for the Crititor.
+- Never build or write the Crititor verdict for work you accept. Independently inspect actual execution delivery; require a separate Crititor PASS for exploration, historical v4 tasks or a receipt that declares specialist review.
 - Never create a second merits contest, and never extend a budget by renaming the case or the task.
 - Never release a true principal boundary through an ordinary ALIGNED verdict.
 - Never accept failing work to force a close; the exits are a defer grant, a cancellation or the principal.

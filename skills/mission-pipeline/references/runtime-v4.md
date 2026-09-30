@@ -1,6 +1,9 @@
 # Runtime v4 request contract
 
-The complete typed request surface of schema 4. `references/walkthrough.md` is the worked example; this document is the contract each step is checked against.
+The shared and full-workflow request surface of schema 4. Version 3.0.0 adds
+[fast-mode](fast-mode.md) for routed receipts, Secretary coordination, Architect
+readiness and execution acceptance. This document and `walkthrough.md` retain the
+full exploration and historical v4 lifecycle, including shared recovery and closure.
 
 ## 1. Entry and identity
 
@@ -52,17 +55,19 @@ Every candidate occurrence is checked before deduplication: project cannot becom
 
 `decision.record` carries the grant, domain, actual `effects`, a `rationale_blob`, the `choice` and an optional predecessor through `revises`. A2 choices are revisable under the same valid grant; only a principal amendment changes A0.
 
-`decision.record` may limit `tasks` to mission task ids. Omission means the decision applies to that domain going forward. It applies to a task only when the task has no ACCEPTED acceptance, current or superseded, created before the decision, so a blanket decision does not retro-invalidate finished work and the rule stays stable across later rounds. Revisions inherit the previous scope unless it is explicitly changed.
+`decision.record` may limit `tasks` to mission task ids of the decision's own `domain`. A decision never applies to a task of another domain, so naming one refuses `DECISION_DOMAIN_MISMATCH` with the `task`, its `task_domain` and the `decision_domain`; this also holds for the tasks a revision inherits. Record the choice in the task's domain, under a grant that covers it, or leave that task out. Omission means the decision applies to that domain going forward. It applies to a task only when the task has no ACCEPTED acceptance, current or superseded, created before the decision, so a blanket decision does not retro-invalidate finished work and the rule stays stable across later rounds. Revisions inherit the previous scope unless it is explicitly changed.
 
 ## 6. Plans, tasks and admission
 
-`plan.record` carries every original goal and obligations as `{id, goal, description}`. Each obligation must trace to a goal and each goal needs a producing obligation.
+`plan.record` carries every original goal and obligations as `{id, goal, description}`. Each obligation must trace to a goal and each goal needs a producing obligation. Recording a plan again restates that text only: an obligation already MET, AUTHORIZED_DEFERRED or AUTHORIZED_CANCELLED keeps its status and every field its disposition wrote (`evidence`, `assurance`, `grant`, `domain`, `deferred_owner`, `reason_blob`, `cancelled_by` and the `legacy.accept` fields).
 
 `task.record` carries mission, obligations, grant, domain, required `effects`, `allowed_effects`, input CAS ids, exact `write_paths`, delivery `outputs`, `dependencies`, `wave` and an optional `required_runs`. Updating an existing id requires `revises` with the task's current digest. `recovers` and `touches_contract` are the two manual calibration triggers.
 
 `task.replace` records a new task linked to its predecessor, retaining obligations and lineage budget.
 
-`plan.review` (supervisor) checks the actual plan and tasks. `task.admit` produces the current admission, freezing the task digest, the authority digest, the dependency digest and the mission fence. Requirements must be registered before the review, because they change the task. A changed plan, task, authority or accepted dependency needs re-admission.
+A task row's stored `status` is its record status: `NOT_ADMITTED` from `task.record` until `task.replace` sets `REPLACED`. It is not the admission state. `query task [<id>]` returns the stored rows unchanged, so their digests still serve `revises`, plus a `derived` map keyed by task id: `admission` is ADMITTED when an admission names the task's current digest and the current authority, STALE when admissions exist but none does, otherwise NOT_ADMITTED, with `admission_id`; `acceptance` is ACCEPTED when the current acceptance report is ACCEPTED over the current digest, STALE when it is ACCEPTED over an older digest, otherwise NOT_ACCEPTED, with `acceptance_report`. These fields are computed at query time and never stored; every positive use still rechecks dependencies, holds, runs and product bytes.
+
+`plan.review` (supervisor) checks the actual plan and tasks. `task.admit` produces the current admission, freezing the task digest, the authority digest, the dependency digest and the mission fence. Requirements must be registered before the review, because they change the task: `requirement.record` appends its id to the task's `required_runs`. When the task spec already lists that id, the id is not added a second time and the task row, with its digest, is unchanged; the requirement's own definition is immutable and enters the product digest of every report and the calibration basis. A changed plan, task, authority or accepted dependency needs re-admission.
 
 The first wave exists at activation. `wave.open` for a successor requires the previous wave CLOSED and a completed aggregate calibration. `wave.integrate` rechecks every task's acceptance and required runs before closing a wave.
 
@@ -77,6 +82,8 @@ The first wave exists at activation. `wave.open` for a successor requires the pr
 ## 8. Product writes
 
 Constructor claims a current dispatch ticket, submits source as a blob, and uses `work.write` with task, admission, path, `source_blob` and `expected_sha256`. It writes only the reviewed exact paths and never pipeline state. A changed working-file head refuses `STALE_PRODUCT_HEAD` rather than overwriting another edit.
+
+One `work.write` installs at most 8 MiB (8,388,608 bytes). A larger `source_blob` refuses `INVALID_INPUT`, and the refusal carries `limit`, the file's `size` and its `path`. Split such a file, or have a controlled run produce it as a declared output.
 
 Product file changes and exported output installations are journaled effects. No file changes before its event is durable. A completion receipt is persisted after installation and before projection commit. Recovery accepts the intended bytes or applies them against the recorded previous hash, and refuses to overwrite an intervening edit (`RECOVERY_PRODUCT_CONFLICT`).
 
@@ -125,6 +132,8 @@ Noticed-but-not-fixed items become live flags at record time; relay items become
 An obligation is REQUIRED, then MET by an ACCEPTED report, or disposed explicitly.
 
 `obligation.defer` (pm, `defer` permission or principal) names the grant, domain, owner and `reason_blob`, and sets AUTHORIZED_DEFERRED. `obligation.cancel` takes the same fields and sets AUTHORIZED_CANCELLED with `cancelled_by`. Both are disclosed gaps with a responsible owner, never verified-fixed, and both are returned in the close outcomes.
+
+`mission.close` rechecks each disposition's grant with the `defer` permission. A 2.1.0 plan re-record stripped `grant` and `domain` from disposed obligations; such a row refuses `DEFERRAL_INCOMPLETE` at close, naming the obligation, and is repaired by submitting the same `obligation.defer` or `obligation.cancel` again.
 
 `consume` and `wave.integrate` recheck current acceptance, source, verification, authority and holds.
 
@@ -218,6 +227,8 @@ Unrelated and non-required diagnostics are excluded from required qualification 
 
 `bundle.record` collects the original authority, grants, actual delivery documents, data and images, task and decision sources, controlled run inputs and logs, and exported outputs. Required declared delivery paths cannot be omitted. Missing CAS yields `INPUT_INCOMPLETE`. Bundles include the actual frozen input files, not only a manifest hash.
 
+A declared output is required once its task could have produced it: the task has an admission of its current digest, or any recorded run. Without a current delivery for that path the bundle refuses `INPUT_INCOMPLETE` with the `path` and the `task`. A task with neither, such as a later wave's task not yet admitted, has produced nothing, so its outputs do not block a bundle for earlier work; it is still unfinished work that `wave.integrate` and `mission.close` refuse. An admission is not part of a bundle's delivery digest, so `calibration.record` (every outcome except INPUT_INCOMPLETE) and `mission.close` recheck the same rule against a task admitted after the bundle was recorded.
+
 `calibration.record` uses the current bundle at an explicit wave or task scope. Outcomes are ALIGNED, SUSPICION, DRIFT and INPUT_INCOMPLETE. Task cells never interrupt the aggregate wave sequence. DRIFT, and a second consecutive aggregate SUSPICION, create a mandatory case and a latch together.
 
 The calibration basis for a task is the current TaskSpec, the applicable PM decisions, authority and contracts, the declared source inputs, the actual output bytes, the required run and environment records, the current deliveries and the current development and critique reports.
@@ -270,7 +281,7 @@ A ledger has one writer environment. `maintenance handoff --target-environment <
 
 `recover()` verifies only the journal tail past a watermark: `verified_seq` plus a byte offset held in `runtime_meta`. The full replay comparison stays in `doctor` and `rebuild`, which is where you want it.
 
-`source_manifest` uses identity_version 3. Clean tracked files take their git blob id from `git ls-files -s -z`; only files that `git status` reports as changed are hashed with sha256. A large tracked tree no longer costs a full hash on every run.
+`source_manifest` uses identity_version 3. Tracked files with unchanged checkout bytes take their Git blob id from `git ls-files -s -z`. Files reported changed by `git status`, and files whose index and working-tree line endings differ according to `git ls-files --eol -z`, are hashed with sha256. A CRLF-converted checkout therefore remains visible even when Git reports it clean; unchanged files avoid a full hash on every run.
 
 ## 24. Migration and legacy continuity
 

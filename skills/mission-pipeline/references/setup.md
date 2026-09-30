@@ -1,4 +1,9 @@
-# Setup — Mission Pipeline 2
+# Setup — Mission Pipeline 3
+
+Version 3.0.0 keeps schema 4. Read [fast-mode](fast-mode.md) for new execution and
+exploration subtasks. Existing tasks keep their recorded workflow; changing route
+requires a reviewed revision and preserves lineage budgets. Rejected legacy replay
+transactions are disclosed history and cannot provide qualified acceptance credit.
 
 Install or update the entire skill directory. The script imports `scripts/mp_runtime/` and loads `roles/` at runtime; a standalone copy of `mp` is unsupported. Keep project bindings in `.claude/mission-pipeline/PROJECT.md`. Engine updates do not overwrite those bindings or the real ledger.
 

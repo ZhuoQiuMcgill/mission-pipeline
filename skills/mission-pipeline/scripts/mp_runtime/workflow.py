@@ -12,6 +12,7 @@ from .process import RuntimeRefusal
 from .storage import digest
 from .review import review_basis, REVIEW_ACTIONS
 from .contracts import applicable_contracts, contract_digest, constraints, validate_policies, compile_candidate
+from .fast import ReceiptWorkflow, routed
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,7 +26,7 @@ class Actor:
 
 
 ROLES = {"principal", "pm", "constructor", "crititor", "stabilizer", "supervisor",
-         "architect", "calibrator", "challenger", "auditor", "controller", "researcher"}
+         "architect", "calibrator", "challenger", "auditor", "controller", "researcher", "secretary"}
 BLOCKED = {"PENDING_SCREEN", "ESTABLISHED_HOLD", "CONTEST_PENDING",
            "SCREENING_UNAVAILABLE", "UNRESOLVED_LIMIT"}
 TERMINAL_TASK = {"ACCEPTED", "AUTHORIZED_CANCELLED", "AUTHORIZED_DEFERRED", "REPLACED"}
@@ -37,17 +38,31 @@ CONTESTABLE = {"REPORTED_PENDING_SCREEN", "DISMISSED", "ESTABLISHED", "VERIFIED_
 # "local-controlled-execution" is the 2.0 spelling of a local executor run; it is read, never written.
 EXECUTED_ASSURANCE = ("controller-execution", "local-controlled-execution", "local-execution")
 REVIEW_DEADLINE = {"local": 86400, "managed": 300}
+WRITE_LIMIT = 8 * 1024 * 1024  # bytes per work.write file; stated in references/runtime-v4.md section 8
+# What the engine writes onto an obligation when a report meets it, `obligation.defer` or
+# `obligation.cancel` disposes it, or `legacy.accept` credits it. A plan re-record restates
+# the PM's `{id, goal, description}` and keeps these with the status.
+OBLIGATION_DISPOSITION = ("evidence", "assurance", "grant", "domain", "deferred_owner", "reason_blob",
+                          "verified_fixed", "cancelled_by", "accepted_task_key", "legacy_acceptance",
+                          "legacy_scope", "source_blob")
 
 
 def refuse(code, detail, **fields):
     raise RuntimeRefusal(code, detail, **fields)
 
 
-class Workflow:
+class Workflow(ReceiptWorkflow):
     def __init__(self, store, actor):
         self.store, self.actor = store, actor
         if actor.role not in ROLES:
             refuse("UNKNOWN_ROLE", "Unknown role")
+
+    @classmethod
+    def reader(cls, store, state):
+        """A read-only view of one committed state for derived query fields; it never transitions."""
+        view = cls.__new__(cls)
+        view.store, view.actor, view.state = store, None, state
+        return view
 
     def apply(self, state, request):
         self.state, self.request = state, request
@@ -529,6 +544,14 @@ class Workflow:
             self.update("decision", previous["id"], current=False)
         if not isinstance(targets, list) or any(not isinstance(tid, str) or self.get("task", tid)["mission"] != d["mission"] for tid in targets):
             refuse("CROSS_MISSION_REFERENCE", "Decision tasks must belong to its mission")
+        for tid in targets:
+            # decision_applies never applies a decision to a task of another domain; naming one
+            # would record authority that governs nothing.
+            task_domain = self.get("task", tid)["domain"]
+            if task_domain != d["domain"]:
+                refuse("DECISION_DOMAIN_MISMATCH", "A decision applies only to tasks of its own domain; record it "
+                       "in the task's domain or leave that task out", task=tid, task_domain=task_domain,
+                       decision_domain=d["domain"])
         decision = self.create("decision", dict(mission=d["mission"], grant=grant["id"],
                                grant_digest=digest(grant), domain=d["domain"], effects=d.get("effects", {}),
                                rationale_blob=self.blob(d["rationale_blob"]), choice=d["choice"],
@@ -556,8 +579,10 @@ class Workflow:
             old = self.optional("obligation", item["id"])
             if old and old["mission"] != d["mission"]:
                 refuse("CROSS_MISSION_REFERENCE", "Obligation belongs to another mission")
-            self.put("obligation", item["id"], dict(item, mission=d["mission"],
-                     status=(old or {}).get("status", "REQUIRED")))
+            row = dict(item, mission=d["mission"], status=(old or {}).get("status", "REQUIRED"))
+            if row["status"] != "REQUIRED":
+                row.update({key: old[key] for key in OBLIGATION_DISPOSITION if key in old})
+            self.put("obligation", item["id"], row)
         if set(x["goal"] for x in d["obligations"]) != set(auth["goals"]):
             refuse("GOAL_COVERAGE_GAP", "Every principal goal needs a production obligation")
         plan = self.create("plan", dict(mission=d["mission"], goals=d["goals"],
@@ -586,7 +611,14 @@ class Workflow:
                         calibration_required=bool(d.get("recovers") or root["version"] > 1 or
                             (d.get("touches_contract") and self.optional("compaction", d["mission"]))),
                         grant=d["grant"], domain=d["domain"], source_blob=self.blob(d["source_blob"]),
-                        status="NOT_ADMITTED", revision=(previous or {}).get("revision", 0) + 1))
+                        status="NOT_ADMITTED", revision=(previous or {}).get("revision", 0) + 1,
+                        **self.task_fields(d, previous)))
+        if routed(task):
+            self.schedule(task, d.get("priority", (self.optional("schedule", task["id"]) or {}).get("priority", 0)), task["source_blob"])
+        if previous and previous.get("workflow_policy", "v4") != task.get("workflow_policy", "v4"):
+            self.create("policy_boundary", dict(mission=task["mission"], task=task["id"], lineage=task["lineage"],
+                previous_policy=previous.get("workflow_policy", "v4"), policy=task.get("workflow_policy", "v4"),
+                previous_digest=digest(previous), contract_digest=digest(task), source_blob=task["source_blob"]))
         return {"task": task}
 
     def do_task_replace(self, d):
@@ -600,6 +632,13 @@ class Workflow:
         result = self.do_task_record(dict(d["task"], mission=old["mission"]))
         new = self.update("task", result["task"]["id"], lineage=old["lineage"], replaces=old["id"])
         self.update("task", old["id"], status="REPLACED", replacement=new["id"])
+        # Preserve the spent lineage budget and historical assignments while releasing
+        # their active ownership. A replacement must not collide with its predecessor.
+        for receipt in self.rows("work_receipt", task=old["id"], current=True):
+            self.update("work_receipt", receipt["id"], current=False, replacement=new["id"])
+        for dispatch in self.rows("receipt_dispatch", task=old["id"], active=True):
+            self.update("receipt_dispatch", dispatch["id"], active=False, superseded=True,
+                        replacement=new["id"])
         return {"task": new}
 
     def dependency_digest(self, task, visiting=None):
@@ -610,6 +649,8 @@ class Workflow:
         dependencies = []
         for tid in task.get("dependencies", []):
             other = self.get("task", tid)
+            if routed(other) and self.disposed(other):
+                refuse("DEPENDENCY_DISPOSED", "A disposed prerequisite does not provide an accepted output")
             if other["mission"] != task["mission"]:
                 refuse("CROSS_MISSION_REFERENCE", "Task dependency is outside this mission")
             self.dependency_digest(other, visiting)
@@ -628,11 +669,16 @@ class Workflow:
         plan = self.get("plan", d["plan"])
         self.check_contract_reading(plan["mission"], d)
         tasks = [self.get("task", tid) for tid in d["tasks"]]
+        active = d.get("active_tasks", [t["id"] for t in tasks if t.get("work_type") != "milestone"])
+        if not set(active).issubset(d["tasks"]):
+            refuse("INVALID_SCOPE", "Executable receipt review must be inside the reviewed graph")
+        contracts = {t["id"]: digest(self.contract(t)) for t in tasks if t["id"] in active} if d["outcome"] == "PASS" else {}
         if any(t["mission"] != plan["mission"] for t in tasks):
             refuse("CROSS_MISSION_REFERENCE", "Plan review includes another mission")
         if d["outcome"] not in ("PASS", "FAIL", "INPUT_INCOMPLETE"):
             refuse("INVALID_VERDICT", "Plan review outcome must be PASS, FAIL or INPUT_INCOMPLETE")
         if d["outcome"] == "PASS":
+            self.graph_check(tasks)
             covered = set()
             for task in tasks:
                 self.grant(task["grant"], task["domain"], task["mission"])
@@ -656,7 +702,9 @@ class Workflow:
         review = self.create("review", dict(kind="plan", mission=plan["mission"], target=plan["id"],
                               target_digest=digest([plan, tasks]), tasks=d["tasks"],
                               authority_digest=self.authority_digest(plan["mission"]),
-                              outcome=d["outcome"], source_blob=self.blob(d["source_blob"])), d.get("id"))
+                              outcome=d["outcome"], source_blob=self.blob(d["source_blob"]),
+                              receipt_contracts=contracts,
+                              receipt_authorities={t["id"]: self.receipt_authority(t) for t in tasks if routed(t) and t["id"] in active}), d.get("id"))
         return {"review": review}
 
     def check_contract_reading(self, mission, d):
@@ -666,7 +714,14 @@ class Workflow:
 
     def do_task_admit(self, d):
         self.only("pm")
+        return self.admit_task(d)
+
+    def admit_task(self, d):
+        """Shared checked admission; Secretary reaches it only through scoped issue."""
         task = self.get("task", d["task"])
+        if task.get("work_type") == "milestone":
+            refuse("MILESTONE_NOT_EXECUTABLE", "Refine a milestone into execution or exploration subtasks")
+        contract = digest(self.contract(task))
         wave = self.get("wave", task["mission"] + ":" + str(task["wave"]))
         if wave["status"] != "OPEN":
             refuse("WAVE_NOT_OPEN", "Task admission requires an open wave")
@@ -674,14 +729,22 @@ class Workflow:
         plan = self.get("plan", review["target"])
         tasks = [self.get("task", tid) for tid in review["tasks"]]
         self.qualify(task["mission"], [task["id"]], task["obligations"], d.get("permit"))
+        if routed(task):
+            current_contract = review.get("receipt_contracts", {}).get(task["id"]) == contract
+            current_authority = review.get("receipt_authorities", {}).get(task["id"]) == self.receipt_authority(task)
+        else:
+            current_contract = (review["target_digest"] == digest([plan, tasks])
+                                and review.get("receipt_contracts", {}).get(task["id"]) == contract)
+            current_authority = review["authority_digest"] == self.authority_digest(task["mission"])
         if review["kind"] != "plan" or review["outcome"] != "PASS" or task["id"] not in review["tasks"] \
-                or review["target_digest"] != digest([plan, tasks]) or review["authority_digest"] != self.authority_digest(task["mission"]):
+                or not current_contract or not current_authority:
             refuse("STALE_PLAN_REVIEW", "Admission requires a current independently reviewed plan")
         self.grant(task["grant"], task["domain"], task["mission"])
         admission = self.create("admission", dict(task=task["id"], mission=task["mission"],
-                                 target_digest=digest(task), authority_digest=review["authority_digest"],
+                                 target_digest=digest(task), authority_digest=self.receipt_authority(task) if routed(task) else review["authority_digest"],
                                  dependency_digest=self.dependency_digest(task),
-                                 fence=self.fence(task["mission"]), permit=d.get("permit")), d.get("id"))
+                                 fence=self.fence(task["mission"]), permit=d.get("permit"),
+                                 contract_digest=contract), d.get("id"))
         return {"admission": admission}
 
     def do_wave_open(self, d):
@@ -705,9 +768,9 @@ class Workflow:
         tasks = self.rows("task", mission=d["mission"], wave=d["number"])
         self.qualify(d["mission"], tasks=[t["id"] for t in tasks], obligations=[oid for t in tasks for oid in t["obligations"]])
         for task in tasks:
-            if task["status"] == "REPLACED":
+            if task["status"] == "REPLACED" or task.get("work_type") == "milestone":
                 continue
-            if all(self.get("obligation", oid)["status"] in ("AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED") for oid in task["obligations"]):
+            if (routed(task) and self.disposed(task)) or ((task["obligations"] or not routed(task)) and all(self.get("obligation", oid)["status"] in ("AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED") for oid in task["obligations"])):
                 continue
             self.required_satisfied(task)
             self.task_acceptance(task)
@@ -717,9 +780,13 @@ class Workflow:
     def admission(self, id, consume=False):
         admission = self.get("admission", id)
         task = self.get("task", admission["task"])
+        if routed(task) and self.disposed(task):
+            refuse("TASK_DISPOSED", "Deferred or cancelled work is not executable")
         self.qualify(task["mission"], [task["id"]], task["obligations"], None if consume else admission.get("permit"))
-        if admission["target_digest"] != digest(task) or admission["authority_digest"] != self.authority_digest(task["mission"]):
+        if admission["target_digest"] != digest(task) or admission["authority_digest"] != (self.receipt_authority(task) if routed(task) else self.authority_digest(task["mission"])):
             refuse("STALE_ADMISSION", "The admitted task or authority has changed")
+        if admission.get("contract_digest") and admission["contract_digest"] != digest(self.contract(task)):
+            refuse("STALE_ADMISSION", "Required verification definitions or environments changed")
         if admission.get("dependency_digest") != self.dependency_digest(task):
             refuse("STALE_DEPENDENCY", "A consumed predecessor's qualified evidence changed")
         self.grant(task["grant"], task["domain"], task["mission"])
@@ -728,6 +795,8 @@ class Workflow:
     def do_task_dispatch(self, d):
         self.only("pm", "constructor")
         task = self.admission(d["admission"])
+        if routed(task):
+            refuse("RECEIPT_DISPATCH_REQUIRED", "Secretary dispatches routed subtasks through their receipt")
         ticket = self.create("ticket", dict(admission=d["admission"], task=task["id"],
                              fence=self.task_fence(task), claimed=False), d.get("id"))
         return {"ticket": ticket}
@@ -736,7 +805,7 @@ class Workflow:
         barriers = [b for b in self.rows("barrier") if self.relevant(b, task["mission"], [task["id"]], task["obligations"])]
         latches = [l for l in self.rows("latch", mission=task["mission"])
                    if not l.get("tasks") or task["id"] in l["tasks"]]
-        return digest([self.authority_digest(task["mission"]), barriers, latches])
+        return digest([self.receipt_authority(task) if routed(task) else self.authority_digest(task["mission"]), barriers, latches])
 
     def do_task_claim(self, d):
         self.only("constructor")
@@ -1176,8 +1245,11 @@ class Workflow:
                                  argv=d["argv"], cwd=d.get("cwd", "."), inputs=d["inputs"],
                                  outputs=d.get("outputs", []),
                                  environment=d["environment"], predicate=predicate,
-                                 scope=d.get("scope", "task"), required=d.get("required", True)), d.get("id"))
-        self.update("task", task["id"], required_runs=task["required_runs"] + [requirement["id"]])
+                                 scope=d.get("scope", "task"), required=d.get("required", True),
+                                 **({"worker": d.get("worker", task["workers"][0]["id"] if len(task.get("workers", [])) == 1 else None)} if routed(task) else {})), d.get("id"))
+        if requirement["id"] not in task["required_runs"]:
+            # A task spec that already lists this id keeps its row, and so its digest, unchanged.
+            self.update("task", task["id"], required_runs=task["required_runs"] + [requirement["id"]])
         return {"requirement": requirement}
 
     def do_environment_register(self, d):
@@ -1210,6 +1282,7 @@ class Workflow:
     def do_run_authorize(self, d):
         self.only("constructor", "crititor", "stabilizer", "controller")
         requirement = self.get("requirement", d["requirement"])
+        self.worker_guard(self.get("task", requirement["task"]), requirement=requirement)
         if self.admission(d["admission"])["id"] != requirement["task"]:
             refuse("INVALID_SCOPE", "Execution admission belongs to another task")
         return {"authorized": True}
@@ -1218,6 +1291,7 @@ class Workflow:
         self.only("constructor", "crititor", "stabilizer", "controller")
         requirement = self.get("requirement", d["requirement"])
         task = self.get("task", requirement["task"])
+        self.worker_guard(task, requirement=requirement)
         if self.admission(d["admission"])["id"] != task["id"]:
             refuse("INVALID_SCOPE", "Execution admission belongs to another task")
         for sha in (d["source_blob"], d["environment_blob"], d["input_blob"]):
@@ -1263,7 +1337,8 @@ class Workflow:
                          input_blob=d["input_blob"], admission=d["admission"], generation=generation,
                          attempt=(latest or {}).get("attempt", len(self.rows("run", requirement=requirement["id"]))) + 1,
                          lease_until=min(self.now + 300, deadline), deadline=deadline,
-                         owner_session=self.actor.session, assurance="PENDING_EXECUTION"), d.get("id"))
+                         owner_session=self.actor.session, assurance="PENDING_EXECUTION",
+                         requester_session=d.get("requester_session"), requester_role=d.get("requester_role")), d.get("id"))
         return {"run": run}
 
     def latest_attempt(self, requirement):
@@ -1342,6 +1417,8 @@ class Workflow:
         self.only("controller")
         run = self.get("run", d["run"])
         task = self.admission(run["admission"])
+        self.request = dict(self.request, data=dict(self.request["data"], requester_session=run.get("requester_session"), requester_role=run.get("requester_role")))
+        self.worker_guard(task, requirement=self.get("requirement", run["requirement"]))
         if run["status"] != "COMPLETE" or not run["satisfied"]:
             refuse("OUTPUT_NOT_QUALIFIED", "Only successful controlled output can become a delivery")
         from .paths import resolve_ref, contained, relative_path
@@ -1436,7 +1513,29 @@ class Workflow:
             refuse("INVALID_REPORT_KIND", "Unknown task report kind")
         self.only(allowed[kind])
         task = self.get("task", d["task"])
-        product_digest = digest(self.calibration_basis(task, reports=False))
+        criterion_ids = set(task.get("criteria", {})) if routed(task) else set(task["obligations"])
+        if task.get("workflow_policy") == "fast" and (kind != "critique" or not task.get("specialist_review")):
+            refuse("RECEIPT_REPORT_REQUIRED", "Fast execution uses compact completion and independent acceptance records")
+        if routed(task):
+            self.worker_guard(task)
+            if kind in ("critique", "acceptance") and any(c["author"]["session"] == self.actor.session for c in self.rows("worker_claim", task=task["id"])):
+                refuse("INDEPENDENCE_REQUIRED", "Review must be independent of every Constructor")
+            if task["workflow_policy"] == "exploration" and d["outcome"] in ("COMPLETE", "PASS", "ACCEPTED"):
+                receipt = self.rows("work_receipt", task=task["id"], current=True)[-1]
+                dispatch = self.rows("receipt_dispatch", receipt=receipt["id"], active=True)[-1]
+                completed = self.rows("completion", dispatch=dispatch["id"])
+                if kind == "development" and not completed and len(task["workers"]) == 1:
+                    claim = [c for c in self.rows("worker_claim", dispatch=dispatch["id"]) if c.get("current", True)][-1]
+                    self.do_completion_record(dict(receipt=receipt["id"], claim=claim["id"], source_blob=d["source_blob"]))
+                    completed = self.rows("completion", dispatch=dispatch["id"])
+                if {c["worker"] for c in completed} != {w["id"] for w in task["workers"]}:
+                    refuse("CONSTRUCTION_INCOMPLETE", "Every exploration worker must complete before aggregate review")
+                for completion in completed:
+                    worker = next(w for w in task["workers"] if w["id"] == completion["worker"])
+                    if completion["outputs"] != self.output_basis(task, worker.get("outputs", [])) or completion["gaps"]:
+                        refuse("INPUT_INCOMPLETE", "Exploration completion must match its current outputs without unresolved gaps")
+                self.output_basis(task, task["outputs"])
+        product_digest = self.product_digest(task)
         calibration = None
         self.blob(d["source_blob"])
         from .markdown import document_fields
@@ -1453,7 +1552,7 @@ class Workflow:
             if observed != d.get("criteria", {}):
                 refuse("CRITERIA_SOURCE_CONFLICT", "Structured criteria cannot contradict or omit source-table rows")
         outcome = d["outcome"]
-        if not parsed and task["obligations"] and outcome in ("COMPLETE", "PASS", "ACCEPTED") \
+        if not parsed and criterion_ids and outcome in ("COMPLETE", "PASS", "ACCEPTED") \
                 and (outcome != "COMPLETE" or d.get("criteria")):
             refuse("CRITERIA_TABLE_REQUIRED", "A completed or positive report needs its criteria table in the source document",
                    task=task["id"], outcome=outcome)
@@ -1473,7 +1572,7 @@ class Workflow:
                 refuse("CURRENT_DEVELOPMENT_REQUIRED", "Positive review needs the current actual development report")
             development = developments[-1]["id"]
             states = d.get("criteria", {})
-            if set(states) != set(task["obligations"]) or any(s != "met" for s in states.values()):
+            if set(states) != criterion_ids or any(s != "met" for s in states.values()):
                 refuse("UNMET_OBLIGATION", "Positive report needs every required obligation actually met")
             if kind == "acceptance":
                 if task.get("calibration_required") or self.get("admission", d["admission"]).get("permit") or d.get("round", 1) == 3:
@@ -1537,13 +1636,34 @@ class Workflow:
         if outcome == "ACCEPTED":
             for oid in task["obligations"]:
                 self.update("obligation", oid, status="MET", evidence=report["id"])
+        if task.get("workflow_policy") == "exploration":
+            dispatches = self.rows("receipt_dispatch", task=task["id"], active=True)
+            if not dispatches:
+                refuse("DISPATCH_REQUIRED", "Exploration report needs its current receipt cycle")
+            dispatch = dispatches[-1]
+            if report["round"] != dispatch["cycle"]:
+                refuse("ROUND_SEQUENCE", "Exploration reports use the issued cycle's lineage round")
+            if kind == "development" and outcome == "COMPLETE":
+                self.update("receipt_dispatch", dispatch["id"], development=report["id"])
+            if kind == "acceptance":
+                if outcome == "ACCEPTED":
+                    receipt = self.get("work_receipt", dispatch["receipt"])
+                    report = self.update("report", report["id"], receipt=receipt["id"],
+                                         dispatch=dispatch["id"], basis=self.candidate(receipt))
+                self.update("receipt_dispatch", dispatch["id"], active=False, acceptance=report["id"])
         return {"report": report}
 
     def task_acceptance(self, task):
+        if task.get("workflow_policy") == "fast":
+            return self.fast_acceptance(task)
         accepted = self.rows("report", task=task["id"], kind="acceptance", outcome="ACCEPTED", current=True)
         if not accepted or accepted[-1]["target_digest"] != digest(task):
             refuse("CURRENT_ACCEPTANCE_REQUIRED", "Task has no current independent acceptance")
         report = accepted[-1]
+        if task.get("workflow_policy") == "exploration":
+            receipt = self.optional("work_receipt", report.get("receipt"))
+            if not receipt or not receipt["current"] or report.get("basis") != self.candidate(receipt):
+                refuse("STALE_ACCEPTANCE", "Exploration acceptance requires its current issued receipt and inspected prerequisites")
         critique = self.get("report", report["critique"])
         development = self.get("report", report["development"])
         if not critique["current"] or critique["outcome"] != "PASS" or not development["current"] or critique.get("development") != development["id"]:
@@ -1555,6 +1675,37 @@ class Workflow:
             cell_id = (self.optional("acceptance_qualification", report["id"]) or {}).get("calibration", report.get("calibration"))
             self.current_calibration(task, cell_id)
         return report
+
+    def task_states(self, tasks):
+        """Admission and acceptance as a reader means them, derived at query time; nothing is stored.
+
+        A task row's own `status` is its record status: NOT_ADMITTED from `task.record` until
+        `task.replace` sets REPLACED. It is not the admission state. ADMITTED here means an
+        admission names the task's current digest and the current authority; ACCEPTED means the
+        current acceptance report is ACCEPTED over the current digest. Every positive use still
+        rechecks dependencies, holds, runs and product bytes.
+        """
+        authority, states = {}, {}
+        for task in tasks:
+            current = digest(task)
+            if task["mission"] not in authority:
+                authority[task["mission"]] = self.authority_digest(task["mission"])
+            admissions = sorted(self.rows("admission", task=task["id"]), key=lambda a: a.get("created", 0))
+            live = [a for a in admissions if a.get("target_digest") == current
+                    and a.get("authority_digest") == authority[task["mission"]]]
+            reports = sorted(self.rows("report", task=task["id"], kind="acceptance", current=True),
+                             key=lambda r: r.get("created", 0))
+            report = reports[-1] if reports else None
+            if report and report["outcome"] == "ACCEPTED":
+                acceptance = "ACCEPTED" if report.get("target_digest") == current else "STALE"
+            else:
+                acceptance = "NOT_ACCEPTED"
+            states[task["id"]] = {
+                "admission": "ADMITTED" if live else "STALE" if admissions else "NOT_ADMITTED",
+                "admission_id": (live or admissions)[-1]["id"] if admissions else None,
+                "acceptance": acceptance,
+                "acceptance_report": report["id"] if report else None}
+        return states
 
     def calibration_basis(self, task, reports=True):
         """Product dependencies exclude acceptance/obligation bookkeeping and other tasks."""
@@ -1682,12 +1833,19 @@ class Workflow:
         self.only("controller", "pm")
         self.get("root", d["mission"])
         root = self.get("root", d["mission"])
+        bundle_scope = None
+        if self.optional("task", d["target"]) and routed(self.get("task", d["target"])):
+            from .fast import packet_tasks
+            bundle_scope, _ = packet_tasks(self.state, d["mission"], [d["target"]])
+        scoped_obligations = {oid for tid in bundle_scope for oid in self.get("task", tid)["obligations"]} if bundle_scope is not None else None
         required = {}
         from .contracts import required_records
         for kind, value in required_records(self.state, d["mission"]):
             if value.get("source_blob"):
                 required[value["source_blob"]] = {"blob": value["source_blob"], "path": kind + ":" + value["id"]}
-        included_kinds = {"authority", "grant", "candidate", "task", "decision", "report", "run", "delivery", "obligation"}
+        included_kinds = {"authority", "grant", "candidate", "task", "decision", "report", "run", "delivery", "obligation",
+                          "work_receipt", "readiness", "completion", "coordination", "delegation", "repair_route", "task_disposition",
+                          "schedule", "policy_boundary", "worker_claim", "receipt_dispatch", "completion_annotation"}
         def collect(value, path):
             if isinstance(value, dict):
                 for key, child in value.items():
@@ -1707,6 +1865,15 @@ class Workflow:
             if kind not in included_kinds:
                 continue
             relevant = value.get("mission") == d["mission"] or (kind == "authority" and id == root["authority"]) or (kind == "grant" and value.get("authority") == root["authority"])
+            if bundle_scope is not None:
+                if kind == "task" and id not in bundle_scope:
+                    relevant = False
+                if value.get("task") and value["task"] not in bundle_scope:
+                    relevant = False
+                if kind == "obligation" and id not in scoped_obligations:
+                    relevant = False
+                if kind == "decision" and value.get("tasks") and not set(value["tasks"]) & bundle_scope:
+                    relevant = False
             if relevant:
                 collect(value, kind + ":" + id)
                 if kind == "run":
@@ -1720,11 +1887,10 @@ class Workflow:
                 overlay = self.optional("semantic_overlay", aid) or {}
                 if overlay.get("source_blob"):
                     required[overlay["source_blob"]] = {"blob": overlay["source_blob"], "path": "legacy:" + str(aid)}
-        for task in self.rows("task", mission=d["mission"]):
-            for output in task.get("outputs", []):
-                deliveries = self.rows("delivery", task=task["id"], path=output, current=True)
-                if not deliveries:
-                    refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output)
+        for tid, output in self.undelivered_outputs(d["mission"]):
+            if bundle_scope is not None and tid not in bundle_scope:
+                continue
+            refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output, task=tid)
         items, unavailable = [], []
         for item in list(required.values()) + d.get("items", []):
             try:
@@ -1734,22 +1900,56 @@ class Workflow:
                 unavailable.append(item.get("path", item.get("blob")))
         bundle = self.create("bundle", dict(mission=d["mission"], target=d["target"], items=items,
                             unavailable=unavailable, authority_digest=self.authority_digest(d["mission"]),
-                            delivery_digest=self.delivery_digest(d["mission"]),
-                            calibration_dependencies={t["id"]: digest(self.calibration_basis(t)) for t in self.rows("task", mission=d["mission"])},
+                            delivery_digest=self.delivery_digest(d["mission"], bundle_scope), scope=sorted(bundle_scope) if bundle_scope is not None else None,
+                            calibration_dependencies={t["id"]: digest(self.calibration_basis(t)) for t in self.rows("task", mission=d["mission"])
+                                                      if t.get("work_type") != "milestone" and (bundle_scope is None or t["id"] in bundle_scope)},
                             status="INPUT_INCOMPLETE" if unavailable else "READY"), d.get("id"))
         return {"bundle": bundle}
 
-    def delivery_digest(self, mission):
-        kinds = {"root", "task", "obligation", "decision", "delivery", "report", "run", "flag"}
+    def undelivered_outputs(self, mission):
+        """Declared outputs a task could have delivered but has no current snapshot for.
+
+        Only an admission of the task's current digest can export or record a delivery, and a
+        run leaves its evidence behind. A task with neither has produced nothing yet, so its
+        declared outputs cannot hold a bundle for earlier work hostage; once it is admitted or
+        has run, every declared output needs its snapshot again.
+        """
+        missing = []
+        for task in self.rows("task", mission=mission):
+            if routed(task) and (task["status"] == "REPLACED" or task.get("work_type") == "milestone" or self.disposed(task)):
+                continue
+            if routed(task) and task["obligations"] and all(self.get("obligation", oid)["status"] in ("AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED") for oid in task["obligations"]):
+                continue
+            current = digest(task)
+            if not any(a.get("target_digest") == current for a in self.rows("admission", task=task["id"])) \
+                    and not self.rows("run", task=task["id"]):
+                continue
+            for output in task.get("outputs", []):
+                from .paths import resolve_ref
+                path = resolve_ref(self.store.source_root, output)
+                if not any(resolve_ref(self.store.source_root, d["path"]) == path for d in self.rows("delivery", task=task["id"], current=True)):
+                    missing.append((task["id"], output))
+        return missing
+
+    def delivery_digest(self, mission, scope=None):
+        kinds = {"root", "task", "obligation", "decision", "delivery", "report", "run", "flag",
+                 "work_receipt", "readiness", "completion", "task_disposition"}
+        scoped_obligations = {oid for tid in scope for oid in self.get("task", tid)["obligations"]} if scope is not None else None
         return digest([[kind, id, row["data"]] for (kind, id), row in sorted(self.state.items())
-                       if kind in kinds and (row["data"].get("mission") == mission or (kind == "root" and id == mission))])
+                       if kind in kinds and (row["data"].get("mission") == mission or (kind == "root" and id == mission))
+                       and (scope is None or kind != "task" or id in scope)
+                       and (scope is None or kind != "obligation" or id in scoped_obligations)
+                       and (scope is None or not row["data"].get("task") or row["data"]["task"] in scope)
+                       and (scope is None or kind != "decision" or not row["data"].get("tasks") or set(row["data"]["tasks"]) & set(scope))])
 
     def current_bundle(self, bundle):
-        if bundle.get("delivery_digest") != self.delivery_digest(bundle["mission"]):
+        if bundle.get("delivery_digest") != self.delivery_digest(bundle["mission"], bundle.get("scope")):
             refuse("STALE_BUNDLE", "Actual delivery or its qualified evidence has changed")
         import hashlib
         from .paths import resolve_ref
         for delivery in self.rows("delivery", mission=bundle["mission"], current=True):
+            if bundle.get("scope") is not None and delivery["task"] not in bundle["scope"]:
+                continue
             source = resolve_ref(self.store.source_root, delivery["path"], must_exist=True)
             if hashlib.sha256(source.read_bytes()).hexdigest() != delivery["source_blob"]:
                 refuse("STALE_BUNDLE", "Delivered bytes have changed", path=delivery["path"])
@@ -1757,22 +1957,28 @@ class Workflow:
     def do_delivery_record(self, d):
         self.only("constructor")
         task = self.get("task", d["task"])
+        self.worker_guard(task, path=d["path"])
         if self.admission(d["admission"])["id"] != task["id"]:
             refuse("INVALID_SCOPE", "Delivery admission belongs to another task")
         if d["path"] not in task.get("outputs", []):
             refuse("UNDECLARED_DELIVERY", "Delivery must be one of the task's reviewed output paths")
-        for old in self.rows("delivery", task=task["id"], path=d["path"], current=True):
+        from .paths import resolve_ref, relative_path
+        path = resolve_ref(self.store.source_root, d["path"])
+        previous = [delivery for delivery in self.rows("delivery", task=task["id"], current=True)
+                    if resolve_ref(self.store.source_root, delivery["path"]) == path]
+        for old in previous:
             if old.get("run"):
                 refuse("EXPORTED_OUTPUT", "This path's current delivery came from a qualified run; export the run again instead of declaring bytes",
                        path=d["path"], run=old["run"])
-        for old in self.rows("delivery", task=task["id"], path=d["path"], current=True):
+        for old in previous:
             self.update("delivery", old["id"], current=False)
         return {"delivery": self.create("delivery", dict(task=task["id"], mission=task["mission"],
-                        path=d["path"], source_blob=self.blob(d["source_blob"]), current=True))}
+                        path=relative_path(path, self.store.source_root).as_posix(), source_blob=self.blob(d["source_blob"]), current=True))}
 
     def do_work_write(self, d):
         self.only("constructor")
         task = self.get("task", d["task"])
+        self.worker_guard(task, path=d["path"])
         if self.admission(d["admission"])["id"] != task["id"] or d["path"] not in task.get("write_paths", []):
             refuse("WRITE_SCOPE_CONFLICT", "Product write is outside the reviewed task paths")
         from .paths import resolve_ref, contained
@@ -1785,8 +1991,9 @@ class Workflow:
         if d.get("expected_sha256") != current:
             refuse("STALE_PRODUCT_HEAD", "Working file changed; re-read before replacing it")
         raw = self.store.blobs.get(d["source_blob"])
-        if len(raw) > 8 * 1024 * 1024:
-            refuse("INVALID_INPUT", "A scoped write exceeds the tool size limit")
+        if len(raw) > WRITE_LIMIT:
+            refuse("INVALID_INPUT", "work.write takes at most " + str(WRITE_LIMIT) + " bytes (8 MiB) per file; this file is "
+                   + str(len(raw)) + " bytes", limit=WRITE_LIMIT, size=len(raw), path=d["path"])
         return {"write": self.create("work_change", dict(task=task["id"], mission=task["mission"],
                        path=d["path"], previous_sha256=current, source_blob=d["source_blob"], install_effect=True))}
 
@@ -1811,6 +2018,12 @@ class Workflow:
             refuse("INVALID_VERDICT", "Invalid calibration outcome")
         if bundle["status"] != "READY" and d["outcome"] != "INPUT_INCOMPLETE":
             refuse("INPUT_INCOMPLETE", "Missing actual delivery inputs cannot be called aligned")
+        if d["outcome"] != "INPUT_INCOMPLETE":
+            # A task admitted after the bundle was recorded is held to its declared outputs here.
+            for tid, output in self.undelivered_outputs(bundle["mission"]):
+                if bundle.get("scope") is not None and tid not in bundle["scope"]:
+                    continue
+                refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output, task=tid)
         if bundle["authority_digest"] != self.authority_digest(bundle["mission"]):
             refuse("STALE_BUNDLE", "Calibration authority has changed")
         self.blob(d["source_blob"])
@@ -1899,24 +2112,35 @@ class Workflow:
             if obligation["status"] not in ("MET", "AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED"):
                 refuse("UNMET_OBLIGATION", "Mission has an unmet required outcome", obligation=obligation["id"])
             if obligation["status"] in ("AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED"):
+                if not obligation.get("grant") or not obligation.get("domain"):
+                    # A 2.1.0 plan re-record dropped these fields; the disposition is recorded again.
+                    refuse("DEFERRAL_INCOMPLETE", "This disposition has lost its grant and domain; record it again "
+                           "with obligation.defer or obligation.cancel", obligation=obligation["id"],
+                           status=obligation["status"])
                 self.grant(obligation["grant"], obligation["domain"], mission, permission="defer")
         for task in self.rows("task", mission=mission):
-            if task["status"] == "REPLACED":
+            if task["status"] == "REPLACED" or task.get("work_type") == "milestone":
                 continue
             accepted = self.rows("report", task=task["id"], kind="acceptance", outcome="ACCEPTED", current=True)
-            excepted = all(self.get("obligation", oid)["status"] in ("AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED")
-                           for oid in task["obligations"])
+            excepted = (routed(task) and self.disposed(task)) or ((task["obligations"] or not routed(task)) and all(self.get("obligation", oid)["status"] in ("AUTHORIZED_DEFERRED", "AUTHORIZED_CANCELLED")
+                           for oid in task["obligations"]))
             if not excepted:
                 self.required_satisfied(task)
                 self.task_acceptance(task)
             if not excepted and not any(r["target_digest"] == digest(task) for r in accepted):
                 refuse("UNFINISHED_TASK", "Every required task needs current acceptance or authorized disposition")
+        # An admission is not part of the bundle's delivery digest, so a task admitted after
+        # the bundle was recorded is rechecked here rather than trusted to that bundle.
+        for tid, output in self.undelivered_outputs(mission):
+            refuse("INPUT_INCOMPLETE", "Declared delivery output has no immutable snapshot", path=output, task=tid)
         for flag in self.rows("flag", mission=mission):
             if flag["live"] and flag["status"] == "OPEN":
                 refuse("OPEN_FLAG", "A live product flag has no disposition")
         bundle = self.get("bundle", d["bundle"])
         self.current_bundle(bundle)
         audit = self.get("audit", d["audit"])
+        if bundle.get("scope") is not None:
+            refuse("FULL_CLOSURE_BUNDLE_REQUIRED", "Final closure requires the complete mission bundle")
         if (audit.get("outcome") or ("FINDINGS" if audit["findings"] else "PASS")) not in ("PASS", "FINDINGS"):
             refuse("AUDIT_OUTCOME_REQUIRED", "Closure needs a completed closure audit outcome of PASS or FINDINGS",
                    audit=audit["id"], outcome=audit.get("outcome"))

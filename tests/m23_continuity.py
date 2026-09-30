@@ -31,6 +31,7 @@ from mp_runtime.engine import Engine
 from mp_runtime.migration import adoption_plan, migrate
 from mp_runtime.storage import RuntimeStore
 from mp_runtime.workflow import Actor
+from mp_runtime.paths import io_path
 
 FIELD_SOURCE = ROOT / "data/analysis/pm-evidence-expansion-20260909/source/latest/mission-pipeline"
 MP = str(ROOT / "skills/mission-pipeline/scripts/mp")
@@ -190,13 +191,18 @@ class ContinuityTests(unittest.TestCase):
     @unittest.skipUnless((FIELD_SOURCE / "ledger/events.jsonl").exists(),
                          "ignored field data not present (data/analysis/...): real-ledger upgrade skipped")
     def test_real_week36_upgrades_mid_mission_and_closes(self):
-        with tempfile.TemporaryDirectory(prefix="mp-m23-field-") as td:
+        temporary = tempfile.TemporaryDirectory(prefix="mp-m23-field-")
+        target = Path(temporary.name).resolve()
+        if target.parent != Path(tempfile.gettempdir()).resolve() or not target.name.startswith("mp-m23-field-"):
+            raise RuntimeError("Unexpected temporary cleanup target")
+        temporary.name = str(io_path(target, force=True))
+        with temporary as td:
             temp = Path(td)
             source_root = temp / "legacy"
             ledger = source_root / "mission-pipeline" / "ledger"
             # Never touch the field data in place: the whole ledger tree is copied,
             # minus the v3 projection, which migration rebuilds from the journal.
-            shutil.copytree(FIELD_SOURCE, source_root / "mission-pipeline",
+            shutil.copytree(io_path(FIELD_SOURCE, force=True), io_path(source_root / "mission-pipeline", force=True),
                             ignore=shutil.ignore_patterns("mp.db", "*.db-journal"))
             product = temp / "product"
             product.mkdir()
@@ -218,7 +224,7 @@ class ContinuityTests(unittest.TestCase):
             self.build_v3_ledger(root, mission)
             ledger = root / ".claude" / "mission-pipeline" / "ledger"
             engine = Engine(root, Actor("pm", "local:pm"))
-            self.assertEqual(ledger, engine.store.path)
+            self.assertEqual(io_path(ledger, force=True), engine.store.path)
             up, scope, result = self.upgrade_to_closed(engine, ledger, root, mission, 1, root)
             self.assertEqual(["T1"], [a["task_key"] for a in scope["acceptances"]])
             self.assertEqual(2, len(result["outcomes"]))

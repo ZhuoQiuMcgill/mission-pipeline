@@ -49,6 +49,16 @@ for _reporter in ("constructor", "crititor", "stabilizer", "auditor", "calibrato
                   "challenger", "architect", "researcher", "supervisor"):
     ROLE_ACTIONS[_reporter].update({"case.contest", "flag.raise"})
 ROLE_ACTIONS["pm"].add("flag.raise")
+ROLE_ACTIONS["pm"].add("secretary.delegate")
+ROLE_ACTIONS["pm"].add("task.dispose")
+ROLE_ACTIONS["pm"].add("schedule.record")
+ROLE_ACTIONS["secretary"] = {"receipt.issue", "receipt.dispatch", "secretary.coordinate"}
+ROLE_ACTIONS["architect"].add("readiness.record")
+ROLE_ACTIONS["constructor"].update({"receipt.claim", "completion.record"})
+ROLE_ACTIONS["constructor"].add("completion.annotate")
+ROLE_ACTIONS["stabilizer"].add("acceptance.record")
+for _role in ROLE_ACTIONS:
+    ROLE_ACTIONS[_role].update({"queue.snapshot", "receipt.snapshot", "acceptance.snapshot", "query"})
 
 
 class ManagedBroker:
@@ -84,14 +94,43 @@ class ManagedBroker:
         self.sessions[session["id"]] = session
         return session
 
-    def packet(self, session, delivered=True):
+    def packet(self, session, delivered=True, full=False):
         records, blobs = [], set()
         state = self.engine.store.read()
+        from .fast import packet_tasks, routed
+        receipt_mode = any(k == "task" and v["data"].get("mission") == session["mission"] and routed(v["data"]) for (k, _), v in state.items())
+        latest = {}
+        for (kind, _), row in state.items():
+            field = {"run": "requirement", "readiness": "receipt", "receipt_dispatch": "task"}.get(kind)
+            if field and row["data"].get("mission") == session["mission"]:
+                key = (kind, row["data"][field])
+                prior = state[(kind, latest[key])]["data"] if key in latest else None
+                if prior is None or row["data"]["created"] > prior["created"]:
+                    latest[key] = row["data"]["id"]
+        scoped_tasks, scoped_decisions = (packet_tasks(state, session["mission"], session["tasks"])
+            if receipt_mode and session["tasks"] and (not full or session["role"] != "pm") else (None, set()))
         adopted = state.get(("legacy_scope", session["mission"]), {}).get("data", {}).get("artifacts", [])
         authorities = {row["data"]["authority"] for (kind, _), row in state.items()
                        if kind in ("root", "intake") and (row["data"].get("mission") == session["mission"] or row["data"].get("id") == session["mission"])}
         for (kind, _), row in state.items():
             value = row["data"]
+            if receipt_mode and not full:
+                if value.get("current") is False and kind in ("report", "work_receipt", "worker_claim", "delivery"):
+                    continue
+                field = {"run": "requirement", "readiness": "receipt", "receipt_dispatch": "task"}.get(kind)
+                if field and field in value and latest.get((kind, value[field])) != value["id"]:
+                    continue
+                if kind in ("completion", "worker_claim") and value["dispatch"] != latest.get(("receipt_dispatch", value["task"])):
+                    continue
+                if kind in ("completion_annotation", "report_annotation", "work_change"):
+                    continue
+            if scoped_tasks is not None:
+                if kind == "task" and value["id"] not in scoped_tasks:
+                    continue
+                if value.get("task") and value["task"] not in scoped_tasks:
+                    continue
+                if kind == "decision" and value.get("tasks") and not set(value["tasks"]) & scoped_tasks and value["id"] not in scoped_decisions:
+                    continue
             if kind == "semantic_overlay" and value["artifact"] in adopted:
                 records.append({"kind": kind, "object": value})
                 if value.get("source_blob"):
@@ -124,11 +163,16 @@ class ManagedBroker:
                     continue
             if value.get("mission") not in (None, session["mission"]):
                 continue
-            if kind in ("authority", "grant", "root", "candidate", "task", "obligation", "decision", "plan", "case", "barrier", "bundle", "report", "requirement", "run", "audit", "review", "contest", "job", "permit", "admission", "ticket", "environment", "rule", "wave", "work_change", "delivery"):
+            if kind in ("authority", "grant", "root", "candidate", "task", "obligation", "decision", "plan", "case", "barrier", "bundle", "report", "requirement", "run", "audit", "review", "contest", "job", "permit", "admission", "ticket", "environment", "rule", "wave", "work_change", "delivery", "work_receipt", "readiness", "worker_claim", "completion", "receipt_dispatch", "coordination", "delegation", "repair_route", "schedule", "task_disposition", "policy_boundary", "completion_annotation", "report_annotation", "consumption", "advisory", "flag", "calibration", "acceptance_qualification"):
                 # Calibrator receives delivery facts and authority, not PM's narrative defense.
                 if session["role"] == "calibrator" and kind in ("case", "plan", "review", "contest"):
                     continue
-                records.append({"kind": kind, "object": value})
+                shown = value
+                if receipt_mode and not full:
+                    shown = {k: v for k, v in value.items() if k not in ("source_fields", "contract")}
+                    if session["role"] in ("pm", "secretary") and kind in ("run", "report", "completion", "work_change", "readiness"):
+                        shown = {k: value[k] for k in ("id", "mission", "task", "receipt", "outcome", "status", "source_blob", "current", "findings", "gaps") if k in value}
+                records.append({"kind": kind, "object": shown})
                 for key, ref in value.items():
                     if key.endswith("_blob") and isinstance(ref, str):
                         blobs.add(ref)
@@ -163,7 +207,7 @@ class ManagedBroker:
                 "root_id": root_identity(self.engine.root)["root_id"],
                 "mission": session["mission"], "instructions": instructions,
                 "records": records, "input_manifest": sorted(blobs), "review_bases": bases,
-                "allowed_tools": ["read_blob", "read_blobs", "submit_blob", "submit", "refresh_packet"],
+                "allowed_tools": ["read_blob", "read_blobs", "read_product", "submit_blob", "submit", "refresh_packet"],
                 "allowed_actions": sorted(ROLE_ACTIONS[session["role"]]), "tool_budget": 128}
 
     def tool(self, session, call):
@@ -195,6 +239,31 @@ class ManagedBroker:
             raw = self.engine.store.blobs.get(sha)
             session["read_blobs"].add(sha)
             return {"blob": sha, "base64": base64.b64encode(raw).decode("ascii")}
+        if tool == "read_product":
+            # Prerequisite inspection needs live source, including files that are
+            # not yet delivery artifacts. This is a scoped read, never a shell.
+            from .paths import resolve_ref, contained
+            import hashlib
+            task = self.engine.object("task", call["task"])
+            if task["mission"] != session["mission"] or (session["tasks"] and task["id"] not in session["tasks"]):
+                raise RuntimeRefusal("TASK_OUTSIDE_ENDPOINT", "Product read is outside this endpoint")
+            from .fast import path_key
+            paths = list(task.get("write_paths", []) + task.get("outputs", []))
+            paths.extend(item["path"] for item in task.get("prerequisites", []))
+            for rid in task["required_runs"]:
+                paths.extend(self.engine.object("requirement", rid)["inputs"])
+            key = path_key(self.engine.root, call["path"])
+            if key not in {path_key(self.engine.root, ref) for ref in paths}:
+                raise RuntimeRefusal("INPUT_OUTSIDE_PACKET", "Read only the receipt's explicit product and prerequisite paths")
+            path = resolve_ref(self.engine.root, call["path"], must_exist=True)
+            if any(contained(path, private) for private in (self.engine.store.path, self.engine.root / ".claude", self.engine.root / ".git")) or not path.is_file() or path.is_symlink():
+                raise RuntimeRefusal("PRIVATE_INPUT_FORBIDDEN", "Product reads require a regular public file")
+            raw = path.read_bytes()
+            if len(raw) > 8 * 1024 * 1024:
+                raise RuntimeRefusal("INVALID_INPUT", "Product read exceeds the framing limit")
+            sha = hashlib.sha256(raw).hexdigest()
+            session.setdefault("product_reads", {})[key] = sha
+            return {"path": call["path"], "sha256": sha, "base64": base64.b64encode(raw).decode("ascii")}
         if tool == "submit_blob":
             raw = base64.b64decode(call["base64"], validate=True)
             if len(raw) > 8 * 1024 * 1024:
@@ -203,7 +272,7 @@ class ManagedBroker:
             session["blob_allowlist"].add(sha)
             return {"blob": sha}
         if tool == "refresh_packet":
-            return self.packet(session)
+            return self.packet(session, full=bool(call.get("full", False)))
         if tool != "submit":
             raise RuntimeRefusal("TOOL_FORBIDDEN", "Unknown tools never fall back to a host shell")
         request = call["request"]
@@ -225,14 +294,29 @@ class ManagedBroker:
         if data.get("mission", session["mission"]) != session["mission"]:
             raise RuntimeRefusal("CROSS_MISSION_REFERENCE", "Endpoint is scoped to another mission")
         reference_kinds = {"task": "task", "case": "case", "bundle": "bundle", "candidate": "candidate",
-                           "admission": "admission", "requirement": "requirement", "run": "run", "plan": "plan"}
+                           "admission": "admission", "requirement": "requirement", "run": "run", "plan": "plan",
+                           "receipt": "work_receipt", "claim": "worker_claim", "delegation": "delegation", "review": "review"}
         for field, kind in reference_kinds.items():
             if field in data:
                 value = self.engine.object(kind, data[field])
                 if value.get("mission", session["mission"]) != session["mission"]:
                     raise RuntimeRefusal("CROSS_MISSION_REFERENCE", "Referenced object is outside endpoint scope")
-                if field == "task" and session["tasks"] and data[field] not in session["tasks"]:
+                referenced_task = data[field] if field == "task" else value.get("task")
+                if referenced_task and session["tasks"] and referenced_task not in session["tasks"]:
                     raise RuntimeRefusal("TASK_OUTSIDE_ENDPOINT", "Endpoint does not own this task")
+        if request["action"] == "query":
+            if not data.get("kind"):
+                raise RuntimeRefusal("INVALID_INPUT", "Scoped managed queries need an explicit object kind")
+            packet = self.packet(session, delivered=False, full=True)
+            allowed = {r["object"]["id"] for r in packet["records"] if r["kind"] == data["kind"]}
+            if data.get("id") and data["id"] not in allowed:
+                raise RuntimeRefusal("INPUT_OUTSIDE_PACKET", "Query target is outside this mission's ledger scope")
+            result = self.engine.handle(request)
+            if not data.get("id"):
+                result["objects"] = [v for v in result["objects"] if v["id"] in allowed]
+                if "derived" in result:
+                    result["derived"] = {k: v for k, v in result["derived"].items() if k in allowed}
+            return result
         actor = Actor(session["role"], session["id"], True)
         client_hash = digest(request)
         receipt = self.engine.store.receipt(request["request_id"])
@@ -251,25 +335,33 @@ class ManagedBroker:
             if data.get("review_basis", basis) != basis:
                 raise RuntimeRefusal("STALE_REVIEW_INPUT", "Submission does not match its delivered packet")
             required_reads.update(basis["blobs"])
-        if request["action"] in {"root.review", "plan.review", "report.record", "calibration.record", "audit.record", "close.review", "work.write"}:
+        if request["action"] in {"root.review", "plan.review", "report.record", "calibration.record", "audit.record", "close.review", "work.write", "readiness.record", "acceptance.record"}:
             packet = self.packet(session, delivered=False)
+            target_task = data.get("task")
+            if data.get("receipt"):
+                target_task = self.engine.object("work_receipt", data["receipt"])["task"]
             for record in packet["records"]:
                 kind, value = record["kind"], record["object"]
                 if kind in ("authority", "grant"):
                     required_reads.add(value["source_blob"])
                 if kind == "candidate" and value["id"] == data.get("candidate"):
                     required_reads.add(value["source_blob"])
-                if kind == "task" and value["id"] == data.get("task"):
+                if kind == "task" and value["id"] == target_task:
                     required_reads.add(value["source_blob"])
                     required_reads.update(value["inputs"])
                 if kind == "case" and value["id"] == data.get("case"):
                     required_reads.update([value["source_blob"], value["counterexample_blob"]])
                 if kind == "bundle" and value["id"] == data.get("bundle"):
                     required_reads.update(item["blob"] for item in value["items"])
-                if kind in ("report", "delivery") and value.get("current") and value.get("task") == data.get("task"):
+                if kind in ("report", "delivery", "completion", "readiness") and value.get("current", True) and value.get("task") == target_task:
                     required_reads.add(value["source_blob"])
         if not required_reads.issubset(session["read_blobs"]):
             raise RuntimeRefusal("INPUT_NOT_READ", "This judgment or write requires reading its actual authority and target inputs", missing=sorted(required_reads - session["read_blobs"]))
+        if request["action"] == "readiness.record" and data.get("outcome") == "READY":
+            from .fast import path_key
+            for path, sha in data.get("basis", {}).get("environment", {}).get("files", []):
+                if session.get("product_reads", {}).get(path_key(self.engine.root, path)) != sha:
+                    raise RuntimeRefusal("INPUT_NOT_READ", "Architect must inspect the actual current prerequisite file", path=path)
         if basis is not None:
             data = dict(data, review_basis=basis)
         request = dict(request, data=dict(data, input_receipt={"read_blobs": sorted(required_reads), "endpoint": session["id"],

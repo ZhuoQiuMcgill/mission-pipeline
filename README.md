@@ -1,8 +1,29 @@
 # mission-pipeline
 
-A supervised engineering workflow with separate Constructor, Crititor and Stabilizer seats, a PM that can make decisions within the principal's delegation, and an independent Supervisor that checks the translation from intent to work.
+A traceable engineering workflow with PM user alignment, delegated coordination, prerequisite inspection, scoped construction and independent acceptance. Execution and exploration use different construction loops.
 
-**Version 2.1.0** keeps schema 4 and the 2.0.0 request surface, and makes them usable in the field. Read the 2.1.0 notes below before updating an existing deployment.
+**Version 3.0.0** adds a shorter execution loop and keeps the traceable ledger,
+PM user alignment, independent planning and final audit. Schema 4 stays readable;
+historical tasks keep their original policy.
+
+## 3.0.0 — execution and exploration
+
+PM turns user requirements into a prioritised dependency graph. Each subtask is
+execution, exploration or a future milestone; a parent can contain both kinds of
+work. A delegated Secretary coordinates routine progress and sends important
+design choices to PM. PM retains complete ledger access on demand.
+
+For execution, Architect checks actual environment prerequisites, scoped Constructors
+work in parallel, and one independent Stabilizer checks the integrated delivery.
+Exploration keeps the full development, critique and acceptance chain. Only current
+accepted outputs unlock dependent work; a recorded historic acceptance can go stale.
+Priorities and routine coordination do not invalidate the executable contract.
+
+Read the [3.0 operating contract](skills/mission-pipeline/references/fast-mode.md)
+for receipt fields and the complete sequence. Full verification definitions must
+exist before executable review; future milestones can remain undecided. Replace
+the whole installed skill package to upgrade. Existing project bindings and ledger
+history are preserved. New work selects its route explicitly through `work_type`.
 
 The principal sets the direction and reserved conditions. The PM may choose and revise methods inside a recorded delegation. A proposed Charter becomes active only after an independent semantic review; a PM-written prohibition does not silently become a principal contract. Mandatory counterexamples immediately block affected positive uses, with bounded repair and independent contest paths. Mandatory closure auditing, current execution evidence and actual delivery inputs are part of the same gate.
 
@@ -43,7 +64,7 @@ python <absolute-skill>/scripts/mp --root <absolute-project> doctor
 
 On Windows, an explicit Python executable or `scripts/mp.ps1` is supported. Requests with arbitrary text use a UTF-8 JSON file or stdin, never a shell command assembled from that text.
 
-## Normal workflow
+## Full exploration and historical workflow
 
 1. Record original principal input and scoped grants through the trusted ingress, or with clearly marked local provenance.
 2. Create an intake, propose a candidate, obtain `root.review`, then atomically `root.activate`.
@@ -53,7 +74,7 @@ On Windows, an explicit Python executable or `scripts/mp.ps1` is supported. Requ
 6. A mandatory counterexample atomically creates its screening job and barrier. Recovery permits allow bounded repair within existing authority. Mandatory Auditor disagreement automatically starts one independent Contest, and its result applies directly.
 7. Build the complete immutable delivery bundle, obtain the mandatory Auditor and Supervisor closure reviews, satisfy the canonical closing run, and close under a valid principal decision or delegated close permission. An authorized deferral or cancellation keeps its true gap and responsible owner.
 
-The complete worked sequence is [walkthrough](skills/mission-pipeline/references/walkthrough.md); the request contract, role transport and recovery commands are in [runtime-v4](skills/mission-pipeline/references/runtime-v4.md). Old free-form CLI commands cannot bypass schema-4 gates.
+New routed work uses the [receipt sequence](skills/mission-pipeline/references/fast-mode.md). The full historical worked sequence is [walkthrough](skills/mission-pipeline/references/walkthrough.md); shared authority, role transport and recovery commands are in [runtime-v4](skills/mission-pipeline/references/runtime-v4.md). Old free-form CLI commands cannot bypass schema-4 gates.
 
 ## Storage, migration and recovery
 
@@ -77,4 +98,4 @@ Changes to the command, contract or schema require a major version. The plugin m
 
 [MIT](LICENSE) © 2026 Zhuo Qiu
 
-The validation inventory is the 22 entry points from `tests/m1_*.py` through `tests/m21_*.py`: released v3 compatibility, normal v4 gates, real managed recovery and canonical adapter protocol, public CLI lifecycle, dual-environment and path boundaries, locked local dependency repair, current review inputs, cross-mission contracts, calibration dependencies and bounded run recovery. Run all entry points on native Windows and WSL; managed-only suites use the actual Windows-to-WSL transport from their native entry. Source and evidence manifests determine which exact version a result validates.
+The validation inventory is the 27 entry points from `tests/m1_*.py` through `tests/m26_*.py`: released v3 compatibility, normal v4 gates, real managed recovery and canonical adapter protocol, public CLI lifecycle, dual-environment and path boundaries, locked local dependency repair, current review inputs, cross-mission contracts, calibration dependencies, bounded run recovery, field ledger continuity, mixed receipt routing and qualified migration. Run all entry points on native Windows and WSL; managed-only suites use the actual Windows-to-WSL transport from their native entry. Source and evidence manifests determine which exact version a result validates.

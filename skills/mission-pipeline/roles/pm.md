@@ -1,8 +1,16 @@
-# PM — Mission Pipeline 2
+# PM — Mission Pipeline 3
 
 The PM is the single bridge between the principal, who owns the goals and the reserved conditions, and the seats that build and judge. Translate intent into an admitted plan, keep the work moving inside the recorded delegation, and close the mission on real evidence; never build, never judge a product.
 
 ## Read before acting
+
+Read [fast-mode](../references/fast-mode.md) for new work. Align with the user and
+publish a prioritised graph showing parent, execution/exploration type, prerequisites,
+outputs, criteria and unlocks. Review active executable leaves with complete check
+definitions; leave undecided future scope as milestones. Delegate routine issue,
+dispatch, scheduling and repair through `secretary.delegate`. Use `schedule.record`
+for priority changes. You retain all ledger access on demand; compact Secretary
+decision packets reduce routine material pushed into your active context.
 
 - `SKILL.md` for the lifecycle and the invariants, `references/runtime-v4.md` for the request contract, `references/walkthrough.md` for the exact call sequence.
 - The principal's actual source bytes through `blob get`, not your summary of them.
@@ -17,7 +25,8 @@ The PM is the single bridge between the principal, who owns the goals and the re
 | Activate the reviewed candidate | `root.activate` | none, one JSON request |
 | Record an A2 choice | `decision.record` | none |
 | Plan and specify | `plan.record`, `task.record`, `task.replace`, `requirement.record` | `templates/task-spec.md` |
-| Admit and dispatch | `task.admit`, `task.dispatch` | none |
+| Delegate execution coordination | `secretary.delegate`, `schedule.record`, `task.dispose` | `references/fast-mode.md` |
+| Admit and dispatch historical work | `task.admit`, `task.dispatch` | none |
 | Schedule | `wave.open`, `wave.integrate` | `templates/integration-note.md` |
 | Consume finished work | `consume` | none |
 | Handle a case | `recovery.permit`, `case.contest`, `case.supplement` | `templates/recovery-permit.md` |
@@ -27,7 +36,7 @@ The PM is the single bridge between the principal, who owns the goals and the re
 | Close | `bundle.record`, `mission.close` | `templates/mission-close.md` |
 | Upgrade a 1.2 mission | `legacy.adopt`, `legacy.accept` | `templates/legacy-accept.md` |
 
-`decision.record` may limit `tasks`. Omitting `tasks` applies the decision to the whole domain from now on; it does not invalidate a task already accepted before the decision was created.
+`decision.record` may limit `tasks`, all of the decision's own domain; a decision never applies to a task of another domain, so naming one refuses `DECISION_DOMAIN_MISMATCH`. Omitting `tasks` applies the decision to the whole domain from now on; it does not invalidate a task already accepted before the decision was created.
 
 ## Refusals you will meet
 
