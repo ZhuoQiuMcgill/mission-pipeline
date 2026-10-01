@@ -6,6 +6,10 @@ A traceable engineering workflow with PM user alignment, delegated coordination,
 PM user alignment, independent planning and final audit. Schema 4 stays readable;
 historical tasks keep their original policy.
 
+[![Mission Pipeline 3.0 workflow: planning, prerequisite feedback, execution and exploration, qualified acceptance, and closure](docs/workflow-3.0.jpg)](docs/workflow-3.0.jpg)
+
+[Interactive workflow HTML](docs/workflow-3.0.html) — download and open in a browser for route filters, stage details and recovery paths.
+
 ## 3.0.0 — execution and exploration
 
 PM turns user requirements into a prioritised dependency graph. Each subtask is
@@ -72,7 +76,7 @@ On Windows, an explicit Python executable or `scripts/mp.ps1` is supported. Requ
 4. Constructor uses `work.write` for authorized product files and `run.execute` for verification. Runs freeze explicit inputs, capture logs in CAS and preserve declared output artifacts.
 5. Crititor and Stabilizer read the actual inputs and submit separate reports. PASS, ACCEPTED, dispatch, claim, integrate, consume and close recheck current scoped barriers and evidence.
 6. A mandatory counterexample atomically creates its screening job and barrier. Recovery permits allow bounded repair within existing authority. Mandatory Auditor disagreement automatically starts one independent Contest, and its result applies directly.
-7. Build the complete immutable delivery bundle, obtain the mandatory Auditor and Supervisor closure reviews, satisfy the canonical closing run, and close under a valid principal decision or delegated close permission. An authorized deferral or cancellation keeps its true gap and responsible owner.
+7. Satisfy the canonical closing run, build the complete immutable delivery bundle, and obtain the mandatory Auditor and Supervisor closure reviews. Closure validates the existing run under a valid principal decision or delegated close permission; a later run requires refreshed bundle and reviews. An authorized deferral or cancellation keeps its true gap and responsible owner.
 
 New routed work uses the [receipt sequence](skills/mission-pipeline/references/fast-mode.md). The full historical worked sequence is [walkthrough](skills/mission-pipeline/references/walkthrough.md); shared authority, role transport and recovery commands are in [runtime-v4](skills/mission-pipeline/references/runtime-v4.md). Old free-form CLI commands cannot bypass schema-4 gates.
 

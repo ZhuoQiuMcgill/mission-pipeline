@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="An interactive engine map of Mission Pipeline 3.0: shared planning, execution and exploration, qualified acceptance, and mission closure.">
+  <title>Mission Pipeline 3.0 — Workflow</title>
+  <style>
+
+    :root {
+      --paper: #191f1c; --surface: #f2efe6; --ink: #26332b; --muted: #4d5b4f;
+      --line: #46554a; --wire: #839184; --accent: #c5a079; --wash: #e6cbaa;
+      --canvas: #232c26; --light: #eae9dd; --quiet: #a0aea2;
+      --mono: Consolas, "SFMono-Regular", monospace;
+      font-family: "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
+      color: var(--light); background: var(--paper); color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100dvh; }
+    button, a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+    button { font: inherit; cursor: pointer; }
+    button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    button:active { transform: translateY(1px); }
+    .shell { max-width: 1440px; padding: 28px 40px 22px; margin: 0 auto; }
+    .masthead { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding-bottom: 20px; border-bottom: 1px solid #ffffff12; }
+    .brand { display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 500; letter-spacing: -.2px; }
+    .brand-mark { display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; width: 27px; height: 27px; border: 1px solid #8e9f90; padding: 5px; transform: rotate(-6deg); }
+    .brand-mark i { background: var(--light); }
+    .brand-mark i:last-child { background: var(--accent); }
+    .version { font: 11px var(--mono); color: var(--accent); background: #c5a0790d; border: 1px solid #c5a07940; padding: 5px 8px; border-radius: 5px; }
+    .masthead-note { font: 11px var(--mono); color: var(--quiet); letter-spacing: 1px; text-transform: uppercase; }
+    .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 28px; margin: 24px 0; }
+    .eyebrow { margin: 0 0 8px; font: 11px var(--mono); text-transform: uppercase; letter-spacing: 1.2px; color: var(--quiet); }
+    h1 { margin: 0; font-size: clamp(27px, 3vw, 36px); font-weight: 400; line-height: 1.15; letter-spacing: -1px; }
+    .tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .routes { display: flex; padding: 4px; background: #111813; border: 1px solid #ffffff10; border-radius: 9px; }
+    .routes button { background: transparent; color: var(--quiet); border: 0; border-radius: 6px; padding: 9px 14px; font-size: 12px; transition: background .2s, color .2s; }
+    .routes button:hover { color: var(--light); }
+    .routes button[aria-pressed="true"] { background: var(--accent); color: #242e26; }
+    .recovery-toggle { background: transparent; color: var(--light); border: 1px solid #637067; border-radius: 7px; padding: 12px 14px; font-size: 12px; }
+    .recovery-toggle[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+    .board { background: var(--canvas); border: 1px solid #48554a; border-radius: 18px; overflow: hidden; }
+    .board-top { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px 28px; border-bottom: 1px solid #ffffff0e; }
+    .board-title { font: 11px var(--mono); text-transform: uppercase; letter-spacing: 1.3px; color: var(--quiet); }
+    .legend { display: flex; gap: 20px; align-items: center; }
+    .legend span { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--quiet); }
+    .legend i { width: 22px; height: 0; border-top: 1.5px solid var(--wire); }
+    .legend .conditional { border-top-style: dashed; }
+    .map { position: relative; isolation: isolate; display: grid; grid-template-columns: repeat(28, minmax(0, 1fr)); grid-template-rows: 80px 120px 80px 80px 80px 116px; gap: 44px 12px; padding: 68px 48px 32px; }
+    .wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: -1; }
+    .wire { fill: none; stroke: var(--wire); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; transition: opacity .2s; }
+    .wire[data-conditional="true"] { stroke-dasharray: 3 5; }
+    .wire.related { stroke: var(--accent); stroke-width: 2; }
+    .wire.dim { opacity: .16; }
+    .wire-label { fill: var(--quiet); font: 11px var(--mono); paint-order: stroke; stroke: var(--canvas); stroke-width: 6px; stroke-linejoin: round; }
+    .phase { position: absolute; color: var(--quiet); font: 11px var(--mono); letter-spacing: 1.15px; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+    .phase span { color: var(--accent); letter-spacing: 0; }
+    .lane { position: absolute; z-index: -2; border: 1px solid #ffffff0a; background: #ffffff04; border-radius: 14px; pointer-events: none; transition: opacity .2s; }
+    .lane-title { position: absolute; width: 92px; color: var(--quiet); }
+    .lane-title::before { content: attr(data-letter); display: block; color: var(--accent); font: 13px var(--mono); margin-bottom: 8px; }
+    .lane-title strong { display: block; font-size: 11px; font-weight: 500; letter-spacing: -.2px; }
+    .lane-title small { display: none; }
+    .node { position: relative; grid-column: var(--c) / span var(--s); grid-row: var(--r); display: flex; flex-direction: column; justify-content: center; text-align: left; min-width: 0; padding: 12px; border: 1px solid #dddcd0; border-radius: 10px; background: var(--surface); color: var(--ink); transition: transform .2s cubic-bezier(.2,.8,.2,1), background .2s, opacity .2s, box-shadow .2s; }
+    .node:hover { background: #fffcf3; transform: translateY(-2px); box-shadow: 0 6px 18px #0f171221; }
+    .node:active { transform: translateY(0); }
+    .node[aria-pressed="true"] { background: var(--wash); border-color: var(--accent); box-shadow: 0 0 0 2px #c5a07940; }
+    .node.optional { border: 1px dashed #b8c4b4; background: #2f3a31; color: var(--light); }
+    .node.optional .role, .node.optional .action { color: #b0bdae; }
+    .node.optional:hover, .node.optional[aria-pressed="true"] { background: #3c483b; }
+    .node.qualified { background: var(--wash); border-color: #d8b991; padding-left: 20px; }
+    .node.qualified::before { content: ''; position: absolute; width: 6px; height: 6px; border-radius: 50%; background: #53694f; right: 18px; top: 18px; }
+    .node.terminal { color: var(--light); border-color: var(--accent); background: #303b31; }
+    .node.terminal .role { color: #c7b89f; }
+    .node.terminal:hover, .node.terminal[aria-pressed="true"] { background: #3d4a3e; }
+    .role { display: block; font: 11px var(--mono); color: var(--muted); line-height: 1.3; margin-bottom: 6px; }
+    .node-title { display: block; font-size: 15px; font-weight: 500; letter-spacing: -.3px; line-height: 1.2; }
+    .action, .step { display: none; }
+    #specialist .action, .feedback-node .action, #readiness .action, #closing-run .action { display: block; font: 11px var(--mono); margin-top: 4px; }
+    .node[data-lane].dim { opacity: .24; }
+    .map-note { position: absolute; font: 11px var(--mono); color: var(--quiet); white-space: nowrap; }
+    .milestone-note { display: none; }
+    .ledger { display: flex; justify-content: space-between; align-items: center; gap: 14px; background: #1c251f; border-top: 1px solid #ffffff0b; padding: 15px 28px; }
+    .ledger strong { color: var(--quiet); font-size: 11px; font-weight: 400; }
+    .ledger span { font: 11px var(--mono); color: #869989; }
+    .ledger-track { display: flex; gap: 12px; align-items: center; }
+    .ledger-track i { height: 3px; width: 3px; border-radius: 50%; background: var(--accent); }
+    [hidden] { display: none !important; }
+    .recovery { border-top: 1px solid #ffffff16; padding: 24px 28px; background: #1d261f; }
+    .recovery-heading { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 16px; }
+    .recovery-heading h2 { font-size: 16px; font-weight: 500; margin: 0; }
+    .recovery-heading span { font: 11px var(--mono); color: var(--accent); }
+    .recovery-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 32px; }
+    .recovery-path { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0; border-top: 1px solid #ffffff10; font-size: 11px; }
+    .recovery-path .state { font-weight: 500; width: 100%; color: var(--quiet); }
+    .recovery-path b { color: var(--accent); font-weight: 400; }
+    .route-stop { background: #f2efe60d; border: 1px solid #59685a; border-radius: 5px; padding: 6px 9px; }
+    .recovery-path small { font: 11px var(--mono); color: var(--quiet); }
+    .page-foot { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; padding: 18px 2px 0; color: var(--quiet); font-size: 11px; }
+    .page-foot > span { font: 11px var(--mono); }
+    .sources { text-align: right; max-width: 550px; }
+    summary { cursor: pointer; }
+    .sources nav { display: flex; gap: 14px; justify-content: flex-end; flex-wrap: wrap; margin-top: 12px; }
+    a { color: var(--accent); text-underline-offset: 4px; text-decoration-color: #c5a07965; }
+    .inspector { position: fixed; right: 24px; bottom: 24px; width: min(400px, calc(100vw - 32px)); background: var(--surface); color: var(--ink); border: 1px solid #e1d1b8; border-radius: 14px; padding: 22px; box-shadow: 0 18px 60px #0e161552; z-index: 2; }
+    .inspector .eyebrow { color: var(--muted); padding-right: 25px; }
+    .inspector h2 { font-size: 20px; font-weight: 500; margin: 0; letter-spacing: -.4px; }
+    .inspector p { font-size: 13px; line-height: 1.65; color: #59685b; margin: 12px 0 16px; }
+    .inspector code { display: block; font: 11px var(--mono); color: #556347; border-top: 1px solid #d8dacd; padding-top: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+    .source-ref { font: 11px var(--mono); margin-top: 8px; color: #4d5b4f; }
+    .close { position: absolute; right: 12px; top: 12px; background: transparent; border: 0; font-size: 23px; padding: 4px; line-height: 1; color: var(--muted); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    @media (min-width: 1024px) and (max-width: 1199px) {
+      .map { grid-template-rows: 100px 120px 96px 80px 80px 116px; }
+    }
+    @media (min-width: 901px) and (max-width: 1023px) {
+      .shell { padding: 24px; }
+      .map { grid-template-rows: 96px 96px 120px 96px 96px 96px 116px; gap: 42px 10px; padding: 64px 32px 32px; }
+      .node { grid-column: var(--tc) / span var(--ts); grid-row: var(--tr); }
+      .node-title { font-size: 14px; }
+      .role { font-size: 11px; }
+      .page-head { align-items: flex-start; }
+      .tools { justify-content: flex-end; }
+    }
+    @media (max-width: 900px) {
+      .shell { padding: 20px 14px; }
+      .masthead { padding-bottom: 16px; }
+      .masthead-note { display: none; }
+      .page-head { display: block; margin: 24px 0 20px; }
+      h1 { font-size: 29px; }
+      .tools { margin-top: 20px; gap: 10px; }
+      .routes { width: 100%; }
+      .routes button { flex: 1; padding: 10px 9px; }
+      .recovery-toggle { padding: 9px 12px; font-size: 11px; }
+      .board { border-radius: 14px; }
+      .board-top { padding: 14px 18px; gap: 14px; }
+      .board-title { font-size: 10px; letter-spacing: 1px; }
+      .legend { gap: 10px; }
+      .legend span { font-size: 10px; gap: 5px; }
+      .legend i { width: 12px; }
+      .map { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(6, 80px) 96px 120px 96px 80px repeat(5, 116px) repeat(2, 80px) 140px; padding: 60px 36px 28px; gap: 36px 16px; }
+      .node { grid-column: var(--mc) / span var(--ms); grid-row: var(--mr); padding: 12px; }
+      .node-title { font-size: 14px; }
+      .role { font-size: 11px; }
+      .phase { font-size: 10px; }
+      .lane-title { width: auto; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+      .lane-title::before { margin: 0; font-size: 11px; }
+      .lane-title strong { font-size: 11px; }
+      .ledger { padding: 16px 18px; flex-wrap: wrap; }
+      .ledger-track { gap: 8px; flex-wrap: wrap; }
+      .ledger span { font-size: 10px; }
+      .recovery { padding: 20px 18px; }
+      .recovery-heading { align-items: flex-start; }
+      .recovery-heading span { max-width: 130px; line-height: 1.6; text-align: right; }
+      .recovery-grid { grid-template-columns: 1fr; }
+      .page-foot { gap: 16px; line-height: 1.6; }
+      .page-foot > span { max-width: 170px; }
+      .inspector { right: 16px; bottom: 16px; padding: 20px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
+    @media print { @page { size: A3 landscape; margin: 12mm; } .tools, .inspector, .sources { display: none !important; } .shell { padding: 0; } .board { break-inside: avoid; } * { print-color-adjust: exact; } .node, .wire, .lane { opacity: 1 !important; } }
+  </style>
+</head>
+<body>
+  <main class="shell" id="mission-workflow">
+    <header class="masthead">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>mission-pipeline <span class="version">3.0.0</span></div>
+      <span class="masthead-note">Engine workflow / schema 4</span>
+    </header>
+    <div class="page-head">
+      <div><p class="eyebrow">From intent to accepted delivery</p><h1>Mission workflow.</h1></div>
+      <div class="tools">
+        <div class="routes" role="group" aria-label="Focus workflow route">
+          <button type="button" data-route="all" aria-pressed="true">Full workflow</button>
+          <button type="button" data-route="execution" aria-pressed="false">Execution</button>
+          <button type="button" data-route="exploration" aria-pressed="false">Exploration</button>
+        </div>
+        <button type="button" class="recovery-toggle" aria-expanded="false" aria-controls="recovery">Recovery paths</button>
+      </div>
+    </div>
+    <section class="board" aria-label="Mission Pipeline 3.0 workflow graph">
+      <div class="board-top"><span class="board-title">Engine map / 3.0</span><div class="legend" aria-label="Connector legend"><span><i></i>Required</span><span><i class="conditional"></i>Conditional</span></div></div>
+      <div class="map" id="workflow-map">
+        <svg class="wires" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="context-stroke" stroke-width="1.6"></path></marker></defs><g id="edge-layer"></g></svg>
+        <div class="phase" id="phase-plan"><span>01</span>ALIGN & PLAN</div>
+<div class="phase" id="phase-feedback"><span>↺</span>PREREQUISITE GAPS</div>
+        <div class="phase" id="phase-work"><span>02</span>CONSTRUCT</div>
+<div class="phase" id="phase-qualify"><span>03</span>QUALIFY</div>
+<div class="phase" id="phase-close"><span>04</span>CLOSE · RUN ALREADY IN BUNDLE</div>
+        <div class="lane" data-lane-background="execution"><div class="lane-title" data-letter="A"><strong>Execution</strong><small>Decided criteria</small></div></div>
+        <div class="lane" data-lane-background="exploration"><div class="lane-title" data-letter="B"><strong>Exploration</strong><small>Open question</small></div></div>
+        <span class="map-note milestone-note" id="milestone-note">Milestones → future children</span>
+        <span class="map-note" id="calibration-note">ALIGNED if required</span>
+
+        <button type="button" class="node" id="align" style="--c:1;--s:4;--r:1;--tc:1;--ts:7;--tr:1;--mc:1;--ms:2;--mr:1" aria-pressed="false"><span class="role">Principal ↔ PM</span><span class="node-title">Align & charter</span><span class="action">goals · constraints · grants</span><span class="step">01</span></button>
+        <button type="button" class="node" id="root" style="--c:5;--s:4;--r:1;--tc:8;--ts:7;--tr:1;--mc:1;--ms:2;--mr:2" aria-pressed="false"><span class="role">Supervisor → PM</span><span class="node-title">Review & activate</span><span class="action">MATCH → active root</span><span class="step">02</span></button>
+        <button type="button" class="node" id="plan" style="--c:9;--s:4;--r:1;--tc:15;--ts:7;--tr:1;--mc:1;--ms:2;--mr:3" aria-pressed="false"><span class="role">PM</span><span class="node-title">Task graph</span><span class="action">type · priority · dependencies</span><span class="step">03</span></button>
+        <button type="button" class="node" id="review" style="--c:13;--s:4;--r:1;--tc:22;--ts:7;--tr:1;--mc:1;--ms:2;--mr:4" aria-pressed="false"><span class="role">Supervisor</span><span class="node-title">Plan review</span><span class="action">PASS · complete active leaves</span><span class="step">04</span></button>
+
+        <button type="button" class="node" id="issue" style="--c:17;--s:4;--r:1;--tc:1;--ts:9;--tr:2;--mc:1;--ms:2;--mr:5" aria-pressed="false"><span class="role">Secretary</span><span class="node-title">Issue receipt</span><span class="action">review → checked admission</span></button>
+        <button type="button" class="node" id="readiness" style="--c:21;--s:4;--r:1;--tc:10;--ts:9;--tr:2;--mc:1;--ms:2;--mr:6" aria-pressed="false"><span class="role">Architect</span><span class="node-title">Readiness check</span><span class="action">READY / gaps</span></button>
+        <button type="button" class="node" id="dispatch" style="--c:25;--s:4;--r:1;--tc:19;--ts:10;--tr:2;--mc:1;--ms:2;--mr:10" aria-pressed="false"><span class="role">Secretary</span><span class="node-title">Dispatch</span><span class="action">recheck basis · scopes · budget</span></button>
+
+
+        <button type="button" class="node optional feedback-node" id="gap-coordinate" style="--c:3;--s:5;--r:2;--tc:3;--ts:5;--tr:3;--mc:1;--ms:2;--mr:7" aria-pressed="false"><span class="role">Secretary</span><span class="node-title">Coordinate gap</span><span class="action">delegation only</span></button>
+        <button type="button" class="node optional feedback-node" id="prereq-producer" style="--c:9;--s:5;--r:2;--tc:9;--ts:5;--tr:3;--mc:1;--ms:1;--mr:8" aria-pressed="false"><span class="role">Reviewed task</span><span class="node-title">Prerequisite producer</span><span class="action">scoped work → accept</span></button>
+        <button type="button" class="node optional feedback-node" id="prereq-qualified" style="--c:15;--s:5;--r:2;--tc:15;--ts:5;--tr:3;--mc:2;--ms:1;--mr:8" aria-pressed="false"><span class="role">Runtime</span><span class="node-title">Qualified prerequisite</span><span class="action">ACCEPTED + current</span></button>
+        <button type="button" class="node optional feedback-node" id="scope-align" style="--c:21;--s:5;--r:2;--tc:21;--ts:5;--tr:3;--mc:1;--ms:2;--mr:9" aria-pressed="false"><span class="role">PM ↔ user</span><span class="node-title">Align & revise</span><span class="action">review → reissue</span></button>
+
+        <button type="button" class="node" id="exec-build" data-lane="execution" style="--c:3;--s:5;--r:3;--tc:3;--ts:5;--tr:4;--mc:1;--ms:1;--mr:11" aria-pressed="false"><span class="role">Constructor(s)</span><span class="node-title">Scoped build</span><span class="action">claim → build → verify</span></button>
+        <button type="button" class="node" id="explore-build" data-lane="exploration" style="--c:3;--s:5;--r:4;--tc:3;--ts:5;--tr:5;--mc:2;--ms:1;--mr:11" aria-pressed="false"><span class="role">Constructor(s)</span><span class="node-title">Investigate</span><span class="action">claim → investigate → verify</span></button>
+        <button type="button" class="node" id="completion" data-lane="execution" style="--c:9;--s:5;--r:3;--tc:9;--ts:5;--tr:4;--mc:1;--ms:1;--mr:12" aria-pressed="false"><span class="role">Constructor → runtime</span><span class="node-title">Candidate ready</span><span class="action">outputs · runs · integrated candidate</span></button>
+        <button type="button" class="node" id="development" data-lane="exploration" style="--c:9;--s:5;--r:4;--tc:9;--ts:5;--tr:5;--mc:2;--ms:1;--mr:12" aria-pressed="false"><span class="role">Constructor</span><span class="node-title">Development report</span><span class="action">evidence · findings · stopping bounds</span></button>
+        <button type="button" class="node optional" id="specialist" data-lane="execution" style="--c:15;--s:5;--r:3;--tc:15;--ts:5;--tr:4;--mc:1;--ms:1;--mr:13" aria-pressed="false"><span class="role">Independent Crititor</span><span class="node-title">Specialist PASS</span><span class="action">only if declared</span></button>
+        <button type="button" class="node" id="critique" data-lane="exploration" style="--c:15;--s:5;--r:4;--tc:15;--ts:5;--tr:5;--mc:2;--ms:1;--mr:13" aria-pressed="false"><span class="role">Independent Crititor</span><span class="node-title">Critique PASS</span><span class="action">current candidate · every criterion</span></button>
+        <button type="button" class="node" id="exec-accept" data-lane="execution" style="--c:21;--s:5;--r:3;--tc:21;--ts:5;--tr:4;--mc:1;--ms:1;--mr:14" aria-pressed="false"><span class="role">Independent Stabilizer</span><span class="node-title">Accept delivery</span><span class="action">actual candidate + criteria + seams</span></button>
+        <button type="button" class="node" id="explore-accept" data-lane="exploration" style="--c:21;--s:5;--r:4;--tc:21;--ts:5;--tr:5;--mc:2;--ms:1;--mr:14" aria-pressed="false"><span class="role">Independent Stabilizer</span><span class="node-title">Accept findings</span><span class="action">honest findings against agreed criteria</span></button>
+
+        <button type="button" class="node qualified" id="qualified" style="--c:11;--s:8;--r:5;--tc:11;--ts:8;--tr:6;--mc:1;--ms:1;--mr:15" aria-pressed="false"><span class="role">Runtime</span><span class="node-title">Qualified acceptance</span><span class="action">ACCEPTED + current evidence</span></button>
+        <button type="button" class="node optional" id="decision" data-lane="exploration" style="--c:21;--s:5;--r:5;--tc:21;--ts:5;--tr:6;--mc:2;--ms:1;--mr:15" aria-pressed="false"><span class="role">PM ↔ principal</span><span class="node-title">Design choice</span><span class="action">when a decision edge requires it</span></button>
+
+        <button type="button" class="node" id="bundle" style="--c:3;--s:5;--r:6;--tc:3;--ts:5;--tr:7;--mc:1;--ms:2;--mr:16" aria-pressed="false"><span class="role">PM</span><span class="node-title">Full mission bundle</span><span class="action">delivery + qualified outcomes</span></button>
+        <button type="button" class="node" id="audit" style="--c:9;--s:5;--r:6;--tc:9;--ts:5;--tr:7;--mc:1;--ms:2;--mr:17" aria-pressed="false"><span class="role">Auditor + Supervisor</span><span class="node-title">Closure reviews</span><span class="action">audit PASS / FINDINGS · close PASS</span></button>
+        <button type="button" class="node" id="closing-run" style="--c:15;--s:5;--r:6;--tc:15;--ts:5;--tr:7;--mc:1;--ms:1;--mr:18" aria-pressed="false"><span class="role">Runtime gate</span><span class="node-title">Validate current closing run</span><span class="action">existing evidence</span></button>
+        <button type="button" class="node terminal" id="close" style="--c:21;--s:5;--r:6;--tc:21;--ts:5;--tr:7;--mc:2;--ms:1;--mr:18" aria-pressed="false"><span class="role">PM / principal</span><span class="node-title">Close mission</span><span class="action">qualified outcomes + authority</span></button>
+      </div>
+      <div class="ledger"><strong>Immutable ledger / CAS</strong><div class="ledger-track"><span>authority</span><i aria-hidden="true"></i><span>receipts</span><i aria-hidden="true"></i><span>attempts</span><i aria-hidden="true"></i><span>evidence</span><i aria-hidden="true"></i><span>verdicts</span></div></div>
+      <section class="recovery" id="recovery" hidden aria-labelledby="recovery-title">
+        <div class="recovery-heading"><h2 id="recovery-title">Routes around a gap</h2><span>1 initial candidate + 2 repairs / lineage</span></div>
+        <div class="recovery-grid">
+          <div class="recovery-path"><span class="state">Repair required</span><span class="route-stop">Secretary</span><b>→</b><span class="route-stop">Dispatch</span><b>→</b><span class="route-stop">Build</span></div>
+          <div class="recovery-path"><span class="state">Known missing input</span><span class="route-stop">Reviewed producer</span><b>→</b><span class="route-stop">Accept</span><b>→</b><span class="route-stop">Recheck READY</span></div>
+          <div class="recovery-path"><span class="state">Decision gap</span><span class="route-stop">Secretary</span><b>→</b><span class="route-stop">PM</span><b>→</b><span class="route-stop">Review / reissue</span></div>
+          <div class="recovery-path"><span class="state">Missing reviewer evidence</span><span class="route-stop">INPUT_INCOMPLETE · revises</span><b>→</b><span class="route-stop">Reviewer retry</span><small>same current execution candidate · no build cycle</small></div>
+          <div class="recovery-path"><span class="state">Changed product / prerequisites / authority / contract</span><span class="route-stop">Applicable gates</span><b>→</b><span class="route-stop">Current qualification</span><small>history retained · dependents blocked</small></div>
+          <div class="recovery-path"><span class="state">Formal hold</span><span class="route-stop">Screen / permit</span><b>→</b><span class="route-stop">Independent resolution</span></div>
+          <div class="recovery-path"><span class="state">Budget exhausted</span><span class="route-stop">Secretary</span><b>→</b><span class="route-stop">PM</span><small>lineage cap stays spent</small></div>
+        </div>
+      </section>
+    </section>
+    <footer class="page-foot"><span>Only current acceptance unlocks work.</span><details class="sources"><summary>Engine sources</summary><nav aria-label="Workflow source files"><a href="../skills/mission-pipeline/references/fast-mode.md">3.0 contract</a><a href="../skills/mission-pipeline/scripts/mp_runtime/fast.py">Receipt engine</a><a href="../skills/mission-pipeline/scripts/mp_runtime/workflow.py">Shared gates</a><a href="../tests/m25_fast_mode.py">Route regressions</a></nav></details></footer>
+    <aside class="inspector" id="inspector" aria-labelledby="detail-title" hidden><button type="button" class="close" aria-label="Close stage details">×</button><div class="eyebrow" id="detail-role"></div><h2 id="detail-title"></h2><p id="detail-copy"></p><code id="detail-action"></code><div class="source-ref" id="detail-source"></div></aside>
+    <div class="sr-only" aria-live="polite" id="status"></div>
+    <noscript><p>Selecting stages and drawing connectors requires JavaScript. The workflow stages remain visible in reading order.</p></noscript>
+  </main>
+  <script>
+  (() => {
+    'use strict';
+    const root = document.getElementById('mission-workflow');
+    const map = root.querySelector('#workflow-map');
+    const svg = map.querySelector('.wires');
+    const edgeLayer = map.querySelector('#edge-layer');
+    const inspector = root.querySelector('#inspector');
+    const nodes = new Map([...map.querySelectorAll('.node')].map(node => [node.id, node]));
+    const ns = 'http://www.w3.org/2000/svg';
+    let route = 'all';
+    let selection = null;
+    let drawFrame = 0;
+
+    const details = {
+      align: ['Original user words, goals, reserved constraints and grants ground the proposed charter.', 'intake.create → root.propose', 'workflow.py · authority / root setup'],
+      root: ['An independent Supervisor checks semantic MATCH. PM activates the reviewed root under current principal authority.', 'root.review → root.activate', 'workflow.py · root review / activation'],
+      plan: ['PM records obligations, execution or exploration leaves, future milestones and design choices. Dependencies set eligibility; priority orders eligible work.', 'decision.record · plan.record · task.record', 'fast.py:96–149 · workflow.py:570–700'],
+      review: ['Supervisor PASS binds the active leaves, their complete verification definitions and goal coverage. Future milestones may remain undecided.', 'requirement.record → plan.review', 'workflow.py:660–700'],
+      issue: ['A recorded PM delegation limits Secretary scope, operations, expiry and actions. Issuing from a scoped review can perform admission atomically.', 'secretary.delegate → receipt.issue', 'fast.py:220–288'],
+      readiness: ['Architect checks actual inputs, qualified dependency outputs, PM choices and environment. READY permits dispatch. Gaps return to Secretary; after a reviewed producer supplies a current accepted prerequisite, Architect inspects the blocked receipt again. New behavior or scope requires PM/user alignment and applicable review/reissue.', 'receipt.snapshot → readiness.record [READY / gaps]', 'fast.py:293–351,581–616'],
+      'gap-coordinate': ['Secretary receives the precise Architect gap. Recorded delegation permits scheduling an already reviewed/admitted producer; issuing from its scoped review may perform admission. Undefined behavior, new graph or contract scope, and material design choices are escalated to PM. Secretary cannot create scope, waive holds or certify acceptance.', 'secretary.coordinate [schedule / escalate]', 'fast.py:581–616 · fast-mode.md:70–98'],
+      'prereq-producer': ['This is an already defined and independently reviewed prerequisite task. Secretary coordinates its receipt, Architect READY and dispatch. Scoped Constructors produce the input, and the applicable independent execution or exploration acceptance chain judges it. This branch summarizes that full task workflow.', 'receipt.issue → readiness.record → receipt.dispatch → scoped work → independent acceptance', 'fast.py:263–351,417–579'],
+      'prereq-qualified': ['The prerequisite must have current qualified acceptance, not just a historical ACCEPTED record. Secretary waits for the required accepted output, then returns the original blocked receipt to Architect for a fresh prerequisite inspection. Status refresh alone never restores qualification.', 'current prerequisite acceptance → receipt.snapshot → readiness.record', 'fast.py:314–351,485–579 · workflow.py:1656–1676'],
+      'scope-align': ['Secretary escalates undefined behavior, a new graph edge or contract scope, or a material choice. PM aligns the decision with the user within current authority, revises the plan or contract, and obtains the applicable independent review/admission before receipt reissue and Architect readiness. Lineage budgets and formal holds remain enforced.', 'secretary.coordinate [escalate] → PM decision/plan → review/admission → receipt.issue', 'fast.py:263–289,581–616 · fast-mode.md:70–98'],
+      dispatch: ['The runtime rechecks current READY, relevant authority, dependencies, decisions, write collisions and the remaining lineage budget.', 'receipt.dispatch', 'fast.py:323–351'],
+      'exec-build': ['Every worker claims a disjoint scope. Build and required verification stay within that assignment. Shared integration belongs to a dependent integration task.', 'receipt.claim → work.write / run.execute / delivery.record', 'fast.py:353–450 · fast-mode.md:36–42'],
+      'explore-build': ['Workers investigate the agreed question within evidence and stopping bounds. Findings may be negative or inconclusive when the criteria permit them.', 'receipt.claim → work.write / run.execute / delivery.record', 'workflow.py · exploration report chain'],
+      completion: ['Each completion checks its actual outputs and assigned runs. All workers must finish; the runtime then assembles the aggregate development record for the current candidate.', 'completion.record', 'fast.py:417–450,476–499'],
+      development: ['Exploration keeps its aggregate development report. Multiple workers first record completion; a single-worker COMPLETE report records it atomically.', 'completion.record → report.record [development]', 'workflow.py:1632–1642 · fast-mode.md:157–164'],
+      specialist: ['Execution needs a Crititor PASS only when specialist_review is declared. The specialist judges this same current candidate independently.', 'report.record [critique] · specialist_review=true', 'fast.py:534–537'],
+      critique: ['Exploration requires an independent current Crititor PASS. Triggered calibration, recovery permits or round 3 also require current ALIGNED before stabilization.', 'report.record [critique] · calibration when required', 'workflow.py:1514–1530,1559–1577'],
+      'exec-accept': ['Independent Stabilizer judges the current candidate, criteria, runs and seams. Missing reviewer evidence may be retried without a build cycle only after INPUT_INCOMPLETE, using revises to name that verdict, while readiness, product bytes, completions and required runs remain current. A stale ACCEPTED verdict cannot be renewed this way.', 'acceptance.snapshot → acceptance.record [revises only for INPUT_INCOMPLETE retry]', 'fast.py:485–556'],
+      'explore-accept': ['Independent Stabilizer acceptance follows the development and Crititor reports, plus ALIGNED when required. Accepted findings satisfy the agreed investigation criteria.', 'report.record [acceptance]', 'workflow.py:1559–1577'],
+      qualified: ['Only current ACCEPTED unlocks work. Changed product, prerequisites, authority or contract keep dependents blocked until applicable gates pass: fresh readiness; review/admission/current receipt when required; and authorized bounded construction plus independent acceptance when required. Historical acceptance remains recorded. queue.snapshot and Secretary refresh report state; they do not restore stale acceptance.', 'applicable gates → current qualification · queue.snapshot is read-only', 'fast.py:263–351,485–616 · workflow.py:1656–1676'],
+      decision: ['Accepted findings do not create a design choice. Secretary escalates; PM records the decision and communicates material tradeoffs to the principal. Changed contracts need review.', 'secretary.coordinate [escalate] → decision.record', 'fast.py:141–149,570–606'],
+      bundle: ['The current satisfied closing-scope run must already exist before recording this full mission bundle. The bundle captures run and delivery evidence. All required outcomes need current satisfaction or authorized disposition. A later run changes delivery_digest, so the bundle and closure reviews must be refreshed.', 'existing closing-run evidence → bundle.record [full mission]', 'workflow.py:1832–1906,1934–1948'],
+      audit: ['Auditor completes PASS or FINDINGS; Supervisor independently records close PASS. Both bind the current full bundle and authority, including existing closing-run evidence. A later run or other changed delivery basis requires refreshed bundle/reviews before closure.', 'audit.record + close.review [current bundle]', 'workflow.py:2066–2103,2140–2157'],
+      'closing-run': ['mission.close validates the existing closing-scope run: COMPLETE, satisfied predicates and current inputs. That run must already be in the evidence captured before the final bundle and reviews. This stage executes no new run. Any later run changes delivery_digest and requires refreshed bundle and closure reviews.', 'mission.close → current_run [existing COMPLETE + satisfied evidence]', 'workflow.py:1934–1948,2140–2157'],
+      close: ['PM with a valid close grant, or the principal, closes after every shared gate passes. Formal holds, live flags and undeclared delivery gaps still block closure.', 'mission.close', 'workflow.py:2091–2147']
+    };
+    const edges = [
+      { from: 'align', to: 'root', kind: 'forward' },
+      { from: 'root', to: 'plan', kind: 'forward' },
+      { from: 'plan', to: 'review', kind: 'forward' },
+      { from: 'review', to: 'issue', kind: 'down' },
+      { from: 'issue', to: 'readiness', kind: 'forward' },
+      { from: 'readiness', to: 'dispatch', kind: 'forward' },
+      { from: 'readiness', to: 'gap-coordinate', kind: 'readiness-gap', conditional: true, annotation: 'gaps' },
+      { from: 'gap-coordinate', to: 'prereq-producer', kind: 'forward', conditional: true },
+      { from: 'prereq-producer', to: 'prereq-qualified', kind: 'forward' },
+      { from: 'prereq-qualified', to: 'readiness', kind: 'prereq-return', conditional: true },
+      { from: 'gap-coordinate', to: 'scope-align', kind: 'scope-gap', conditional: true, annotation: 'new scope / material choice' },
+      { from: 'scope-align', to: 'plan', kind: 'decision-return', conditional: true },
+      { from: 'dispatch', to: 'exec-build', kind: 'down', lane: 'execution' },
+      { from: 'dispatch', to: 'explore-build', kind: 'down', lane: 'exploration' },
+      { from: 'exec-build', to: 'completion', kind: 'down', lane: 'execution' },
+      { from: 'completion', to: 'exec-accept', kind: 'bypass', lane: 'execution' },
+      { from: 'completion', to: 'specialist', kind: 'down', lane: 'execution', conditional: true },
+      { from: 'specialist', to: 'exec-accept', kind: 'down', lane: 'execution', conditional: true },
+      { from: 'explore-build', to: 'development', kind: 'down', lane: 'exploration' },
+      { from: 'development', to: 'critique', kind: 'down', lane: 'exploration' },
+      { from: 'critique', to: 'explore-accept', kind: 'down', lane: 'exploration' },
+      { from: 'exec-accept', to: 'qualified', kind: 'down', lane: 'execution' },
+      { from: 'explore-accept', to: 'qualified', kind: 'down', lane: 'exploration' },
+      { from: 'explore-accept', to: 'decision', kind: 'choice', lane: 'exploration', conditional: true },
+      { from: 'decision', to: 'plan', kind: 'decision-return', lane: 'exploration', conditional: true },
+      { from: 'qualified', to: 'issue', kind: 'unlock', label: 'unlock next work' },
+      { from: 'qualified', to: 'bundle', kind: 'down' },
+      { from: 'bundle', to: 'audit', kind: 'forward' },
+      { from: 'audit', to: 'closing-run', kind: 'closure' },
+      { from: 'closing-run', to: 'close', kind: 'forward' }
+    ];
+
+    function rect(id) {
+      const box = nodes.get(id).getBoundingClientRect();
+      const base = map.getBoundingClientRect();
+      return { x: box.left - base.left, y: box.top - base.top, w: box.width, h: box.height, cx: box.left - base.left + box.width / 2, cy: box.top - base.top + box.height / 2 };
+    }
+    function elbow(ax, ay, bx, by) {
+      const middle = (ay + by) / 2;
+      return `M ${ax} ${ay} V ${middle} H ${bx} V ${by}`;
+    }
+    function draw() {
+      drawFrame = 0;
+      const mobile = window.matchMedia('(max-width: 900px)').matches;
+      const width = map.clientWidth, height = map.clientHeight;
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      edgeLayer.replaceChildren();
+      for (const edge of edges) {
+        const a = rect(edge.from), b = rect(edge.to);
+        let d;
+        if (edge.kind === 'readiness-gap') {
+          d = mobile ? elbow(a.cx,a.y+a.h,b.cx,b.y) : `M ${a.cx-16} ${a.y+a.h} V ${b.y-10} H ${b.cx} V ${b.y}`;
+        } else if (edge.kind === 'prereq-return') {
+          d = mobile ? `M ${a.x+a.w} ${a.cy} H ${width-18} V ${b.cy} H ${b.x+b.w}` : `M ${a.cx} ${a.y} V ${a.y-24} H ${b.cx+16} V ${b.y+b.h}`;
+        } else if (edge.kind === 'scope-gap') {
+          d = mobile ? `M ${a.x} ${a.cy} H 18 V ${b.cy} H ${b.x}` : `M ${a.cx} ${a.y+a.h} V ${a.y+a.h+14} H ${b.cx} V ${b.y+b.h}`;
+        } else if (mobile) {
+          if (edge.from==='readiness' && edge.to==='dispatch') {
+            d = `M ${a.x} ${a.cy} H 26 V ${b.cy} H ${b.x}`;
+          } else if (edge.kind === 'forward' || edge.kind === 'closure') {
+            d = a.y === b.y ? `M ${a.x+a.w} ${a.cy} H ${b.x}` : elbow(a.cx,a.y+a.h,b.cx,b.y);
+          } else if (edge.kind === 'bypass') {
+            d = `M ${a.x} ${a.cy} H ${a.x-12} V ${b.cy} H ${b.x}`;
+          } else if (edge.kind === 'decision-return') {
+            d = `M ${a.x+a.w} ${a.cy} H ${width-9} V ${b.y-14} H ${b.cx} V ${b.y}`;
+          } else if (edge.kind === 'unlock') {
+            d = `M ${a.x} ${a.cy} H 8 V ${b.cy} H ${b.x}`;
+          } else if (edge.kind === 'choice') {
+            d = `M ${a.x+a.w} ${a.cy} H ${a.x+a.w+12} V ${b.y-16} H ${b.cx} V ${b.y}`;
+          } else {
+            d = elbow(a.cx,a.y+a.h,b.cx,b.y);
+          }
+        } else {
+          if (edge.kind === 'decision-return') {
+            d = `M ${a.x+a.w} ${a.cy} H ${width-12} V ${b.y-28} H ${b.cx} V ${b.y}`;
+          } else if (edge.kind === 'unlock') {
+            d = `M ${a.x} ${a.cy} H 18 V ${b.y-14} H ${b.cx} V ${b.y}`;
+          } else if (edge.kind === 'bypass') {
+            d = `M ${a.cx} ${a.y+a.h} V ${a.y+a.h+14} H ${b.cx} V ${b.y+b.h}`;
+          } else if (edge.from === 'dispatch' && edge.to === 'exec-build') {
+            d = `M ${a.x+a.w} ${a.cy} H ${width-38} V ${b.y-8} H ${b.cx} V ${b.y}`;
+          } else if (edge.from === 'dispatch' && edge.to === 'explore-build') {
+            d = `M ${a.x+a.w} ${a.cy} H ${width-28} V ${b.y-18} H ${b.cx} V ${b.y}`;
+          } else if (edge.from === 'exec-accept' && edge.to === 'qualified') {
+            d = `M ${a.x+a.w} ${a.cy} H ${width-44} V ${b.y-12} H ${b.cx} V ${b.y}`;
+          } else if (a.y === b.y) {
+            d = `M ${a.x+a.w} ${a.cy} H ${b.x}`;
+          } else {
+            d = elbow(a.cx,a.y+a.h,b.cx,b.y);
+          }
+        }
+        const path = document.createElementNS(ns,'path');
+        path.setAttribute('d',d); path.setAttribute('class','wire');
+        path.setAttribute('marker-end','url(#arrow)');
+        path.dataset.from=edge.from; path.dataset.to=edge.to;
+        path.dataset.conditional=String(Boolean(edge.conditional));
+        if (edge.lane) path.dataset.lane=edge.lane;
+        if (selection && (edge.from===selection || edge.to===selection)) path.classList.add('related');
+        if (edge.lane && route!=='all' && route!==edge.lane) path.classList.add('dim');
+        edgeLayer.appendChild(path);
+        if (edge.annotation) {
+          const label=document.createElementNS(ns,'text');
+          label.setAttribute('class','wire-label');
+          if(edge.kind==='readiness-gap') {
+            label.setAttribute('x',mobile?a.cx+9:a.cx-5); label.setAttribute('y',a.y+a.h+15);
+          } else if(!mobile) {
+            label.setAttribute('x',(a.cx+b.cx)/2); label.setAttribute('y',a.y+a.h+30);
+            label.setAttribute('text-anchor','middle');
+          }
+          if(edge.kind==='readiness-gap'||!mobile) { label.textContent=edge.annotation; edgeLayer.appendChild(label); }
+        }
+        if (edge.label && !mobile) {
+          const label=document.createElementNS(ns,'text');
+          label.setAttribute('class','wire-label');
+          label.setAttribute('transform',`translate(12 ${(a.cy+b.y)/2}) rotate(-90)`);
+          label.setAttribute('text-anchor','middle'); label.textContent=edge.label;
+          edgeLayer.appendChild(label);
+        }
+      }
+      for (const lane of ['execution','exploration']) {
+        const first=rect(lane==='execution'?'exec-build':'explore-build');
+        const last=rect(lane==='execution'?'exec-accept':'explore-accept');
+        const background=map.querySelector(`[data-lane-background="${lane}"]`);
+        Object.assign(background.style,{left:`${first.x-(mobile?7:12)}px`,top:`${first.y-(mobile?26:12)}px`,width:`${mobile?first.w+14:last.x+last.w-first.x+24}px`,height:`${mobile?last.y+last.h-first.y+40:first.h+38}px`,opacity:route!=='all'&&route!==lane?'.2':'1'});
+        Object.assign(background.firstElementChild.style,{left:mobile?'7px':`${60-first.x}px`,top:mobile?'5px':'19px'});
+      }
+      const phases=[['plan','align'],['feedback','gap-coordinate'],['work','exec-build'],['qualify','qualified'],['close','bundle']];
+      for(const [key,id] of phases) {
+        const r=rect(id),phase=root.querySelector(`#phase-${key}`);
+        phase.hidden=mobile && (key==='work'||key==='qualify');
+        Object.assign(phase.style,{left:mobile?'24px':'48px',top:`${r.y-(key==='plan'?50:34)}px`});
+      }
+      const critique=rect('critique'),note=root.querySelector('#calibration-note');
+      Object.assign(note.style,{left:`${critique.x+4}px`,top:`${critique.y+critique.h+9}px`,opacity:route==='execution'?'.2':'1'});
+    }
+    function scheduleDraw() {
+      if (!drawFrame) drawFrame = requestAnimationFrame(draw);
+    }
+    function select(id) {
+      selection = id;
+      for (const [nodeId, node] of nodes) node.setAttribute('aria-pressed', String(nodeId === id));
+      const [copy, action, source] = details[id];
+      root.querySelector('#detail-role').textContent = nodes.get(id).querySelector('.role').textContent;
+      root.querySelector('#detail-title').textContent = nodes.get(id).querySelector('.node-title').textContent;
+      root.querySelector('#detail-copy').textContent = copy;
+      root.querySelector('#detail-action').textContent = action;
+      root.querySelector('#detail-source').textContent = source;
+      inspector.hidden = false;
+      root.querySelector('#status').textContent = `${nodes.get(id).querySelector('.node-title').textContent}. ${copy}`;
+      scheduleDraw();
+    }
+    function closeDetails(restoreFocus = false) {
+      const previous = selection;
+      selection = null;
+      inspector.hidden = true;
+      for (const node of nodes.values()) node.setAttribute('aria-pressed', 'false');
+      if (restoreFocus && previous) nodes.get(previous).focus({ preventScroll: true });
+      scheduleDraw();
+    }
+    root.querySelectorAll('[data-route]').forEach(button => button.addEventListener('click', () => {
+      route = button.dataset.route;
+      root.querySelectorAll('[data-route]').forEach(control => control.setAttribute('aria-pressed', String(control === button)));
+      for (const node of nodes.values()) node.classList.toggle('dim', Boolean(node.dataset.lane && route !== 'all' && node.dataset.lane !== route));
+      root.querySelector('#status').textContent = route === 'all' ? 'Full workflow highlighted.' : `${route} route highlighted. Shared gates remain visible.`;
+      scheduleDraw();
+    }));
+    for (const [id, node] of nodes) node.addEventListener('click', () => selection === id ? closeDetails() : select(id));
+    root.querySelector('.close').addEventListener('click', () => closeDetails(true));
+    root.querySelector('.recovery-toggle').addEventListener('click', event => {
+      const button = event.currentTarget;
+      const expanded = button.getAttribute('aria-expanded') !== 'true';
+      button.setAttribute('aria-expanded', String(expanded));
+      root.querySelector('#recovery').hidden = !expanded;
+      if (expanded) root.querySelector('#recovery').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
+    });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDetails(true); });
+    new ResizeObserver(scheduleDraw).observe(map);
+    document.fonts.ready.then(scheduleDraw);
+    scheduleDraw();
+  })();
+  </script>
+</body>
+</html>
