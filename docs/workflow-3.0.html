@@ -15,6 +15,7 @@
       --line: #a9a497; --hair: #d2cdc3; --grid: rgba(40, 36, 20, .05);
       --accent: #b97a33; --accent-soft: rgba(185, 122, 51, .14); --accent-ink: #8a5821;
       --ok: #55613f; --edge: #77746b; --on-ink: #f3f1ed; --shadow: rgba(30, 26, 14, .10);
+      --m-opus: #6b4fa0; --m-sonnet: #1f7a68; --m-gpt: #2f62a8; --fail: #b0473b;
       --font: "MiSans Latin", "MiSans", "HarmonyOS Sans", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
       --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
       color-scheme: light;
@@ -25,6 +26,7 @@
         --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
         --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e;
         --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      --m-opus: #b9a3e8; --m-sonnet: #6cc7b3; --m-gpt: #8ab4ef; --fail: #e58a7c;
         color-scheme: dark;
       }
     }
@@ -33,6 +35,7 @@
       --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
       --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e;
       --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      --m-opus: #b9a3e8; --m-sonnet: #6cc7b3; --m-gpt: #8ab4ef; --fail: #e58a7c;
       color-scheme: dark;
     }
     /* The page's own Theme button wins over the system and any host setting */
@@ -41,6 +44,7 @@
       --line: #a9a497; --hair: #d2cdc3; --grid: rgba(40, 36, 20, .05);
       --accent: #b97a33; --accent-soft: rgba(185, 122, 51, .14); --accent-ink: #8a5821;
       --ok: #55613f; --edge: #77746b; --on-ink: #f3f1ed; --shadow: rgba(30, 26, 14, .10);
+      --m-opus: #6b4fa0; --m-sonnet: #1f7a68; --m-gpt: #2f62a8; --fail: #b0473b;
       color-scheme: light;
     }
     html:root[data-look="dark"] {
@@ -48,6 +52,7 @@
       --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
       --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e;
       --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      --m-opus: #b9a3e8; --m-sonnet: #6cc7b3; --m-gpt: #8ab4ef; --fail: #e58a7c;
       color-scheme: dark;
     }
 
@@ -81,6 +86,23 @@
     .tab:hover { color: var(--ink); }
     .theme-btn { white-space: nowrap; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--hair); padding: 5px 9px; }
     .theme-btn:hover { color: var(--ink); border-color: var(--line); }
+    .theme-btn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+    /* Show model: a tag per seat, coloured by model family */
+    .mchip { display: inline-block; padding: 0 4px; border: 1px solid currentColor; background: var(--paper); font: 600 9px/1.45 var(--font); letter-spacing: .01em; white-space: nowrap; text-transform: none; }
+    .mchip.opus { color: var(--m-opus); } .mchip.sonnet { color: var(--m-sonnet); } .mchip.gpt { color: var(--m-gpt); }
+    .mchips { display: none; gap: 3px; pointer-events: none; }
+    .show-models .mchips { display: flex; }
+    .mchips.above, .mchips.below { position: absolute; left: 4px; z-index: 5; }
+    .mchips.above { bottom: calc(100% + 2px); } .mchips.below { top: calc(100% + 2px); }
+    .mchips.inside { flex-wrap: wrap; margin-top: 2px; }
+    .show-models .pnode.has-inside .p-note { display: none; }
+    .band-name .mchip { display: none; margin-left: 8px; letter-spacing: .02em; }
+    .show-models .band-name .mchip { display: inline-block; }
+    .model-key { display: none; margin-top: 16px; padding: 12px 0 2px; border-top: 1px solid var(--hair); font-size: 12.5px; color: var(--ink-2); }
+    .show-models .model-key { display: grid; gap: 7px; }
+    .model-key div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+    .model-key .mchip { justify-self: start; }
+    .model-key p { margin: 4px 0 0; font-size: 12px; color: var(--muted); max-width: 90ch; }
 
     /* Mission timeline */
     .mission { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--hair); }
@@ -113,7 +135,9 @@
     .wire.cond { stroke-dasharray: 4 4; }
     .wire.hot { stroke: var(--accent); stroke-width: 2; }
     .wire.dim { opacity: .16; }
-    .ah { fill: var(--edge); } .ah-hot { fill: var(--accent); }
+    .ah { fill: var(--edge); } .ah-hot { fill: var(--accent); } .ah-fail { fill: var(--fail); }
+    .wire.fail { stroke: var(--fail); stroke-dasharray: 6 3; }
+    .wire.fail.hot { stroke: var(--accent); }
 
     /* Task graph */
     .graph { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); grid-auto-rows: minmax(70px, auto); gap: 34px 46px; padding: 38px 30px 30px; min-width: 900px; }
@@ -213,13 +237,15 @@
     .key .k-dash { height: 0; border: 0; border-top: 1.5px dashed var(--edge); background: none; }
     .key .k-hot { height: 0; border: 0; border-top: 2px solid var(--accent); background: none; }
     .key .k-pr { background: var(--ink); }
+    .key .k-fail { height: 0; border: 0; border-top: 2px dashed var(--fail); background: none; }
+    .flabel { position: absolute; z-index: 4; transform: translate(-50%, -50%); white-space: nowrap; padding: 1px 6px; font-size: 10px; font-weight: 600; letter-spacing: .04em; color: var(--fail); background: var(--paper); border: 1px solid var(--fail); pointer-events: none; }
     .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; margin-top: 18px; font-size: 11.5px; color: var(--muted); }
     .foot nav { display: flex; flex-wrap: wrap; gap: 6px 16px; }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
     /* Pipeline map: one fixed canvas, scaled to fit */
     .pipe-wrap { margin: 0; overflow: hidden; }
-    .pipe { position: absolute; left: 0; top: 0; width: 1400px; height: 650px; transform-origin: 0 0; }
+    .pipe { position: absolute; left: 0; top: 0; width: 1400px; height: 586px; transform-origin: 0 0; }
     .pipe .wire.dim { opacity: .28; }
     .p-band { position: absolute; left: 0; top: 0; width: 1400px; height: 100px; background: color-mix(in srgb, var(--accent) 8%, transparent); border-bottom: 1px solid var(--hair); }
     .p-band-name { position: absolute; left: 20px; top: 8px; font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); }
@@ -237,8 +263,8 @@
     .pnode .p-role { font-size: 9px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
     .pnode .p-title { font-size: 12.5px; font-weight: 700; line-height: 1.2; }
     .pnode .p-note { font: 9.5px/1.35 var(--mono); color: var(--muted); }
-    .pnode.major { border-width: 1.5px; padding: 10px 12px; }
-    .pnode.major .p-title { font-size: 17px; }
+    .pnode.major { border-width: 1.5px; padding: 6px 10px; }
+    .pnode.major .p-title { font-size: 15px; }
     .pnode.cond { border-style: dashed; }
     .pnode.gate { border: 3px double var(--ink); }
     .pnode.stack { box-shadow: 4px 4px 0 -1px var(--paper), 4px 4px 0 0 var(--ink), 8px 8px 0 -1px var(--paper), 8px 8px 0 0 var(--ink); }
@@ -269,6 +295,10 @@
     .compare tbody th { width: 15%; font-size: 10.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2); }
     .compare td { width: 30%; line-height: 1.55; color: var(--ink-2); }
     .compare td:last-child { width: 25%; color: var(--muted); }
+    .compare.fails td:nth-child(2) { width: 18%; font: 11.5px/1.55 var(--mono); color: var(--fail); }
+    .compare.fails td:nth-child(3) { width: 45%; }
+    .compare.fails td:last-child { width: 14%; }
+    .compare.fails tbody th { width: 18%; }
 
     /* Capture mode renders the pipeline for the README screenshots */
     body.capture .shell { max-width: none; padding: 32px 40px; }
@@ -305,11 +335,12 @@
         <span class="b3">SCHEMA 4<b>3.0</b></span>
       </div>
       <div class="mast-side">
-        <p class="mast-note" style="margin:0">You set the goals · PM plans · every task runs its own loop · the mission closes once</p>
+        <p class="mast-note" style="margin:0">You set the goals · research until the unknowns are known · PM plans · every task runs its own loop · the mission closes once</p>
         <div class="tabs" role="group" aria-label="View">
           <button type="button" class="tab" data-view="pipeline" aria-pressed="true"><small>01</small>Pipeline</button>
           <button type="button" class="tab" data-view="overview" aria-pressed="false"><small>02</small>Task graph</button>
           <button type="button" class="tab" data-view="detail" aria-pressed="false"><small>03</small>Task detail</button>
+          <button type="button" class="theme-btn" id="model-btn" aria-pressed="false">Show model</button>
           <button type="button" class="theme-btn" id="theme-btn">Theme · Auto</button>
         </div>
       </div>
@@ -321,13 +352,37 @@
           <div class="view-head">
             <div>
               <h1 class="view-title" id="pl-title">Pipeline</h1>
-              <p class="view-sub">You, the principal, set the goals and answer the questions only you can answer. PM plans once and revises when needed. Every task then goes around the task loop on its own, many at once, on the execution or the exploration track. Select any box or numbered loop for details.</p>
+              <p class="view-sub">You, the principal, set the goals and answer the questions only you can answer. When something the plan depends on is unknown, research rounds come first, until you and PM agree enough is known. PM then plans once and revises when needed. Every task then goes around the task loop on its own, many at once, on the execution or the exploration track. Select any box or numbered loop for details.</p>
             </div>
           </div>
           <div class="scroll"><div class="board pipe-wrap" id="pipe-wrap"><div class="pipe" id="pipe"></div></div></div>
+          <div class="model-key" id="model-key" aria-label="Seat models">
+            <div><span class="mchip opus">Opus 5.5 · xhigh</span><span>Claude Opus 5.5: PM, Researcher, Secretary, Architect, and the Constructors on the exploration track.</span></div>
+            <div><span class="mchip sonnet">Sonnet 5.5 · xhigh</span><span>Claude Sonnet 5.5: the Constructors on the execution track.</span></div>
+            <div><span class="mchip gpt">GPT-6.1-Sol · xhigh</span><span>GPT-6.1-Sol via the Codex CLI: Supervisor, Crititor, Calibrator, Stabilizer and Auditor.</span></div>
+            <p>When the product itself is GPT-made, the review seats switch to Claude Opus, so the reviewer's model family always differs from the builder's. Sonnet never directs, briefs or judges an Opus seat. Seat settings as of the model rule of 2026-10-03, amended 2026-10-05.</p>
+          </div>
           <div class="loops" id="loops" role="group" aria-label="Loops"></div>
+          <h2 class="sub-title">When a review does not pass</h2>
+          <p class="view-sub">Every gate has an independent reviewer, and nothing moves forward until the reviewer passes it. Red dashed arrows on the map show where each failure goes.</p>
+          <div class="scroll">
+            <table class="compare fails">
+              <thead><tr><th scope="col">Review</th><th scope="col">Not passed</th><th scope="col">What happens next</th><th scope="col">On the map</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Root review · Supervisor</th><td>MISMATCH, INPUT_INCOMPLETE</td><td>Nothing is activated. PM corrects the draft under the same authority, without a full root cycle, or supplies the missing bytes, and the Supervisor reviews again.</td><td>Back to Charter</td></tr>
+                <tr><th scope="row">Plan review · Supervisor</th><td>FAIL, INPUT_INCOMPLETE</td><td>Nothing is admitted. PM revises the plan or supplies what is missing, and the Supervisor reviews again.</td><td>Back to Plan</td></tr>
+                <tr><th scope="row">Ready to build? · Architect</th><td>Not READY</td><td>The gaps go to the Secretary, who moves a setup task ahead or escalates to PM.</td><td>Loop ②, or ⑤</td></tr>
+                <tr><th scope="row">Specialist, Critique · Crititor</th><td>Anything but PASS: CHANGES_REQUESTED, FAIL, BLOCKED</td><td>No acceptance without a current PASS. The work goes back to the Constructors for the next cycle or round.</td><td>Loop ③</td></tr>
+                <tr><th scope="row">Calibrate · Calibrator</th><td>DRIFT; two aggregate SUSPICION verdicts in a row</td><td>A formal case and a latch hold the scope. You release the latch, or an independent contest dismisses the case. INPUT_INCOMPLETE means the bundle is missing bytes.</td><td>Formal hold</td></tr>
+                <tr><th scope="row">Accept · Stabilizer</th><td>REPAIR_REQUIRED, NEEDS_DECISION, INPUT_INCOMPLETE</td><td>Repair goes back to the Constructors; a decision goes to PM; missing evidence is read and the same candidate is judged again, with no rebuild. In exploration, findings that are not accepted go to the next round.</td><td>Loop ③, ⑤</td></tr>
+                <tr><th scope="row">Closure audit · Auditor</th><td>FINDINGS</td><td>Each finding becomes a formal case that holds the tasks it names until it is repaired, dismissed through screening or contest, or excepted under a defer grant. Then the mission is re-bundled.</td><td>Into the loop, then ⑥</td></tr>
+                <tr><th scope="row">Closure audit · Auditor</th><td>INPUT_INCOMPLETE</td><td>PM restores the missing bytes and rebuilds the bundle.</td><td>Loop ⑥</td></tr>
+                <tr><th scope="row">Close review · Supervisor</th><td>FAIL, INPUT_INCOMPLETE</td><td>PM fixes the gaps the review states and rebuilds the bundle; both closure reviews run again.</td><td>Loop ⑥</td></tr>
+              </tbody>
+            </table>
+          </div>
           <h2 class="sub-title">Execution and exploration</h2>
-          <p class="view-sub">Each task picks its track through <code>work_type</code>. A parent can hold both kinds; a specified experiment can be execution, and interpreting its data to choose a design is exploration.</p>
+          <p class="view-sub">Each task picks its track through <code>work_type</code>. A parent can hold both kinds; a specified experiment can be execution, and interpreting its data to choose a design is exploration. A research round before the plan is neither: a Researcher reads inside an assigned scope and reports facts, inferences and proposals, and nothing is built, run as a task or accepted.</p>
           <div class="scroll">
             <table class="compare">
               <thead><tr><th scope="col"></th><th scope="col">Execution</th><th scope="col">Exploration</th><th scope="col">Milestone</th></tr></thead>
@@ -387,6 +442,7 @@
       <span class="key"><i class="k-line"></i>Flow</span>
       <span class="key"><i class="k-dash"></i>Only when needed</span>
       <span class="key"><i class="k-hot"></i>Highlighted path</span>
+      <span class="key"><i class="k-fail"></i>Not passed → back</span>
     </div>
     <footer class="foot">
       <span>Only current acceptance unlocks work. Old acceptance stays on record.</span>
@@ -402,6 +458,7 @@
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
     <defs>
       <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah" d="M0 1 L9 5 L0 9 Z"/></marker>
+      <marker id="ah-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah-fail" d="M0 1 L9 5 L0 9 Z"/></marker>
       <marker id="ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah-hot" d="M0 1 L9 5 L0 9 Z"/></marker>
     </defs>
   </svg>
@@ -419,19 +476,19 @@
     /* ---------- content ---------- */
     const MISSION = [
       { id: 'charter', name: 'Charter', mult: 'Once', state: 'done', steps: 'Align · root review · activate',
-        title: 'Charter', sub: 'Principal ↔ PM · Supervisor', copy: "PM records the principal's original words, goals, reserved constraints and grants, then proposes a root. An independent Supervisor checks that it matches; PM activates it under current authority.",
+        title: 'Charter', sub: 'PM', copy: "PM records your original words, goals, reserved constraints and grants, and proposes a root: the charter. It goes to an independent Supervisor for root review; only after MATCH does PM activate it.",
         facts: ['A proposed root creates no contract until it is reviewed and activated.', 'A grant that contradicts a reserved constraint is refused.'],
         act: 'authority.record · grant.record · intake.create · root.propose · root.review · root.activate', src: src('SKILL.md', 'roles/pm.md') },
       { id: 'plan', name: 'Plan', mult: 'Per revision', state: 'done', steps: 'Task graph · plan review · delegate',
-        title: 'Plan', sub: 'PM · Supervisor', copy: 'PM turns every goal into obligations and a prioritised dependency graph. Each task is execution, exploration or a future milestone; a parent can hold both kinds. Supervisor reviews the active leaves with their complete checks, then PM delegates routine coordination to the Secretary.',
-        facts: ['Dependencies decide eligibility; larger priority runs first.', 'Milestones stay undecided until refined into producing tasks.', 'A changed leaf contract needs a new review and admission.'],
+        title: 'Plan', sub: 'PM', copy: 'PM turns every goal into obligations and a prioritised dependency graph: high level, with full detail only for the tasks about to start. Each task is execution, exploration or a future milestone, and a parent can hold both kinds. The plan then goes to the Supervisor for plan review, and PM delegates routine coordination to the Secretary.',
+        facts: ['When something is unknown, research rounds come first, until you and PM agree enough is known.', 'The plan can stay high level: only the tasks about to start need full detail, later scope stays as milestones, and the order is adjusted as readiness reports come in.', 'Dependencies decide eligibility; larger priority runs first.', 'Milestones stay undecided until refined into producing tasks.', 'A changed leaf contract needs a new review and admission.'],
         act: 'decision.record · plan.record · task.record · requirement.record · plan.review · secretary.delegate · schedule.record', src: src('references/fast-mode.md', 'roles/pm.md') },
       { id: 'tasks', name: 'Tasks', mult: '× N', state: 'active', steps: 'One receipt cycle per task, in parallel',
         title: 'Tasks', sub: 'Secretary · Architect · Constructors · independent seats', copy: 'Every eligible task runs its own receipt cycle: issue, readiness, dispatch, scoped construction and independent acceptance. Several tasks can be in flight at once. A task that qualifies unlocks the tasks waiting for it.',
         facts: ['PM is not inside the cycle; it returns only when the Secretary escalates.', 'Open “Task detail” to walk one task through its cycle.'],
         act: 'queue.snapshot · receipt.issue · readiness.record · receipt.dispatch · completion.record · acceptance.record', src: src('references/fast-mode.md', 'roles/secretary.md') },
       { id: 'close', name: 'Close', mult: 'Once', state: 'pending', steps: 'Closing run · bundle · audit · close',
-        title: 'Close', sub: 'PM · Auditor · Supervisor · principal', copy: 'The closing run must already be complete and satisfied. PM records the full mission bundle over it; an Auditor records PASS or FINDINGS and the Supervisor records close PASS on that same bundle. PM with a close grant, or the principal, then closes.',
+        title: 'Close', sub: 'PM with a close grant, or you', copy: 'With a current bundle, a PASS or FINDINGS audit and a close PASS on that same bundle, PM closes with a close grant; otherwise you close. Authorised gaps are listed in the close outcomes with an owner and a reason.',
         facts: ['Every obligation is met or has an authorised deferral or cancellation.', 'Formal holds, live flags and stale bundles block the close.', 'A later run changes the delivery and requires a new bundle and reviews.'],
         act: 'run.execute [closing] · bundle.record · audit.record · close.review · mission.close', src: src('SKILL.md', 'references/runtime-v4.md') },
     ];
@@ -485,9 +542,9 @@
       issue: { lane: 'sec', short: 'receipt.issue', title: 'Issue receipt', plain: 'Freezes the contract', act: 'receipt.issue',
         copy: 'The Secretary issues a receipt from the task\'s scoped review or admission, inside its delegation. The receipt carries an immutable contract, the admission, the route and the lineage.',
         facts: ['A material contract revision supersedes the receipt.', 'Reissuing never resets a repair budget.'], src: src('references/fast-mode.md', 'roles/secretary.md') },
-      ready: { lane: 'arch', short: 'readiness.record', title: 'Readiness', plain: 'READY, or a precise list of gaps', act: 'readiness.record',
-        copy: 'The Architect reads the frozen contract and the actual prerequisites: input bytes, interpreter and libraries, accepted dependency outputs, recorded decisions and authority. READY permits dispatch; anything missing becomes a gap.',
-        facts: ['Missing assigned outputs are expected; missing input interfaces block.', 'Gaps go to the rail on the right.'], src: src('references/fast-mode.md', 'roles/architect.md') },
+      ready: { lane: 'arch', short: 'readiness.record', title: 'Ready to build?', plain: 'Environment and inputs, checked for real', act: 'receipt.snapshot · readiness.record',
+        copy: 'Before anything is built, the Architect reports whether this task can start: the environment (interpreter, registered libraries, tools), the actual input bytes, accepted outputs of the tasks it depends on, recorded decisions and authority. READY permits dispatch. Anything missing becomes a precise gap for the Secretary.',
+        facts: ['A high-level plan can put "build module A" first while its build environment does not exist yet. This is where that shows up.', 'Missing assigned outputs are expected; a missing input or environment blocks.'], src: src('references/fast-mode.md', 'roles/architect.md') },
       disp: { lane: 'sec', short: 'receipt.dispatch', title: 'Dispatch', plain: 'Rechecks READY, collisions, budget', act: 'receipt.dispatch',
         copy: 'Dispatch rechecks current READY, dependencies, decisions, write collisions with other receipts and the remaining lineage budget before construction starts.',
         facts: ['One initial candidate plus two repairs per lineage.'], src: src('references/fast-mode.md') },
@@ -524,12 +581,12 @@
       choice: { lane: 'pm', short: 'decision.record', kind: 'cond', title: 'Design choice', plain: 'When a task waits on it', act: 'decision.record',
         copy: 'A downstream task with a decision dependency stays blocked until PM records the choice and communicates material tradeoffs to the principal.',
         facts: [], src: src('references/fast-mode.md', 'roles/pm.md') },
-      sort: { lane: 'sec', short: 'secretary.coordinate', kind: 'cond', rail: true, title: 'Sort the gap', plain: 'Known producer, or needs PM', act: 'secretary.coordinate',
-        copy: 'The Secretary decides which exit the gap needs, inside its delegation. It can schedule an already defined and admitted producer. It cannot create scope, change criteria or waive holds.',
-        facts: [], src: src('roles/secretary.md', 'references/fast-mode.md') },
-      producer: { lane: 'rt', short: 'secretary.coordinate', kind: 'cond', rail: true, title: 'Producer task', plain: 'Its own cycle, then recheck READY', act: 'secretary.coordinate [schedule]',
-        copy: "The missing input comes from another task in the graph, which runs its own receipt cycle. Once that task's output is accepted and current, the Architect inspects the blocked receipt again.",
-        facts: [], src: src('references/fast-mode.md') },
+      sort: { lane: 'sec', short: 'secretary.coordinate', kind: 'cond', rail: true, title: 'Reorder or escalate', plain: 'Setup task first, or ask PM', act: 'secretary.coordinate [schedule · escalate]',
+        copy: 'The Secretary handles the gap inside its delegation. If a task that sets up the environment or produces the input already exists, the Secretary moves it ahead in the queue, within the priority range PM delegated, and schedules it. If no such task exists, or the move needs a new graph edge or a priority outside that range, the Secretary escalates to PM with the gap and the evidence.',
+        facts: ['The Secretary cannot create scope, change criteria or waive holds.'], src: src('roles/secretary.md', 'references/fast-mode.md') },
+      producer: { lane: 'rt', short: 'secretary.coordinate', kind: 'cond', rail: true, title: 'Setup task first', plain: 'Its own loop, then recheck', act: 'secretary.coordinate [schedule]',
+        copy: "The setup task (or the task that produces the missing input) runs its own receipt cycle ahead of the blocked one. Once its output is accepted and current, the Architect inspects the blocked receipt again.",
+        facts: ['Registering a new interpreter is environment.register, which only you can do.'], src: src('references/fast-mode.md') },
       decide: { lane: 'pm', short: 'decision.record', kind: 'cond', rail: true, title: 'PM decision', plain: 'Align, revise, review, reissue', act: 'decision.record · plan.record',
         copy: 'Undefined behavior, new graph edges or contract scope, and material design choices go to PM with the precise gap and evidence. PM aligns with the user within current authority, revises the plan or contract, obtains review and admission, and a new receipt is issued.',
         facts: [], src: src('roles/pm.md', 'roles/secretary.md') },
@@ -582,9 +639,10 @@
           ['done', 'Workers record completion of the new candidate.'], ['accept', 'A fresh acceptance judges the new candidate.'], ['qual', 'Accepted and current, the task qualifies.']],
           extra: [['accept', 'repair', { route: 'vert' }], ['repair', 'disp', { route: 'over' }]],
           edges: [['accept', 'repair'], ['repair', 'disp'], ['disp', 'build'], ['build', 'done'], ['done', 'accept'], ['accept', 'qual']] },
-        { id: 'missing', name: 'Missing input', steps: [
-          ['ready', 'The Architect records a gap: a declared input does not exist yet.'], ['sort', 'The Secretary finds an already defined, admitted producer.'],
-          ['producer', 'That task is scheduled and runs its own cycle.'], ['ready', 'When its output is accepted and current, the Architect inspects again and records READY.'],
+        { id: 'missing', name: 'Not ready → reorder', steps: [
+          ['ready', 'The Architect reports this task cannot start: its build environment is not set up yet, or an input does not exist.'],
+          ['sort', 'The Secretary finds the task that sets it up and moves it ahead in the queue, within the delegated priority range.'],
+          ['producer', 'The setup task runs its own loop first.'], ['ready', 'With its output accepted and current, the Architect checks again and records READY.'],
           ['disp', 'Dispatch continues.']],
           extra: [['producer', 'ready', { route: 'over' }]],
           edges: [['ready', 'sort'], ['sort', 'producer'], ['producer', 'ready'], ['ready', 'disp']] },
@@ -637,9 +695,10 @@
           ['acf', 'The findings are accepted.'], ['qual', 'They qualify like any other output.'],
           ['choice', 'A task with a decision dependency on them waits until PM records the choice.']],
           edges: [['acf', 'qual'], ['acf', 'choice']] },
-        { id: 'missing', name: 'Missing input', steps: [
-          ['ready', 'The Architect records a gap: a declared input does not exist yet.'], ['sort', 'The Secretary finds an already defined, admitted producer.'],
-          ['producer', 'That task runs its own cycle.'], ['ready', 'When its output is accepted and current, the Architect records READY.'], ['disp', 'Dispatch continues.']],
+        { id: 'missing', name: 'Not ready → reorder', steps: [
+          ['ready', 'The Architect reports this investigation cannot start: its environment is not set up yet, or an input does not exist.'],
+          ['sort', 'The Secretary finds the task that sets it up and moves it ahead in the queue, within the delegated priority range.'],
+          ['producer', 'The setup task runs its own loop first.'], ['ready', 'With its output accepted and current, the Architect records READY.'], ['disp', 'Dispatch continues.']],
           extra: [['producer', 'ready', { route: 'over' }]],
           edges: [['ready', 'sort'], ['sort', 'producer'], ['producer', 'ready'], ['ready', 'disp']] },
         { id: 'decision', name: 'Decision gap', steps: [
@@ -758,6 +817,8 @@
         const band = document.createElement('div'); band.className = 'band'; band.style.gridRow = i + 1; band.dataset.lane = lane.id;
         const name = document.createElement('span'); name.className = 'band-name'; name.textContent = lane.name;
         const small = document.createElement('small'); small.textContent = lane.note; name.appendChild(small);
+        const laneModel = { pm: 'opus', sec: 'opus', arch: 'opus', con: v === 'execution' ? 'sonnet' : 'opus', ind: 'gpt' }[lane.id];
+        if (laneModel) name.appendChild(chip(laneModel, MODELS[laneModel].full));
         band.appendChild(name); host.appendChild(band);
       });
       const railCol = Object.entries(cells).find(([id]) => S[id].rail)[1];
@@ -930,7 +991,7 @@
 
 
     /* ---------- pipeline map ---------- */
-    const PW = 1400, PH = 650, NW = 92, NH = 66;
+    const PW = 1400, PH = 586, NW = 92, NH = 66;
     const C = [376, 482, 588, 694, 800, 906, 1012, 1128];
     const R1 = 186, R2 = 300, R3 = 416;
     const PRINCIPAL = {
@@ -947,17 +1008,83 @@
         copy: 'Closing needs a current bundle, an Auditor PASS or FINDINGS, a Supervisor close PASS and a satisfied closing run. PM closes only with a close grant; otherwise you close. Authorised gaps are listed in the close outcomes with an owner and a reason.',
         facts: ['Reopening a closed mission is yours alone.'] },
     };
+    const PRE = {
+      rootrev: { kicker: 'Supervisor', title: 'Root review', sub: 'MATCH, then PM activates', act: 'root.review → root.activate', src: src('SKILL.md', 'roles/supervisor.md'),
+        copy: 'An independent Supervisor compares the proposed root with your original words and goal inventory and records MATCH, MISMATCH or INPUT_INCOMPLETE. Only after MATCH can PM activate the root; activation compiles your standing contracts and opens the first wave.',
+        facts: ['A goal missing from the root refuses GOAL_COVERAGE_GAP.'] },
+      decide: { kicker: 'PM', title: 'PM decision', sub: 'Where escalations land', act: 'decision.record · plan.record · schedule.record', src: src('roles/pm.md', 'roles/secretary.md'),
+        copy: 'The Secretary escalates what its delegation cannot cover: new behavior or scope, a design choice, NEEDS_DECISION, a missing setup task or a spent budget. PM decides inside the grant, brings material tradeoffs and anything outside the grant to you, and revises the plan, which goes back through plan review.',
+        facts: ['Inside the grant, PM needs no fresh permission from you.'] },
+      planrev: { kicker: 'Supervisor', title: 'Plan review', sub: 'PASS, then admission', act: 'plan.review → task.admit', src: src('SKILL.md', 'references/fast-mode.md'),
+        copy: 'The Supervisor checks that every goal has an obligation with an authorised producer, that no task requires an excluded effect, and that the tasks about to start carry complete check definitions. Only PASS lets them be admitted and issued; later milestones may stay undecided.',
+        facts: ['A changed task contract needs a new review and admission.'] },
+      bundle: { kicker: 'PM', title: 'Mission bundle', sub: 'After the closing run', act: 'run.execute [closing] · bundle.record', src: src('SKILL.md'),
+        copy: 'The closing-scope run must already be complete and satisfied. PM then records the full mission bundle: your original authority, grants, decisions, run inputs and logs, and the delivered bytes. Missing bytes make the bundle INPUT_INCOMPLETE.',
+        facts: ['A later run changes the delivery and needs a new bundle (loop ⑥).'] },
+      audit: { kicker: 'Auditor', title: 'Closure audit', sub: 'PASS or FINDINGS', act: 'audit.record', src: src('roles/auditor.md', 'SKILL.md'),
+        copy: "The Auditor reads the complete bundle at arm's length and records PASS or FINDINGS. INPUT_INCOMPLETE blocks the close, and findings stay disclosed.",
+        facts: [] },
+      closerev: { kicker: 'Supervisor', title: 'Close review', sub: 'Close PASS on the same bundle', act: 'close.review', src: src('SKILL.md', 'roles/supervisor.md'),
+        copy: 'The Supervisor independently reviews the same bundle and authority and records close PASS. Both reviews must bind the current bundle; a stale bundle refuses the close.',
+        facts: [] },
+      research: { kicker: 'Researcher', title: 'Research round', sub: 'Only when something is unknown', act: 'issue.report [ADVISORY] · blob put', src: src('roles/researcher.md'),
+        copy: 'PM gives the Researcher one open question and a read scope. The Researcher reads only inside that scope, checks the existing record first, and reports facts with their source, inferences marked as theirs, and proposals marked as proposals. Substantial material is stored as a blob and cited by its hash.',
+        facts: ['A Researcher never decides what you want and never changes the product.', 'Findings reach the plan only through PM; the engine has no research gate of its own.'] },
+      agree: { kicker: 'Principal', title: 'Enough is known?', sub: 'Your call, talked through with PM', act: 'plan.record once you agree', src: src('roles/pm.md', 'references/fast-mode.md'),
+        copy: 'You and PM read the research together. If the plan still depends on something unknown, PM opens another round with a sharper question. When you agree enough is known, PM writes the plan; questions that only a built experiment can answer become exploration tasks inside it.',
+        facts: ['Every decision you make fits in one plain sentence.'] },
+    };
+    const MODELS = {
+      opus: { label: 'Opus 5.5 · xhigh', full: 'Claude Opus 5.5, effort xhigh' },
+      sonnet: { label: 'Sonnet 5.5 · xhigh', full: 'Claude Sonnet 5.5, effort xhigh' },
+      gpt: { label: 'GPT-6.1-Sol · xhigh', full: 'GPT-6.1-Sol via the Codex CLI, effort xhigh' },
+    };
+    const SEAT_MODEL = { PM: 'opus', Researcher: 'opus', Secretary: 'opus', Architect: 'opus', 'Constructors · execution': 'sonnet', 'Constructors · exploration': 'opus',
+      Supervisor: 'gpt', Crititor: 'gpt', Calibrator: 'gpt', Stabilizer: 'gpt', Auditor: 'gpt' };
+    const NODE_SEATS = { charter: ['PM'], rootrev: ['Supervisor'], research: ['Researcher'], decide: ['PM'], plan: ['PM'], planrev: ['Supervisor'],
+      bundle: ['PM'], audit: ['Auditor'], closerev: ['Supervisor'], close: ['PM'],
+      issue: ['Secretary'], ready: ['Architect'], disp: ['Secretary'], build: ['Constructors · execution'], done: ['Constructors · execution'],
+      spec: ['Crititor'], accept: ['Stabilizer'], inv: ['Constructors · exploration'], dev: ['Constructors · exploration'], crit: ['Crititor'], cal: ['Calibrator'], acf: ['Stabilizer'] };
+    const CHIP_AT = { charter: 'inside', rootrev: 'inside', research: 'inside', decide: 'inside', plan: 'inside', planrev: 'inside',
+      bundle: 'inside', audit: 'inside', closerev: 'inside', close: 'inside', issue: 'below', ready: 'below' };
+    function chip(model, title) {
+      const c = document.createElement('span'); c.className = 'mchip ' + model; c.textContent = MODELS[model].label;
+      if (title) c.title = title;
+      return c;
+    }
+    function seatModelFacts(seats) {
+      return seats.map(seat => `${seat}: ${MODELS[SEAT_MODEL[seat]].full}.`);
+    }
+    let showModels = false;
+    try { showModels = localStorage.getItem('mp-workflow-models') === 'on'; } catch (_) {}
+    function applyModels() {
+      document.body.classList.toggle('show-models', showModels);
+      $('#model-btn').setAttribute('aria-pressed', String(showModels));
+    }
+    $('#model-btn').addEventListener('click', () => {
+      showModels = !showModels;
+      try { localStorage.setItem('mp-workflow-models', showModels ? 'on' : 'off'); } catch (_) {}
+      applyModels(); renderInspector();
+    });
     const PN = [
       { id: 'p-goals', kind: 'principal', x: 20, y: 28, w: 220, h: 58, role: 'You set', title: 'Goals · limits · grants', note: 'authority.record · grant.record' },
       { id: 'p-trade', kind: 'principal', x: 250, y: 28, w: 210, h: 58, role: 'You decide', title: 'Material tradeoffs', note: 'PM explains, you choose' },
       { id: 'p-amend', kind: 'principal', x: 470, y: 28, w: 250, h: 58, role: 'You amend', title: 'Anything outside the grant', note: 'authority.amend · latch.release' },
       { id: 'p-close', kind: 'principal', x: 1160, y: 28, w: 226, h: 58, role: 'You close', title: 'Close · or grant the close', note: 'mission.close · mission.reopen' },
-      { id: 'charter', kind: 'major', x: 20, y: 250, w: 130, h: 96, role: 'PM · Supervisor', title: 'Charter', note: 'align · root review · activate' },
-      { id: 'plan', kind: 'major', x: 180, y: 250, w: 150, h: 96, role: 'PM · Supervisor', title: 'Plan', note: 'task graph · review · delegate' },
-      { id: 'close', kind: 'major', x: 1256, y: 250, w: 130, h: 96, role: 'PM · Auditor · Supervisor', title: 'Close', note: 'after every task qualifies' },
+      { id: 'charter', kind: 'major', x: 20, y: 124, w: 130, h: 64, role: 'PM', title: 'Charter', note: 'root.propose' },
+      { id: 'rootrev', x: 20, y: 214, w: 130, h: 64, role: 'Supervisor', title: 'Root review', note: 'MATCH → activate' },
+      { id: 'research', kind: 'cond', x: 20, y: 394, w: 130, h: 64, role: 'Researcher', title: 'Research round', note: 'facts · proposals' },
+      { id: 'agree', kind: 'principal', x: 20, y: 304, w: 130, h: 64, role: 'You · with PM', title: 'Enough is known?', note: 'yes → plan' },
+      { id: 'decide', x: 190, y: 124, w: 140, h: 64, role: 'PM', title: 'PM decision', note: 'decide · revise' },
+      { id: 'plan', kind: 'major', x: 190, y: 304, w: 140, h: 64, role: 'PM', title: 'Plan', note: 'high-level graph' },
+      { id: 'planrev', x: 190, y: 394, w: 140, h: 64, role: 'Supervisor', title: 'Plan review', note: 'PASS → admit' },
+      { id: 'close', kind: 'major', x: 1256, y: 124, w: 130, h: 64, role: 'PM', title: 'Close', note: 'with close grant' },
+      { id: 'closerev', x: 1256, y: 214, w: 130, h: 64, role: 'Supervisor', title: 'Close review', note: 'close PASS' },
+      { id: 'audit', x: 1256, y: 304, w: 130, h: 64, role: 'Auditor', title: 'Closure audit', note: 'PASS or FINDINGS' },
+      { id: 'bundle', x: 1256, y: 394, w: 130, h: 64, role: 'PM', title: 'Mission bundle', note: 'after closing run' },
       { id: 'queue', kind: 'gate', x: C[0], y: R1, role: 'Runtime', title: 'Queue' },
       { id: 'issue', x: C[1], y: R1, role: 'Secretary', title: 'Issue receipt' },
-      { id: 'ready', x: C[2], y: R1, role: 'Architect', title: 'Readiness' },
+      { id: 'ready', x: C[2], y: R1, role: 'Architect', title: 'Ready to build?' },
       { id: 'disp', x: C[3], y: R1, role: 'Secretary', title: 'Dispatch' },
       { id: 'build', kind: 'stack', x: C[2], y: R2, role: 'Constructors', title: 'Build × M' },
       { id: 'done', x: C[3], y: R2, role: 'Constructors', title: 'Completion' },
@@ -971,12 +1098,24 @@
       { id: 'qual', kind: 'gate', x: C[7], y: 358, role: 'Runtime', title: 'Qualified' },
     ];
     const PE = {
-      'w-goals': { p: [[85, 86], [85, 250]] },
-      'w-trade': { p: [[262, 86], [262, 250]], both: true },
-      'w-amend': { p: [[540, 86], [540, 112], [312, 112], [312, 250]], both: true },
-      'w-close': { p: [[1321, 86], [1321, 250]] },
-      'w-cp': { p: [[150, 298], [180, 298]] },
-      'w-pq': { p: [[330, 298], [350, 298], [350, 219], [376, 219]] },
+      'w-goals': { p: [[85, 86], [85, 124]] },
+      'w-trade': { p: [[280, 86], [280, 124]], both: true },
+      'w-amend': { p: [[540, 86], [540, 104], [312, 104], [312, 124]], both: true },
+      'w-close': { p: [[1321, 86], [1321, 124]] },
+      'w-cr': { p: [[85, 188], [85, 214]] },
+      'w-ra': { p: [[85, 278], [85, 304]] },
+      'w-ap': { p: [[150, 336], [190, 336]] },
+      'w-ar': { p: [[85, 368], [85, 394]], cond: true },
+      'w-rr': { p: [[85, 458], [85, 474], [8, 474], [8, 336], [20, 336]], cond: true },
+      'w-dp': { p: [[260, 188], [260, 304]] },
+      'w-pr': { p: [[260, 368], [260, 394]] },
+      'w-pq': { p: [[330, 426], [346, 426], [346, 219], [376, 219]] },
+      'w-esc': { p: [[560, 130], [560, 116], [338, 116], [338, 156], [330, 156]] },
+      'w-qc': { p: [[1220, 391], [1242, 391], [1242, 426], [1256, 426]] },
+      'w-ba': { p: [[1321, 394], [1321, 368]] },
+      'w-ac': { p: [[1321, 304], [1321, 278]] },
+      'w-cl': { p: [[1321, 214], [1321, 188]] },
+      'w-refresh': { p: [[1386, 156], [1394, 156], [1394, 474], [1321, 474], [1321, 458]], fail: true },
       'w-qi': { p: [[468, 219], [482, 219]] }, 'w-ir': { p: [[574, 219], [588, 219]] }, 'w-rd': { p: [[680, 219], [694, 219]] },
       'w-fork-e': { p: [[740, 252], [740, 272], [581, 272], [581, 333], [588, 333]] },
       'w-fork-x': { p: [[581, 272], [581, 449], [588, 449]] },
@@ -985,32 +1124,39 @@
       'w-ab': { p: [[998, 333], [1116, 333]], noArrow: true }, 'w-xb': { p: [[1104, 449], [1116, 449]], noArrow: true },
       'w-bus': { p: [[1116, 333], [1116, 449]], noArrow: true }, 'w-bq': { p: [[1116, 391], [1128, 391]] },
       'w-loop1': { p: [[1174, 424], [1174, 532], [386, 532], [386, 252]] },
-      'w-rw-e': { p: [[952, 366], [952, 388], [634, 388], [634, 372]] },
-      'w-rw-s': { p: [[846, 366], [846, 388]], noArrow: true },
-      'w-rw-x': { p: [[846, 482], [846, 508], [634, 508], [634, 488]] },
-      'w-rw-a': { p: [[1058, 482], [1058, 508], [846, 508]], noArrow: true },
-      'w-miss': { p: [[612, 186], [612, 170], [656, 170], [656, 186]] },
-      'w-esc': { p: [[860, 556], [860, 612], [255, 612], [255, 346]] },
-      'w-qc': { p: [[1220, 391], [1244, 391], [1244, 298], [1256, 298]] },
-      'w-refresh': { p: [[1300, 346], [1300, 368], [1352, 368], [1352, 346]] },
+      'w-rw-e': { p: [[952, 366], [952, 388], [634, 388], [634, 372]], fail: true },
+      'w-rw-s': { p: [[846, 366], [846, 388]], noArrow: true, fail: true },
+      'w-rw-x': { p: [[846, 482], [846, 508], [634, 508], [634, 488]], fail: true },
+      'w-rw-a': { p: [[1058, 482], [1058, 508], [846, 508]], noArrow: true, fail: true },
+      'w-miss': { p: [[634, 186], [634, 172], [422, 172], [422, 186]], fail: true },
+      'w-rootfail': { p: [[150, 246], [168, 246], [168, 156], [150, 156]], fail: true },
+      'w-planfail': { p: [[190, 440], [172, 440], [172, 350], [190, 350]], fail: true },
+      'w-findings': { p: [[1256, 330], [1174, 330], [1174, 358]], fail: true },
+      'w-crfail': { p: [[1386, 246], [1394, 246]], fail: true, noArrow: true },
+      'w-aufail': { p: [[1386, 336], [1394, 336]], fail: true, noArrow: true },
     };
     const LOOPS = [
-      { id: '1', name: 'Next task', pill: 'qualified → unlocks the next tasks', at: [780, 532], path: ['w-loop1', 'w-bq'], nodes: ['qual', 'queue'],
-        text: 'A task that qualifies unlocks the tasks waiting for it. The queue then picks the next eligible task by priority.',
-        act: 'queue.snapshot', src: src('references/fast-mode.md', 'roles/secretary.md') },
-      { id: '2', name: 'Review → rework', pill: 'not accepted → rebuild', at: [740, 388], path: ['w-rw-e', 'w-rw-s', 'w-rw-x', 'w-rw-a'], nodes: ['accept', 'spec', 'build', 'crit', 'acf', 'inv'],
+      { key: 'research', name: 'Research round', pill: 'another round', at: [72, 474], path: ['w-ar', 'w-rr'], nodes: ['research', 'agree'],
+        text: 'When something the plan depends on is unknown, PM gives a Researcher a question and a read scope. The Researcher reports facts with their sources, inferences and proposals, kept apart. You and PM read it together; while something is still unknown, another round starts. When you agree enough is known, PM writes the plan.',
+        act: 'issue.report [ADVISORY] · blob put', src: src('roles/researcher.md', 'roles/pm.md') },
+      { key: 'missing', name: 'Not ready → reorder', pill: 'not ready → Secretary reorders', at: [528, 172], path: ['w-miss'], nodes: ['ready', 'queue'],
+        text: 'The Architect reports whether the environment and inputs are ready to start building. If the plan put "build module A" first but its build environment is not set up, the Secretary changes the order: the setup task moves ahead in the queue, within the priority range PM delegated, and runs its own loop first. When it qualifies, the Architect checks again. If no setup task exists yet, the Secretary escalates and PM adds one to the plan (loop ⑤).',
+        act: 'readiness.record · secretary.coordinate [schedule] · schedule.record', src: src('roles/architect.md', 'roles/secretary.md', 'references/fast-mode.md') },
+      { key: 'rework', name: 'Review → rework', pill: 'not accepted → rebuild', at: [740, 388], path: ['w-rw-e', 'w-rw-s', 'w-rw-x', 'w-rw-a'], nodes: ['accept', 'spec', 'build', 'crit', 'acf', 'inv'],
         text: 'Execution: when the Stabilizer, or a declared specialist, does not accept, the Constructors rebuild. Exploration: when the Crititor asks for changes or fails the report, or the findings are not accepted, the Constructors investigate again and write the next round. Each rework is a new cycle the Secretary routes and dispatches: execution allows one initial candidate plus two repairs, exploration three rounds.',
         act: 'report.record [critique: CHANGES_REQUESTED · FAIL] · secretary.coordinate [repair] · receipt.dispatch', src: src('roles/crititor.md', 'references/runtime-v4.md') },
-      { id: '3', name: 'Missing input', pill: 'missing input', at: [690, 160], path: ['w-miss'], nodes: ['ready'],
-        text: 'Readiness finds an input that does not exist yet. If a task already produces it, that task runs its own loop first, then readiness is checked again.',
-        act: 'readiness.record · secretary.coordinate [schedule]', src: src('references/fast-mode.md', 'roles/architect.md') },
-      { id: '4', name: 'Escalate', pill: 'escalate to PM · new scope, design choice, spent budget', at: [560, 612], path: ['w-esc', 'w-trade', 'w-amend'], nodes: ['plan', 'p-trade', 'p-amend'],
-        text: 'New behavior or scope, a design choice, NEEDS_DECISION or a spent budget goes to PM. PM aligns with you when the choice is material or outside the grant, revises the plan and gets it reviewed again.',
+      { key: 'next', name: 'Next task', pill: 'qualified → unlocks the next tasks', at: [780, 532], path: ['w-loop1', 'w-bq'], nodes: ['qual', 'queue'],
+        text: 'A task that qualifies unlocks the tasks waiting for it. The queue then picks the next eligible task by priority.',
+        act: 'queue.snapshot', src: src('references/fast-mode.md', 'roles/secretary.md') },
+      { key: 'escalate', name: 'Escalate', pill: 'escalate to PM', at: [450, 116], path: ['w-esc', 'w-trade', 'w-amend', 'w-dp', 'w-pr'], nodes: ['decide', 'p-trade', 'p-amend', 'plan', 'planrev'],
+        text: 'New behavior or scope, a design choice, NEEDS_DECISION, a missing setup task or a spent budget goes to the PM decision box. PM aligns with you when the choice is material or outside the grant, revises the plan, and the Supervisor reviews it again before new work is issued.',
         act: 'secretary.coordinate [escalate] · decision.record · plan.review', src: src('roles/secretary.md', 'roles/pm.md') },
-      { id: '5', name: 'Re-bundle', pill: 're-bundle', at: [1326, 386], path: ['w-refresh'], nodes: ['close'],
-        text: 'A later run changes the delivery, so the bundle, the audit and the close review are made again before the mission can close.',
+      { key: 'rebundle', name: 'Re-bundle', pill: 're-bundle', at: [1357, 474], path: ['w-refresh', 'w-crfail', 'w-aufail', 'w-ba', 'w-ac', 'w-cl'], nodes: ['bundle', 'audit', 'closerev', 'close'],
+        text: 'A close review that does not pass, an audit that is missing bytes, or a later run that changes the delivery sends PM back to rebuild the bundle. The audit and the close review then run again on the new bundle.',
         act: 'bundle.record · audit.record · close.review', src: src('SKILL.md', 'references/runtime-v4.md') },
     ];
+    LOOPS.forEach((L, i) => { L.id = String(i + 1); });
+    const DIGITS = '①②③④⑤⑥';
     const HOLD_NOTE = 'A mandatory counterexample fences only its own scope; unrelated tasks continue. The Supervisor screens it and PM may permit up to two repairs. A drift latch is released by you or by an independent contest.';
 
     function renderPipe() {
@@ -1044,17 +1190,30 @@
         b.innerHTML = '<span class="p-role"></span><span class="p-title"></span>' + (n.note ? '<span class="p-note"></span>' : '');
         b.querySelector('.p-role').textContent = n.role; b.querySelector('.p-title').textContent = n.title;
         if (n.note) b.querySelector('.p-note').textContent = n.note;
+        if (NODE_SEATS[n.id]) {
+          const at = CHIP_AT[n.id] || 'above';
+          const box = document.createElement('span'); box.className = 'mchips ' + at;
+          const byModel = new Map();
+          for (const seat of NODE_SEATS[n.id]) byModel.set(SEAT_MODEL[seat], [...(byModel.get(SEAT_MODEL[seat]) || []), seat]);
+          for (const [model, seats] of byModel) box.appendChild(chip(model, `${seats.join(', ')}: ${MODELS[model].full}`));
+          b.appendChild(box);
+          if (at === 'inside') b.classList.add('has-inside');
+        }
         b.addEventListener('click', () => {
-          focus = n.kind === 'principal' ? { kind: 'principal', id: n.id } : ['charter', 'plan', 'close'].includes(n.id) ? { kind: 'mission', id: n.id } : { kind: 'pnode', id: n.id };
+          focus = PRE[n.id] ? { kind: 'pre', id: n.id } : n.kind === 'principal' ? { kind: 'principal', id: n.id } : ['charter', 'plan', 'close'].includes(n.id) ? { kind: 'mission', id: n.id } : { kind: 'pnode', id: n.id };
           markPipe(); renderInspector();
         });
         pipe.appendChild(b);
       }
-      const pills = [...LOOPS.map(L => [L, L.at, L.pill]), [LOOPS[1], [740, 508], 'changes requested → next round']];
+      for (const [text, x, y] of [['MISMATCH', 168, 201], ['FAIL', 172, 381], ['FINDINGS → case', 1188, 316]]) {
+        const l = document.createElement('span'); l.className = 'flabel'; l.textContent = text;
+        Object.assign(l.style, { left: x + 'px', top: y + 'px' }); pipe.appendChild(l);
+      }
+      const pills = [...LOOPS.map(L => [L, L.at, L.pill]), [LOOPS.find(L => L.key === 'rework'), [740, 508], 'changes requested → next round']];
       for (const [L, at, text] of pills) {
         const b = document.createElement('button'); b.type = 'button'; b.className = 'ppill'; b.dataset.loop = L.id;
         Object.assign(b.style, { left: at[0] + 'px', top: at[1] + 'px' });
-        const n = document.createElement('b'); n.textContent = '①②③④⑤'[+L.id - 1]; b.append(n, text);
+        const n = document.createElement('b'); n.textContent = DIGITS[+L.id - 1]; b.append(n, text);
         b.addEventListener('click', () => selectLoop(L.id));
         pipe.appendChild(b);
       }
@@ -1062,7 +1221,7 @@
       keys.replaceChildren(...LOOPS.map(L => {
         const b = document.createElement('button'); b.type = 'button'; b.className = 'loop-key'; b.dataset.loop = L.id;
         b.innerHTML = '<span class="n"></span><strong></strong><span></span>';
-        b.querySelector('.n').textContent = '①②③④⑤'[+L.id - 1]; b.querySelector('strong').textContent = L.name; b.querySelector('span:last-child').textContent = L.text;
+        b.querySelector('.n').textContent = DIGITS[+L.id - 1]; b.querySelector('strong').textContent = L.name; b.querySelector('span:last-child').textContent = L.text;
         b.addEventListener('click', () => selectLoop(L.id));
         return b;
       }));
@@ -1084,8 +1243,8 @@
         const hot = !!loop && loop.path.includes(id);
         const p = document.createElementNS(NS, 'path');
         p.setAttribute('d', e.p.map((pt, i) => (i ? 'L' : 'M') + pt[0] + ' ' + pt[1]).join(' '));
-        p.setAttribute('class', ['wire', e.cond ? 'cond' : '', hot ? 'hot' : '', loop && !hot ? 'dim' : ''].filter(Boolean).join(' '));
-        const m = `url(#${hot ? 'ah-hot' : 'ah'})`;
+        p.setAttribute('class', ['wire', e.cond ? 'cond' : '', e.fail ? 'fail' : '', hot ? 'hot' : '', loop && !hot ? 'dim' : ''].filter(Boolean).join(' '));
+        const m = `url(#${hot ? 'ah-hot' : e.fail ? 'ah-fail' : 'ah'})`;
         if (!e.noArrow) p.setAttribute('marker-end', m);
         if (e.both) p.setAttribute('marker-start', m);
         svg.appendChild(p);
@@ -1095,7 +1254,7 @@
       const loop = focus.kind === 'loop' ? LOOPS.find(L => L.id === focus.id) : null;
       document.querySelectorAll('.pnode').forEach(b => {
         const id = b.dataset.id;
-        const sel = (['principal', 'pnode', 'mission'].includes(focus.kind) && focus.id === id) || (loop && loop.nodes.includes(id));
+        const sel = (['principal', 'pnode', 'mission', 'pre'].includes(focus.kind) && focus.id === id) || (loop && loop.nodes.includes(id));
         b.classList.toggle('on', !!sel);
       });
       document.querySelectorAll('[data-loop]').forEach(b => b.setAttribute('aria-pressed', String(!!loop && b.dataset.loop === loop.id)));
@@ -1118,9 +1277,12 @@
       if (focus.kind === 'principal') {
         const pr = PRINCIPAL[focus.id];
         d = { kicker: 'Principal', title: pr.title, sub: pr.sub, copy: pr.copy, facts: pr.facts, act: pr.act, src: pr.src };
+      } else if (focus.kind === 'pre') {
+        const x = PRE[focus.id];
+        d = { kicker: x.kicker, title: x.title, sub: x.sub, copy: x.copy, facts: x.facts, act: x.act, src: x.src };
       } else if (focus.kind === 'loop') {
         const L = LOOPS.find(x => x.id === focus.id);
-        d = { kicker: 'Loop ' + '\u2460\u2461\u2462\u2463\u2464'[+L.id - 1], title: L.name, sub: L.pill, copy: L.text, act: L.act, src: L.src };
+        d = { kicker: 'Loop ' + DIGITS[+L.id - 1], title: L.name, sub: L.pill, copy: L.text, act: L.act, src: L.src };
       } else if (focus.kind === 'pnode') {
         const st = S[focus.id], lane = LANES.find(l => l.id === st.lane);
         d = { kicker: lane.name, title: st.title, sub: st.plain, copy: st.copy, facts: st.facts, act: st.act, src: st.src };
@@ -1152,6 +1314,8 @@
         for (const [kk, vv] of d.grid) { const w = document.createElement('div'); const dt = document.createElement('dt'); dt.textContent = kk; const dd = document.createElement('dd'); dd.textContent = vv; w.append(dt, dd); dl.appendChild(w); }
         colB.appendChild(dl);
       }
+      const seatsHere = ['pnode', 'mission', 'pre'].includes(focus.kind) ? NODE_SEATS[focus.id] : null;
+      if (showModels && seatsHere) d.facts = [...seatModelFacts(seatsHere), ...(d.facts || [])];
       if (d.facts && d.facts.length) {
         const ul = document.createElement('ul'); ul.className = 'ins-list';
         for (const f of d.facts) { const li = document.createElement('li'); li.textContent = f; ul.appendChild(li); }
@@ -1195,6 +1359,7 @@
 
     if (capture) document.body.classList.add('capture');
     applyTheme();
+    applyModels();
     focus = { kind: 'mission', id: 'tasks' };
     renderPipe();
     markPipe();
