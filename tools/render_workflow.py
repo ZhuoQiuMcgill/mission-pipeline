@@ -1,14 +1,14 @@
-"""Render docs/workflow-3.0.html into the README screenshots, light and dark.
+"""Render docs/workflow-3.0.html into the README screenshot (light theme).
 
 Opens the page in capture mode (both views, no controls) with a headless Chromium,
-reads the page height the page reports, then takes one full-height screenshot per
-theme. Writes docs/workflow-3.0-light.png and docs/workflow-3.0-dark.png.
+reads the page height the page reports, then takes one full-height screenshot.
+Writes docs/workflow-3.0-light.png.
 
     python tools/render_workflow.py [--chrome PATH] [--width 1600] [--no-sandbox]
 
 The browser is found from --chrome, then $CHROME, then common executable names,
 then a Playwright download under ~/.cache/ms-playwright. Run it after every edit to
-the HTML so the README images never drift from the page.
+the HTML so the README image never drifts from the page.
 """
 import argparse
 import glob
@@ -61,7 +61,7 @@ def main():
     with tempfile.TemporaryDirectory() as profile:
         # A shared profile keeps the web fonts cached, so measuring and capturing see the same layout.
         run(chrome, [f"--window-size={opts.width},1200", "--dump-dom", f"{PAGE.as_uri()}?capture"], sandbox, profile)
-        for theme in ("light", "dark"):
+        for theme in ("light",):
             url = f"{PAGE.as_uri()}?capture&theme={theme}"
             dom = run(chrome, [f"--window-size={opts.width},1200", "--dump-dom", url], sandbox, profile).stdout
             match = re.search(r'<meta name="capture-height" content="(\d+)"', dom)

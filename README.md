@@ -6,12 +6,9 @@ A traceable engineering workflow with PM user alignment, delegated coordination,
 PM user alignment, independent planning and final audit. Schema 4 stays readable;
 historical tasks keep their original policy.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/workflow-3.0-dark.png">
-  <img alt="Mission Pipeline 3.0 workflow: the PM's task graph, then one task's receipt cycle laid out by seat" src="docs/workflow-3.0-light.png">
-</picture>
+[![Mission Pipeline 3.0 pipeline: the principal's touchpoints, the PM's charter and plan, the task loop with execution and exploration tracks and its numbered loops, and closure](docs/workflow-3.0-light.png)](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-3.0.html)
 
-[Interactive workflow](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-3.0.html) — select tasks, walk one task's cycle seat by seat and replay recovery scenarios. The page is [docs/workflow-3.0.html](docs/workflow-3.0.html); after editing it, regenerate both images with `python tools/render_workflow.py`.
+[Interactive workflow](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-3.0.html) — select tasks, walk one task's cycle seat by seat and replay recovery scenarios. The page is [docs/workflow-3.0.html](docs/workflow-3.0.html); after editing it, regenerate the image with `python tools/render_workflow.py`.
 
 ## 3.0.0 — execution and exploration
 

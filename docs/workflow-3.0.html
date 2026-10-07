@@ -35,6 +35,21 @@
       --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
       color-scheme: dark;
     }
+    /* The page's own Theme button wins over the system and any host setting */
+    html:root[data-look="light"] {
+      --bg: #e9e6e1; --paper: #f3f1ed; --ink: #0d0f0d; --ink-2: #3a3c37; --muted: #6f6d65;
+      --line: #a9a497; --hair: #d2cdc3; --grid: rgba(40, 36, 20, .05);
+      --accent: #b97a33; --accent-soft: rgba(185, 122, 51, .14); --accent-ink: #8a5821;
+      --ok: #55613f; --edge: #77746b; --on-ink: #f3f1ed; --shadow: rgba(30, 26, 14, .10);
+      color-scheme: light;
+    }
+    html:root[data-look="dark"] {
+      --bg: #11181b; --paper: #162024; --ink: #e0e3dc; --ink-2: #c4cac3; --muted: #a6b0b1;
+      --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
+      --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e;
+      --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      color-scheme: dark;
+    }
 
     * { box-sizing: border-box; }
     html { -webkit-text-size-adjust: 100%; }
@@ -123,7 +138,7 @@
     .graph-tags { position: absolute; z-index: 3; font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); pointer-events: none; }
 
     /* Swimlanes */
-    .lanes { display: grid; grid-template-columns: repeat(var(--cols), minmax(92px, 1fr)); grid-template-rows: repeat(6, auto); column-gap: 14px; padding: 0 16px 46px; min-width: calc(var(--cols) * 106px + 32px); }
+    .lanes { display: grid; grid-template-columns: repeat(var(--cols), minmax(92px, 1fr)); grid-template-rows: repeat(7, auto); column-gap: 14px; padding: 0 16px 46px; min-width: calc(var(--cols) * 106px + 32px); }
     .band { position: relative; grid-column: 1 / -1; margin: 0 -16px; border-bottom: 1px solid var(--hair); }
     .band:nth-of-type(odd) { background: color-mix(in srgb, var(--bg) 45%, transparent); }
     .band-name { position: absolute; z-index: 4; margin: 7px 0 0 10px; padding: 1px 5px; background: var(--paper); font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-2); }
@@ -197,16 +212,70 @@
     .key .k-line { height: 0; border: 0; border-top: 1.5px solid var(--edge); background: none; }
     .key .k-dash { height: 0; border: 0; border-top: 1.5px dashed var(--edge); background: none; }
     .key .k-hot { height: 0; border: 0; border-top: 2px solid var(--accent); background: none; }
+    .key .k-pr { background: var(--ink); }
     .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; margin-top: 18px; font-size: 11.5px; color: var(--muted); }
     .foot nav { display: flex; flex-wrap: wrap; gap: 6px 16px; }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-    /* Capture mode renders both views for the README screenshots */
+    /* Pipeline map: one fixed canvas, scaled to fit */
+    .pipe-wrap { margin: 0; overflow: hidden; }
+    .pipe { position: absolute; left: 0; top: 0; width: 1400px; height: 650px; transform-origin: 0 0; }
+    .pipe .wire.dim { opacity: .28; }
+    .p-band { position: absolute; left: 0; top: 0; width: 1400px; height: 100px; background: color-mix(in srgb, var(--accent) 8%, transparent); border-bottom: 1px solid var(--hair); }
+    .p-band-name { position: absolute; left: 20px; top: 8px; font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); }
+    .p-band-name small { margin-left: 8px; font-weight: 400; letter-spacing: .04em; text-transform: none; color: var(--muted); }
+    .loopbox { position: absolute; z-index: 1; border: 1.5px solid var(--ink); background: var(--paper);
+      box-shadow: 6px 6px 0 -1.5px var(--paper), 6px 6px 0 0 var(--line), 12px 12px 0 -1.5px var(--paper), 12px 12px 0 0 var(--hair); }
+    .loop-title { position: absolute; z-index: 3; display: flex; align-items: baseline; gap: 10px; }
+    .loop-title b { font-size: 15px; font-weight: 700; letter-spacing: .08em; }
+    .loop-title span { font-size: 11.5px; color: var(--muted); }
+    .track { position: absolute; z-index: 3; display: grid; gap: 2px; }
+    .track b { font-size: 12px; font-weight: 700; letter-spacing: .12em; }
+    .track span { font-size: 11px; color: var(--muted); line-height: 1.35; }
+    .pnode { position: absolute; z-index: 3; display: grid; align-content: center; gap: 2px; padding: 6px 9px; background: var(--paper); border: 1px solid var(--ink); transition: border-color .2s, box-shadow .2s, opacity .2s; }
+    .pnode:hover { background: var(--bg); }
+    .pnode .p-role { font-size: 9px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+    .pnode .p-title { font-size: 12.5px; font-weight: 700; line-height: 1.2; }
+    .pnode .p-note { font: 9.5px/1.35 var(--mono); color: var(--muted); }
+    .pnode.major { border-width: 1.5px; padding: 10px 12px; }
+    .pnode.major .p-title { font-size: 17px; }
+    .pnode.cond { border-style: dashed; }
+    .pnode.gate { border: 3px double var(--ink); }
+    .pnode.stack { box-shadow: 4px 4px 0 -1px var(--paper), 4px 4px 0 0 var(--ink), 8px 8px 0 -1px var(--paper), 8px 8px 0 0 var(--ink); }
+    .pnode.principal { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+    .pnode.principal:hover { background: var(--ink-2); }
+    .pnode.principal .p-role, .pnode.principal .p-note { color: color-mix(in srgb, var(--on-ink) 72%, transparent); }
+    .pnode.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .pnode.stack.on { box-shadow: 0 0 0 1px var(--accent), 4px 4px 0 0 var(--paper), 4px 4px 0 1px var(--accent); }
+    .pnode.principal.on { box-shadow: 0 0 0 2px var(--accent); }
+    .ppill { position: absolute; z-index: 4; transform: translate(-50%, -50%); white-space: nowrap; padding: 2px 8px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; background: var(--paper); border: 1px solid var(--line); color: var(--ink-2); }
+    .ppill b { color: var(--accent-ink); margin-right: 5px; }
+    .ppill:hover { border-color: var(--accent); }
+    .ppill[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-ink); }
+    .ppill[aria-pressed="true"] b { color: inherit; }
+    .loops { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 0 28px; margin-top: 18px; }
+    .loop-key { display: grid; align-content: start; grid-template-columns: 26px minmax(0, 1fr); gap: 2px 8px; padding: 10px 0; border-top: 1px solid var(--hair); text-align: left; }
+    .loop-key .n { grid-row: span 2; font-size: 15px; font-weight: 700; color: var(--accent-ink); }
+    .loop-key strong { font-size: 13px; font-weight: 700; }
+    .loop-key span { font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+    .loop-key[aria-pressed="true"] strong { color: var(--accent-ink); }
+    .loop-key.note { cursor: default; }
+    .loop-key.note .n { color: var(--muted); }
+    .sub-title { margin: 34px 0 4px; font-size: 18px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .compare { width: 100%; min-width: 760px; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+    .compare th, .compare td { text-align: left; vertical-align: top; padding: 9px 14px 9px 0; border-top: 1px solid var(--hair); }
+    .compare thead th { font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); border-top: 2px solid var(--ink); }
+    .compare thead th:nth-child(2), .compare thead th:nth-child(3) { color: var(--ink); }
+    .compare tbody th { width: 15%; font-size: 10.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2); }
+    .compare td { width: 30%; line-height: 1.55; color: var(--ink-2); }
+    .compare td:last-child { width: 25%; color: var(--muted); }
+
+    /* Capture mode renders the pipeline for the README screenshots */
     body.capture .shell { max-width: none; padding: 32px 40px; }
     body.capture .work { grid-template-columns: minmax(0, 1fr); }
     body.capture .inspector, body.capture .tabs, body.capture .theme-btn, body.capture .bar, body.capture .scenario-steps { display: none !important; }
-    body.capture .view[hidden] { display: block !important; }
-    body.capture #view-detail { margin-top: 30px; }
+    body.capture #view-pipeline { display: block !important; }
+    body.capture #view-overview, body.capture #view-detail, body.capture .legend { display: none !important; }
 
     @media (max-width: 1180px) {
       .work { grid-template-columns: minmax(0, 1fr); }
@@ -236,23 +305,51 @@
         <span class="b3">SCHEMA 4<b>3.0</b></span>
       </div>
       <div class="mast-side">
-        <p class="mast-note" style="margin:0">PM plans once · every task runs its own receipt cycle · the mission closes once</p>
+        <p class="mast-note" style="margin:0">You set the goals · PM plans · every task runs its own loop · the mission closes once</p>
         <div class="tabs" role="group" aria-label="View">
-          <button type="button" class="tab" data-view="overview" aria-pressed="true"><small>01</small>Overview</button>
-          <button type="button" class="tab" data-view="detail" aria-pressed="false"><small>02</small>Task detail</button>
+          <button type="button" class="tab" data-view="pipeline" aria-pressed="true"><small>01</small>Pipeline</button>
+          <button type="button" class="tab" data-view="overview" aria-pressed="false"><small>02</small>Task graph</button>
+          <button type="button" class="tab" data-view="detail" aria-pressed="false"><small>03</small>Task detail</button>
           <button type="button" class="theme-btn" id="theme-btn">Theme · Auto</button>
         </div>
       </div>
     </header>
 
-    <nav class="mission" id="mission" aria-label="Mission timeline"></nav>
-
     <div class="work">
       <div>
-        <section class="view" id="view-overview" aria-labelledby="ov-title">
+        <section class="view" id="view-pipeline" aria-labelledby="pl-title">
           <div class="view-head">
             <div>
-              <h1 class="view-title" id="ov-title">Task graph</h1>
+              <h1 class="view-title" id="pl-title">Pipeline</h1>
+              <p class="view-sub">You, the principal, set the goals and answer the questions only you can answer. PM plans once and revises when needed. Every task then goes around the task loop on its own, many at once, on the execution or the exploration track. Select any box or numbered loop for details.</p>
+            </div>
+          </div>
+          <div class="scroll"><div class="board pipe-wrap" id="pipe-wrap"><div class="pipe" id="pipe"></div></div></div>
+          <div class="loops" id="loops" role="group" aria-label="Loops"></div>
+          <h2 class="sub-title">Execution and exploration</h2>
+          <p class="view-sub">Each task picks its track through <code>work_type</code>. A parent can hold both kinds; a specified experiment can be execution, and interpreting its data to choose a design is exploration.</p>
+          <div class="scroll">
+            <table class="compare">
+              <thead><tr><th scope="col"></th><th scope="col">Execution</th><th scope="col">Exploration</th><th scope="col">Milestone</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Use it when</th><td>The design and the acceptance criteria are already decided.</td><td>Findings are needed before a decision can be made.</td><td>Future scope whose details are still undecided.</td></tr>
+                <tr><th scope="row">Constructors</th><td>Build and verify in disjoint scopes, one or more workers.</td><td>Investigate within agreed evidence and stopping bounds.</td><td>None: no workers, writes, outputs or runs.</td></tr>
+                <tr><th scope="row">Reports</th><td>Each worker records completion; the runtime assembles one candidate.</td><td>Completion, then a development report with evidence, findings and the stops met.</td><td>None.</td></tr>
+                <tr><th scope="row">Independent review</th><td>One Stabilizer acceptance. A Crititor PASS only when <code>specialist_review</code> is declared.</td><td>A Crititor critique always, then Stabilizer acceptance.</td><td>None.</td></tr>
+                <tr><th scope="row">Calibration</th><td>Not routine. Formal cases and latches still apply.</td><td>Required when the task repairs a case, the root was revised, or the contract was touched after context compaction.</td><td>None.</td></tr>
+                <tr><th scope="row">A valid result</th><td>The delivered product meets every criterion on real bytes and runs.</td><td>Honest findings against the agreed criteria, including negative or inconclusive ones.</td><td>PM refines it into producing tasks.</td></tr>
+                <tr><th scope="row">Repair budget</th><td>One initial candidate plus two repairs per lineage.</td><td>Three rounds per lineage.</td><td>None.</td></tr>
+                <tr><th scope="row">What it unlocks</th><td>Tasks that use its accepted outputs.</td><td>Tasks that use its findings. A decision edge also waits for PM's recorded choice.</td><td>Nothing; it earns no acceptance credit.</td></tr>
+                <tr><th scope="row">Engine</th><td><code>work_type: execution</code>, receipt policy</td><td><code>work_type: exploration</code>, full evidence chain</td><td><code>work_type: milestone</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="view" id="view-overview" aria-labelledby="ov-title" hidden>
+          <div class="view-head">
+            <div>
+              <h2 class="view-title" id="ov-title">Task graph</h2>
               <p class="view-sub">Example mission. PM's reviewed plan is a dependency graph of tasks. A task becomes eligible when everything it waits for is currently accepted; priority orders eligible work. Select a task to see what it waits for and what it unlocks.</p>
             </div>
             <span class="label" id="ov-count"></span>
@@ -278,6 +375,7 @@
     </div>
 
     <div class="legend" aria-label="Legend">
+      <span class="key"><i class="k-pr"></i>Principal touchpoint</span>
       <span class="key"><i></i>Required step</span>
       <span class="key"><i class="k-cond"></i>Conditional step</span>
       <span class="key"><i class="k-gate"></i>Runtime gate</span>
@@ -303,8 +401,8 @@
 
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
     <defs>
-      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path class="ah" d="M0 1 L9 5 L0 9 Z"/></marker>
-      <marker id="ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path class="ah-hot" d="M0 1 L9 5 L0 9 Z"/></marker>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah" d="M0 1 L9 5 L0 9 Z"/></marker>
+      <marker id="ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah-hot" d="M0 1 L9 5 L0 9 Z"/></marker>
     </defs>
   </svg>
 
@@ -362,6 +460,7 @@
     const STATE_STEP = { READY: 'disp', RUNNING: 'build', ACCEPTED: 'qual' };
 
     const LANES = [
+      { id: 'pr', name: 'Principal', note: 'speaks · agents operate' },
       { id: 'pm', name: 'PM', note: 'plans · decides on escalation' },
       { id: 'sec', name: 'Secretary', note: 'coordinates under delegation' },
       { id: 'arch', name: 'Architect', note: 'checks real prerequisites' },
@@ -371,6 +470,12 @@
     ];
 
     const S = {
+      auth: { lane: 'pr', short: 'grant.record', title: 'Goals & grants', plain: 'Your words, recorded verbatim', act: 'authority.record · grant.record',
+        copy: 'You state the goals and the conditions that must not be broken. PM records your words verbatim and records what you delegate: domains, permissions and expiry. Every later review compares against those words.',
+        facts: ['A grant that contradicts a reserved condition is refused.'], src: src('SKILL.md', 'references/runtime-v4.md') },
+      align: { lane: 'pr', short: 'authority.amend', kind: 'cond', ghost: true, title: 'Tradeoff or amend', plain: 'You decide in one sentence', act: 'decision.record · authority.amend',
+        copy: 'PM brings you a material tradeoff, or a change the grant does not cover. You answer in a plain sentence; when the answer goes beyond the grant, the authority is amended.',
+        facts: ['Choices inside the grant need no fresh permission.'], src: src('roles/pm.md', 'SKILL.md') },
       graph: { lane: 'pm', short: 'plan.review', title: 'Task graph', plain: 'Reviewed leaves, delegated', act: 'plan.review · secretary.delegate',
         copy: "PM's reviewed plan is the source of every task. Plan review binds the active leaves with their complete check definitions; PM delegates routine issue, dispatch, scheduling and repair to the Secretary.",
         facts: ['The delegation lists tasks, operations, expiry and a finite action count.', 'Priority changes use schedule.record and do not change the contract.'], src: src('references/fast-mode.md', 'roles/pm.md') },
@@ -448,14 +553,14 @@
     const VARIANTS = {
       execution: {
         order: ['graph', 'queue', 'issue', 'ready', 'disp', 'build', 'done', 'spec', 'accept', 'qual', 'sort'],
-        cells: { graph: 0, queue: 1, issue: 2, ready: 3, disp: 4, build: 5, done: 6, spec: 7, accept: 8, qual: 9, sort: 10, producer: 10, decide: 10, repair: 8, retry: 9, dispose: 4, hold: 9, permit: 9 },
-        edges: [['graph', 'queue'], ['queue', 'issue', { route: 'upfirst' }], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'build'], ['build', 'done'],
+        cells: { auth: 0, align: 10, graph: 0, queue: 1, issue: 2, ready: 3, disp: 4, build: 5, done: 6, spec: 7, accept: 8, qual: 9, sort: 10, producer: 10, decide: 10, repair: 8, retry: 9, dispose: 4, hold: 9, permit: 9 },
+        edges: [['auth', 'graph'], ['graph', 'queue'], ['queue', 'issue', { route: 'upfirst' }], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'build'], ['build', 'done'],
           ['done', 'spec', { cond: 'spec' }], ['spec', 'accept', { cond: 'spec' }], ['done', 'accept'], ['accept', 'qual'],
           ['qual', 'queue', { route: 'loop' }], ['ready', 'sort', { cond: true }], ['sort', 'decide', { cond: true }], ['sort', 'producer', { cond: true }]],
       },
       exploration: {
-        cells: { graph: 0, queue: 1, issue: 2, ready: 3, disp: 4, inv: 5, dev: 6, crit: 7, cal: 8, acf: 9, qual: 10, choice: 10, sort: 11, producer: 11, decide: 11, hold: 10 },
-        edges: [['graph', 'queue'], ['queue', 'issue', { route: 'upfirst' }], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'inv'], ['inv', 'dev'],
+        cells: { auth: 0, align: 11, graph: 0, queue: 1, issue: 2, ready: 3, disp: 4, inv: 5, dev: 6, crit: 7, cal: 8, acf: 9, qual: 10, choice: 10, sort: 11, producer: 11, decide: 11, hold: 10, repair: 7 },
+        edges: [['auth', 'graph'], ['graph', 'queue'], ['queue', 'issue', { route: 'upfirst' }], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'inv'], ['inv', 'dev'],
           ['dev', 'crit'], ['crit', 'cal', { cond: true }], ['cal', 'acf', { cond: true }], ['crit', 'acf', { route: 'under' }], ['acf', 'qual'], ['acf', 'choice', { cond: true }],
           ['qual', 'queue', { route: 'loop' }], ['ready', 'sort', { cond: true }], ['sort', 'decide', { cond: true }], ['sort', 'producer', { cond: true }]],
       },
@@ -465,12 +570,12 @@
     const SCENARIOS = {
       execution: [
         { id: 'normal', name: 'Normal path', steps: [
-          ['graph', "PM's reviewed graph contains the task."], ['queue', 'Everything it waits for is accepted; the Secretary picks it by priority.'],
+          ['auth', 'Your goals and grants are on record.'], ['graph', "PM's reviewed graph contains the task."], ['queue', 'Everything it waits for is accepted; the Secretary picks it by priority.'],
           ['issue', 'The Secretary issues the receipt.'], ['ready', 'The Architect records READY.'], ['disp', 'The Secretary dispatches.'],
           ['build', 'Constructors claim their scopes, build and verify.'], ['done', 'Each worker records completion.'],
           ['spec', 'A specialist Crititor passes the candidate, when declared.'], ['accept', 'The Stabilizer records ACCEPTED.'],
           ['qual', 'The task qualifies and unlocks the tasks waiting for it.']],
-          edges: [['graph', 'queue'], ['queue', 'issue'], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'build'], ['build', 'done'], ['done', 'spec'], ['spec', 'accept'], ['done', 'accept'], ['accept', 'qual'], ['qual', 'queue']] },
+          edges: [['auth', 'graph'], ['graph', 'queue'], ['queue', 'issue'], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'build'], ['build', 'done'], ['done', 'spec'], ['spec', 'accept'], ['done', 'accept'], ['accept', 'qual'], ['qual', 'queue']] },
         { id: 'repair', name: 'Repair required', steps: [
           ['accept', 'The Stabilizer returns REPAIR_REQUIRED with concrete findings.'], ['repair', 'The Secretary routes an in-contract repair.'],
           ['disp', 'Dispatch checks the lineage budget: one initial candidate plus two repairs.'], ['build', 'Constructors repair inside the same scopes.'],
@@ -485,10 +590,10 @@
           edges: [['ready', 'sort'], ['sort', 'producer'], ['producer', 'ready'], ['ready', 'disp']] },
         { id: 'decision', name: 'Decision gap', steps: [
           ['ready', 'The gap needs new behavior, new scope or a material choice.'], ['sort', 'The Secretary escalates with the precise gap and evidence.'],
-          ['decide', 'PM aligns with the user, revises the plan or contract, and obtains review and admission.'], ['issue', 'A new receipt is issued from the new review.'],
-          ['ready', 'The Architect checks the new receipt.']],
-          extra: [['decide', 'issue', { route: 'top' }]],
-          edges: [['ready', 'sort'], ['sort', 'decide'], ['decide', 'issue'], ['issue', 'ready']] },
+          ['decide', 'PM prepares the choice or the revision.'], ['align', 'You hear the material tradeoff, or amend authority when the change is outside the grant.'],
+          ['issue', 'With the plan revised, reviewed and admitted, a new receipt is issued.'], ['ready', 'The Architect checks the new receipt.']],
+          extra: [['decide', 'align', { route: 'vert' }], ['align', 'issue', { route: 'top' }]],
+          edges: [['ready', 'sort'], ['sort', 'decide'], ['decide', 'align'], ['align', 'issue'], ['issue', 'ready']] },
         { id: 'evidence', name: 'Missing reviewer evidence', steps: [
           ['accept', 'The Stabilizer records INPUT_INCOMPLETE: evidence it needs is missing.'], ['retry', 'The reviewer reads the missing evidence and records a new verdict that revises the incomplete one.'],
           ['qual', 'Same candidate, no new construction cycle.']],
@@ -516,11 +621,18 @@
       ],
       exploration: [
         { id: 'normal', name: 'Normal path', steps: [
-          ['graph', "PM's reviewed graph contains the investigation."], ['queue', 'It becomes eligible and is picked by priority.'], ['issue', 'The Secretary issues the receipt.'],
+          ['auth', 'Your goals and grants are on record.'], ['graph', "PM's reviewed graph contains the investigation."], ['queue', 'It becomes eligible and is picked by priority.'], ['issue', 'The Secretary issues the receipt.'],
           ['ready', 'The Architect records READY.'], ['disp', 'The Secretary dispatches.'], ['inv', 'Workers investigate within the agreed bounds.'],
           ['dev', 'The development report records evidence and findings.'], ['crit', 'An independent Crititor passes it.'], ['cal', 'A Calibrator returns ALIGNED, when triggered.'],
           ['acf', 'The Stabilizer accepts the findings.'], ['qual', 'The findings qualify and unlock the tasks waiting for them.']],
-          edges: [['graph', 'queue'], ['queue', 'issue'], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'inv'], ['inv', 'dev'], ['dev', 'crit'], ['crit', 'cal'], ['cal', 'acf'], ['crit', 'acf'], ['acf', 'qual'], ['qual', 'queue']] },
+          edges: [['auth', 'graph'], ['graph', 'queue'], ['queue', 'issue'], ['issue', 'ready'], ['ready', 'disp'], ['disp', 'inv'], ['inv', 'dev'], ['dev', 'crit'], ['crit', 'cal'], ['cal', 'acf'], ['crit', 'acf'], ['acf', 'qual'], ['qual', 'queue']] },
+        { id: 'rework', name: 'Changes requested', steps: [
+          ['crit', 'The Crititor records CHANGES_REQUESTED or FAIL on this round.'], ['repair', 'The Secretary routes the rework as the next round; three rounds per lineage.'],
+          ['disp', 'Dispatch rechecks readiness and the remaining rounds.'], ['inv', 'The Constructors investigate again.'],
+          ['dev', 'A new development report for the next round, naming the one it revises.'], ['crit', 'The Crititor reviews the new round and passes it.'],
+          ['acf', 'The Stabilizer accepts the findings.'], ['qual', 'The findings qualify.']],
+          extra: [['crit', 'repair', { route: 'vert' }], ['repair', 'disp', { route: 'over' }]],
+          edges: [['crit', 'repair'], ['repair', 'disp'], ['disp', 'inv'], ['inv', 'dev'], ['dev', 'crit'], ['crit', 'acf'], ['acf', 'qual']] },
         { id: 'choice', name: 'Design choice', steps: [
           ['acf', 'The findings are accepted.'], ['qual', 'They qualify like any other output.'],
           ['choice', 'A task with a decision dependency on them waits until PM records the choice.']],
@@ -532,9 +644,10 @@
           edges: [['ready', 'sort'], ['sort', 'producer'], ['producer', 'ready'], ['ready', 'disp']] },
         { id: 'decision', name: 'Decision gap', steps: [
           ['ready', 'The gap needs new behavior, new scope or a material choice.'], ['sort', 'The Secretary escalates with the precise gap and evidence.'],
-          ['decide', 'PM aligns with the user, revises, and obtains review and admission.'], ['issue', 'A new receipt is issued.'], ['ready', 'The Architect checks the new receipt.']],
-          extra: [['decide', 'issue', { route: 'top' }]],
-          edges: [['ready', 'sort'], ['sort', 'decide'], ['decide', 'issue'], ['issue', 'ready']] },
+          ['decide', 'PM prepares the choice or the revision.'], ['align', 'You hear the material tradeoff, or amend authority when the change is outside the grant.'],
+          ['issue', 'With the plan revised, reviewed and admitted, a new receipt is issued.'], ['ready', 'The Architect checks the new receipt.']],
+          extra: [['decide', 'align', { route: 'vert' }], ['align', 'issue', { route: 'top' }]],
+          edges: [['ready', 'sort'], ['sort', 'decide'], ['decide', 'align'], ['align', 'issue'], ['issue', 'ready']] },
         { id: 'hold', name: 'Formal hold', steps: [
           ['hold', "A mandatory counterexample fences this investigation's scope. The Supervisor screens it; PM may permit at most two repairs."],
           ['disp', 'The repair is dispatched under the permit.'], ['inv', 'Workers repair the investigation.'], ['dev', 'A new development report.'], ['crit', 'Independent critique.'],
@@ -561,8 +674,8 @@
 
     /* ---------- theme ---------- */
     function applyTheme() {
-      if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
-      else delete document.documentElement.dataset.theme;
+      if (theme === 'light' || theme === 'dark') document.documentElement.dataset.look = theme;
+      else delete document.documentElement.dataset.look;
       $('#theme-btn').textContent = 'Theme · ' + theme[0].toUpperCase() + theme.slice(1);
     }
     $('#theme-btn').addEventListener('click', () => {
@@ -570,26 +683,6 @@
       try { localStorage.setItem('mp-workflow-theme', theme); } catch (_) {}
       applyTheme();
     });
-
-    /* ---------- mission strip ---------- */
-    function renderMission() {
-      const nav = $('#mission');
-      nav.replaceChildren(...MISSION.map(m => {
-        const b = document.createElement('button');
-        b.type = 'button'; b.className = 'seg'; b.dataset.state = m.state; b.dataset.id = m.id;
-        b.setAttribute('aria-pressed', 'false');
-        b.innerHTML = `<span class="seg-top"><span class="seg-name"></span><span class="seg-mult"></span></span><span class="seg-steps"></span><span class="seg-state"></span>`;
-        b.querySelector('.seg-name').textContent = m.name;
-        b.querySelector('.seg-mult').textContent = m.mult;
-        b.querySelector('.seg-steps').textContent = m.steps;
-        b.querySelector('.seg-state').textContent = { done: 'Done', active: 'In progress · 3 of 7 accepted', pending: 'After every task qualifies' }[m.state];
-        b.addEventListener('click', () => { focus = { kind: 'mission', id: m.id }; renderInspector(); markMission(); });
-        return b;
-      }));
-    }
-    function markMission() {
-      document.querySelectorAll('.seg').forEach(s => s.setAttribute('aria-pressed', String(focus.kind === 'mission' && focus.id === s.dataset.id)));
-    }
 
     /* ---------- overview: task graph ---------- */
     function renderGraph() {
@@ -605,7 +698,7 @@
         b.querySelector('.t-meta').textContent = meta;
         b.querySelector('.t-title').textContent = t.title;
         b.querySelector('.t-state').textContent = STATE_LABEL[t.state];
-        b.addEventListener('click', () => { selTask = t.id; focus = { kind: 'task', id: t.id }; markGraph(); renderInspector(); markMission(); schedule(); });
+        b.addEventListener('click', () => { selTask = t.id; focus = { kind: 'task', id: t.id }; markGraph(); renderInspector(); schedule(); });
         g.appendChild(b);
       }
       for (const [k, text] of [['up', 'Waits for'], ['down', 'Unlocks']]) {
@@ -679,7 +772,7 @@
         b.className = ['step', kind, s.stack ? 'stack' : '', s.ghost ? 'ghost' : ''].filter(Boolean).join(' ');
         b.style.gridColumn = col + 1; b.style.gridRow = LANES.findIndex(l => l.id === s.lane) + 1;
         const title = id === 'build' || id === 'inv' ? s.title.replace('M', String(t.workers)) : s.title;
-        const plain = id === 'spec' && t.specialist ? 'Crititor PASS, declared here' : s.plain;
+        const plain = id === 'spec' && t.specialist ? 'Crititor PASS, declared here' : id === 'repair' && v === 'exploration' ? 'Next round, three per lineage' : s.plain;
         b.innerHTML = '<span class="num"></span><span class="s-title"></span><span class="s-plain"></span><span class="s-act"></span>';
         b.querySelector('.s-title').textContent = title;
         b.querySelector('.s-plain').textContent = plain;
@@ -688,7 +781,7 @@
         if (STATE_STEP[t.state] === id && t.state !== 'ACCEPTED') {
           const now = document.createElement('span'); now.className = 'now'; now.textContent = t.state === 'RUNNING' ? 'Now' : 'Next'; b.appendChild(now);
         }
-        b.addEventListener('click', () => { focus = { kind: 'step', id }; markLanes(); renderInspector(); markMission(); });
+        b.addEventListener('click', () => { focus = { kind: 'step', id }; markLanes(); renderInspector(); });
         host.appendChild(b);
       }
       renderScenarioBar();
@@ -826,7 +919,7 @@
     }
     function draw() {
       frame = 0;
-      drawGraph(); drawLanes();
+      fitPipe(); drawGraph(); drawLanes();
       if (capture) {
         let meta = $('meta[name="capture-height"]');
         if (!meta) { meta = document.createElement('meta'); meta.name = 'capture-height'; document.head.appendChild(meta); }
@@ -835,11 +928,203 @@
     }
     function schedule() { if (!frame) frame = requestAnimationFrame(draw); }
 
+
+    /* ---------- pipeline map ---------- */
+    const PW = 1400, PH = 650, NW = 92, NH = 66;
+    const C = [376, 482, 588, 694, 800, 906, 1012, 1128];
+    const R1 = 186, R2 = 300, R3 = 416;
+    const PRINCIPAL = {
+      'p-goals': { title: 'Goals, limits and grants', sub: 'Principal → PM', act: 'authority.record · grant.record', src: src('SKILL.md', 'references/runtime-v4.md'),
+        copy: 'You state the goals and the conditions that must not be broken, in your own words. PM records them verbatim and records what you delegate: which domains, which permissions (choose, revise, defer, close), and for how long.',
+        facts: ['Every later review compares against your original words, not PM\'s summary.', 'A grant that contradicts a reserved condition is refused.', 'You never run a command; PM records what you say.'] },
+      'p-trade': { title: 'Material tradeoffs', sub: 'PM ↔ Principal', act: 'decision.record', src: src('roles/pm.md', 'references/fast-mode.md'),
+        copy: 'Inside the grant, PM chooses and revises methods without asking again. When a choice carries a material tradeoff, PM explains it to you and records the decision with its rationale. Accepted exploration findings inform the choice; they never make it.',
+        facts: ['Every decision you make fits in one plain sentence.', 'PM never asks again for permission the grant already records.'] },
+      'p-amend': { title: 'Anything outside the grant', sub: 'PM → Principal', act: 'authority.amend · grant.record · grant.revoke · latch.release', src: src('roles/pm.md', 'SKILL.md'),
+        copy: 'When an effect contradicts a reserved condition, or the grant is revoked, expired or out of domain, the engine refuses with AUTHORITY_CONFLICT. That question is yours: amend the authority, grant more, or say no. You also release a drift latch, unless an independent contest dismisses it.',
+        facts: ['Only authority.amend changes your original words.', 'Deferring or cancelling an obligation needs a defer grant.'] },
+      'p-close': { title: 'Close', sub: 'Principal, or PM with a close grant', act: 'mission.close · mission.reopen', src: src('SKILL.md'),
+        copy: 'Closing needs a current bundle, an Auditor PASS or FINDINGS, a Supervisor close PASS and a satisfied closing run. PM closes only with a close grant; otherwise you close. Authorised gaps are listed in the close outcomes with an owner and a reason.',
+        facts: ['Reopening a closed mission is yours alone.'] },
+    };
+    const PN = [
+      { id: 'p-goals', kind: 'principal', x: 20, y: 28, w: 220, h: 58, role: 'You set', title: 'Goals · limits · grants', note: 'authority.record · grant.record' },
+      { id: 'p-trade', kind: 'principal', x: 250, y: 28, w: 210, h: 58, role: 'You decide', title: 'Material tradeoffs', note: 'PM explains, you choose' },
+      { id: 'p-amend', kind: 'principal', x: 470, y: 28, w: 250, h: 58, role: 'You amend', title: 'Anything outside the grant', note: 'authority.amend · latch.release' },
+      { id: 'p-close', kind: 'principal', x: 1160, y: 28, w: 226, h: 58, role: 'You close', title: 'Close · or grant the close', note: 'mission.close · mission.reopen' },
+      { id: 'charter', kind: 'major', x: 20, y: 250, w: 130, h: 96, role: 'PM · Supervisor', title: 'Charter', note: 'align · root review · activate' },
+      { id: 'plan', kind: 'major', x: 180, y: 250, w: 150, h: 96, role: 'PM · Supervisor', title: 'Plan', note: 'task graph · review · delegate' },
+      { id: 'close', kind: 'major', x: 1256, y: 250, w: 130, h: 96, role: 'PM · Auditor · Supervisor', title: 'Close', note: 'after every task qualifies' },
+      { id: 'queue', kind: 'gate', x: C[0], y: R1, role: 'Runtime', title: 'Queue' },
+      { id: 'issue', x: C[1], y: R1, role: 'Secretary', title: 'Issue receipt' },
+      { id: 'ready', x: C[2], y: R1, role: 'Architect', title: 'Readiness' },
+      { id: 'disp', x: C[3], y: R1, role: 'Secretary', title: 'Dispatch' },
+      { id: 'build', kind: 'stack', x: C[2], y: R2, role: 'Constructors', title: 'Build × M' },
+      { id: 'done', x: C[3], y: R2, role: 'Constructors', title: 'Completion' },
+      { id: 'spec', kind: 'cond', x: C[4], y: R2, role: 'Crititor', title: 'Specialist' },
+      { id: 'accept', x: C[5], y: R2, role: 'Stabilizer', title: 'Accept' },
+      { id: 'inv', kind: 'stack', x: C[2], y: R3, role: 'Constructors', title: 'Investigate' },
+      { id: 'dev', x: C[3], y: R3, role: 'Constructors', title: 'Development report' },
+      { id: 'crit', x: C[4], y: R3, role: 'Crititor', title: 'Critique' },
+      { id: 'cal', kind: 'cond', x: C[5], y: R3, role: 'Calibrator', title: 'Calibrate' },
+      { id: 'acf', x: C[6], y: R3, role: 'Stabilizer', title: 'Accept findings' },
+      { id: 'qual', kind: 'gate', x: C[7], y: 358, role: 'Runtime', title: 'Qualified' },
+    ];
+    const PE = {
+      'w-goals': { p: [[85, 86], [85, 250]] },
+      'w-trade': { p: [[262, 86], [262, 250]], both: true },
+      'w-amend': { p: [[540, 86], [540, 112], [312, 112], [312, 250]], both: true },
+      'w-close': { p: [[1321, 86], [1321, 250]] },
+      'w-cp': { p: [[150, 298], [180, 298]] },
+      'w-pq': { p: [[330, 298], [350, 298], [350, 219], [376, 219]] },
+      'w-qi': { p: [[468, 219], [482, 219]] }, 'w-ir': { p: [[574, 219], [588, 219]] }, 'w-rd': { p: [[680, 219], [694, 219]] },
+      'w-fork-e': { p: [[740, 252], [740, 272], [581, 272], [581, 333], [588, 333]] },
+      'w-fork-x': { p: [[581, 272], [581, 449], [588, 449]] },
+      'w-bd': { p: [[685, 333], [694, 333]] }, 'w-ds': { p: [[786, 333], [800, 333]], cond: true }, 'w-sa': { p: [[892, 333], [906, 333]], cond: true },
+      'w-id': { p: [[685, 449], [694, 449]] }, 'w-dc': { p: [[786, 449], [800, 449]] }, 'w-cc': { p: [[892, 449], [906, 449]], cond: true }, 'w-ca': { p: [[998, 449], [1012, 449]], cond: true },
+      'w-ab': { p: [[998, 333], [1116, 333]], noArrow: true }, 'w-xb': { p: [[1104, 449], [1116, 449]], noArrow: true },
+      'w-bus': { p: [[1116, 333], [1116, 449]], noArrow: true }, 'w-bq': { p: [[1116, 391], [1128, 391]] },
+      'w-loop1': { p: [[1174, 424], [1174, 532], [386, 532], [386, 252]] },
+      'w-rw-e': { p: [[952, 366], [952, 388], [634, 388], [634, 372]] },
+      'w-rw-s': { p: [[846, 366], [846, 388]], noArrow: true },
+      'w-rw-x': { p: [[846, 482], [846, 508], [634, 508], [634, 488]] },
+      'w-rw-a': { p: [[1058, 482], [1058, 508], [846, 508]], noArrow: true },
+      'w-miss': { p: [[612, 186], [612, 170], [656, 170], [656, 186]] },
+      'w-esc': { p: [[860, 556], [860, 612], [255, 612], [255, 346]] },
+      'w-qc': { p: [[1220, 391], [1244, 391], [1244, 298], [1256, 298]] },
+      'w-refresh': { p: [[1300, 346], [1300, 368], [1352, 368], [1352, 346]] },
+    };
+    const LOOPS = [
+      { id: '1', name: 'Next task', pill: 'qualified → unlocks the next tasks', at: [780, 532], path: ['w-loop1', 'w-bq'], nodes: ['qual', 'queue'],
+        text: 'A task that qualifies unlocks the tasks waiting for it. The queue then picks the next eligible task by priority.',
+        act: 'queue.snapshot', src: src('references/fast-mode.md', 'roles/secretary.md') },
+      { id: '2', name: 'Review → rework', pill: 'not accepted → rebuild', at: [740, 388], path: ['w-rw-e', 'w-rw-s', 'w-rw-x', 'w-rw-a'], nodes: ['accept', 'spec', 'build', 'crit', 'acf', 'inv'],
+        text: 'Execution: when the Stabilizer, or a declared specialist, does not accept, the Constructors rebuild. Exploration: when the Crititor asks for changes or fails the report, or the findings are not accepted, the Constructors investigate again and write the next round. Each rework is a new cycle the Secretary routes and dispatches: execution allows one initial candidate plus two repairs, exploration three rounds.',
+        act: 'report.record [critique: CHANGES_REQUESTED · FAIL] · secretary.coordinate [repair] · receipt.dispatch', src: src('roles/crititor.md', 'references/runtime-v4.md') },
+      { id: '3', name: 'Missing input', pill: 'missing input', at: [690, 160], path: ['w-miss'], nodes: ['ready'],
+        text: 'Readiness finds an input that does not exist yet. If a task already produces it, that task runs its own loop first, then readiness is checked again.',
+        act: 'readiness.record · secretary.coordinate [schedule]', src: src('references/fast-mode.md', 'roles/architect.md') },
+      { id: '4', name: 'Escalate', pill: 'escalate to PM · new scope, design choice, spent budget', at: [560, 612], path: ['w-esc', 'w-trade', 'w-amend'], nodes: ['plan', 'p-trade', 'p-amend'],
+        text: 'New behavior or scope, a design choice, NEEDS_DECISION or a spent budget goes to PM. PM aligns with you when the choice is material or outside the grant, revises the plan and gets it reviewed again.',
+        act: 'secretary.coordinate [escalate] · decision.record · plan.review', src: src('roles/secretary.md', 'roles/pm.md') },
+      { id: '5', name: 'Re-bundle', pill: 're-bundle', at: [1326, 386], path: ['w-refresh'], nodes: ['close'],
+        text: 'A later run changes the delivery, so the bundle, the audit and the close review are made again before the mission can close.',
+        act: 'bundle.record · audit.record · close.review', src: src('SKILL.md', 'references/runtime-v4.md') },
+    ];
+    const HOLD_NOTE = 'A mandatory counterexample fences only its own scope; unrelated tasks continue. The Supervisor screens it and PM may permit up to two repairs. A drift latch is released by you or by an independent contest.';
+
+    function renderPipe() {
+      const pipe = $('#pipe');
+      pipe.replaceChildren();
+      const band = document.createElement('div'); band.className = 'p-band';
+      const bn = document.createElement('span'); bn.className = 'p-band-name'; bn.textContent = 'Principal';
+      const bs = document.createElement('small'); bs.textContent = 'you speak in plain sentences; agents operate the engine'; bn.appendChild(bs);
+      band.appendChild(bn); pipe.appendChild(band);
+      const box = document.createElement('div'); box.className = 'loopbox';
+      Object.assign(box.style, { left: '360px', top: '130px', width: '876px', height: '426px' });
+      box.addEventListener('click', e => { if (e.target === box) { focus = { kind: 'mission', id: 'tasks' }; markPipe(); renderInspector(); } });
+      pipe.appendChild(box);
+      const title = document.createElement('div'); title.className = 'loop-title';
+      Object.assign(title.style, { left: '378px', top: '140px' });
+      title.innerHTML = '<b>TASK LOOP</b>';
+      const tsub = document.createElement('div'); tsub.className = 'loop-title';
+      Object.assign(tsub.style, { right: (PW - 1222) + 'px', top: '143px' });
+      tsub.innerHTML = '<span>once per task · many tasks at once · PM is not inside</span>';
+      pipe.append(title, tsub);
+      for (const [y, name, sub] of [[R2 + 10, 'EXECUTION', 'design and criteria decided'], [R3 + 10, 'EXPLORATION', 'findings needed for a decision']]) {
+        const tr = document.createElement('div'); tr.className = 'track'; Object.assign(tr.style, { left: '398px', top: y + 'px', width: '170px' });
+        const b = document.createElement('b'); b.textContent = name; const sp = document.createElement('span'); sp.textContent = sub; tr.append(b, sp); pipe.appendChild(tr);
+      }
+      const svg = document.createElementNS(NS, 'svg'); svg.setAttribute('class', 'wires'); svg.setAttribute('viewBox', `0 0 ${PW} ${PH}`);
+      svg.setAttribute('width', PW); svg.setAttribute('height', PH); svg.setAttribute('aria-hidden', 'true'); pipe.appendChild(svg);
+      for (const n of PN) {
+        const b = document.createElement('button'); b.type = 'button'; b.id = 'pn-' + n.id; b.dataset.id = n.id;
+        b.className = ['pnode', n.kind || ''].filter(Boolean).join(' ');
+        Object.assign(b.style, { left: n.x + 'px', top: n.y + 'px', width: (n.w || NW) + 'px', height: (n.h || NH) + 'px' });
+        b.innerHTML = '<span class="p-role"></span><span class="p-title"></span>' + (n.note ? '<span class="p-note"></span>' : '');
+        b.querySelector('.p-role').textContent = n.role; b.querySelector('.p-title').textContent = n.title;
+        if (n.note) b.querySelector('.p-note').textContent = n.note;
+        b.addEventListener('click', () => {
+          focus = n.kind === 'principal' ? { kind: 'principal', id: n.id } : ['charter', 'plan', 'close'].includes(n.id) ? { kind: 'mission', id: n.id } : { kind: 'pnode', id: n.id };
+          markPipe(); renderInspector();
+        });
+        pipe.appendChild(b);
+      }
+      const pills = [...LOOPS.map(L => [L, L.at, L.pill]), [LOOPS[1], [740, 508], 'changes requested → next round']];
+      for (const [L, at, text] of pills) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'ppill'; b.dataset.loop = L.id;
+        Object.assign(b.style, { left: at[0] + 'px', top: at[1] + 'px' });
+        const n = document.createElement('b'); n.textContent = '①②③④⑤'[+L.id - 1]; b.append(n, text);
+        b.addEventListener('click', () => selectLoop(L.id));
+        pipe.appendChild(b);
+      }
+      const keys = $('#loops');
+      keys.replaceChildren(...LOOPS.map(L => {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'loop-key'; b.dataset.loop = L.id;
+        b.innerHTML = '<span class="n"></span><strong></strong><span></span>';
+        b.querySelector('.n').textContent = '①②③④⑤'[+L.id - 1]; b.querySelector('strong').textContent = L.name; b.querySelector('span:last-child').textContent = L.text;
+        b.addEventListener('click', () => selectLoop(L.id));
+        return b;
+      }));
+      const hold = document.createElement('div'); hold.className = 'loop-key note';
+      hold.innerHTML = '<span class="n">!</span><strong>Formal hold</strong><span></span>'; hold.querySelector('span:last-child').textContent = HOLD_NOTE;
+      keys.appendChild(hold);
+      drawPipe();
+    }
+    function selectLoop(id) {
+      focus = focus.kind === 'loop' && focus.id === id ? { kind: 'mission', id: 'tasks' } : { kind: 'loop', id };
+      markPipe(); renderInspector();
+    }
+    function drawPipe() {
+      const svg = $('#pipe .wires');
+      if (!svg) return;
+      svg.replaceChildren();
+      const loop = focus.kind === 'loop' ? LOOPS.find(L => L.id === focus.id) : null;
+      for (const [id, e] of Object.entries(PE)) {
+        const hot = !!loop && loop.path.includes(id);
+        const p = document.createElementNS(NS, 'path');
+        p.setAttribute('d', e.p.map((pt, i) => (i ? 'L' : 'M') + pt[0] + ' ' + pt[1]).join(' '));
+        p.setAttribute('class', ['wire', e.cond ? 'cond' : '', hot ? 'hot' : '', loop && !hot ? 'dim' : ''].filter(Boolean).join(' '));
+        const m = `url(#${hot ? 'ah-hot' : 'ah'})`;
+        if (!e.noArrow) p.setAttribute('marker-end', m);
+        if (e.both) p.setAttribute('marker-start', m);
+        svg.appendChild(p);
+      }
+    }
+    function markPipe() {
+      const loop = focus.kind === 'loop' ? LOOPS.find(L => L.id === focus.id) : null;
+      document.querySelectorAll('.pnode').forEach(b => {
+        const id = b.dataset.id;
+        const sel = (['principal', 'pnode', 'mission'].includes(focus.kind) && focus.id === id) || (loop && loop.nodes.includes(id));
+        b.classList.toggle('on', !!sel);
+      });
+      document.querySelectorAll('[data-loop]').forEach(b => b.setAttribute('aria-pressed', String(!!loop && b.dataset.loop === loop.id)));
+      drawPipe();
+    }
+    function fitPipe() {
+      const wrap = $('#pipe-wrap');
+      if (!wrap || !wrap.offsetParent) return;
+      const avail = wrap.parentElement.clientWidth - 2;
+      const k = Math.min(1.15, Math.max(0.7, avail / PW));
+      $('#pipe').style.transform = `scale(${k})`;
+      wrap.style.width = (PW * k + 2) + 'px';
+      wrap.style.height = (PH * k + 2) + 'px';
+    }
+
     /* ---------- inspector ---------- */
     function renderInspector() {
       const ins = $('#inspector');
       let d;
-      if (focus.kind === 'mission') {
+      if (focus.kind === 'principal') {
+        const pr = PRINCIPAL[focus.id];
+        d = { kicker: 'Principal', title: pr.title, sub: pr.sub, copy: pr.copy, facts: pr.facts, act: pr.act, src: pr.src };
+      } else if (focus.kind === 'loop') {
+        const L = LOOPS.find(x => x.id === focus.id);
+        d = { kicker: 'Loop ' + '\u2460\u2461\u2462\u2463\u2464'[+L.id - 1], title: L.name, sub: L.pill, copy: L.text, act: L.act, src: L.src };
+      } else if (focus.kind === 'pnode') {
+        const st = S[focus.id], lane = LANES.find(l => l.id === st.lane);
+        d = { kicker: lane.name, title: st.title, sub: st.plain, copy: st.copy, facts: st.facts, act: st.act, src: st.src };
+      } else if (focus.kind === 'mission') {
         const m = MISSION.find(x => x.id === focus.id);
         d = { kicker: 'Mission · ' + m.mult, title: m.title, sub: m.sub, copy: m.copy, facts: m.facts, act: m.act, src: m.src };
       } else if (focus.kind === 'step') {
@@ -891,30 +1176,34 @@
     function setView(next) {
       view = next;
       document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === view)));
+      $('#view-pipeline').hidden = view !== 'pipeline';
       $('#view-overview').hidden = view !== 'overview';
       $('#view-detail').hidden = view !== 'detail';
-      $('.work').classList.toggle('wide', view === 'detail');
+      $('.work').classList.toggle('wide', view !== 'overview');
       schedule();
     }
     document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => {
       setView(b.dataset.view);
       if (view === 'detail' && focus.kind === 'task') { const t = taskById(selTask); if (variantOf(t)) { detailTask = selTask; renderTaskBar(); renderLanes(); } }
       if (view === 'overview') focus = { kind: 'task', id: selTask };
-      renderInspector(); markMission();
+      if (view === 'pipeline') { focus = { kind: 'mission', id: 'tasks' }; markPipe(); }
+      renderInspector();
     }));
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && view === 'detail') { setView('overview'); focus = { kind: 'task', id: selTask }; renderInspector(); markMission(); }
+      if (e.key === 'Escape' && view === 'detail') { setView('overview'); focus = { kind: 'task', id: selTask }; renderInspector(); }
     });
 
     if (capture) document.body.classList.add('capture');
     applyTheme();
-    renderMission();
+    focus = { kind: 'mission', id: 'tasks' };
+    renderPipe();
+    markPipe();
     renderGraph();
     renderTaskBar();
     renderLanes();
     markGraph();
     renderInspector();
-    setView('overview');
+    setView('pipeline');
     new ResizeObserver(schedule).observe(document.body);
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(schedule);
   })();
