@@ -1,0 +1,27 @@
+{
+  "description": "Mission Pipeline 4: start the engine when the PM session opens (design 6.3), put layer 0, WI-12 and undelivered notices into the PM's context; on every prompt detect stop words (6.4) and book the user's words (3.1). The hooks act only inside a registered project and never block a prompt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/mp-hook\" session-start",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/mp-hook\" user-prompt-submit",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -6,6 +6,69 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.0.0] — 2026-10-10
+
+A new engine in `engine/` (TypeScript, Node 22.12+). It replaces the 3.x plugin under the
+same name, `mission-pipeline`. The design contract is
+`docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md`.
+
+### Added
+- One on-screen PM. Every user message is booked in the ledger by the PM session's prompt
+  hook; requirement items point to their source in the user's words. Only important design
+  decisions (what the user gets, hard-to-undo choices, conflicts with the user's words) go
+  to the user.
+- Seats as separate Claude Code processes with only the program's typed tools, in a
+  bubblewrap sandbox without network by default, under delegated cgroups. Seats start only
+  after the startup self-check passes for the installed versions.
+- A single ledger service as the only writer, a separate evaluator for the derived state
+  (proven, not fully proven, negated), a scheduler and a watchdog. The engine starts when
+  the PM session opens, not at boot.
+- Stops from the prompt hook or `mp stop`: written to two pre-allocated inboxes and
+  signalled to running units within 2 seconds, even while the ledger is down. Each stop
+  shows its state (persisted, committed, stopped) and can be narrowed or released.
+- Stop scope: one related mission (named in the user's words, or the only one open or with
+  work) means that mission. If it is unclear, or the ledger doesn't answer in time, the stop
+  covers everything.
+- After a reboot, stops are committed first; the engine then goes on or pauses for the
+  user's answer, from the inboxes' evidence (WI-12).
+- Delivery and landing: a delivery ref under `refs/mission-pipeline/`, landed onto the
+  target branch in a controlled git view (repository hooks off, fixed configuration, no
+  reset or forced checkout, nothing deleted).
+- Work instructions WI-01 to WI-27 for the PM: each exception stops only the affected
+  action and arrives as a notice naming its WI, the trigger and the default action taken.
+  The PM keeps only the WI index in context and opens a page when a notice names it.
+- `mp`, the PM's command group: `install`, `status`, `show`, `alerts`, `watch-notices`,
+  `stop`, `stop-narrow`, `stop-release`, `resume`, `recovery-check`, `deliver`, `land`,
+  `withdraw-delivery`, `detach-duplicate`, `close`, `requirement`, `constraint`, `plan`,
+  `answer`, `mission`, `legalize`, `retry-evaluator`, `retry-service`, `grant`,
+  `model-config`, `ops` (`spend-limit` is reserved; money limits are not available yet). Text output by default, `--json` for machines;
+  state-changing commands carry an operation id and are recorded in the ledger.
+- `mp install` checks the platform (Node, git 2.44+, the systemd user instance, cgroup v2
+  delegation, bubblewrap, the Claude Code login, filesystems, socket path lengths), picks a
+  second volume for the backup stop inbox, writes the configuration, starts the engine and
+  runs the startup self-check (offline items, then live items under the seat login on the
+  cheapest model). `--credentials api-key:<VAR>` is refused in 4.0.
+- `mp selfcheck`: the self-check reruns by itself in the background when Claude Code, the SDK
+  or Node changes version (at most once an hour per version); seats wait for it, and a failure
+  arrives as one WI-18 notice. `mp selfcheck` is the manual retry.
+- Toolchain freeze: `mp install` copies the user's Node and Python toolchains (outside the
+  system directories) read-only under the engine root, and the sandboxes mount that copy,
+  never the live directories. Run `mp install` again after upgrading Node.
+- Mission ids: letters, digits and `-`, starting with a letter or digit, at most 64
+  characters. No `.`, `_` or spaces. Requirement item and constraint ids follow the same rule.
+- Project constraints are project-wide: a constraint, a new text or a scope change recorded
+  from any mission applies to every mission's cards by the constraint's own scope (paths,
+  task types).
+
+### Compatibility
+- 4.0 replaces the 3.x plugin under the same name, `mission-pipeline`. 3.x is no longer in
+  the marketplace; it stays available at tag v3.0.0.
+- 4.0 does not read 3.x ledgers.
+- 4.0 runs seats on Linux and WSL2 only, with the Claude Code subscription login.
+- Not landed automatically in 4.0: reftable repositories (no delivery), shallow and partial
+  clones, submodule changes, attribute-only changes. Money spend limits are not available
+  yet; `unlimited` is.
+
 ## [3.0.0] — 2026-09-30
 
 ### Added

@@ -1,0 +1,182 @@
+# Raw probe output, 2026-10-09T11:48:17-04:00, git version 2.53.0, bubblewrap 0.11.1, kernel 6.6.87.1-microsoft-standard-WSL2
+## probe-resource-limits.sh
+PASS memory: scope max=67108864, 16 MB ok, 200 MB killed (rc=137, oom_kill=1)
+PASS whole unit: OOMPolicy=stop ended the sibling within 5 s; OOMPolicy=continue left it alive (shell printed AFTER under stop: no)
+PASS disk: tmpfs --size 1 MiB stopped the write at 1048576 bytes
+exit=0
+## probe-oom-group.sh
+  oom.group=1: AFTER=0 SIB_ALIVE=no RUN=[oom 1 oom_kill 4 ] UNIT=[oom 0 oom_kill 0 ]
+  oom.group=0: AFTER=1 SIB_ALIVE=yes RUN=[oom 1 oom_kill 1 ] UNIT=[oom 0 oom_kill 0 ]
+PASS oom.group=1: shell in the run group never reached AFTER
+PASS oom.group=1: sibling killed together (gone within 5 s)
+PASS negative control oom.group=0: sibling survived the OOM
+PASS attribution: run level recorded oom and oom_kill (oom 1 oom_kill 4 )
+PASS attribution: unit level's own counters stayed zero
+exit=0
+## probe-oom-attribution.sh
+  case A (ancestor limit): UNIT_LOCAL_OOM=0 UNIT_HIER_OOM_KILL=3 POOL_LOCAL_OOM=1 CTL_ALIVE=no
+  case B (unit limit):     UNIT_LOCAL_OOM=1 UNIT_HIER_OOM_KILL=3 POOL_LOCAL_OOM=0 CTL_ALIVE=no
+PASS A: unit's own limit not hit (local oom = 0)
+PASS A: ancestor's limit hit (pool local oom >= 1)
+PASS A: unit was nevertheless killed (hierarchical oom_kill >= 1)
+PASS A: oom.group killed the unit's control process too
+PASS B: unit's own limit hit (local oom >= 1)
+PASS B: whole unit killed, control process included
+exit=0
+## probe-unit-supervisor.sh
+  normal host: STATUS=7 UNIT_OOM=0 UNIT_OOM_KILL=0 POPULATED_AT_PROOF=0
+  OOM host:    STATUS=137 UNIT_OOM=1 UNIT_OOM_KILL=4 POPULATED_AT_PROOF=0
+PASS normal host: proof has the real exit code and no OOM
+PASS OOM host: supervisor survived and wrote a proof
+PASS OOM host: proof records kill by signal 9 (137) and unit-level OOM
+PASS proofs written only after the unit subtree was empty
+exit=0
+## probe-git-landing.sh
+PASS dirty checkout refused
+PASS named branch moved, checked-out feature untouched
+PASS stale lease refused
+PASS clean checkout updated in place
+PASS clean linked worktree updated in place
+PASS untracked file in the way refused
+PASS hazard reproduced: hook leaves branch moved but files stale
+PASS with hooks disabled the worktree is updated despite the hook
+PASS post-landing check passes a correct landing
+PASS post-landing check flags the race end state
+exit=0
+## probe-landing-config-view.sh
+PASS hazard group: without the view, smudge ran in the push, clean and the index hook in the check (rc=0)
+PASS negative group: sequence completed (rc=0)
+PASS negative group: injected clean ran during the post-landing check
+PASS negative group (observation): receive side did not see the injected smudge
+PASS hook control: without the hook guard the default index hook ran inside the view
+PASS positive group: sequence completed and checkout updated (rc=0)
+PASS positive group: the mapping is in effect inside the view
+PASS positive group: no filter and no hook ran in push, temp-index build or check
+PASS real config untouched by the view
+exit=0
+## probe-disk-image-cap.sh
+PASS space reserved up front (16384k of 16384k)
+PASS mounted
+PASS plain write capped with ENOSPC
+PASS unlinked open file capped with ENOSPC
+PASS inode count capped (created 52 of 200)
+PASS cap holds inside the sandbox
+PASS hazard recorded: 1 GiB sparse file fits in a 16 MiB image
+PASS host footprint never exceeds the image (16384k)
+exit=0
+
+=== probe-git-refuse-mode.sh v2 (2026-10-09, git 2.53.0) ===
+case 1: main checked out in linked worktree wt1
+  PASS linked worktree: refused (exit 1)
+  PASS linked worktree: ref, HEADs, index bytes, files, op state unchanged
+case 2: main checked out in the main worktree
+  PASS main worktree: refused (exit 1)
+  PASS main worktree: ref, HEADs, index bytes, files, op state unchanged
+case 3: bisect in progress in wt1, started from main
+warning: you are switching branch while bisecting
+  wt1 HEAD: detached; BISECT_START=main
+  PASS bisect in progress: refused (exit 1)
+  PASS bisect in progress: ref, HEADs, index bytes, files, op state unchanged
+case 4: rebase in progress in wt1 on main (stopped at a conflict)
+  wt1 HEAD: detached; head-name=refs/heads/main
+  PASS rebase in progress: refused (exit 1)
+  PASS rebase in progress: ref, HEADs, index bytes, files, op state unchanged
+case 5 (positive control): no worktree has main checked out
+  PASS unoccupied: push accepted, main = delivered
+  PASS unoccupied: only the ref moved (HEADs, index bytes, files unchanged)
+git 2.53.0; failures: 0
+
+=== probe-git-occupant-binding.sh (2026-10-09, git 2.53.0, bwrap 0.11.1) ===
+case 0 (control, no namespace): W1 approved, then W1 detaches and W2 switches to main
+  PASS attack reproduced: plain receiver wrote unapproved W2 (refs/heads/main idx=4b18a7934014 f=base -> refs/heads/main idx=9790077e7392 f=delivered)
+case 1: same race inside the namespace (approved W1 is a linked worktree)
+  PASS push accepted, main = delivered (ref only)
+  PASS no worktree written; W2 left as 'branch advanced, files stale': refs/heads/main idx=8ea63900385b f=base
+case 2: race where the MAIN worktree takes the branch (W1 approved, W1 detaches, W0 switches to main)
+  PASS W0 not written thanks to the recorded HEAD (exit 0): refs/heads/main idx=a86b6e000067 f=base
+  PASS real common HEAD untouched by the read-only copy
+case 3: no race, approved W1 still on main
+  PASS W1 updated: refs/heads/main idx=cd2bfccd8e8c f=delivered
+  PASS W0, W2 untouched
+case 4: approved occupant is the main worktree; W0 detaches, linked W1 switches to main
+  PASS hidden W1 not written (exit 0): refs/heads/main idx=9535e27e0aac f=base
+git 2.53.0, bwrap 0.11.1; failures: 0
+
+=== probe-git-occupant-binding.sh v2 (2026-10-09, git 2.53.0, bwrap 0.11.1) ===
+case 0 (control, no namespace): W1 approved, then W1 detaches and W2 switches to main
+  PASS attack reproduced: plain receiver wrote unapproved W2 (refs/heads/main idxtree=c8aeb034b6b1 f=base -> refs/heads/main idxtree=1a13171f9a80 f=delivered)
+case 0b (control, namespace without core.bare): main worktree takes the branch via bisect state
+  PASS round-19 attack reproduced: W0 (detached, BISECT_START=main) written (detached idxtree=c8aeb034b6b1 f=base -> detached idxtree=1a13171f9a80 f=delivered)
+case 1: W1 approved; W1 detaches, W2 switches to main
+  PASS push accepted, main = delivered (ref only)
+  PASS no worktree written; W2 left as 'branch advanced, files stale': refs/heads/main idxtree=c8aeb034b6b1 f=base
+case 2: W1 approved; W1 detaches, main worktree W0 switches to main
+  PASS W0 not written (exit 0): refs/heads/main idxtree=c8aeb034b6b1 f=base
+case 3: W1 approved; W1 detaches, W0 (detached) checks out main, starts bisect, detaches again
+  W0 HEAD=detached BISECT_START=main
+  PASS W0 with bisect state not written (exit 0)
+case 4: W1 approved; W2 takes the branch via a rebase stopped on a conflict
+  PASS W2 (rebase in progress) not written, rebase state intact (push exit 0)
+case 5: no race, approved W1 still on main
+  PASS W1 updated: index tree equals the delivered tree, file = delivered
+  PASS W0, W2 untouched
+case 6: approved occupant is the main worktree; W0 detaches, linked W1 switches to main
+  PASS hidden W1 not written (exit 0)
+case 7: approved occupant is the main worktree, no race
+  PASS W0 updated: index tree equals the delivered tree
+case 8: bare common repository; W1 approved; W1 detaches, W2 switches to main
+  PASS bare layout: ref only, W2 not written
+case 9: bare common repository, no race
+  PASS bare layout: W1 updated, index tree equals the delivered tree
+git 2.53.0, bwrap 0.11.1; failures: 0
+
+=== probe-git-push-to-checkout.sh (2026-10-09, git 2.53.0) ===
+case 1: HEAD is the recorded base, clean
+  PASS landed: main = delivered, index tree = delivered tree, only f changed
+case 2: the branch moved to C (g changed) after the re-check; the lease is made to pass so receive-pack reaches the worktree update
+  PASS refused by the hook (exit 1)
+  PASS nothing written: main, HEAD, index bytes, files unchanged
+case 3: dirty worktree (unstaged change)
+  PASS refused, nothing written apart from the index stat refresh
+case 4: staged change
+  PASS refused, nothing written
+git 2.53.0; failures: 0
+
+=== probe-git-materialization-inputs.sh (2026-10-09, git 2.53.0) ===
+part a: a staged .gitattributes change (f -> text eol=crlf) before read-tree -u -m A B
+  PASS control: live attributes used, f materialized as CRLF (9 bytes, admission assumed 6)
+  PASS --attr-source=<delivered>: f materialized as LF (6 bytes), matching the admission
+  PASS attr.tree=<delivered> gives the same result (6 bytes)
+part b: sparse rules widened to include g (not reapplied); g has skip-worktree and is absent
+  PASS control: widened rules pulled g (outside the change set) into the worktree
+  PASS core.sparseCheckout=false: only f written, g stays absent
+git 2.53.0; failures: 0
+
+=== probe-git-check-readonly.sh (2026-10-09, git 2.53.0; git-lfs not installed, LFS clean simulated) ===
+part 1: a replace ref created after admission for the delivered blob
+  PASS control: replace ref honoured, f written as 100000 bytes (admission assumed 10)
+  PASS core.useReplaceRefs=false: f written as the delivered blob (10 bytes)
+part 2: cleanliness check over a large uncommitted change to an LFS-tracked file outside the change set
+  PASS control: check judged dirty and wrote 5000000 bytes into the object store
+  PASS read-only comparator: check judged dirty, 0 bytes written
+  PASS read-only comparator: restored file judged clean, still 0 bytes written
+git 2.53.0; failures: 0
+
+=== probe-git-history-and-fetch.sh (2026-10-09, git 2.53.0) ===
+part 1: B and C both branch from A; C does not contain B; info/grafts claims C's parent is B
+  PASS control: with useReplaceRefs=false alone, grafts make B look contained in C
+  PASS GIT_GRAFT_FILE=/dev/null: raw history used, B is not contained in C (exit 1)
+part 2: partial clone (blob:none) from a local repository; read a blob that is not present locally
+  PASS GIT_NO_LAZY_FETCH=1: read fails (exit 128), object files unchanged (4)
+  PASS control: a plain read fetched the blob and wrote object files (4 -> 8)
+git 2.53.0; failures: 0
+
+=== probe-git-program-lfs-filter.sh (2026-10-09, git 2.53.0) ===
+case 1: object present locally
+  PASS g materialized from the local store, verified
+case 2: object removed from the local store after the last check (a local-directory copy still exists)
+  PASS checkout fails (exit 128): no transfer, no fallback
+  PASS nothing written under .git/lfs
+case 3: local object corrupted (same length, different bytes)
+  PASS checkout fails (exit 128) on a mismatching object
+git 2.53.0; failures: 0

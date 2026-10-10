@@ -6,8 +6,8 @@
   "plugins": [
     {
       "name": "mission-pipeline",
-      "source": "./",
-      "description": "Mission Pipeline 3: mixed execution and exploration subtasks, delegated Secretary coordination, Architect readiness, scoped parallel construction and independent acceptance over an immutable ledger. Windows/POSIX local CLI; managed Linux/WSL needs a separately supplied trusted model transport."
+      "source": "./engine/plugin",
+      "description": "An on-screen PM that aligns with you while sandboxed seats plan, build and review the work over a single-writer ledger, with stops that take effect at once and deliveries landed by the program (Linux or WSL2; run mp install from a clone of this repository first)."
     }
   ]
 }

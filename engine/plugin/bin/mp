@@ -1,0 +1,16 @@
+#!/bin/sh
+# Mission Pipeline 4: the PM's CLI (design 9.2). Same engine discovery as mp-hook.
+root="${MP_ENGINE_ROOT:-}"
+if [ -z "$root" ]; then
+  here=$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")
+  [ -f "$here/../../src/cli/main.ts" ] && root="$here/../.."
+fi
+if [ -z "$root" ]; then
+  cfg="${MP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/mission-pipeline/engine4.json}"
+  [ -f "$cfg" ] && root=$(sed -n 's/.*"engineRoot"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" | head -n 1)
+fi
+if [ -z "$root" ] || [ ! -f "$root/src/cli/main.ts" ]; then
+  echo "mp: cannot find the engine (set MP_ENGINE_ROOT, or run mp install first)" >&2
+  exit 78
+fi
+exec "${MP_NODE:-node}" --experimental-strip-types --disable-warning=ExperimentalWarning "$root/src/cli/main.ts" "$@"

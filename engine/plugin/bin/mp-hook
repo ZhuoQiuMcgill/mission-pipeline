@@ -1,0 +1,26 @@
+#!/bin/sh
+# Mission Pipeline 4: the PM session hooks' launcher (design 6.3, 6.4, 3.1).
+# Finds the engine (engine/), then runs src/cli/hooks/main.ts with Node's type stripping.
+# Not finding it is not an error: this session is then not a PM session (exit 0, no output).
+#   $MP_ENGINE_ROOT, else the plugin's parent directory (engine/plugin -> engine),
+#   else "engineRoot" from the CLI configuration ($MP_CONFIG or ~/.config/mission-pipeline/engine4.json).
+event="$1"
+root="${MP_ENGINE_ROOT:-}"
+if [ -z "$root" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/../src/cli/hooks/main.ts" ]; then
+  root="${CLAUDE_PLUGIN_ROOT}/.."
+fi
+if [ -z "$root" ]; then
+  here=$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")
+  [ -f "$here/../../src/cli/hooks/main.ts" ] && root="$here/../.."
+fi
+if [ -z "$root" ]; then
+  cfg="${MP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/mission-pipeline/engine4.json}"
+  if [ -f "$cfg" ]; then
+    root=$(sed -n 's/.*"engineRoot"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" | head -n 1)
+  fi
+fi
+if [ -z "$root" ] || [ ! -f "$root/src/cli/hooks/main.ts" ]; then
+  cat >/dev/null 2>&1
+  exit 0
+fi
+exec "${MP_NODE:-node}" --experimental-strip-types --disable-warning=ExperimentalWarning "$root/src/cli/hooks/main.ts" "$event"

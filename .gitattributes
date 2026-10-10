@@ -1,5 +1,7 @@
-*.py text eol=lf
+*.ts text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.sh text eol=lf
 *.md text eol=lf
 *.json text eol=lf
-skills/mission-pipeline/scripts/mp text eol=lf
-*.ps1 text eol=lf
+engine/plugin/bin/* text eol=lf
