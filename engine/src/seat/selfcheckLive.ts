@@ -39,7 +39,7 @@ import {
   type ToolchainVersions,
 } from '../exec/selfcheck.ts';
 import type { SeatCredentialsSpec } from './credentials.ts';
-import { DEFAULT_MODEL_CONFIG, loadModelConfig, type ModelConfig, type SeatModel } from './modelConfig.ts';
+import { DEFAULT_MODEL_CONFIG, loadModelConfig, resolvePrice, type ModelConfig, type SeatModel } from './modelConfig.ts';
 import { checkLedgerRecognition, checkPmMonitor, checkSessionOffline, judgeProbeSession, runProbeSession, type PmMonitorProbe, type ProbeSession, type ProbeSessionOptions } from './selfcheck.ts';
 
 export const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
@@ -92,11 +92,15 @@ export interface SelfCheckRun {
   readonly gate: GateVerdict;
 }
 
-/** The cheapest model the configuration prices among the seats' models (a few short requests). */
+/**
+ * The cheapest model the configuration prices among the seats' models (a few short requests),
+ * priced as the metering proxy prices it (resolvePrice: aliases and dated ids included). When
+ * every seat runs one model (mp install --model), the probe runs that model.
+ */
 export function cheapestModel(models: ModelConfig): SeatModel {
   const seats = Object.values(models.seats);
   const cost = (m: SeatModel): number => {
-    const p = models.metering.prices[m.model];
+    const p = resolvePrice(models.metering.prices, m.model)?.price;
     return p === undefined ? Number.POSITIVE_INFINITY : p.inputPerMTok + p.outputPerMTok;
   };
   const best = [...seats].sort((a, b) => cost(a) - cost(b))[0];

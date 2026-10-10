@@ -17,8 +17,8 @@ import { fileURLToPath } from 'node:url';
 import { id, type Generation, type LaunchId, type MissionId, type ReservationId, type StopId } from '../src/common/ids.ts';
 import { LedgerClient, serveLedger } from '../src/ledger/ipc.ts';
 import { LedgerService, ledgerPaths } from '../src/ledger/service.ts';
-import { DEFAULT_MODEL_CONFIG, boundPrices, upperBoundMicros, usageMicros, type ApiUsage } from '../src/seat/modelConfig.ts';
-import { MeteringProxy, SpendLedgerDown, UsageReader, ledgerSpend, type ProxyFatal } from '../src/seat/proxy.ts';
+import { DEFAULT_MODEL_CONFIG, boundPrices, resolvePrice, upperBoundMicros, usageMicros, type ApiUsage } from '../src/seat/modelConfig.ts';
+import { MeteringProxy, SpendLedgerDown, UsageReader, ledgerSpend, servedModels, type MeteredRequest, type ProxyFatal } from '../src/seat/proxy.ts';
 
 const PROXY_MAIN = fileURLToPath(new URL('../src/seat/proxy-main.ts', import.meta.url));
 const MODEL = 'claude-haiku-5-5';
@@ -87,7 +87,8 @@ function sseBody(model: string): string {
   ].join('');
 }
 
-async function fakeModel(mission: MissionId, behavior: () => Behavior, delayMs = 0): Promise<{ url: string; seen: Seen[]; release: () => void }> {
+/** `served`: the model id the streamed response names, from the requested one (default: always MODEL). */
+async function fakeModel(mission: MissionId, behavior: () => Behavior, delayMs = 0, served?: (requested: string) => string): Promise<{ url: string; seen: Seen[]; release: () => void }> {
   const seen: Seen[] = [];
   const stalled: ServerResponse[] = [];
   const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -124,7 +125,13 @@ async function fakeModel(mission: MissionId, behavior: () => Behavior, delayMs =
           stalled.push(res);
         } else {
           res.writeHead(200, { 'content-type': 'text/event-stream' });
-          const body = sseBody(MODEL);
+          let requested = MODEL;
+          try {
+            requested = String((JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model?: unknown }).model ?? MODEL);
+          } catch {
+            /* not JSON */
+          }
+          const body = sseBody(served !== undefined ? served(requested) : MODEL);
           // split inside a multi-byte character to exercise the stream decoder
           const cut = Buffer.from(body).indexOf(Buffer.from('é')) + 1;
           const buf = Buffer.from(body);
@@ -224,6 +231,28 @@ describe('request bound and settlement prices (pure)', () => {
   });
 });
 
+describe('served models (pure)', () => {
+  test('the distinct models of the metered requests, in the order first seen; unmetered and unbounded requests are left out', () => {
+    const r = (seq: number, model: string | null, reservation: string | null): MeteredRequest => ({
+      seq,
+      reservation: reservation as never,
+      method: 'POST',
+      path: '/v1/messages',
+      model,
+      bodyBytes: 1,
+      maxTokens: 1,
+      reservedMicros: 0,
+      status: 200,
+      usage: null,
+      settledMicros: 0,
+      settlement: reservation === null ? 'unmetered' : 'usage',
+      ms: 1,
+    });
+    assert.deepEqual(servedModels([]), []);
+    assert.deepEqual(servedModels([r(1, null, null), r(2, 'claude-opus-5-5', 'q2'), r(3, 'gpt-5', null), r(4, 'claude-haiku-4-5', 'q4'), r(5, 'claude-opus-5-5', 'q5')]), ['claude-opus-5-5', 'claude-haiku-4-5']);
+  });
+});
+
 // ---------------------------------------------------------------- through a real ledger
 
 describe('the metering proxy with a real ledger', () => {
@@ -267,6 +296,51 @@ describe('the metering proxy with a real ledger', () => {
     const s = spend(mission);
     assert.equal(s.inflight, 0);
     assert.equal(s.spent, usageMicros(DEFAULT_MODEL_CONFIG, MODEL, USAGE) + 0 + (proxy.log[2]?.reservedMicros ?? NaN));
+  });
+
+  test('any Claude model is forwarded and metered: an unknown family member at the dearest price of its family, a dated id at its entry; the seat goes on', async () => {
+    const mission = id<MissionId>(`m-proxy-${process.pid}-anyclaude`);
+    const launch = await launchIn(mission);
+    // the service serves what was asked for, except that it names the alias's current model
+    const up = await fakeModel(mission, () => 'sse', 0, (requested) => (requested === 'sonnet' ? 'claude-sonnet-5-5' : requested));
+    const { proxy, fatal } = await proxyFor(launch, up.url);
+    for (const model of ['claude-opus-6', 'claude-haiku-4-5-20251001', 'sonnet', 'claude-foo-1']) {
+      const r = await ask(proxy.url, 1000, { model });
+      assert.equal(r.status, 200, `${model}: ${r.body}`);
+    }
+    await proxy.drain();
+    assert.deepEqual(fatal, [], 'no unpriced-model fatal: the seat goes on');
+    assert.equal(up.seen.length, 4, 'every request was forwarded');
+    assert.deepEqual(
+      proxy.log.map((e) => [e.model, e.settlement, e.pricedAs ?? null]),
+      [
+        ['claude-opus-6', 'usage', 'family:opus'],
+        ['claude-haiku-4-5-20251001', 'usage', 'claude-haiku-4-5'],
+        ['claude-sonnet-5-5', 'usage', null], // served under its own id: priced exactly, nothing to note
+        ['claude-foo-1', 'usage', 'family:any-claude'],
+      ],
+    );
+    const opus = proxy.log[0]!;
+    assert.equal(opus.settledMicros, usageMicros(DEFAULT_MODEL_CONFIG, 'opus', USAGE), 'settled at the dearest opus price');
+    assert.ok(opus.reservedMicros >= opus.settledMicros);
+    assert.equal(proxy.log[2]!.settledMicros, usageMicros(DEFAULT_MODEL_CONFIG, 'claude-sonnet-5-5', USAGE));
+    assert.equal(resolvePrice(DEFAULT_MODEL_CONFIG.metering.prices, 'sonnet')?.pricedAs, 'family:sonnet', 'the reservation of the alias request was at the family price');
+    assert.deepEqual(spend(mission), { limit: null, spent: proxy.log.reduce((n, e) => n + e.settledMicros, 0), inflight: 0 });
+  });
+
+  test('a non-Claude model cannot be bounded: refused unforwarded, and the seat is ended (unpriced-model)', async () => {
+    const mission = id<MissionId>(`m-proxy-${process.pid}-nonclaude`);
+    const launch = await launchIn(mission);
+    const up = await fakeModel(mission, () => 'sse');
+    const { proxy, fatal } = await proxyFor(launch, up.url);
+    const r = await ask(proxy.url, 1000, { model: 'gpt-5' });
+    await proxy.drain();
+    assert.equal(r.status, 400);
+    assert.match(r.body, /no price for model gpt-5: the request cannot be bounded/);
+    assert.equal(up.seen.length, 0);
+    assert.deepEqual(fatal.map((f) => f.reason), ['unpriced-model']);
+    assert.equal(proxy.log[0]?.settlement, 'refused');
+    assert.deepEqual(spend(mission), { limit: null, spent: 0, inflight: 0 });
   });
 
   test('an unreachable model service: 502 to the client, settled at zero', async () => {

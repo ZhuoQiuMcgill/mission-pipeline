@@ -12,7 +12,7 @@
 // again is the same ledger operation. Alerts whose ledger delivery failed are listed by
 // undeliveredAlerts() so the scheduler can carry them over (deliverPendingAlerts).
 //
-// WI numbering: design v42 (WI-09 budget, WI-10 resource block, WI-14 cleanup / processes that
+// WI numbering: design v42 (WI-09 budget, and a seat's model not available, WI-10 resource block, WI-14 cleanup / processes that
 // will not end, WI-15 attempt failure, WI-17 async evidence and recovery state, WI-18 startup
 // self-check, WI-20 consistency anomaly); WI-12 (storage fault, the ledger unavailable) as in v41.
 
@@ -54,6 +54,12 @@ export const EXEC_ALERT_WI = {
   // ---- seat host (seat)
   /** The metering proxy refused a request at the spend limit and the seat was ended (6.5). */
   'spend-refused': 'WI-09',
+  /**
+   * The seat's configured model is not available to this login (retired, or not in its plan):
+   * Claude Code refused it, or the model service answered 404 not_found_error. The attempt ends
+   * as an environment failure; retries fail the same way until the seat's model changes.
+   */
+  'model-unavailable': 'WI-09',
   /** A large-disk unit cannot run here (no fuse2fs, no prepared image): resource block (7.1, 6.5). */
   'area-unavailable': 'WI-10',
   /** The attempt ended as an environment failure, a seat failure, or over its resources. */

@@ -44,6 +44,11 @@ describe('the startup self-check as the product runs it (9.3)', () => {
   test('the cheapest configured model runs the probe', () => {
     const m = cheapestModel({ ...DEFAULT_MODEL_CONFIG, seats: { ...DEFAULT_MODEL_CONFIG.seats, secretary: { provider: 'anthropic', model: 'claude-haiku-5-5' } } });
     assert.deepEqual(m, { provider: 'anthropic', model: 'claude-haiku-5-5', maxOutputTokens: 256 });
+    // priced as the proxy prices them: aliases and dated ids too
+    const seats = Object.fromEntries(Object.keys(DEFAULT_MODEL_CONFIG.seats).map((k) => [k, { provider: 'anthropic' as const, model: 'opus' }]));
+    assert.equal(cheapestModel({ ...DEFAULT_MODEL_CONFIG, seats: { ...seats, auditor: { provider: 'anthropic', model: 'haiku' } } }).model, 'haiku');
+    assert.equal(cheapestModel({ ...DEFAULT_MODEL_CONFIG, seats: { ...seats, auditor: { provider: 'anthropic', model: 'claude-3-haiku-20240307' } } }).model, 'claude-3-haiku-20240307');
+    assert.equal(cheapestModel({ ...DEFAULT_MODEL_CONFIG, seats }).model, 'opus', 'every seat on one model: that model');
   });
 
   test('live items 1-3 and 8 are recorded in live mode; the gate then allows seats without fixtures', { skip: UNIT_OK ? false : 'needs a usable bubblewrap and nsenter' }, async () => {

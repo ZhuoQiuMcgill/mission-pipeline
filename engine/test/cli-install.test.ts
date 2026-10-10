@@ -1,8 +1,9 @@
 // `mp install` (design 9.6, 6.1, 7.1, 9.3; WI-18): the dry run writes nothing; an install
 // into temp dirs writes the engine's configuration and both stop inboxes, records
 // degradations only with the user's explicit consent, and the engine it configured
-// starts (6.3) and takes the install states. No system configuration is touched: no
-// user service is installed, the inbox and control plane are temp dirs, no model runs.
+// starts (6.3) and takes the install states; --model puts every seat on one model. No system
+// configuration is touched: no user service is installed, the inbox and control plane are temp
+// dirs, no model runs.
 
 import { afterEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,6 +18,8 @@ import { chooseBackupInbox, installBlocker, planInstall } from '../src/cli/comma
 import { detectExecCapabilities } from '../src/exec/platform.ts';
 import { readHeader } from '../src/ledger/inbox.ts';
 import { engineState } from '../src/scheduler/engine.ts';
+import { DEFAULT_MODEL_CONFIG, loadModelConfig } from '../src/seat/modelConfig.ts';
+import { cheapestModel } from '../src/seat/selfcheckLive.ts';
 import { makeEnv, waitFor } from './scheduler-fixtures.ts';
 
 const dirs: string[] = [];
@@ -83,6 +86,51 @@ describe('mp install (9.6)', { timeout: 300_000 }, () => {
     assert.match(err.message, /4\.0 seats use the Claude Code subscription login.*API-key seats come in a later version/);
     assert.equal(existsSync(join(t, 'root')), false, 'nothing written');
     assert.equal((await runCli(['install', '--dry-run', '--root', join(t, 'root'), '--config', join(t, 'c.json'), '--credentials', 'none', '--no-backup-inbox'], io(t))).exitCode, 0, 'none is still accepted');
+  });
+
+  test('--model puts every seat on that model (a new file, then the existing one rewritten); a non-Claude id is refused before anything is written', async () => {
+    const t = temp('mp-cli-install-model-');
+    const root = join(t, 'root');
+    const cfg = join(t, 'c.json');
+    const models = join(root, 'config', 'model_config.json');
+    const common = ['--root', root, '--config', cfg, '--project', t, '--control-plane', join(t, 'cp'), '--no-backup-inbox', '--bin-dir', join(t, 'bin'), '--no-start', '--skip-selfcheck', '--json'];
+    // refused before anything is written: a non-Claude id, --effort alone, an unknown effort
+    const bad = await runCli(['install', ...common, '--model', 'gpt-5'], io(t));
+    assert.equal(bad.exitCode, 64, bad.stdout);
+    const err = (JSON.parse(bad.stdout) as { error: { code: string; message: string } }).error;
+    assert.equal(err.code, 'BAD_MODEL_CONFIG');
+    assert.match(err.message, /--model "gpt-5" cannot be used; nothing was written: .*a seat model is any Claude model id/);
+    assert.equal(existsSync(root), false, 'nothing written');
+    assert.equal(existsSync(cfg), false);
+    assert.equal((await runCli(['install', ...common, '--effort', 'low'], io(t))).exitCode, 64, '--effort goes with --model');
+    assert.equal((await runCli(['install', ...common, '--model', 'opus', '--effort', 'extreme'], io(t))).exitCode, 64);
+    assert.equal(existsSync(root), false);
+    const dry = await runCli(['install', '--dry-run', '--root', root, '--config', cfg, '--no-backup-inbox', '--model', 'sonnet'], io(t));
+    assert.equal(dry.exitCode, 0, dry.stdout);
+    assert.match(dry.stdout, /model_config\.json \(every seat on sonnet\)/);
+    assert.equal(existsSync(root), false, 'the dry run writes nothing');
+
+    // a new install: every seat on the alias, at the given effort
+    const r = await runCli(['install', ...common, '--model', 'sonnet', '--effort', 'medium'], io(t));
+    assert.equal((JSON.parse(r.stdout) as { result: { installed: boolean } }).result.installed, true, r.stdout);
+    type Seats = Record<string, { provider: string; model: string; effort?: string; maxOutputTokens?: number }>;
+    const seats = (): Seats => (JSON.parse(readFileSync(models, 'utf8')) as { seats: Seats }).seats;
+    assert.deepEqual(Object.keys(seats()), Object.keys(DEFAULT_MODEL_CONFIG.seats));
+    for (const [seat, m] of Object.entries(seats())) assert.deepEqual(m, { provider: 'anthropic', model: 'sonnet', effort: 'medium', maxOutputTokens: 32_000 }, seat);
+    // the live self-check probes the cheapest seat model: with every seat on one model, that model
+    assert.equal(cheapestModel(loadModelConfig(models)).model, 'sonnet');
+
+    // install again with another model: the existing file is rewritten, the effort kept (not given)
+    const r2 = await runCli(['install', ...common, '--model', 'claude-haiku-4-5-20251001'], io(t));
+    assert.equal((JSON.parse(r2.stdout) as { result: { installed: boolean } }).result.installed, true, r2.stdout);
+    for (const m of Object.values(seats())) assert.deepEqual([m.model, m.effort], ['claude-haiku-4-5-20251001', 'medium']);
+    // a refused --model leaves the existing file as it was
+    const before = readFileSync(models, 'utf8');
+    assert.equal((await runCli(['install', ...common, '--model', 'gpt-5'], io(t))).exitCode, 64);
+    assert.equal(readFileSync(models, 'utf8'), before);
+    // without --model an existing file is left as it is
+    await runCli(['install', ...common], io(t));
+    assert.equal(readFileSync(models, 'utf8'), before);
   });
 
   test('git too old or missing, and no systemd user instance, make install refuse early with the fix named', () => {

@@ -26,7 +26,8 @@ import { checkTerminationProof } from '../src/exec/acceptance.ts';
 import { DEFAULT_STOP_GRACE_MS, stopUnit } from '../src/exec/supervisor.ts';
 import { SEAT_DEFINITIONS } from '../src/seat/card.ts';
 import { SEAT_STOP_GRACE_MS } from '../src/seat/unit.ts';
-import { heartbeatPath } from '../src/seat/host.ts';
+import { heartbeatPath, modelUnavailable } from '../src/seat/host.ts';
+import type { MeteredRequest } from '../src/seat/proxy.ts';
 import { readTree } from '../src/seat/tree.ts';
 import type { FakeModel } from './seat-fakemodel.ts';
 import { SeatHarness, UNIT_SKIP, recordsOf, recordsOf as kinds, until, type RunOptions, type UnitRun } from './seat-harness.ts';
@@ -817,5 +818,71 @@ describe('code review r1: seat host end to end', { skip: UNIT_SKIP }, () => {
     const first = round2.fake?.requests.find((q) => q.main);
     assert.ok(first !== undefined && first.step === 0 && first.userText.includes('could not be resumed') && first.userText.includes('EVIDENCE-R2-6'));
     assert.equal(ledgerAlerts(round2.launch).find((a) => a.category === 'recovery-state-degraded')?.wi, 'WI-17');
+  });
+});
+
+describe("WI-09: a seat's model not available, and the served models", () => {
+  const req = (status: number, errorType?: string, reservation: string | null = 'q1'): MeteredRequest => ({
+    seq: 1,
+    reservation: reservation as never,
+    method: 'POST',
+    path: '/v1/messages',
+    model: 'claude-3-5-haiku-20241022',
+    bodyBytes: 1,
+    maxTokens: 1,
+    reservedMicros: 1,
+    status,
+    usage: null,
+    settledMicros: 0,
+    settlement: 'zero',
+    ms: 1,
+    ...(errorType !== undefined ? { errorType } : {}),
+  });
+
+  test("recognized by Claude Code's message, or by a 404 not_found_error on the last metered request", () => {
+    const msg = "Claude Code returned an error result: There's an issue with the selected model (claude-3-5-haiku-20241022). It may not exist or you may not have access to it.";
+    assert.equal(modelUnavailable(msg, []), msg);
+    assert.equal(modelUnavailable('It may not exist or you may not have access to it', []), 'It may not exist or you may not have access to it');
+    assert.match(modelUnavailable(null, [req(404, 'not_found_error')]) ?? '', /HTTP 404 \(not_found_error\) for model claude-3-5-haiku-20241022/);
+    assert.equal(modelUnavailable('the SDK said something', [req(404, 'not_found_error')]), 'the SDK said something');
+    // a free request after it does not hide it; other errors are not it
+    assert.notEqual(modelUnavailable(null, [req(404, 'not_found_error'), req(200, undefined, null)]), null);
+    assert.equal(modelUnavailable(null, [req(404, 'invalid_request_error')]), null);
+    assert.equal(modelUnavailable(null, [req(500, 'api_error')]), null);
+    assert.equal(modelUnavailable('Claude Code process exited with code 1', [req(200)]), null);
+    assert.equal(modelUnavailable(null, []), null);
+  });
+
+  test('a retired model: an environment failure whose reason says model-unavailable, one WI-09 notice naming the seat and the fix; the served models are recorded', { skip: UNIT_SKIP }, async () => {
+    const retired = 'claude-3-5-haiku-20241022';
+    const r = await runSeatUnit({
+      card: constructorCard,
+      modelConfig: h.modelConfigFile(retired, 1000),
+      script: () => ({ kind: 'error', status: 404, type: 'not_found_error', message: `model: ${retired}` }),
+    });
+    assert.equal(r.outcome.status, 'environment-failure', diag(r.state, r.launch));
+    assert.match(r.outcome.reason ?? '', new RegExp(`^model-unavailable: ${retired}: `), r.outcome.reason ?? '');
+    assert.deepEqual(r.outcome.model, { name: retired, source: 'config' });
+    assert.deepEqual(r.outcome.served, [retired], 'the proxy saw only the configured model');
+    assert.equal(r.outcome.metering.settledMicros, 0, 'refused before execution: settled at zero');
+    const alerts = ledgerAlerts(r.launch);
+    const a = alerts.find((x) => x.category === 'model-unavailable');
+    assert.ok(a !== undefined, JSON.stringify(alerts));
+    assert.equal(a.wi, 'WI-09');
+    assert.equal(a.body.trigger['seatName'], 'constructor');
+    assert.equal(a.body.trigger['model'], retired);
+    assert.equal(typeof a.body.trigger['message'], 'string');
+    assert.match(a.body.defaultAction, /environment failure; automatic retries fail the same way until this seat's model changes: `mp model-config set constructor\|all --model <a model this login can use>`; when the lineage is exhausted meanwhile, WI-08/);
+    assert.equal(alerts.filter((x) => x.category === 'attempt-failed').length, 0, "the host's notice is WI-09, not WI-15 (the scheduler's own WI-15 notice tells the retries)");
+  });
+
+  test('a seat that ran: the outcome lists the models the proxy saw', { skip: UNIT_SKIP }, async () => {
+    const r = await runSeatUnit({
+      card: constructorCard,
+      script: (q) =>
+        q.step === 0 ? { kind: 'tool', name: 'mcp__program__write_file', input: { path: 'src/out.txt', content: 'hello\n' } } : q.step === 1 ? done('wrote src/out.txt') : { kind: 'text', text: 'Done.' },
+    });
+    assert.equal(r.outcome.status, 'handed-back', `${r.outcome.reason}\n${diag(r.state, r.launch)}`);
+    assert.deepEqual(r.outcome.served, [MODEL]);
   });
 });

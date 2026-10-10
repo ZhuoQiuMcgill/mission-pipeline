@@ -5,7 +5,10 @@
 // configuration (ledger, scheduler with the evaluator, inbox probes, watchdog, engine
 // start, CLI) and both stop inboxes; starts the engine and records the install states
 // (degradations only with the user's explicit consent: --accept-degradation); runs the
-// offline self-check; and prints one paragraph for the PM to relay.
+// offline self-check; and prints one paragraph for the PM to relay. `--model <id|alias>`
+// [`--effort <level>`] puts every seat of model_config.json on that model (any Claude model;
+// a new install, or the existing file rewritten); without it every seat runs claude-opus-5-5
+// at effort high and an existing model_config.json is left as it is.
 //
 // `--dry-run` writes nothing at all: it reports what it found and what it would do.
 
@@ -25,7 +28,7 @@ import { installInbox } from '../../ledger/inbox.ts';
 import { LedgerClient } from '../../ledger/ipc.ts';
 import { ledgerPaths } from '../../ledger/service.ts';
 import { writeInboxConfig } from '../../ledger/stops.ts';
-import { DEFAULT_MODEL_CONFIG } from '../../seat/modelConfig.ts';
+import { DEFAULT_MODEL_CONFIG, EFFORTS, parseModelConfig, withEverySeat, type Effort } from '../../seat/modelConfig.ts';
 import type { SeatCredentialsSpec } from '../../seat/credentials.ts';
 import { EXEC_INSTALL_FORMAT } from '../../exec/selfcheck.ts';
 import { TOOLCHAIN_FIX, detectToolchain, hostSystemEnvironment, type EnvironmentRoot, type Toolchain } from '../../exec/sandbox.ts';
@@ -443,6 +446,30 @@ export function planInstall(o: {
   return { root, configPath: o.configPath, cliConfig: cliConfig as unknown as InstallPlan['cliConfig'], files, backup: o.backup, checks, caps: o.caps, requiresAcceptance: missing, accepted, blocked: pol.blocked, toolchain };
 }
 
+/**
+ * `mp install --model <id|alias> [--effort <level>]`: model_config.json with every seat on that
+ * model (the existing file rewritten, its other settings kept; or a new one from the defaults),
+ * validated before anything is written. Refuses (nothing written) an id that is not a model
+ * the seats can run, or an existing file that cannot be read.
+ */
+export function plannedSeatModels(path: string, model: string, effort: Effort | null): { readonly doc: Record<string, unknown>; readonly line: string } {
+  let raw: Record<string, unknown> = { format: DEFAULT_MODEL_CONFIG.format, seats: DEFAULT_MODEL_CONFIG.seats };
+  if (existsSync(path)) {
+    try {
+      raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    } catch (e) {
+      throw new CliError('BAD_MODEL_CONFIG', `cannot read the existing ${path} to set --model (${errorMessage(e)}); nothing was written: fix or remove the file, then install again`, { exitCode: EXIT.REFUSED });
+    }
+  }
+  const doc = withEverySeat(raw, { model, ...(effort !== null ? { effort } : {}) });
+  try {
+    parseModelConfig(doc);
+  } catch (e) {
+    throw new CliError('BAD_MODEL_CONFIG', `--model ${JSON.stringify(model)} cannot be used; nothing was written: ${errorMessage(e)}`, { exitCode: EXIT.USAGE });
+  }
+  return { doc, line: `every seat on ${model}${effort !== null ? `, effort ${effort}` : ''}` };
+}
+
 /** Install states to record (pending until the ledger takes them). */
 export interface PendingInstallState {
   readonly item: string;
@@ -504,7 +531,7 @@ export const installCmd: Command = {
   name: 'install',
   summary: 'first install and self-check: checks the environment, picks the backup inbox volume, writes the configuration and inboxes, starts the engine, records install states, runs the offline self-check',
   usage:
-    'mp install [--root <dir>] [--project <repository>] [--target-branch main] [--credentials subscription|none] [--control-plane <memory dir>] [--backup-inbox <file>|--no-backup-inbox] [--accept-degradation <name>,...] [--bin-dir <dir>] [--skip-selfcheck] [--no-start] [--dry-run]',
+    'mp install [--root <dir>] [--project <repository>] [--target-branch main] [--credentials subscription|none] [--model <id|alias> [--effort low|medium|high|xhigh|max]] [--control-plane <memory dir>] [--backup-inbox <file>|--no-backup-inbox] [--accept-degradation <name>,...] [--bin-dir <dir>] [--skip-selfcheck] [--no-start] [--dry-run]',
   flags: {
     root: 'string',
     project: 'string',
@@ -518,6 +545,8 @@ export const installCmd: Command = {
     'dry-run': 'boolean',
     'bin-dir': 'string',
     credentials: 'string',
+    model: 'string',
+    effort: 'string',
   },
   changesState: true,
   wi: 'WI-18',
@@ -529,6 +558,10 @@ export const installCmd: Command = {
     const configPath = ctx.configPath !== '' ? ctx.configPath : defaultConfigPath(env);
     const accepted = flagList(args, 'accept-degradation');
     for (const d of accepted) if (!DEGRADATIONS.includes(d as Degradation)) throw usage(`unknown degradation ${d} (${DEGRADATIONS.join(', ')})`);
+    const modelFlag = flagStr(args, 'model');
+    const effortFlag = flagStr(args, 'effort');
+    if (effortFlag !== null && modelFlag === null) throw usage('--effort goes with --model (to change only the effort later: mp model-config set <seat>|all --effort <level>)');
+    if (effortFlag !== null && !EFFORTS.includes(effortFlag as Effort)) throw usage(`--effort is one of ${EFFORTS.join(', ')}`);
     const wsl = isWsl(env);
     const backupFlag = flagStr(args, 'backup-inbox');
     if (backupFlag !== null && flagBool(args, 'no-backup-inbox')) throw usage('--backup-inbox and --no-backup-inbox cannot both be given');
@@ -553,9 +586,21 @@ export const installCmd: Command = {
       home: env['HOME'] ?? homedir(),
       credentials: seatCredentials(flagStr(args, 'credentials'), env),
     });
+    // --model: the seats' model_config.json, checked before anything is written
+    const modelConfigPath = plan.cliConfig.modelConfig ?? join(root, 'config', 'model_config.json');
+    const seatModels = modelFlag !== null ? plannedSeatModels(modelConfigPath, modelFlag, effortFlag as Effort | null) : null;
     const hardFail = installBlocker(plan);
     if (dryRun) {
-      const lines = [summaryParagraph(plan, { started: null, selfCheck: null, dryRun: true }), '', 'Checks:', ...plan.checks.map((c) => `  ${c.ok ? 'ok' : 'needs attention'} ${c.item}: ${c.detail}${c.wi ? ` (${c.wi})` : ''}`), '', 'Files it would write:', ...Object.keys(plan.files).map((f) => `  ${f}`)];
+      const lines = [
+        summaryParagraph(plan, { started: null, selfCheck: null, dryRun: true }),
+        '',
+        'Checks:',
+        ...plan.checks.map((c) => `  ${c.ok ? 'ok' : 'needs attention'} ${c.item}: ${c.detail}${c.wi ? ` (${c.wi})` : ''}`),
+        '',
+        'Files it would write:',
+        ...Object.keys(plan.files).map((f) => `  ${f}`),
+        ...(seatModels !== null ? [`  ${modelConfigPath} (${seatModels.line})`] : []),
+      ];
       return ok(lines.join('\n'), { dryRun: true, plan: { root: plan.root, configPath: plan.configPath, checks: plan.checks, backup: plan.backup, requiresAcceptance: plan.requiresAcceptance, accepted: plan.accepted, blocked: plan.blocked, files: plan.files } });
     }
     if (hardFail !== undefined) throw new CliError('INSTALL_BLOCKED', `cannot install: ${hardFail.detail}`, { exitCode: EXIT.REFUSED, wi: 'WI-18' });
@@ -587,7 +632,8 @@ export const installCmd: Command = {
       mkdirSync(dirname(file), { recursive: true });
       writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
     }
-    if (c.modelConfig !== null && !existsSync(c.modelConfig)) writeFileAtomic(c.modelConfig, `${JSON.stringify({ format: DEFAULT_MODEL_CONFIG.format, seats: DEFAULT_MODEL_CONFIG.seats }, null, 2)}\n`);
+    if (seatModels !== null) writeFileAtomic(modelConfigPath, `${JSON.stringify(seatModels.doc, null, 2)}\n`);
+    else if (c.modelConfig !== null && !existsSync(c.modelConfig)) writeFileAtomic(c.modelConfig, `${JSON.stringify({ format: DEFAULT_MODEL_CONFIG.format, seats: DEFAULT_MODEL_CONFIG.seats }, null, 2)}\n`);
     const lp = ledgerPaths(c.ledgerRoot, c.controlPlane, { backupInbox: plan.backup.file });
     const primary = installInbox(lp.inbox, 'primary');
     let backupHeader = null;
@@ -729,8 +775,8 @@ export const installCmd: Command = {
         }
       }
     }
-    const text = [summaryParagraph(plan, { started, selfCheck, dryRun: false }), ...(depsNote !== null ? [depsNote] : []), ...(toolchainLine !== null ? [toolchainLine] : []), binNote, ...(startError ? [`(engine start: ${startError})`] : []), ...(backupError ? [`(the backup inbox could not be set up: ${backupError})`] : []), `Configuration: ${plan.configPath}`].join('\n');
+    const text = [summaryParagraph(plan, { started, selfCheck, dryRun: false }), ...(seatModels !== null ? [`Seat models: ${seatModels.line}`] : []), ...(depsNote !== null ? [depsNote] : []), ...(toolchainLine !== null ? [toolchainLine] : []), binNote, ...(startError ? [`(engine start: ${startError})`] : []), ...(backupError ? [`(the backup inbox could not be set up: ${backupError})`] : []), `Configuration: ${plan.configPath}`].join('\n');
     const failedChecks = plan.checks.filter((x) => !x.ok && x.wi === 'WI-18');
-    return ok(text, { installed: true, configPath: plan.configPath, root, checks: plan.checks, backup: plan.backup, started, startError, selfCheck, accepted: plan.accepted, requiresAcceptance: plan.requiresAcceptance }, failedChecks.length > 0 || selfCheck?.ok === false ? EXIT.REFUSED : 0);
+    return ok(text, { installed: true, configPath: plan.configPath, root, ...(seatModels !== null ? { seatModel: { model: modelFlag, effort: effortFlag, file: modelConfigPath } } : {}), checks: plan.checks, backup: plan.backup, started, startError, selfCheck, accepted: plan.accepted, requiresAcceptance: plan.requiresAcceptance }, failedChecks.length > 0 || selfCheck?.ok === false ? EXIT.REFUSED : 0);
   },
 };

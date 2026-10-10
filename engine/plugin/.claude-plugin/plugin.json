@@ -1,6 +1,6 @@
 {
   "name": "mission-pipeline",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "Mission Pipeline 4 for the PM session: starts the engine when the PM opens, puts layer 0, the PM's core handbook and the work-instruction index into the PM's context, detects stop words and books the user's words on every prompt; the mp command (bin/) is the PM's CLI, and mp watch-notices is its background monitor.",
   "author": { "name": "Zhuo Qiu" },
   "homepage": "https://github.com/ZhuoQiuMcgill/mission-pipeline",

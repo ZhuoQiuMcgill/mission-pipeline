@@ -15,6 +15,8 @@ Mission Pipeline runs a software project as a traceable pipeline. You talk to on
 
 You need Linux or WSL2, Node 22.12 or later, git 2.44 or later, a systemd user instance, cgroup v2, bubblewrap, and a Claude Code subscription login. The install checks all of these. The full list is in [engine/README.md](engine/README.md#requirements).
 
+The seats run on any Claude model your login can use (default `claude-opus-5-5`; `mp install --model sonnet`, for example, puts every seat on Sonnet). Codex or an OpenAI account is not needed. See [Models](engine/README.md#models).
+
 ```sh
 git clone https://github.com/ZhuoQiuMcgill/mission-pipeline.git
 cd mission-pipeline/engine

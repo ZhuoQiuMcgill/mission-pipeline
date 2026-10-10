@@ -12,7 +12,7 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-06: A landing did not complete (A before the push / B safe to retry / base moved / C other)
 - WI-07: A selected object's content changed on the delivery candidate
 - WI-08: A lineage's automatic loop is exhausted, or repeats the same failure
-- WI-09: Budget block, or waiting for the account quota to reset
+- WI-09: Budget block, waiting for the account quota to reset, or a seat's model not available
 - WI-10: Resource block, disk or inode watermark, no fuse2fs, space reminder
 - WI-11: Evaluator fault (derived state cannot be computed), or its pool is too small
 - WI-12: Storage fault, a stop not persisted, the recovery pause or going on after a reboot

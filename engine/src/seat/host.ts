@@ -73,7 +73,7 @@ import { loginTextChanged, prepareCredentials, type SeatCredentialsSpec } from '
 import { buildSeatServer, type EvidenceRequest } from './mcpTools.ts';
 import { DEFAULT_MODEL_CONFIG, loadModelConfig, seatModelFor, type ModelConfig, type SeatModel } from './modelConfig.ts';
 import { MaterialShelf, hostCardView, needsSandbox, sandboxPaths, type HostCard } from './profiles.ts';
-import { MeteringProxy, ledgerSpend, type ProxyFatal, type ProxyTotals } from './proxy.ts';
+import { MeteringProxy, ledgerSpend, servedModels, type MeteredRequest, type ProxyFatal, type ProxyTotals } from './proxy.ts';
 import { citedEvidence, findingRecords, judgmentRecord, resultDocuments, snapshotFiles, type HandBack, type ReviewerResult, type SnapshotFiles } from './results.ts';
 import { seatSessionOptions } from './session.ts';
 import { restoreTree } from './tree.ts';
@@ -180,6 +180,12 @@ export interface SeatHostOutcome {
   readonly seatName: string | null;
   /** The model the seat ran on, and whether model_config.json named it or the default applied. */
   readonly model: { readonly name: string; readonly source: 'config' | 'default' } | null;
+  /**
+   * The distinct model ids the metering proxy saw in the seat's metered requests (proxy.ts
+   * servedModels). Differs from `model.name` for an alias, a dated id, or a retired model that
+   * Claude Code redirected to the current model of its family. Absent in older outcomes.
+   */
+  readonly served?: readonly string[];
   readonly status: HostStatus;
   readonly endedBy: EndedBy | null;
   readonly reason: string | null;
@@ -258,6 +264,24 @@ const ATTEMPT_DEFAULT: Readonly<Record<'environment-failure' | 'seat-failure' | 
   'seat-failure': 'reported as a pending result and not accepted; the task needs a decision (restart, change the card, or escalate), counted in the 6.5 restarts',
 };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Claude Code's message when the selected model does not exist or the login has no access to it. */
+export const MODEL_UNAVAILABLE_TEXT = /issue with the selected model|may not exist or you may not have access/i;
+
+/**
+ * WI-09 "a seat's model not available": the seat's model is retired or not in this login's plan.
+ * Recognized by Claude Code's message in the SDK failure, or (a second signal) by the last
+ * metered request answered HTTP 404 with a not_found_error. Returns the message to report, or
+ * null when neither signal is there.
+ */
+export function modelUnavailable(failure: string | null, log: readonly MeteredRequest[]): string | null {
+  if (failure !== null && MODEL_UNAVAILABLE_TEXT.test(failure)) return failure;
+  const last = [...log].reverse().find((r) => r.reservation !== null);
+  if (last !== undefined && last.status === 404 && last.errorType === 'not_found_error') {
+    return failure ?? `the model service answered HTTP 404 (not_found_error) for model ${last.model ?? '(unknown)'}`;
+  }
+  return null;
+}
 
 export function parseSeatHostConfig(x: unknown): SeatHostConfig {
   const c = x as Partial<SeatHostConfig> | null;
@@ -892,6 +916,8 @@ class SeatHostRun {
     const ev = evidence as { request: ContentHash; savedState: ContentHash } | null;
     let status: HostStatus;
     let reason: string | null = null;
+    /** WI-09: the seat's model is not available to this login (Claude Code's message). */
+    let unavailable: string | null = null;
     const endedBy = this.endedBy as EndedBy | null;
     if (endedBy !== null) {
       status = endedBy === 'timeout' ? 'timed-out' : endedBy === 'ledger-down' || endedBy === 'unpriced-model' || endedBy === 'wedged' ? 'environment-failure' : 'cancelled';
@@ -908,7 +934,13 @@ class SeatHostRun {
     else if (sub !== null) status = 'handed-back';
     else {
       const last = proxy.log.at(-1);
-      if (failure !== null) {
+      unavailable = modelUnavailable(failure, proxy.log);
+      if (unavailable !== null) {
+        // still an environment failure (the scheduler's retry loop is unchanged); the reason and
+        // the WI-09 notice below say what fixes it: another model for this seat
+        status = 'environment-failure';
+        reason = `model-unavailable: ${seatModel.model.model}: ${unavailable}`;
+      } else if (failure !== null) {
         status = 'environment-failure';
         reason = `the SDK failed: ${failure}`;
       } else if (last !== undefined && (last.status === 401 || last.status === 429 || last.status >= 500)) {
@@ -1043,7 +1075,18 @@ class SeatHostRun {
       // the facts that let the unit be judged at all, if the ledger takes them now
       if (await this.submitFailureResult().catch(() => false)) pendingOps.push(`host-result:${launch}`);
     }
-    if (status === 'environment-failure' || status === 'seat-failure' || status === 'resource-exceeded') {
+    const served = servedModels(proxy.log);
+    if (unavailable !== null && status === 'environment-failure' && reason?.startsWith('model-unavailable:') === true) {
+      // WI-09 instead of the host's WI-15 notice: WI-15's options (retry, restart, change the card)
+      // cannot fix it; the scheduler's own WI-15 notice still tells the retry count and exhaustion
+      const seatName = entry.seat;
+      this.raise(
+        'model-unavailable',
+        `the ${seatName} seat's model ${seatModel.model.model} is not available to this login: ${unavailable}`,
+        { seatName, model: seatModel.model.model, modelSource: seatModel.source, served, message: unavailable, status, reason, claudeExit: exit, lastModelStatus: proxy.log.at(-1)?.status ?? null },
+        `the attempt ended as an environment failure; automatic retries fail the same way until this seat's model changes: \`mp model-config set ${seatName}|all --model <a model this login can use>\`; when the lineage is exhausted meanwhile, WI-08`,
+      );
+    } else if (status === 'environment-failure' || status === 'seat-failure' || status === 'resource-exceeded') {
       this.raise('attempt-failed', `${status}: ${reason ?? ''}`, { status, reason, endedBy, claudeExit: exit, lastModelStatus: proxy.log.at(-1)?.status ?? null }, ATTEMPT_DEFAULT[status]);
     }
 
@@ -1053,6 +1096,7 @@ class SeatHostRun {
       seat: card.seat,
       seatName: entry.seat,
       model: { name: seatModel.model.model, source: seatModel.source },
+      served,
       status,
       endedBy,
       reason,

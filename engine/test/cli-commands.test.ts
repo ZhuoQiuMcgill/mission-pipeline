@@ -15,6 +15,7 @@ import { ledgerPaths } from '../src/ledger/service.ts';
 import { ControlPlane } from '../src/scheduler/controlPlane.ts';
 import { SUMMARY_FORMAT, summaryPath } from '../src/evaluator/checkpoint.ts';
 import { canonicalJson } from '../src/common/hash.ts';
+import { DEFAULT_MODEL_CONFIG } from '../src/seat/modelConfig.ts';
 import { cleanupEnvs, LedgerProc, startWatched, waitFor } from './scheduler-fixtures.ts';
 import { CLI_MAIN, cliEnv, ioOf, ledgerCall, mp, mpJson, runProcess, type CliEnv } from './cli-fixtures.ts';
 
@@ -355,6 +356,42 @@ describe('delivery and landing through the adapter (6.6)', { timeout: 120_000 },
     assert.equal((await mp(env, 'mission', 'open', 'a')).exitCode, 0);
     assert.equal((await mp(env, 'mission', 'open', 'Mission-2')).exitCode, 0);
     assert.match((await mp(env, 'mission', 'list')).stdout, /Mission-2: open/);
+  });
+});
+
+describe('model-config (WI-09)', { timeout: 120_000 }, () => {
+  test('set all puts every seat on one model; aliases and dated ids are taken; an unknown seat or a non-Claude model is refused', async () => {
+    const env = cliEnv('models');
+    await ledgerUp(env);
+    type Seats = Record<string, { provider: string; model: string; effort?: string; maxOutputTokens?: number }>;
+    const seats = (): Seats => (JSON.parse(readFileSync(env.modelConfig, 'utf8')) as { seats: Seats }).seats;
+    // a file with one seat of its own and one seat outside the defaults
+    writeFileSync(env.modelConfig, JSON.stringify({ format: 'mp4.model-config.v1', seats: { reviewer: { provider: 'anthropic', model: 'claude-opus-5-5', effort: 'max' }, legacy: { provider: 'anthropic', model: 'claude-opus-5' } } }));
+    const all = await mpJson(env, 'model-config', 'set', 'all', '--model', 'sonnet');
+    assert.equal(all.exitCode, 0, JSON.stringify(all.out));
+    assert.deepEqual(Object.keys(seats()).sort(), [...Object.keys(DEFAULT_MODEL_CONFIG.seats), 'legacy'].sort(), 'every default seat, plus the one the file named');
+    for (const m of Object.values(seats())) assert.equal(m.model, 'sonnet');
+    assert.equal(seats()['reviewer']?.effort, 'max', 'a seat keeps what was not changed');
+    assert.equal(seats()['architect']?.effort, 'high', 'a seat the file did not name starts from the default');
+    const eff = await mp(env, 'model-config', 'set', 'all', '--effort', 'low', '--max-output-tokens', '16000');
+    assert.equal(eff.exitCode, 0, eff.stderr);
+    assert.match(eff.stdout, /^Changed every seat \(calibrator, architect, .*legacy\): sonnet, effort low\. Seats started from now on use it\.$/m);
+    for (const m of Object.values(seats())) assert.deepEqual([m.model, m.effort, m.maxOutputTokens], ['sonnet', 'low', 16_000]);
+    // one seat, with a dated id
+    assert.equal((await mp(env, 'model-config', 'set', 'architect', '--model', 'claude-haiku-4-5-20251001')).exitCode, 0);
+    assert.equal(seats()['architect']?.model, 'claude-haiku-4-5-20251001');
+    assert.equal(seats()['constructor']?.model, 'sonnet');
+    // refused, the file unchanged: an unknown seat, a non-Claude model
+    const before = readFileSync(env.modelConfig, 'utf8');
+    const typo = await mp(env, 'model-config', 'set', 'architekt', '--model', 'opus');
+    assert.equal(typo.exitCode, 64, typo.stdout + typo.stderr);
+    assert.match(typo.stdout + typo.stderr, /unknown seat "architekt": the seats are calibrator, architect, secretary, constructor, reviewer, researcher, crititor, auditor \(or all\)/);
+    const gpt = await mp(env, 'model-config', 'set', 'all', '--model', 'gpt-5');
+    assert.equal(gpt.exitCode, 3, gpt.stdout + gpt.stderr);
+    assert.match(gpt.stdout + gpt.stderr, /not changed: .*has no price: a seat model is any Claude model id/);
+    assert.equal(readFileSync(env.modelConfig, 'utf8'), before);
+    const shown = await mp(env, 'model-config', 'show');
+    assert.match(shown.stdout, /^calibrator: sonnet, effort low, max output 16000$/m);
   });
 });
 

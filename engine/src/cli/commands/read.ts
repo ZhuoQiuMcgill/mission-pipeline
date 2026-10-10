@@ -3,6 +3,8 @@
 // `alerts` lists the notices for the PM with their WI numbers, the trigger facts, the default
 // action already taken and the WI's page (3.9, 3.11); `ops` lists the PM's recorded actions.
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { LOOP_KINDS } from '../../common/records.ts';
 import type { ActiveStop, DispatchedTask, LaunchInfo, QueuedTask, TaskInfo } from '../../ledger/queries.ts';
 import { readStopHistory, stopCovers, stopDeliveryStates } from '../../ledger/stops.ts';
@@ -114,6 +116,22 @@ async function showStop(ctx: Ctx, stop: string): Promise<{ text: string; json: u
   return { text: lines.join('\n'), json: { stop, state, scope, committed, sent: sent === null ? null : { ...sent, state: sentState }, inbox: history, report } };
 }
 
+/**
+ * ", model: configured X, served Y" for a seat launch whose outcome (seat/host.ts, in the
+ * scheduler's state directory) lists served models other than the configured one; else "".
+ */
+export function servedModelNote(stateDir: string, launch: string): string {
+  try {
+    const o = JSON.parse(readFileSync(join(stateDir, 'units', launch, 'outcome.json'), 'utf8')) as { format?: unknown; model?: { name?: unknown } | null; served?: unknown };
+    const configured = o.model?.name;
+    const served = Array.isArray(o.served) ? o.served.filter((x): x is string => typeof x === 'string') : [];
+    if (o.format !== 'mp4.seat-host-outcome.v1' || typeof configured !== 'string' || served.length === 0 || served.every((m) => m === configured)) return '';
+    return `, model: configured ${configured}, served ${served.join(', ')}`;
+  } catch {
+    return '';
+  }
+}
+
 async function showTask(ctx: Ctx, task: string): Promise<{ text: string; json: unknown }> {
   const info = (await ctx.call('taskInfo', { task })) as TaskInfo | null;
   let view: { state: string; note: string | null; launches: string[] } | null = null;
@@ -141,7 +159,7 @@ async function showTask(ctx: Ctx, task: string): Promise<{ text: string; json: u
   }
   const lines = [`Task ${task}: ${view?.state ?? info?.state ?? '-'} (mission ${info?.mission ?? '-'}, lineage ${info?.lineage ?? '-'})`, `Last change: ${time(info?.updatedAt)}`];
   if (view?.note) lines.push(`Blocking reason and next step: ${view.note}`);
-  for (const l of launches) lines.push(`  Launch ${l.launch}: ${l.disposition ?? 'running'}, cleanup ${l.cleanup ?? '-'}, started ${time(l.createdAt)}`);
+  for (const l of launches) lines.push(`  Launch ${l.launch}: ${l.disposition ?? 'running'}, cleanup ${l.cleanup ?? '-'}, started ${time(l.createdAt)}${servedModelNote(ctx.config.stateDir, l.launch)}`);
   for (const l of loops) lines.push(`  Loop ${l.loop}: ${l.attempts}/${l.allowed}${l.exhausted ? `, exhausted (${l.reason}, WI-08)` : ''}`);
   return { text: lines.join('\n'), json: { task, info, scheduler: view, launches, loops } };
 }

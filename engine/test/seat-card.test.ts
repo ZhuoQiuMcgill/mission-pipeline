@@ -13,7 +13,7 @@ import { ContentStore } from '../src/ledger/content.ts';
 import type { ExportManifest } from '../src/exec/export.ts';
 import { cardTag, parseSeatCard, renderCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
 import { CredentialsUnusable, loginChanged, prepareCredentials } from '../src/seat/credentials.ts';
-import { CONFIRMED_PRICES, DEFAULT_PRICES, ModelConfigError, boundPrices, parseModelConfig, upperBoundMicros, usageMicros, type ModelPrice } from '../src/seat/modelConfig.ts';
+import { CONFIRMED_PRICES, DEFAULT_MODEL_CONFIG, DEFAULT_PRICES, ModelConfigError, SEAT_NAMES, boundPrices, parseModelConfig, resolvePrice, upperBoundMicros, usageMicros, withEverySeat, type ApiUsage, type ModelPrice } from '../src/seat/modelConfig.ts';
 import { SEAT_HOST_MAIN, SEAT_STOP_GRACE_MS, seatUnitConfig } from '../src/seat/unit.ts';
 import { DEFAULT_STOP_GRACE_MS } from '../src/exec/supervisor.ts';
 import { citedEvidence, findingRecords, judgmentRecord, parseSeatResult, resultProblems, snapshotFiles, type ResultContext, type ReviewerResult } from '../src/seat/results.ts';
@@ -414,5 +414,129 @@ describe('model configuration (9.3, 6.5)', () => {
       assert.throws(() => parseModelConfig(base(bad)), ModelConfigError, what);
     }
     assert.throws(() => parseModelConfig(base(ok, { constructor: { provider: 'anthropic', model: 'unpriced-model' } })), /has no price/);
+  });
+});
+
+describe('every Claude model is priced (resolvePrice)', () => {
+  const as = (model: string): string | null => resolvePrice(DEFAULT_PRICES, model)?.pricedAs ?? null;
+
+  test('exact ids, dated snapshots, -v1, [1m], @date and case resolve to their table entry', () => {
+    assert.equal(as('claude-opus-5-5'), 'claude-opus-5-5');
+    assert.deepEqual(resolvePrice(DEFAULT_PRICES, 'claude-opus-5-5')?.price, DEFAULT_PRICES['claude-opus-5-5']);
+    for (const [id, entry] of [
+      ['claude-haiku-4-5-20251001', 'claude-haiku-4-5'],
+      ['claude-sonnet-4-5-20250929', 'claude-sonnet-4-5'],
+      ['claude-opus-4-1-20250805', 'claude-opus-4-1'],
+      ['claude-opus-4-5-20251101', 'claude-opus-4-5'],
+      ['claude-opus-4-20250514', 'claude-opus-4'],
+      ['claude-3-5-haiku-20241022', 'claude-3-5-haiku'],
+      ['claude-3-5-sonnet-20241022-v2', 'claude-3-5-sonnet'],
+      ['claude-opus-4-1-20250805-v1:0', 'claude-opus-4-1'],
+      ['claude-opus-4-6-v1', 'claude-opus-4-6'],
+      ['claude-opus-5-5[1m]', 'claude-opus-5-5'],
+      ['claude-sonnet-4-5-20250929[1m]', 'claude-sonnet-4-5'],
+      ['claude-opus-4-1@20250805', 'claude-opus-4-1'],
+      ['Claude-Opus-5-5', 'claude-opus-5-5'],
+    ] as const) {
+      assert.equal(as(id), entry, id);
+    }
+  });
+
+  test('aliases price as the dearest of their family; an unknown family member too; an unknown claude id as the dearest of all', () => {
+    for (const f of ['opus', 'sonnet', 'haiku', 'fable', 'mythos']) {
+      assert.equal(as(f), `family:${f}`, f);
+      assert.equal(as(`${f}[1m]`), `family:${f}`, `${f}[1m]`);
+    }
+    assert.equal(as('claude-opus-6'), 'family:opus');
+    assert.equal(as('claude-opus-6-20270101'), 'family:opus');
+    assert.equal(as('claude-3-opus'), 'family:opus');
+    assert.equal(as('claude-haiku-3-5'), 'family:haiku');
+    assert.equal(as('claude-mythos-preview'), 'family:mythos');
+    assert.equal(as('claude-foo-1'), 'family:any-claude');
+    const opus = resolvePrice(DEFAULT_PRICES, 'opus')!.price;
+    assert.deepEqual([opus.inputPerMTok, opus.outputPerMTok, opus.cacheReadPerMTok], [15, 75, 1.5], 'the dearest opus entry, field by field');
+    const any = resolvePrice(DEFAULT_PRICES, 'claude-foo-1')!.price;
+    assert.deepEqual([any.inputPerMTok, any.outputPerMTok, any.cacheReadPerMTok], [15, 75, 1.5]);
+  });
+
+  test('a non-Claude id is not priced', () => {
+    for (const id of ['gpt-5', 'gpt-6-astra', 'o3', 'best', 'opusplan', 'unknown-model', 'toString', '__proto__', '']) assert.equal(resolvePrice(DEFAULT_PRICES, id), null, id);
+    assert.throws(() => upperBoundMicros(DEFAULT_MODEL_CONFIG, 'gpt-5', 1, 1), RangeError);
+    assert.throws(() => usageMicros(DEFAULT_MODEL_CONFIG, 'gpt-5', {}), RangeError);
+  });
+
+  test('the older models carry the public prices; none of them is marked confirmed', () => {
+    const fields = (m: string): number[] => {
+      const p = DEFAULT_PRICES[m]!;
+      return [p.inputPerMTok, p.outputPerMTok, p.cacheReadPerMTok];
+    };
+    assert.deepEqual(fields('claude-opus-4-5'), [5, 25, 0.5]);
+    for (const m of ['claude-opus-4-1', 'claude-opus-4-0', 'claude-opus-4']) assert.deepEqual(fields(m), [15, 75, 1.5], m);
+    for (const m of ['claude-sonnet-4-5', 'claude-sonnet-4-0', 'claude-sonnet-4']) {
+      assert.deepEqual(fields(m), [3, 15, 0.3], m);
+      assert.deepEqual(DEFAULT_PRICES[m]!.longContext, { aboveInputTokens: 200_000, inputPerMTok: 6, outputPerMTok: 22.5, cacheReadPerMTok: 0.6 }, m);
+    }
+    for (const m of ['claude-3-7-sonnet', 'claude-3-5-sonnet']) assert.deepEqual(fields(m), [3, 15, 0.3], m);
+    assert.deepEqual(fields('claude-3-5-haiku'), [0.8, 4, 0.08]);
+    assert.deepEqual(fields('claude-3-haiku'), [0.25, 1.25, 0.03]);
+    assert.deepEqual(fields('claude-mythos-5'), [10, 50, 1]);
+    assert.deepEqual([...CONFIRMED_PRICES], ['claude-haiku-5-5']);
+  });
+
+  test('conservative: a family (and any-claude) price is never cheaper than any member, for the bound and for the settlement', () => {
+    const usages: ApiUsage[] = [
+      { input_tokens: 1200, cache_creation_input_tokens: 300, cache_read_input_tokens: 5000, output_tokens: 250, cache_creation: { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 0 } },
+      { input_tokens: 150_000, output_tokens: 10 }, // above the haiku long-context threshold, below sonnet's
+      { input_tokens: 250_000, cache_creation_input_tokens: 1000, cache_read_input_tokens: 9000, output_tokens: 4000 }, // above every threshold
+      { cache_creation_input_tokens: 1000 },
+    ];
+    const families = ['opus', 'sonnet', 'haiku', 'fable', 'mythos'];
+    for (const [synthetic, members] of [
+      ...families.map((f) => [f, Object.keys(DEFAULT_PRICES).filter((k) => k.split('-').includes(f))] as const),
+      ['claude-foo-1', Object.keys(DEFAULT_PRICES)] as const,
+    ]) {
+      assert.ok(members.length > 0, synthetic);
+      for (const m of members) {
+        for (const [bytes, max] of [[1000, 100], [500_000, null], [0, 64_000]] as const) {
+          const sb = upperBoundMicros(DEFAULT_MODEL_CONFIG, synthetic, bytes, max);
+          const mb = upperBoundMicros(DEFAULT_MODEL_CONFIG, m, bytes, max);
+          assert.ok(sb >= mb, `bound of ${synthetic} ${sb} >= ${m} ${mb}`);
+        }
+        for (const u of usages) {
+          const su = usageMicros(DEFAULT_MODEL_CONFIG, synthetic, u);
+          const mu = usageMicros(DEFAULT_MODEL_CONFIG, m, u);
+          assert.ok(su >= mu, `settlement of ${synthetic} ${su} >= ${m} ${mu} for ${JSON.stringify(u)}`);
+        }
+      }
+    }
+  });
+
+  test('model_config.json takes aliases and dated ids and refuses a non-Claude model with the accepted forms', () => {
+    for (const model of ['opus', 'sonnet', 'haiku', 'fable', 'sonnet[1m]', 'claude-sonnet-4-5', 'claude-haiku-4-5-20251001', 'claude-3-5-haiku-20241022', 'claude-opus-6']) {
+      assert.equal(parseModelConfig({ format: 'mp4.model-config.v1', seats: { architect: { provider: 'anthropic', model } } }).seats['architect']?.model, model, model);
+    }
+    assert.throws(
+      () => parseModelConfig({ format: 'mp4.model-config.v1', seats: { architect: { provider: 'anthropic', model: 'gpt-5' } } }),
+      /the architect seat's model "gpt-5" has no price: a seat model is any Claude model id \(claude-\.\.\.\), a dated snapshot .*or an alias: opus, sonnet, haiku, fable/,
+    );
+    // a file's own price for an id still wins over the family fallback
+    const own = parseModelConfig({
+      format: 'mp4.model-config.v1',
+      seats: { architect: { provider: 'anthropic', model: 'claude-opus-6' } },
+      metering: { prices: { 'claude-opus-6': { inputPerMTok: 1, outputPerMTok: 2, cacheReadPerMTok: 0.1, cacheWrite5mMultiplier: 1.25, cacheWrite1hMultiplier: 2 } } },
+    });
+    assert.equal(resolvePrice(own.metering.prices, 'claude-opus-6')?.pricedAs, 'claude-opus-6');
+  });
+
+  test('withEverySeat sets every default seat and any other seat the file names, keeping the rest', () => {
+    const raw = { format: 'mp4.model-config.v1', seats: { reviewer: { provider: 'anthropic', model: 'claude-opus-5-5', effort: 'max', maxOutputTokens: 1000 }, legacy: { provider: 'anthropic', model: 'claude-opus-5' } }, metering: { toolOverheadTokens: 10 } };
+    const doc = withEverySeat(raw, { model: 'sonnet' });
+    const seats = doc['seats'] as Record<string, { model: string; effort?: string; maxOutputTokens?: number }>;
+    assert.deepEqual(Object.keys(seats), [...SEAT_NAMES, 'legacy']);
+    for (const s of Object.values(seats)) assert.equal(s.model, 'sonnet');
+    assert.deepEqual(seats['reviewer'], { provider: 'anthropic', model: 'sonnet', effort: 'max', maxOutputTokens: 1000 }, 'its own effort and cap kept');
+    assert.deepEqual(seats['architect'], { provider: 'anthropic', model: 'sonnet', effort: 'high', maxOutputTokens: 32_000 }, 'an unnamed seat starts from the default seat');
+    assert.deepEqual(doc['metering'], { toolOverheadTokens: 10 });
+    assert.doesNotThrow(() => parseModelConfig(doc));
   });
 });

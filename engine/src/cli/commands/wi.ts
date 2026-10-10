@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { canonicalJson } from '../../common/hash.ts';
 import { LOOP_KINDS, type LoopKind } from '../../common/records.ts';
 import { writeFileAtomic } from '../../common/fsx.ts';
-import { DEFAULT_MODEL_CONFIG, parseModelConfig, type Effort, type ModelConfig } from '../../seat/modelConfig.ts';
+import { DEFAULT_MODEL_CONFIG, EFFORTS, SEAT_NAMES, parseModelConfig, withEverySeat, type Effort, type ModelConfig } from '../../seat/modelConfig.ts';
 import { requestRetry, retryRequestPath, watchdogStatusPath } from '../../scheduler/watchdog.ts';
 import { flagBool, flagStr, missionArg, positional } from '../args.ts';
 import type { Command } from '../command.ts';
@@ -149,8 +149,6 @@ export const spendLimitCmd: Command = {
   },
 };
 
-const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-
 function readModelConfig(path: string): { cfg: ModelConfig; raw: Record<string, unknown> } {
   if (!existsSync(path)) return { cfg: DEFAULT_MODEL_CONFIG, raw: { format: DEFAULT_MODEL_CONFIG.format, seats: { ...DEFAULT_MODEL_CONFIG.seats } } };
   const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
@@ -159,8 +157,8 @@ function readModelConfig(path: string): { cfg: ModelConfig; raw: Record<string, 
 
 export const modelConfigCmd: Command = {
   name: 'model-config',
-  summary: 'show or change model_config.json (each seat\'s model and effort; seats started later use it; switching models invalidates no conclusion)',
-  usage: 'mp model-config show | mp model-config set <seat> [--model <model>] [--effort low|medium|high|xhigh|max] [--max-output-tokens <n>]',
+  summary: 'show or change model_config.json (each seat\'s model and effort; any Claude model or an alias opus|sonnet|haiku|fable; seats started later use it; switching models invalidates no conclusion)',
+  usage: `mp model-config show | mp model-config set <seat>|all [--model <id|alias>] [--effort low|medium|high|xhigh|max] [--max-output-tokens <n>] (seats: ${SEAT_NAMES.join(', ')}; all sets every seat)`,
   flags: { model: 'string', effort: 'string', 'max-output-tokens': 'string' },
   changesState: true,
   wi: 'WI-09',
@@ -174,31 +172,48 @@ export const modelConfigCmd: Command = {
       return ok(lines.join('\n'), { path, seats: cfg.seats });
     }
     if (sub !== 'set') throw usage('model-config takes show or set');
-    const seat = positional(args, 1, 'seat');
+    const seat = positional(args, 1, 'seat (or all)');
+    // an unknown seat name would be written and never read (a typo would change nothing)
+    if (seat !== 'all' && !SEAT_NAMES.includes(seat)) throw usage(`unknown seat ${JSON.stringify(seat)}: the seats are ${SEAT_NAMES.join(', ')} (or all)`);
     const model = flagStr(args, 'model');
     const effort = flagStr(args, 'effort');
     const mot = flagStr(args, 'max-output-tokens');
     if (model === null && effort === null && mot === null) throw usage('set needs at least one of --model, --effort, --max-output-tokens');
     if (effort !== null && !EFFORTS.includes(effort as Effort)) throw usage(`--effort is one of ${EFFORTS.join(', ')}`);
-    const seats = { ...((raw['seats'] as Record<string, Record<string, unknown>> | undefined) ?? {}) };
-    const prev = seats[seat] ?? { provider: 'anthropic' };
-    const next: Record<string, unknown> = { ...prev, provider: 'anthropic' };
-    if (model !== null) next['model'] = model;
-    if (effort !== null) next['effort'] = effort;
+    let maxOutputTokens: number | null = null;
     if (mot !== null) {
-      const n = Number(mot);
-      if (!Number.isSafeInteger(n) || n <= 0) throw usage('--max-output-tokens is a positive integer');
-      next['maxOutputTokens'] = n;
+      maxOutputTokens = Number(mot);
+      if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens <= 0) throw usage('--max-output-tokens is a positive integer');
     }
-    if (typeof next['model'] !== 'string') throw usage(`seat ${seat} has no model yet: give --model`);
-    seats[seat] = next;
-    const doc = { ...raw, seats };
+    let doc: Record<string, unknown>;
+    if (seat === 'all') {
+      // every seat: the default seats and any other seat the file names
+      doc = withEverySeat(raw, { ...(model !== null ? { model } : {}), ...(effort !== null ? { effort: effort as Effort } : {}), ...(maxOutputTokens !== null ? { maxOutputTokens } : {}) });
+    } else {
+      const seats = { ...((raw['seats'] as Record<string, Record<string, unknown>> | undefined) ?? {}) };
+      const prev = seats[seat] ?? { provider: 'anthropic' };
+      const next: Record<string, unknown> = { ...prev, provider: 'anthropic' };
+      if (model !== null) next['model'] = model;
+      if (effort !== null) next['effort'] = effort;
+      if (maxOutputTokens !== null) next['maxOutputTokens'] = maxOutputTokens;
+      if (typeof next['model'] !== 'string') throw usage(`seat ${seat} has no model yet: give --model`);
+      seats[seat] = next;
+      doc = { ...raw, seats };
+    }
     try {
       parseModelConfig(doc);
     } catch (e) {
       throw new CliError('BAD_MODEL_CONFIG', `not changed: ${errorMessage(e)}`, { exitCode: EXIT.REFUSED });
     }
     writeFileAtomic(path, `${JSON.stringify(doc, null, 2)}\n`);
-    return ok(`Changed ${seat}: ${String(next['model'])}${next['effort'] ? `, effort ${String(next['effort'])}` : ''}. Seats started from now on use it.`, { path, seat, model: next });
+    const changed = (doc['seats'] ?? {}) as Record<string, Record<string, unknown>>;
+    const describe = (m: Record<string, unknown> | undefined): string => `${String(m?.['model'])}${m?.['effort'] ? `, effort ${String(m['effort'])}` : ''}`;
+    if (seat === 'all') {
+      const names = Object.keys(changed);
+      const one = new Set(names.map((n) => describe(changed[n])));
+      const text = one.size === 1 ? `Changed every seat (${names.join(', ')}): ${[...one][0]}.` : `Changed every seat: ${names.map((n) => `${n}: ${describe(changed[n])}`).join('; ')}.`;
+      return ok(`${text} Seats started from now on use it.`, { path, seat: 'all', seats: changed });
+    }
+    return ok(`Changed ${seat}: ${describe(changed[seat])}. Seats started from now on use it.`, { path, seat, model: changed[seat] });
   },
 };

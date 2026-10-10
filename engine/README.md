@@ -53,6 +53,8 @@ Install also freezes a copy of your Node and Python toolchain for the sandboxes.
 | `--project <repo>` | the git top level of the current directory | the repository the flows work on; the hooks act only inside a registered project |
 | `--target-branch <branch>` | `main` | the branch deliveries land on |
 | `--credentials subscription\|none` | `subscription` when the Claude Code login exists | the seats' login; `api-key:<VAR>` is refused in 4.0 |
+| `--model <id\|alias>` | `claude-opus-5-5` | puts every seat on this model (see [Models](#models)); on a reinstall it rewrites every seat's model in the existing `model_config.json` |
+| `--effort low\|medium\|high\|xhigh\|max` | `high` | with `--model`: every seat's effort |
 | `--backup-inbox <file>` / `--no-backup-inbox` | chosen on another volume | where the backup stop inbox goes |
 | `--root <dir>` | `~/.local/share/mission-pipeline/engine4` | the engine's data: ledger, state, logs, sockets |
 | `--control-plane <dir>` | `$XDG_RUNTIME_DIR/mission-pipeline-engine4` or `/dev/shm/...` | must be a memory filesystem |
@@ -71,6 +73,14 @@ Then add the plugin in Claude Code and open the PM session in your project:
 ```
 
 Open Claude Code in the project directory. The session-start hook starts the engine if it is not running and puts layer 0, any pending notices, the PM's core handbook (`plugin/pm/PM.md`) and the WI index (`plugin/pm/wi/INDEX.md`) into the PM's context. The PM then starts its background watcher, `mp watch-notices --stream`, through the Monitor tool.
+
+## Models
+
+Every seat runs on any Claude model your Claude Code login can use. Codex or an OpenAI account is not needed. By default every seat runs `claude-opus-5-5` at effort `high`. Choose another model at install with `mp install --model <id|alias> [--effort <level>]`, or change it later with `mp model-config set <seat>|all --model <id|alias> [--effort <level>]` (the seats are `calibrator`, `architect`, `secretary`, `constructor`, `reviewer`, `researcher`, `crititor` and `auditor`; `all` sets every seat). Seats started after the change use it. `mp model-config show` lists them; the file is `config/model_config.json` under the `--root` directory.
+
+A model is a Claude model id (`claude-sonnet-4-5`), a dated snapshot (`claude-haiku-4-5-20251001`), or an alias Claude Code accepts: `opus`, `sonnet`, `haiku`, `fable` (also with `[1m]`). The metering proxy prices each request from its price table (the built-in prices, plus any that `model_config.json` adds under `metering.prices`). A model the table does not list, such as a newer one, is priced at the highest price of its family, so the accounting over-counts rather than under-counts. A model that is not a Claude model is refused.
+
+Claude Code either redirects a retired model to the current model of its family, or refuses it. A seat's outcome records the models that actually served it, and `mp show task` prints "configured X, served Y" when they differ. When Claude Code refuses a seat's model, the attempt ends as an environment failure and the PM gets a WI-09 notice to switch that seat (or all seats) to a model the login can use.
 
 ## Daily use
 

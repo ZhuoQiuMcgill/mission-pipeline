@@ -21,8 +21,11 @@
 //        or the service answered with an API error of a class documented as refused before
 //        execution and not charged (400, 401, 403, 404, 413, 429 with the matching error type,
 //        before any message started; finding 10);
-//      - at the reservation otherwise: 5xx, gateway errors, malformed or cut responses, an
-//        unpriced served model.
+//      - at the reservation otherwise: 5xx, gateway errors, malformed or cut responses.
+//   Prices come from resolvePrice (modelConfig.ts): any Claude model id is priced (an unknown
+//   one at the dearest price of its family); the settlement prices the served model, or the
+//   requested one when the served id cannot be priced. Only a request for a model that cannot
+//   be priced at all (not a Claude model) is refused, and ends the seat (unpriced-model).
 // In "unlimited" mode the ledger never refuses, and the proxy meters all the same.
 
 import http, { type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type ServerResponse } from 'node:http';
@@ -31,7 +34,7 @@ import type { Socket } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { id, type LaunchId, type ReservationId } from '../common/ids.ts';
 import { LedgerClient, RemoteLedgerError } from '../ledger/ipc.ts';
-import { upperBoundMicros, usageMicros, usageProblems, type ApiUsage, type ModelConfig } from './modelConfig.ts';
+import { resolvePrice, upperBoundMicros, usageMicros, usageProblems, type ApiUsage, type ModelConfig } from './modelConfig.ts';
 
 // ---------------------------------------------------------------- the ledger side
 
@@ -275,6 +278,23 @@ export interface MeteredRequest {
   readonly ms: number;
   /** Why a forwarded request was not settled by its usage (finding 9), when it was not. */
   readonly note?: string;
+  /**
+   * What the request was priced as (resolvePrice), when that is not `model` itself: a table
+   * entry (a dated or suffixed id), or `family:<family>` / `family:any-claude`.
+   */
+  readonly pricedAs?: string;
+  /** The error type of an API error response (e.g. not_found_error), when the response was one. */
+  readonly errorType?: string;
+}
+
+/**
+ * The distinct model ids of the metered requests, in the order first seen: the model the
+ * service served (the response's model), or the one asked for when no response named one.
+ * The seat outcome lists them next to the configured model (Claude Code may redirect a
+ * retired model to the current model of its family).
+ */
+export function servedModels(log: readonly MeteredRequest[]): string[] {
+  return [...new Set(log.flatMap((r) => (r.reservation !== null && r.model !== null ? [r.model] : [])))];
 }
 
 export interface ProxyTotals {
@@ -498,7 +518,7 @@ export class MeteringProxy {
     } catch (e) {
       this.totals.refused++;
       apiError(res, 400, 'invalid_request_error', `${(e as Error).message}: the request cannot be bounded`);
-      this.fatal('unpriced-model', `no price for model ${JSON.stringify(model)}`);
+      this.fatal('unpriced-model', `no price for model ${JSON.stringify(model)} (only Claude models can be priced)`);
       this.record({ ...base, reservation: null, model, maxTokens, reservedMicros: 0, status: 400, usage: null, settledMicros: 0, settlement: 'refused', ms: Date.now() - started });
       return;
     }
@@ -540,14 +560,19 @@ export class MeteringProxy {
     const servedModel = reader?.model ?? model;
     const final = reader?.finalUsage() ?? { usage: null, problem: 'no response' };
 
-    // 4. settle (see the file header)
+    // 4. settle (see the file header): the served model's price, else the requested model's
     let micros: number;
     let settlement: Settlement;
     let usage: ApiUsage | null = null;
-    const pricedAs = servedModel === model || this.opts.config.metering.prices[servedModel] !== undefined ? servedModel : null;
-    if (final.usage !== null && f.status === 200 && pricedAs !== null) {
+    const prices = this.opts.config.metering.prices;
+    const requested = resolvePrice(prices, model); // priced: the request was bounded above
+    const servedPrice = resolvePrice(prices, servedModel);
+    const settleModel = servedPrice !== null ? servedModel : model;
+    const settleAs = (servedPrice ?? requested)?.pricedAs ?? model;
+    const boundAs = requested?.pricedAs ?? model;
+    if (final.usage !== null && f.status === 200) {
       usage = final.usage;
-      micros = usageMicros(this.opts.config, pricedAs, usage);
+      micros = usageMicros(this.opts.config, settleModel, usage);
       settlement = 'usage';
     } else if (!f.sent) {
       // never forwarded: no connection (or no TLS session) was made
@@ -570,6 +595,7 @@ export class MeteringProxy {
     }
     const settled = await this.settle(reservation, micros);
     if (settled) this.totals.settledMicros += micros;
+    const pricedAs = settlement === 'usage' ? settleAs : boundAs;
     this.record({
       ...base,
       reservation,
@@ -582,6 +608,8 @@ export class MeteringProxy {
       settlement: settled ? settlement : 'unsettled',
       ms: Date.now() - started,
       ...(settlement !== 'usage' && final.problem !== null ? { note: final.problem } : {}),
+      ...(pricedAs !== servedModel ? { pricedAs } : {}),
+      ...(reader !== null && reader.errorType !== null ? { errorType: reader.errorType } : {}),
     });
   }
 

@@ -6,6 +6,34 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.0.1] — 2026-10-10
+
+### Added
+- Seats run on any Claude model the login can use; Codex or an OpenAI account is not needed.
+  A seat model is a Claude model id, a dated snapshot (`claude-sonnet-4-5-20250929`), a
+  suffixed variant (`-v1`, `[1m]`, `@20250805`), or an alias Claude Code accepts (`opus`,
+  `sonnet`, `haiku`, `fable`). The default stays `claude-opus-5-5` at effort `high`.
+- `mp install --model <id|alias> [--effort <level>]` puts every seat on one model. On a
+  reinstall it rewrites every seat's model in the existing `model_config.json`. An id that is
+  not a Claude model is refused before anything is written.
+- `mp model-config set all ...` changes every seat at once.
+- WI-09 also covers a seat's model that is not available to the login (retired, or not in its
+  plan). The attempt still ends as an environment failure, and the PM gets a
+  `model-unavailable` notice that names the seat, its model and Claude Code's message, with the
+  fix: `mp model-config set <seat>|all --model ...`.
+- A seat's outcome lists the models that served it (Claude Code may redirect a retired model
+  to the current model of its family); `mp show task` prints "configured X, served Y" when
+  they differ.
+
+### Changed
+- Prices for the older Claude models Claude Code still knows (Claude 3 to Claude 4.5, Mythos 5)
+  are in the default price table. A model the table does not list is priced at the highest
+  price of its family (or of the whole table), so the metering over-counts rather than refusing
+  the request. Before, a request for an unlisted model ended the seat. Requests for a model that
+  is not a Claude model are still refused.
+- `mp model-config set` refuses a seat name that is not a seat (before, a typo was written to
+  the file and never read).
+
 ## [4.0.0] — 2026-10-10
 
 A new engine in `engine/` (TypeScript, Node 22.12+). It replaces the 3.x plugin under the

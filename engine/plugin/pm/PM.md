@@ -29,6 +29,7 @@ The PM seat of design §2: the user's own Claude Code session, working through t
 - Stops: `mp stop "<the words>"`, `mp stop-narrow`, `mp stop-release`.
 - Delivery: `mp deliver`, `mp land` (`--deliver-ref-only`, `--allow-external`), `mp withdraw-delivery`, `mp detach-duplicate`, `mp close`.
 - Exceptions: the commands the WI page gives (`mp retry-evaluator`, `mp retry-service`, `mp grant`, `mp spend-limit`, `mp model-config`, `mp resume`, ...).
+- Models: every seat runs any Claude model the login can use. When the user asks, `mp model-config set <seat>|all --model <id or alias opus|sonnet|haiku|fable> [--effort ...]`; `mp model-config show` lists them (WI-09).
 - Every state-changing command carries an operation id; retrying with the same id never runs it twice.
 - Mission ids (`mp mission open <id>`): letters, digits and `-`, starting with a letter or digit, at most 64 characters. No `.`, `_` or spaces.
 
