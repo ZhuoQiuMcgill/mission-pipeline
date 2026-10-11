@@ -2,8 +2,8 @@
 //
 // `fullCompute` is the definition of "the derived state at revision R": it
 // recomputes everything from the base records with revision <= R. It is the
-// oracle for the incremental evaluator (incremental.ts): every published
-// revision must equal fullCompute over the same records (5.5).
+// oracle for the stored labels (labels.ts): once propagation is done, the
+// stored labels must equal fullCompute over the same records (5.5).
 //
 // The proof model in brief (5.2):
 //   - objects carry only what is fixed with their content: identity,
@@ -63,7 +63,7 @@ import type {
   ReviewContract,
   ReviewPosition,
 } from '../common/records.ts';
-import { renewalDecision } from './renewal.ts';
+import { renewalDecision, usesSampledFields } from './renewal.ts';
 
 /** A committed record with its lists resolved, as the ledger read API returns it. */
 export type ResolvedRecord =
@@ -139,7 +139,7 @@ export function worse(a: Label, b: Label): Label {
   return LABEL_RANK[a] <= LABEL_RANK[b] ? a : b;
 }
 
-function worseConclusion(a: Conclusion, b: Conclusion): Conclusion {
+export function worseConclusion(a: Conclusion, b: Conclusion): Conclusion {
   if (a === 'negated' || b === 'negated') return 'negated';
   if (a === 'unaccepted' || b === 'unaccepted') return 'unaccepted';
   return 'passed';
@@ -168,7 +168,7 @@ export function requiredRange(scope: ConstraintScope, obj: ObjectScope): string[
 }
 
 /** The patterns that can match `path`: itself, each ancestor (and itself) as "dir/**", and "**". */
-function candidatePatterns(path: string): string[] {
+export function candidatePatterns(path: string): string[] {
   const out = [path, '**', `${path}/**`];
   let i = path.lastIndexOf('/');
   while (i > 0) {
@@ -212,6 +212,65 @@ function removeFrom<K, V>(map: Map<K, Set<V>>, key: K, value: V): void {
   if (set.size === 0) map.delete(key);
 }
 
+/** A read-only lookup: what the rules need of a map. */
+export interface ReadMap<K, V> {
+  get(key: K): V | undefined;
+  has(key: K): boolean;
+}
+
+/** A read-only membership test. */
+export interface ReadSet<K> {
+  has(key: K): boolean;
+}
+
+/**
+ * The forward lookups the rules read (everything below takes this, never the
+ * class): the in-memory `Index`, or the stored index of the project memory
+ * (store.ts, 4.1 §4.1), which answers the same questions from its tables.
+ */
+export interface IndexView {
+  readonly basisLatest: ReadMap<BasisLineId, BasisVersionId>;
+  readonly basisLineOf: ReadMap<BasisVersionId, BasisLineId>;
+  readonly basisKindOf: ReadMap<BasisVersionId, string>;
+  readonly withdrawn: ReadSet<BasisLineId>;
+  readonly constraints: ReadMap<BasisLineId, ConstraintLine>;
+  readonly envCurrent: ReadMap<EnvLineId, EnvSnapshotId>;
+  readonly evidence: ReadMap<EvidenceId, Resolved<EvidenceRecord>>;
+  readonly revoked: ReadSet<EvidenceId>;
+  /** JSON pair (judgment, original evidence) -> renewals in revision order. */
+  readonly renewal: ReadMap<string, ReadonlyArray<{ readonly rev: Revision; readonly replacement: EvidenceId }>>;
+  readonly objects: ReadMap<ObjectVersionId, Resolved<ObjectVersionRecord>>;
+  readonly units: ReadMap<ProofUnitId, Resolved<ProofUnitRecord>>;
+  /** member -> the latest unit that lists it. */
+  readonly unitOf: ReadMap<ObjectVersionId, ProofUnitId>;
+  readonly judgments: ReadMap<JudgmentId, JudgmentInfo>;
+  /** position -> judgments in revision order. */
+  readonly byPosition: ReadMap<ReviewPosition, readonly JudgmentInfo[]>;
+  /** fixKey(issue, version) -> registered regression runs. */
+  readonly regression: ReadMap<string, readonly RegressionRun[]>;
+  readonly regressionIssuesByTarget: ReadMap<string, Iterable<IssueId>>;
+  readonly pendingOps: ReadMap<OpId, Resolved<PendingOpRecord>>;
+  readonly executed: ReadMap<OpId, Revision>;
+  readonly basisRev: ReadMap<BasisVersionId, Revision>;
+  readonly withdrawnRev: ReadMap<BasisLineId, Revision>;
+  readonly envHistory: ReadMap<EnvLineId, ReadonlyArray<{ readonly rev: Revision; readonly snapshot: EnvSnapshotId }>>;
+  readonly evidenceRev: ReadMap<EvidenceId, Revision>;
+  readonly revokedRev: ReadMap<EvidenceId, Revision>;
+  /** Object constraint lines whose current scope can match one of the object's paths. */
+  constraintsFor(scope: ObjectScope): Iterable<BasisLineId>;
+  /** A decoded constraint check; a malformed entry covers nothing. */
+  check(enc: string): ConstraintCheck | null;
+  /** The review contracts of an object or proof unit, or null for an unknown target. */
+  contracts(target: string): readonly ReviewContract[] | null;
+  isTarget(target: string): boolean;
+  /** A finished scan of an object's coverage or a unit's members (4.1 stored labels), used instead of computing it; none in process memory. */
+  scanned?(target: string): TargetScan | undefined;
+  /** A review position's state before `beforeRev` (Infinity: now), kept by the index (4.1 stored labels: one lookup, never the position's history); none in process memory. */
+  positionAt?(target: string, review: string, beforeRev: number): PositionState;
+  /** An environment line's snapshot before `beforeRev`, kept by the index (4.1 stored labels: one lookup); none in process memory. */
+  envAt?(line: EnvLineId, beforeRev: number): EnvSnapshotId | undefined;
+}
+
 /**
  * The base records, indexed. Besides the forward lookups the rules need, it
  * keeps reverse indexes ("who depends on this?") for the incremental evaluator;
@@ -219,7 +278,7 @@ function removeFrom<K, V>(map: Map<K, Set<V>>, key: K, value: V): void {
  * arrives. A fact with an identity is taken from its first record; a later
  * record with the same identity is ignored (the ledger refuses those anyway).
  */
-export class Index {
+export class Index implements IndexView {
   basisLatest = new Map<BasisLineId, BasisVersionId>();
   basisLineOf = new Map<BasisVersionId, BasisLineId>();
   basisKindOf = new Map<BasisVersionId, string>();
@@ -448,7 +507,7 @@ export class Index {
 
 // ---------------------------------------------------------------- leaf rules (records only)
 
-export function basisState(ix: Index, v: BasisVersionId): BasisState {
+export function basisState(ix: IndexView, v: BasisVersionId): BasisState {
   const line = ix.basisLineOf.get(v);
   if (line === undefined) return 'withdrawn'; // an unknown basis can never be valid
   if (ix.withdrawn.has(line)) return 'withdrawn';
@@ -456,13 +515,13 @@ export function basisState(ix: Index, v: BasisVersionId): BasisState {
 }
 
 /** Constraint and instruction versions are not bases of currency: constraints count only through coverage. */
-const isConstraintKind = (ix: Index, v: string): boolean => {
+const isConstraintKind = (ix: IndexView, v: string): boolean => {
   const k = ix.basisKindOf.get(v as BasisVersionId);
   return k === 'constraint' || k === 'instruction';
 };
 
 /** 5.2: applicable iff bound to the current snapshot of its environment line and not revoked. */
-export function evidenceApplicable(ix: Index, e: EvidenceId): boolean {
+export function evidenceApplicable(ix: IndexView, e: EvidenceId): boolean {
   const ev = ix.evidence.get(e);
   if (!ev || ix.revoked.has(e)) return false;
   return ix.envCurrent.get(ev.envLine) === ev.envSnapshot;
@@ -476,7 +535,7 @@ export function evidenceApplicable(ix: Index, e: EvidenceId): boolean {
  * one (core review r3 F14); a renewal back to an evidence already on the chain
  * is skipped too.
  */
-function effectiveEvidence(ix: Index, j: Resolved<JudgmentRecord>, e: EvidenceId, beforeRev: number = Infinity): EvidenceId {
+export function effectiveEvidence(ix: IndexView, j: Resolved<JudgmentRecord>, e: EvidenceId, beforeRev: number = Infinity): EvidenceId {
   let cur = e;
   const seen = new Set<EvidenceId>([e]);
   for (;;) {
@@ -500,7 +559,8 @@ function effectiveEvidence(ix: Index, j: Resolved<JudgmentRecord>, e: EvidenceId
 }
 
 /** The snapshot of an environment line as it stood before `beforeRev`. */
-function envSnapshotBefore(ix: Index, line: EnvLineId, beforeRev: number): EnvSnapshotId | undefined {
+function envSnapshotBefore(ix: IndexView, line: EnvLineId, beforeRev: number): EnvSnapshotId | undefined {
+  if (ix.envAt) return ix.envAt(line, beforeRev);
   const h = ix.envHistory.get(line);
   if (!h) return undefined;
   for (let i = h.length - 1; i >= 0; i--) if (h[i]!.rev < beforeRev) return h[i]!.snapshot;
@@ -508,14 +568,14 @@ function envSnapshotBefore(ix: Index, line: EnvLineId, beforeRev: number): EnvSn
 }
 
 /** 5.2 evidence applicability as the records stood before `beforeRev`. */
-function evidenceApplicableBefore(ix: Index, e: EvidenceId, beforeRev: number): boolean {
+function evidenceApplicableBefore(ix: IndexView, e: EvidenceId, beforeRev: number): boolean {
   const ev = ix.evidence.get(e);
   if (!ev || (ix.evidenceRev.get(e) ?? Infinity) >= beforeRev) return false;
   if ((ix.revokedRev.get(e) ?? Infinity) < beforeRev) return false;
   return envSnapshotBefore(ix, ev.envLine, beforeRev) === ev.envSnapshot;
 }
 
-type PositionState = { readonly state: 'none' } | { readonly state: 'pass' | 'fail' | 'undecided'; readonly by: JudgmentInfo };
+export type PositionState = { readonly state: 'none' } | { readonly state: 'pass' | 'fail' | 'undecided'; readonly by: JudgmentInfo };
 
 /**
  * v30 5.2: the state of one review position. A negation stands until a later
@@ -524,7 +584,8 @@ type PositionState = { readonly state: 'none' } | { readonly state: 'pass' | 'fa
  * replaces an earlier one. Outside a negation the latest judgment decides;
  * revoking a pass is a later negation or undecided judgment on the position.
  */
-function positionState(ix: Index, target: string, review: string, beforeRev: number = Infinity): PositionState {
+export function positionState(ix: IndexView, target: string, review: string, beforeRev: number = Infinity): PositionState {
+  if (ix.positionAt) return ix.positionAt(target, review, beforeRev);
   let st: PositionState = { state: 'none' };
   for (const j of ix.byPosition.get(reviewPosition(target, review)) ?? []) {
     if (j.rev >= beforeRev) break;
@@ -546,7 +607,7 @@ function positionState(ix: Index, target: string, review: string, beforeRev: num
  * A judgment on a position the target does not require has no contract and
  * never conforms.
  */
-function conforms(ix: Index, j: Resolved<JudgmentRecord>): boolean {
+function conforms(ix: IndexView, j: Resolved<JudgmentRecord>): boolean {
   const contract = ix.contracts(j.target)?.find((c) => c.review === j.review);
   if (!contract) return false;
   const boundLines = new Set<BasisLineId>();
@@ -580,7 +641,7 @@ function conforms(ix: Index, j: Resolved<JudgmentRecord>): boolean {
  * After acceptance only J's own conditions matter: a later renewal or a later
  * negation of J0 does not change whether J is a valid continuation.
  */
-function continuationCarries(ix: Index, info: JudgmentInfo): boolean {
+function continuationCarries(ix: IndexView, info: JudgmentInfo): boolean {
   const j = info.rec;
   if (j.extends === null) return j.superseded.length === 0;
   const j0info = ix.judgments.get(j.extends);
@@ -642,8 +703,9 @@ function continuationCarries(ix: Index, info: JudgmentInfo): boolean {
  * version was revised counts as part of the batch (only a withdrawn line, or a
  * version not recorded yet, fails).
  */
-function currentOutsideChangesBefore(ix: Index, info: JudgmentInfo, beforeRev: number): boolean {
+function currentOutsideChangesBefore(ix: IndexView, info: JudgmentInfo, beforeRev: number): boolean {
   const rec = info.rec;
+  if (!sampledRunsOnly(ix, rec)) return false;
   for (const e of rec.evidence) if (!evidenceApplicableBefore(ix, effectiveEvidence(ix, rec, e as EvidenceId, beforeRev), beforeRev)) return false;
   for (const b of rec.bases) {
     if (isConstraintKind(ix, b)) continue;
@@ -659,8 +721,24 @@ function currentOutsideChangesBefore(ix: Index, info: JudgmentInfo, beforeRev: n
  * values. `assumeValid`: basis lines to treat as valid (the continuation check
  * asks "is J0 current if this batch's changes count as reviewed?").
  */
-function judgmentLeavesOk(ix: Index, info: JudgmentInfo, assumeValid: ReadonlySet<string> = EMPTY): boolean {
+/**
+ * 4.1 §6.5: a judgment that uses a timing, statistical or external field rests
+ * only on sampling runs. The record is refused when it is appended; a judgment
+ * that reached the log anyway (written by a process without the labels) is never
+ * current when it cites a recorded run of another class.
+ */
+function sampledRunsOnly(ix: IndexView, rec: Resolved<JudgmentRecord>): boolean {
+  if (usesSampledFields(rec.evidenceUse) === null) return true;
+  for (const e of rec.evidence) {
+    const ev = ix.evidence.get(e as EvidenceId);
+    if (ev !== undefined && ev.runClass !== 'sampling') return false;
+  }
+  return true;
+}
+
+export function judgmentLeavesOk(ix: IndexView, info: JudgmentInfo, assumeValid: ReadonlySet<string> = EMPTY): boolean {
   const rec = info.rec;
+  if (!sampledRunsOnly(ix, rec)) return false;
   for (const e of rec.evidence) if (!evidenceApplicable(ix, effectiveEvidence(ix, rec, e as EvidenceId))) return false;
   for (const b of rec.bases) {
     if (isConstraintKind(ix, b)) continue;
@@ -673,7 +751,7 @@ function judgmentLeavesOk(ix: Index, info: JudgmentInfo, assumeValid: ReadonlySe
 
 const EMPTY: ReadonlySet<string> = new Set();
 
-function composite(ix: Index, target: string, reviews: readonly ReviewContract[]): { conclusion: Conclusion; deciding: JudgmentInfo[]; all: JudgmentInfo[] } {
+export function composite(ix: IndexView, target: string, reviews: readonly ReviewContract[]): { conclusion: Conclusion; deciding: JudgmentInfo[]; all: JudgmentInfo[] } {
   if (reviews.length === 0) return { conclusion: 'unaccepted', deciding: [], all: [] };
   const states = reviews.map((c) => positionState(ix, target, c.review));
   const all = states.flatMap((s) => (s.state === 'none' ? [] : [s.by]));
@@ -688,7 +766,7 @@ function composite(ix: Index, target: string, reviews: readonly ReviewContract[]
  * target is covered by the union of the paths the deciding judgments reviewed
  * against its current content version.
  */
-function covered(ix: Index, scopes: readonly ObjectScope[], deciding: readonly JudgmentInfo[]): boolean {
+function covered(ix: IndexView, scopes: readonly ObjectScope[], deciding: readonly JudgmentInfo[]): boolean {
   const reviewed = new Map<string, Set<string>>(); // content version -> paths reviewed
   for (const d of deciding) {
     for (const enc of d.rec.constraints) {
@@ -711,15 +789,21 @@ function covered(ix: Index, scopes: readonly ObjectScope[], deciding: readonly J
 }
 
 /** 5.3 label priority. A deciding judgment of any verdict whose basis line was withdrawn gives "basis-withdrawn". */
-function basisWithdrawnIn(ix: Index, deciding: readonly JudgmentInfo[]): boolean {
+export function basisWithdrawnIn(ix: IndexView, deciding: readonly JudgmentInfo[]): boolean {
   return deciding.some((d) => d.rec.bases.some((b) => !isConstraintKind(ix, b) && basisState(ix, b as BasisVersionId) === 'withdrawn'));
 }
 
 
 export const NOT_PROVEN: TargetState = Object.freeze({ conclusion: 'unaccepted', inEffect: false, fresh: false, label: 'unaccepted' });
 
-/** An object's own structure (its own positions, prerequisites outside its unit, coverage). */
-interface OwnStructure {
+/**
+ * An object's own structure (its own positions, prerequisites outside its
+ * unit, coverage). The parts that can read much (prerequisites, coverage,
+ * withdrawn bases) are computed on first use; coverage comes from the index's
+ * scan when it has one (4.1 §4.1: the stored labels compute it in bounded
+ * steps).
+ */
+export interface OwnStructure {
   readonly conclusion: Conclusion;
   readonly deciding: readonly JudgmentInfo[];
   readonly prereqs: readonly string[];
@@ -727,24 +811,54 @@ interface OwnStructure {
   readonly basisWithdrawn: boolean;
 }
 
-function ownStructure(ix: Index, x: string): OwnStructure | null {
+/** The members of each unit as a set, once per index (a member's prerequisites leave out its co-members). */
+const memberSets = new WeakMap<IndexView, Map<string, ReadonlySet<string>>>();
+
+function membersOf(ix: IndexView, unit: ProofUnitId): ReadonlySet<string> {
+  let byUnit = memberSets.get(ix);
+  if (!byUnit) memberSets.set(ix, (byUnit = new Map()));
+  let set = byUnit.get(unit);
+  if (!set) byUnit.set(unit, (set = new Set<string>(ix.units.get(unit)?.members ?? [])));
+  return set;
+}
+
+/** Every path of an object's scope is concrete: a pattern cannot be matched against constraint scopes (core review r2 F8). */
+export function concreteScope(scope: ObjectScope): boolean {
+  return scope.paths.every((p) => !p.includes('*'));
+}
+
+export function ownStructure(ix: IndexView, x: string): OwnStructure | null {
   const o = ix.objects.get(x as ObjectVersionId);
   if (!o) return null;
-  const myUnit = ix.unitOf.get(o.object);
-  const coMembers = new Set<string>(myUnit ? (ix.units.get(myUnit)?.members ?? []) : []);
   const comp = composite(ix, x, o.reviews);
+  let prereqs: readonly string[] | undefined;
+  let coverageOk: boolean | undefined;
+  let bw: boolean | undefined;
   return {
     conclusion: comp.conclusion,
     deciding: comp.deciding,
-    prereqs: o.prerequisites.filter((p) => !coMembers.has(p)),
-    // A path that is not concrete cannot be matched against constraint scopes, so coverage cannot hold (core review r2 F8).
-    coverageOk: o.scope.paths.every((p) => !p.includes('*')) && covered(ix, [o.scope], comp.deciding),
-    basisWithdrawn: basisWithdrawnIn(ix, comp.all),
+    get prereqs(): readonly string[] {
+      if (prereqs === undefined) {
+        const myUnit = ix.unitOf.get(o.object);
+        const coMembers = myUnit ? membersOf(ix, myUnit) : null;
+        prereqs = coMembers === null ? o.prerequisites : o.prerequisites.filter((p) => !coMembers.has(p));
+      }
+      return prereqs;
+    },
+    get coverageOk(): boolean {
+      // A path that is not concrete cannot be matched against constraint scopes, so coverage cannot hold.
+      coverageOk ??= ix.scanned?.(x)?.ok ?? (concreteScope(o.scope) && covered(ix, [o.scope], comp.deciding));
+      return coverageOk;
+    },
+    get basisWithdrawn(): boolean {
+      bw ??= basisWithdrawnIn(ix, comp.all);
+      return bw;
+    },
   };
 }
 
 /** A unit's structure: its own positions combined with every member's own state (5.3). */
-interface UnitStructure {
+export interface UnitStructure {
   /** Combined over the unit's positions and the members' own conclusions. */
   readonly conclusion: Conclusion;
   /** The unit's own positions all pass. */
@@ -755,10 +869,20 @@ interface UnitStructure {
   readonly basisWithdrawn: boolean;
 }
 
-function unitStructure(ix: Index, u: string): UnitStructure | null {
-  const unit = ix.units.get(u as ProofUnitId);
-  if (!unit) return null;
-  const comp = composite(ix, u, unit.reviews);
+/** What a unit's members add up to, or what an object's coverage is (4.1: the stored labels' scan of it, `ok` = records / coverage). */
+export interface TargetScan {
+  readonly ok: boolean;
+  readonly conclusion: Conclusion;
+  readonly basisWithdrawn: boolean;
+}
+
+/**
+ * The unit's combination over its own positions and every member (5.3): the
+ * conclusion, withdrawn bases, and whether its records hold (members recorded,
+ * coverage of the whole unit by the union of the unit's and its members'
+ * deciding judgments). The stored labels compute the same in bounded steps.
+ */
+export function unitAggregate(ix: IndexView, unit: Resolved<ProofUnitRecord>, comp: { conclusion: Conclusion; deciding: readonly JudgmentInfo[]; all: readonly JudgmentInfo[] }): TargetScan {
   let conclusion = comp.conclusion;
   let bw = basisWithdrawnIn(ix, comp.all);
   let recordsOk = unit.members.length > 0;
@@ -778,7 +902,32 @@ function unitStructure(ix: Index, u: string): UnitStructure | null {
   }
   // Coverage of the whole unit: the union over the unit's and its members' deciding judgments.
   if (!covered(ix, scopes, decidingAll)) recordsOk = false;
-  return { conclusion, ownPassed: comp.conclusion === 'passed', deciding: comp.deciding, members: unit.members, recordsOk, basisWithdrawn: bw };
+  return { ok: recordsOk, conclusion, basisWithdrawn: bw };
+}
+
+export function unitStructure(ix: IndexView, u: string): UnitStructure | null {
+  const unit = ix.units.get(u as ProofUnitId);
+  if (!unit) return null;
+  const comp = composite(ix, u, unit.reviews);
+  let agg: TargetScan | undefined;
+  const aggregate = (): TargetScan => {
+    agg ??= ix.scanned?.(u) ?? unitAggregate(ix, unit, comp);
+    return agg;
+  };
+  return {
+    get conclusion(): Conclusion {
+      return aggregate().conclusion;
+    },
+    ownPassed: comp.conclusion === 'passed',
+    deciding: comp.deciding,
+    members: unit.members,
+    get recordsOk(): boolean {
+      return aggregate().ok;
+    },
+    get basisWithdrawn(): boolean {
+      return aggregate().basisWithdrawn;
+    },
+  };
 }
 
 // ---------------------------------------------------------------- continuation judgments (v32 5.2 part 5)
@@ -879,6 +1028,16 @@ function labelOf(conclusion: Conclusion, basisWithdrawn: boolean, fresh: boolean
 }
 
 /**
+ * Where a Derivation keeps its facts, by node: a Map, or the stored facts of
+ * the project memory. `get` is undefined for a fact not (or no longer) computed.
+ */
+export interface FactMemo {
+  get(node: string): boolean | undefined;
+  set(node: string, value: boolean): void;
+  delete(node: string): void;
+}
+
+/**
  * Memoized evaluation of the derivation's boolean facts, each a conjunction of
  * other facts and record-only conditions (so each is a monotone Horn rule and
  * the least fixed point is computed per fact):
@@ -896,35 +1055,25 @@ function labelOf(conclusion: Conclusion, basisWithdrawn: boolean, fresh: boolean
  * across a cycle, so every published value is independent of evaluation order.
  * `invalidate` drops a memo entry; the incremental evaluator drops everything
  * that may depend on a changed record and evaluates it again.
+ *
+ * The memo is a `FactMemo` keyed by node ("j:J", "e:X", "f:X", "p:X"): a map in
+ * process memory by default, or the stored facts of the project memory (4.1
+ * §4.1). `guard` and `kids` expose each rule in two parts, so the stored labels
+ * can evaluate it in bounded, resumable steps (labels.ts).
  */
 export class Derivation {
-  readonly current = new Map<JudgmentId, boolean>();
-  readonly effect = new Map<string, boolean>();
-  readonly freshness = new Map<string, boolean>();
-  readonly provenness = new Map<string, boolean>();
+  private readonly memo: FactMemo;
   private readonly visiting = new Set<string>();
-  private readonly ix: Index;
+  private readonly ix: IndexView;
 
-  constructor(ix: Index) {
+  constructor(ix: IndexView, memo: FactMemo = new Map<string, boolean>()) {
     this.ix = ix;
-  }
-
-  private memo(kind: string): Map<string, boolean> {
-    switch (kind) {
-      case 'j':
-        return this.current as Map<string, boolean>;
-      case 'e':
-        return this.effect;
-      case 'f':
-        return this.freshness;
-      default:
-        return this.provenness;
-    }
+    this.memo = memo;
   }
 
   private fact(node: string): boolean {
     this.run(node);
-    return this.memo(node[0]!).get(node.slice(2)) ?? false;
+    return this.memo.get(node) ?? false;
   }
 
   judgmentCurrent(j: JudgmentId): boolean {
@@ -954,11 +1103,11 @@ export class Derivation {
   }
 
   invalidate(node: string): void {
-    this.memo(node[0]!).delete(node.slice(2));
+    this.memo.delete(node);
   }
 
   private memoized(node: string): boolean {
-    return this.memo(node[0]!).has(node.slice(2));
+    return this.memo.get(node) !== undefined;
   }
 
   /** Evaluate `root` and everything it needs, depth first with an explicit stack. */
@@ -968,12 +1117,12 @@ export class Derivation {
     while (stack.length > 0) {
       const { node, post } = stack.pop()!;
       if (post) {
-        this.memo(node[0]!).set(node.slice(2), this.combine(node));
+        this.memo.set(node, this.combine(node));
         this.visiting.delete(node);
         continue;
       }
       if (this.memoized(node) || this.visiting.has(node)) continue;
-      if (node.startsWith('j:') && !this.ix.judgments.has(node.slice(2) as JudgmentId)) continue;
+      if (!this.evaluable(node)) continue;
       this.visiting.add(node);
       stack.push({ node, post: true });
       for (const c of this.children(node)) {
@@ -984,6 +1133,38 @@ export class Derivation {
         else if (!this.memoized(c)) stack.push({ node: c, post: false });
       }
     }
+  }
+
+  /**
+   * Each fact's rule is `guard(node)` and every fact of `kids(node)` holding:
+   * the record-only part, and exactly the facts it reads. The stored labels
+   * (labels.ts) evaluate a rule in these two parts, in bounded steps.
+   */
+  kids(node: string): string[] {
+    return this.children(node);
+  }
+
+  /** False for the fact of a judgment without its record: it is never evaluated and reads as not holding. */
+  evaluable(node: string): boolean {
+    return !node.startsWith('j:') || this.ix.judgments.has(node.slice(2) as JudgmentId);
+  }
+
+  /** The record-only part of the node's rule (see `kids`). */
+  guard(node: string): boolean {
+    const kind = node[0];
+    const id = node.slice(2);
+    if (kind === 'j') return judgmentLeavesOk(this.ix, this.ix.judgments.get(id as JudgmentId)!);
+    const u = unitStructure(this.ix, id);
+    if (u) {
+      if (kind === 'e') return u.ownPassed;
+      if (kind === 'f') return u.recordsOk;
+      return u.conclusion === 'passed' && !u.basisWithdrawn;
+    }
+    const s = ownStructure(this.ix, id);
+    if (!s) return false;
+    if (kind === 'e') return s.conclusion === 'passed';
+    if (kind === 'f') return s.coverageOk;
+    return s.conclusion === 'passed' && !s.basisWithdrawn;
   }
 
   /** Exactly the facts the node's rule reads (never more: an extra edge could fake a cycle). */
@@ -1071,31 +1252,14 @@ export class Derivation {
 
   /** A fact read across a cycle (still on the search path, so not memoized) reads as false. */
   private peek(node: string): boolean {
-    const v = this.memo(node[0]!).get(node.slice(2));
+    const v = this.memo.get(node);
     if (v !== undefined) return v;
     if (this.visiting.has(node)) this.cycleNodes.add(node);
     return false;
   }
 
   private combine(node: string): boolean {
-    const kind = node[0];
-    const id = node.slice(2);
-    if (kind === 'j') {
-      const info = this.ix.judgments.get(id as JudgmentId)!;
-      return judgmentLeavesOk(this.ix, info) && info.rec.reliesOn.every((o) => this.peek(`p:${o}`));
-    }
-    const u = unitStructure(this.ix, id);
-    if (u) {
-      if (kind === 'e') return u.ownPassed && u.deciding.every((d) => this.peek(`j:${d.rec.judgment}`)) && u.members.every((m) => this.peek(`e:${m}`));
-      if (kind === 'f') return this.peek(`e:${id}`) && u.recordsOk && u.members.every((m) => this.peek(`f:${m}`));
-      return u.conclusion === 'passed' && !u.basisWithdrawn && this.peek(`f:${id}`);
-    }
-    const s = ownStructure(this.ix, id);
-    if (!s) return false;
-    if (kind === 'e') return s.conclusion === 'passed' && s.deciding.every((d) => this.peek(`j:${d.rec.judgment}`));
-    if (kind === 'f') return this.peek(`e:${id}`) && s.coverageOk && s.prereqs.every((p) => this.peek(`p:${p}`));
-    const myUnit = this.ix.unitOf.get(id as ObjectVersionId);
-    return s.conclusion === 'passed' && !s.basisWithdrawn && this.peek(`f:${id}`) && (myUnit === undefined || this.peek(`p:${myUnit}`));
+    return this.guard(node) && this.children(node).every((c) => this.peek(c));
   }
 
   // ------------------------------------------------------------ published values
@@ -1106,10 +1270,14 @@ export class Derivation {
     return st.state === 'pass' && this.judgmentCurrent(st.by.rec.judgment);
   }
 
-  /** 5.6 kind 1: a registered regression run counts only as a closed, applicable run with every registered test passed and unchanged inputs. */
+  /**
+   * 5.6 kind 1, the mechanical regression check (4.1 §6.5: "closed" read as
+   * "declared"): a registered regression run counts only as a declared,
+   * applicable run with every registered test passed and unchanged inputs.
+   */
   private regressionHolds(run: RegressionRun): boolean {
     const ev = this.ix.evidence.get(run.evidence);
-    if (!ev || ev.runClass !== 'closed' || !evidenceApplicable(this.ix, run.evidence)) return false;
+    if (!ev || ev.runClass !== 'declared' || !evidenceApplicable(this.ix, run.evidence)) return false;
     if (run.tests.length === 0 || run.command.length === 0) return false;
     // 5.6: without registered test files and a declared runner configuration a run never counts mechanically.
     if (!run.inputs.some((x) => x.startsWith('testfile:')) || !run.inputs.some((x) => x.startsWith('runner:'))) return false;

@@ -9,6 +9,9 @@
 import { z } from 'zod';
 import { ITEM_ID, wellFormed, type MissionId } from '../common/ids.ts';
 
+/** An exploration's round budget when its definition sets none (4.1 §6.3, U-6). */
+export const EXPLORATION_ROUNDS_DEFAULT = 3;
+
 /** A free-form id (standard, verification command, module, decision): non-empty and well-formed text (review r3: a lone surrogate would merge two ids). */
 const FreeId = z.string().min(1).refine(wellFormed, 'an id must be well-formed text (no lone UTF-16 surrogate)');
 /** A requirement item named by its id (it becomes the line item.<mission>.<id>). */
@@ -21,23 +24,30 @@ export const ExplorationDefinition = z.object({
   id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
   /** What it produces: a design, a method, an analysis, or the answer to a question. */
   deliverable: z.string().min(1),
-  /** The user's fuzzy acceptance goal, verbatim, with the message it comes from. */
-  fuzzyGoal: z.object({ quote: z.string().min(1), message: z.string().min(1) }),
+  /** The user's fuzzy acceptance goal, verbatim, with the words entry (W-<n>) it comes from. */
+  fuzzyGoal: z.object({ quote: z.string().min(1), words: z.string().min(1) }),
   /** What counts as a hole (default: contradictions, infeasible, deadlocks, silent errors, cost blow-up, conflict with the user's words). */
   attackScope: z.array(z.string()).min(1),
   /** The decision it serves and its type (3.10: fixed at definition). */
   decision: z.object({ id: FreeId, type: z.enum(['direction', 'structure']) }),
-  budget: z.object({ rounds: z.number().int().positive(), micros: z.number().int().positive().nullable() }),
+  /** Attack rounds (4.1 §6.3: default 3); `micros` is informational (4.1 meters nothing). */
+  budget: z.object({ rounds: z.number().int().positive().default(EXPLORATION_ROUNDS_DEFAULT), micros: z.number().int().positive().nullable().default(null) }).default({ rounds: EXPLORATION_ROUNDS_DEFAULT, micros: null }),
   /** Stop conditions beyond the standard three (8.2), if any. */
   stop: z.string(),
   /** A research exploration (4.3 "研究型探索"): the answer to a question. */
   research: z.boolean(),
+  /**
+   * The web addresses a reading may cite (url:<address>, decision 12): a citation scope only. The
+   * Reader fetches with its harness's own tools; `mp` fetches nothing and checks only that a cited
+   * address falls inside one of these. Absent: none (a reading then cites no web page).
+   */
+  readingNetwork: z.array(z.string().min(1)).optional(),
 });
 export type ExplorationDefinition = z.infer<typeof ExplorationDefinition>;
 
 export const PlanProvenance = z.discriminatedUnion('by', [
-  /** "用户说过": the message and the quoted words. */
-  z.object({ by: z.literal('user'), message: z.string().min(1), quote: z.string().min(1) }),
+  /** "用户说过": the words entry (W-<n>, decision 1) and the quoted words. */
+  z.object({ by: z.literal('user'), words: z.string().min(1), quote: z.string().min(1) }),
   /** "PM 补充". */
   z.object({ by: z.literal('pm') }),
 ]);
@@ -84,10 +94,20 @@ export const DetailedTask = z.object({
   standards: z.array(z.object({ id: FreeId, text: z.string().min(1) })).min(1),
   /** Requirement item lines the task rests on. */
   requirementItems: z.array(z.string()),
-  writeScope: z.array(z.string()).min(1),
+  /**
+   * The paths the task may change. Empty: a task that only reads and runs (it runs the tests, it
+   * checks a behaviour): its Constructor changes nothing (any change refuses the hand-back), and
+   * its product version claims no path, so a delivery that selects it adds no path of its own.
+   */
+  writeScope: z.array(z.string()).describe('The paths the task may change (exact paths, "dir/**", or "**"). Empty for a task that only reads and runs (for example, runs the tests): it changes no file.'),
   readableFiles: z.array(z.string()),
   interpreter: z.string(),
-  verificationCommands: z.array(z.object({ id: FreeId, command: z.string().min(1), cwd: z.string().optional() })),
+  /**
+   * Run by `mp` on a clean checkout of the candidate (4.1 §5.3). `sampled`: one observation among
+   * possible others (a benchmark, a flaky-test probe: a sampling run, never reused); `network`: it
+   * needs the network (another run, never reused or renewed) (§6.5).
+   */
+  verificationCommands: z.array(z.object({ id: FreeId, command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional() })),
   implements: z.array(z.string()),
   calls: z.array(z.string()),
   /** Scheduling dependencies: tasks that must be accepted first (interface definitions before their users). */
@@ -199,9 +219,12 @@ export interface PmPlanEffectiveBody {
 
 /**
  * The event the exploration flow writes when an exploration stops (line
- * "exploration:<id>", event "settled", key = the exploration id): the decision layer routes it
- * by decision type (3.10): structure → the Architect decomposes the waiting part; direction, no
- * conclusion, or the key conclusion not standing → the Secretary, then the PM and the user.
+ * "exploration:<id>", event "settled", key = the exploration id; once per opening: a rerun after
+ * an environment change reopens a converged exploration, and a later stop settles again with key
+ * "<id>#<n>"; only the current settle counts, exploration/step.ts currentSettle): the decision
+ * layer routes it by decision type (3.10): structure → the Architect decomposes the waiting part;
+ * direction, no conclusion, or the key conclusion not standing → the Secretary, then the PM and
+ * the user.
  */
 export interface ExplorationSettledBody {
   readonly exploration: string;
@@ -220,6 +243,27 @@ export interface ExplorationSettledBody {
 
 export const PM_PLAN_EFFECTIVE = 'pm-plan-effective';
 export const EXPLORATION_SETTLED = 'settled';
+
+/**
+ * `mp pm renew` (4.1 §6.5, decision 18) records here the judgments it could not renew
+ * mechanically (a sampling run, a timing or statistical field, or a rerun whose fields differ):
+ * line "renew", event "review-needed", key "<judgment>@<environment identity>". The flow that owns
+ * the judged object dispatches a new judgment of the same review position on the same version with
+ * the runs recorded again under the current identity (execution: a Reviewer); no WI.
+ */
+export const RENEW_LINE = 'renew';
+export const REVIEW_NEEDED = 'review-needed';
+export interface ReviewNeededBody {
+  readonly judgment: string;
+  readonly target: string;
+  readonly review: string;
+  /** The identity the new judgment is under. */
+  readonly environment: string;
+  readonly reason: string;
+  /** The renewal rerun that could not renew it (null: none was run: a sampling run, sampled fields). */
+  readonly rerun: string | null;
+  readonly passed: boolean | null;
+}
 
 export function missionOf(s: string): MissionId {
   return s as MissionId;

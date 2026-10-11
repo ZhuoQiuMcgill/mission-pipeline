@@ -1,25 +1,30 @@
-// External worktrees (design 6.6 v41 "外部工作区"; 3.11 WI-02, WI-03).
+// External worktrees and branches (design 4.1 §6.7; WI-02, WI-03).
 //
-// The program never creates worktrees (seats work on snapshots made from
-// commits, 7.1), so every worktree of the repository is external; only the main
-// checkout registered at install time is a landing target. This lists every
-// worktree with its branch, HEAD, occupancy, lock, inferred origin, live
-// processes, last modification and the paths it changed relative to a base,
-// committed and uncommitted: for the PM's layer-2 list, before every landing
-// and periodically, and for the scheduler's WI-03 check (overlap with the write
-// scopes of missions in flight). It is for explanation and scheduling ONLY: no
-// safety rule depends on it, and the inferred origin may be wrong.
+// Every worktree of the repository is external except the maintainer's own
+// checkout and the pipeline's dispatch worktrees under
+// `.mission-pipeline/worktrees/`. This lists every worktree with its branch,
+// HEAD, occupancy, lock, inferred origin, last modification and the paths it
+// changed relative to a base (since it diverged from it), committed and
+// uncommitted; and, for WI-03 (at a delivery and at a landing, never by a
+// periodic scan), the external worktrees and branches checked out nowhere whose
+// changes overlap the write scope of a module of a mission in flight. It is for
+// explanation ONLY: no safety rule depends on it, and the inferred origin may
+// be wrong.
 //
 // Pure reads: plumbing that runs no filter (worktree list, rev-parse,
 // diff-tree, ls-tree, ls-files), with each worktree named by its own locators.
 // Uncommitted changes are found from the index (staged) and from the index's
 // stat data compared with the files (modified), never by hashing through a
 // filter, so they are "possibly changed" when only the stat data moved.
+//
+// 4.1 (§2.4, §6.6): which processes work in a worktree is the harness's to
+// report; nothing here looks at processes, so their presence is unknown here,
+// never "none".
 
-import { lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import type { GitOid } from '../common/ids.ts';
 import { gitOid, parseLsFiles } from './objects.ts';
-import type { GitLocators, SafeGit } from './safeGit.ts';
+import type { GitExec, GitLocators } from './plainGit.ts';
 import { registeredWorktrees, type Occupancy } from './worktreeRecord.ts';
 import { join } from 'node:path';
 
@@ -38,8 +43,6 @@ export interface ExternalWorktree {
   /** `git worktree lock` reason; "" when locked without one; null when not locked. */
   readonly locked: string | null;
   readonly origin: WorktreeOrigin;
-  /** Live processes whose current directory is inside the worktree. */
-  readonly liveProcesses: readonly number[];
   /** Latest modification seen (ms since the epoch): the root, its HEAD, its index and its changed files. */
   readonly lastModified: number | null;
   /** Paths changed relative to the base: committed (base..HEAD) and uncommitted (staged, or modified by stat). */
@@ -66,28 +69,6 @@ function scopeMatches(pattern: string, path: string): boolean {
 /** WI-03: the changed paths that fall inside a mission module's write scope. */
 export function overlappingPaths(changed: readonly string[], writeScope: readonly string[]): string[] {
   return changed.filter((p) => writeScope.some((pat) => scopeMatches(pat, p)));
-}
-
-/** Current directories of live processes, by pid (processes of other users are invisible here). */
-function processCwds(): Map<number, string> {
-  const out = new Map<number, string>();
-  let names: string[];
-  try {
-    names = readdirSync('/proc');
-  } catch {
-    return out;
-  }
-  for (const name of names) {
-    if (!/^\d+$/.test(name)) continue;
-    const pid = Number(name);
-    if (pid === process.pid) continue;
-    try {
-      out.set(pid, readlinkSync(`/proc/${pid}/cwd`));
-    } catch {
-      /* gone, or not ours */
-    }
-  }
-  return out;
 }
 
 function mtimeMs(path: string): number | null {
@@ -143,13 +124,9 @@ function statDiffers(root: string, e: DebugEntry): boolean {
   }
 }
 
-async function changedPaths(git: SafeGit, commonDir: string, loc: GitLocators, root: string, base: GitOid, head: GitOid | null): Promise<{ committed: string[]; uncommitted: string[] }> {
+async function changedPaths(git: GitExec, commonDir: string, loc: GitLocators, root: string, base: GitOid, head: GitOid | null): Promise<{ committed: string[]; uncommitted: string[] }> {
   const repo = { gitDir: commonDir };
-  let committed: string[] = [];
-  if (head !== null) {
-    const r = await git.run(['diff-tree', '-r', '-z', '--name-only', '--no-renames', '--no-ext-diff', '--no-textconv', base, head], { cwd: commonDir, locators: repo, maxOutputBytes: 256 * 1024 * 1024 });
-    if (r.code === 0) committed = r.stdout.toString('utf8').split('\0').filter((p) => p !== '');
-  }
+  const committed = head === null ? [] : await divergedPaths(git, commonDir, base, head);
   const uncommitted = new Set<string>();
   // Staged: the index against HEAD's tree.
   const idx = await git.ok(['ls-files', '-s', '-t', '-z'], { cwd: root, locators: loc, maxOutputBytes: 1024 * 1024 * 1024 });
@@ -174,12 +151,24 @@ async function changedPaths(git: SafeGit, commonDir: string, loc: GitLocators, r
 }
 
 /**
+ * The paths `head` changed since it diverged from `base` (the merge base to
+ * `head`): what the other side did, not what the base did meanwhile.
+ */
+async function divergedPaths(git: GitExec, commonDir: string, base: GitOid, head: GitOid): Promise<string[]> {
+  const repo = { gitDir: commonDir };
+  const mb = await git.run(['merge-base', base, head], { cwd: commonDir, locators: repo });
+  const from = mb.code === 0 ? mb.stdout.toString('utf8').trim() : base;
+  if (from === head) return [];
+  const r = await git.run(['diff-tree', '-r', '-z', '--name-only', '--no-renames', '--no-ext-diff', '--no-textconv', from, head], { cwd: commonDir, locators: repo, maxOutputBytes: 256 * 1024 * 1024 });
+  return r.code === 0 ? r.stdout.toString('utf8').split('\0').filter((p) => p !== '').sort() : [];
+}
+
+/**
  * Every worktree of the repository, read outside any namespace. `base`: the
  * commit changes are reported against (the target branch's tip, typically).
  */
-export async function listExternalWorktrees(git: SafeGit, commonDir: string, opts: { readonly base: GitOid; readonly mainCheckout: string | null }): Promise<ExternalWorktree[]> {
+export async function listExternalWorktrees(git: GitExec, commonDir: string, opts: { readonly base: GitOid; readonly mainCheckout: string | null }): Promise<ExternalWorktree[]> {
   const all = await registeredWorktrees(git.withLocators({ gitDir: commonDir }), commonDir);
-  const cwds = processCwds();
   const out: ExternalWorktree[] = [];
   for (const w of all) {
     const root = w.bare ? null : w.path;
@@ -191,7 +180,6 @@ export async function listExternalWorktrees(git: SafeGit, commonDir: string, opt
         locked = null;
       }
     }
-    const live = root === null ? [] : [...cwds].filter(([, cwd]) => cwd === root || cwd.startsWith(root + '/')).map(([pid]) => pid).sort((a, b) => a - b);
     let changed: ExternalWorktree['changed'] = null;
     if (root !== null && !w.prunable && w.gitDir !== null) {
       const loc: GitLocators = { gitDir: w.gitDir, commonDir, workTree: root };
@@ -218,10 +206,68 @@ export async function listExternalWorktrees(git: SafeGit, commonDir: string, opt
       occupancy: w.occupancy,
       locked,
       origin: inferOrigin(w.path, w.branch),
-      liveProcesses: live,
       lastModified: times.length === 0 ? null : Math.max(...times),
       changed,
     });
+  }
+  return out;
+}
+
+/** One module's write scope, of a mission in flight. */
+export interface WriteScopeOf {
+  readonly mission: string;
+  readonly module: string | null;
+  readonly writeScope: readonly string[];
+}
+
+/** WI-03: an external worktree, or a branch checked out nowhere, whose changes overlap a module's write scope. */
+export interface ExternalOverlap {
+  /** The worktree's root; null for a branch checked out nowhere. */
+  readonly worktree: string | null;
+  readonly branch: string | null;
+  readonly origin: WorktreeOrigin;
+  readonly mission: string;
+  readonly module: string | null;
+  /** The overlapping paths, committed (since the branch diverged from the base) or not (staged, or modified by stat). */
+  readonly paths: readonly string[];
+}
+
+/**
+ * WI-03 (at a delivery and at a landing): the external worktrees and the local
+ * branches checked out nowhere whose changes, relative to `base`, fall inside
+ * a write scope of `scopes`. Not external: the maintainer's checkout
+ * (`own`), the pipeline's dispatch worktrees (under `pipelineDir`), the target
+ * branch itself. Reads commits, the index and stat data only.
+ */
+export async function externalOverlaps(
+  git: GitExec,
+  o: { readonly commonDir: string; readonly base: GitOid; readonly targetBranch: string; readonly own: string; readonly pipelineDir: string; readonly scopes: readonly WriteScopeOf[] },
+): Promise<ExternalOverlap[]> {
+  if (o.scopes.length === 0) return [];
+  const inside = (p: string, dir: string): boolean => p === dir || p.startsWith(dir.endsWith('/') ? dir : `${dir}/`);
+  const target = `refs/heads/${o.targetBranch}`;
+  const found: Array<{ worktree: string | null; branch: string | null; origin: WorktreeOrigin; changed: string[] }> = [];
+  const worktrees = await listExternalWorktrees(git, o.commonDir, { base: o.base, mainCheckout: o.own });
+  const checkedOut = new Set(worktrees.map((w) => w.branch).filter((b): b is string => b !== null));
+  for (const w of worktrees) {
+    if (w.bare || w.prunable || w.isMainCheckout || w.path === o.own || inside(w.path, o.pipelineDir) || w.branch === target || w.changed === null) continue;
+    found.push({ worktree: w.path, branch: w.branch, origin: w.origin, changed: [...new Set([...w.changed.committed, ...w.changed.uncommitted])] });
+  }
+  const refs = await git.run(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads/'], { cwd: o.commonDir, locators: { gitDir: o.commonDir } });
+  if (refs.code === 0) {
+    for (const line of refs.stdout.toString('utf8').split('\n')) {
+      const [ref, oid] = line.split('\0');
+      if (ref === undefined || oid === undefined || ref === '' || ref === target || checkedOut.has(ref)) continue;
+      const changed = await divergedPaths(git, o.commonDir, o.base, gitOid(oid));
+      if (changed.length > 0) found.push({ worktree: null, branch: ref, origin: inferOrigin('', ref), changed });
+    }
+  }
+  const out: ExternalOverlap[] = [];
+  for (const f of found) {
+    for (const s of o.scopes) {
+      const paths = overlappingPaths(f.changed, s.writeScope).sort();
+      if (paths.length > 0) out.push({ worktree: f.worktree, branch: f.branch, origin: f.origin, mission: s.mission, module: s.module, paths });
+    }
   }
   return out;
 }

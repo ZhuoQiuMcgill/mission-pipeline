@@ -9,45 +9,31 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import type { ContentHash, MissionId } from '../src/common/ids.ts';
 import type { ObjectVersionRecord } from '../src/common/records.ts';
-import type { TreeDocument } from '../src/exec/export.ts';
-import { applyExport, prepareWritable, programActions, type ActionContext } from '../src/flow/actions/index.ts';
-import { ledgerAdapter } from '../src/flow/adapters.ts';
 import { basisIndex, countedReturn, flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { fakePorts, type FakeOutcome } from '../src/flow/fakes.ts';
+import { memoryPorts, say } from './flow-memory-fixtures.ts';
+import type { ScriptedOutcome } from '../src/flow/scripted.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import type { DetailedPlanDoc } from '../src/flow/plandoc.ts';
 import type { FlowTask } from '../src/flow/ports.ts';
 import { constraintLine, currentConstraints, currentItems, itemLine, recordConstraint, recordItem, requirementSetLine, withdrawItem } from '../src/flow/requirements.ts';
 import { architect, cal1Pass, cal2Escalate, constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, type Script } from '../src/flow/scripted.ts';
+import { SEED_TEXT } from '../src/flow/scripted.ts';
 import { answerEscalation } from '../src/flow/secretary.ts';
-import { discoverRepo } from '../src/git/objects.ts';
-import { readTransformDescription, transformDescriptionHash } from '../src/git/representation.ts';
-import { ContentStore } from '../src/ledger/content.ts';
-import { ledgerPaths } from '../src/ledger/service.ts';
-import { Alerts } from '../src/scheduler/alerts.ts';
-import { ControlPlane } from '../src/scheduler/controlPlane.ts';
-import { SchedulerLedger } from '../src/scheduler/ledger.ts';
+import { transformDescriptionHash } from '../src/git/representation.ts';
+import { gitActions } from '../src/process/index.ts';
 import type { ReviewerCard } from '../src/seat/card.ts';
 import { calibrator1Problems, type Calibrator1Card, type Calibrator2Card } from '../src/seat/cards/calibrator.ts';
 import type { SecretaryCard } from '../src/seat/cards/secretary.ts';
-import { checkoutMain, initRepo, makeFixture, rawCommit, type Fixture } from './git-fixtures.test.ts';
-import { cleanupEnvs, inProcessLedger, makeEnv } from './scheduler-fixtures.ts';
+import { processProject, write } from './process-fixtures.ts';
 
 const M = 'm1' as MissionId;
-let fx: Fixture;
-before(() => {
-  fx = makeFixture('flow-r1');
-});
-after(async () => {
-  await cleanupEnvs();
-  fx.cleanup();
-});
 
 async function setup(mode: 'stable' | 'fast' = 'fast') {
-  const ports = fakePorts();
+  const ports = memoryPorts();
+  say(ports, SEED_TEXT);
   await seedMission(ports, M);
-  await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['msg1'], mode });
+  await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['W-1'], mode });
   return { ports, engine: new FlowEngine(ports) };
 }
 
@@ -56,75 +42,23 @@ function withKinds(over: Record<string, Script>): Script {
   return (t, s) => (Object.hasOwn(over, t.card.seat) ? (over[t.card.seat] as Script) : base)(t, s);
 }
 
-describe('review r1 #1: snapshot and product writes never leave their directory', () => {
-  it('a write scope or an export through a symbolic link is refused; nothing outside is created or changed', () => {
-    const root = mkdtempSync(join(tmpdir(), 'mp-r1-1-'));
-    try {
-      const tree = join(root, 'tree');
-      const outside = join(root, 'outside');
-      mkdirSync(tree);
-      mkdirSync(outside);
-      writeFileSync(join(outside, 'sentinel'), 'host data\n');
-      symlinkSync(outside, join(tree, 'alias'));
-      // snapshot preparation: a writable path through the link
-      assert.throws(() => prepareWritable(tree, ['alias/new/**']), /symbolic link/);
-      assert.throws(() => prepareWritable(tree, ['alias']), /symbolic link/);
-      assert.equal(existsSync(join(outside, 'new')), false, 'no directory was created outside the snapshot');
-      // product: an export entry under the base's link
-      const content = new Map<string, Buffer>();
-      const put = (t: string): string => {
-        const h = String(content.size).padStart(64, '0');
-        content.set(h, Buffer.from(t));
-        return h;
-      };
-      const viaBase: TreeDocument = { format: 'mp4.tree.v1', entries: [{ path: 'alias/sentinel', kind: 'file', mode: 0o644, size: 7, hash: put('changed') as ContentHash, target: null }] };
-      // the link is outside the write scope (kept), the file under it inside: refused
-      assert.throws(() => applyExport(tree, viaBase, ['alias/sentinel'], (h) => content.get(h) as Buffer), /symbolic link/);
-      // the link itself inside the write scope and not in the export: removed (never followed), the file written inside the tree
-      applyExport(tree, viaBase, ['alias/**'], (h) => content.get(h) as Buffer);
-      assert.equal(readFileSync(join(tree, 'alias', 'sentinel'), 'utf8'), 'changed', 'written inside the tree');
-      // product: the export's own link, then a file under it
-      mkdirSync(join(tree, 'impl'));
-      const viaOwn: TreeDocument = {
-        format: 'mp4.tree.v1',
-        entries: [
-          { path: 'impl/link', kind: 'symlink', mode: 0o777, size: 0, hash: null, target: outside },
-          { path: 'impl/link/sentinel', kind: 'file', mode: 0o644, size: 7, hash: put('changed') as ContentHash, target: null },
-        ],
-      };
-      assert.throws(() => applyExport(tree, viaOwn, ['impl/**'], (h) => content.get(h) as Buffer), /symbolic link/);
-      assert.equal(readFileSync(join(outside, 'sentinel'), 'utf8'), 'host data\n', 'the host file is untouched');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
+// review r1 #1 (4.0: the snapshot and the export laid over it never write through a link) went with the 4.0
+// program actions: 4.1 collects the candidate from the Constructor's worktree with git (src/git/workspace.ts).
 
-describe('review r1 #6: loop caps hold on the real ledger', () => {
+describe('review r1 #6: loop caps hold on the project memory', () => {
   it('equal returns: the second is no progress; distinct returns: the cap holds; a repeated key counts once', async () => {
-    const e = makeEnv('flow-r1-6');
-    const l = inProcessLedger(e);
-    const lp = ledgerPaths(e.ledgerRoot, e.cp);
-    const ledger = SchedulerLedger.connect(e.socket, 5_000);
-    const content = new ContentStore(lp.content);
-    try {
-      const gen = await l.svc.beginGeneration();
-      const port = ledgerAdapter({ ledger, content, alerts: new Alerts({ ledger, content, controlPlane: new ControlPlane(e.cp), source: 'flow' }), gen: () => gen });
-      const ctx = flowCtx({ ledger: port, scheduler: null as never, evaluator: null as never }, M);
-      const same = [];
-      for (let i = 1; i <= 6; i++) same.push(await countedReturn(ctx, { line: 'plan', key: `same:${i}`, lineage: 'plan.m1.same', loop: 'mechanical-return', signature: 'A' }));
-      assert.deepEqual(same.map((r) => r.proceed), [true, false, false, false, false, false], 'two equal signatures in a row exhaust the loop (6.5)');
-      assert.equal(same[0]?.status.attempts, 1, 'the attempt is counted in the ledger');
-      const distinct = [];
-      for (let i = 1; i <= 4; i++) distinct.push(await countedReturn(ctx, { line: 'plan', key: `d:${i}`, lineage: 'plan.m1.d', loop: 'mechanical-return', signature: `S${i}` }));
-      assert.deepEqual(distinct.map((r) => r.proceed), [true, true, true, false], 'three returns, the fourth exhausted');
-      const again = await countedReturn(ctx, { line: 'plan', key: 'd:1', lineage: 'plan.m1.d', loop: 'mechanical-return', signature: 'S1' });
-      assert.equal(again.proceed, true, 'the kept verdict');
-      assert.equal(again.status.attempts, 3, 'a repeated key is not counted again');
-    } finally {
-      ledger.close();
-      await l.close();
-    }
+    const ports = memoryPorts();
+    const ctx = flowCtx(ports, M);
+    const same = [];
+    for (let i = 1; i <= 6; i++) same.push(await countedReturn(ctx, { line: 'plan', key: `same:${i}`, lineage: 'plan.m1.same', loop: 'mechanical-return', signature: 'A' }));
+    assert.deepEqual(same.map((r) => r.proceed), [true, false, false, false, false, false], 'two equal signatures in a row exhaust the loop (6.5)');
+    assert.equal(same[0]?.status.attempts, 1, 'the attempt is counted in the memory');
+    const distinct = [];
+    for (let i = 1; i <= 4; i++) distinct.push(await countedReturn(ctx, { line: 'plan', key: `d:${i}`, lineage: 'plan.m1.d', loop: 'mechanical-return', signature: `S${i}` }));
+    assert.deepEqual(distinct.map((r) => r.proceed), [true, true, true, false], 'three returns, the fourth exhausted');
+    const again = await countedReturn(ctx, { line: 'plan', key: 'd:1', lineage: 'plan.m1.d', loop: 'mechanical-return', signature: 'S1' });
+    assert.equal(again.proceed, true, 'the kept verdict');
+    assert.equal(again.status.attempts, 3, 'a repeated key is not counted again');
   });
 });
 
@@ -137,7 +71,7 @@ describe("review r1 #8: a refused Secretary grant leaves the user's exit open", 
     assert.ok(sec !== undefined);
     // between the card and the decision, the Secretary's one grant on the lineage is used elsewhere
     assert.equal((await ports.ledger.grantLoop({ lineage: 'plan.m1.1', loop: 'env-retry', by: 'secretary', extra: 1, op: 'elsewhere' })).granted, true);
-    ports.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'grant') });
+    await ports.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'grant') });
     await engine.reconcile(M);
     const ask = ports.ledger.notices.find((n) => n.category === 'loop-exhausted-needs-user');
     assert.ok(ask !== undefined && ask.wi === 'WI-08' && ask.askUser === true);
@@ -149,7 +83,7 @@ describe("review r1 #8: a refused Secretary grant leaves the user's exit open", 
 
 describe('review r1 #9 and #10: constraint scopes and restored texts', () => {
   it('a scope change alone is a constraint.scope record and the cards read the new scope; a kind change is a new version', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
     await recordConstraint(ports, { mission: M, constraint: 'c1', kind: 'object', text: 'No secret logs', scope: { paths: ['a.ts'], taskTypes: [] } });
     const v1 = await recordConstraint(ports, { mission: M, constraint: 'c1', kind: 'object', text: 'No secret logs', scope: { paths: ['a.ts', 'b.ts'], taskTypes: [] } });
     const ctx = flowCtx(ports, M);
@@ -160,7 +94,7 @@ describe('review r1 #9 and #10: constraint scopes and restored texts', () => {
   });
 
   it('restoring an earlier text (A → B → A) makes a new current version, not the old one', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
     const a1 = await recordConstraint(ports, { mission: M, constraint: 'c2', kind: 'object', text: 'A', scope: { paths: ['**'], taskTypes: [] } });
     const b = await recordConstraint(ports, { mission: M, constraint: 'c2', kind: 'object', text: 'B', scope: { paths: ['**'], taskTypes: [] } });
     const a2 = await recordConstraint(ports, { mission: M, constraint: 'c2', kind: 'object', text: 'A', scope: { paths: ['**'], taskTypes: [] } });
@@ -173,7 +107,7 @@ describe('review r1 #9 and #10: constraint scopes and restored texts', () => {
 
 describe('project constraints (9.5): recorded from any mission, in force for every mission by their own scope', () => {
   const M2 = 'm2' as MissionId;
-  const conCard = (ports: ReturnType<typeof fakePorts>) => ports.scheduler.card<{ constraints: Array<{ id: string; text: string }> }>('con.m1.impl.1');
+  const conCard = (ports: ReturnType<typeof memoryPorts>) => ports.scheduler.card<{ constraints: Array<{ id: string; text: string }> }>('con.m1.impl.1');
 
   it('M2 records c1 v2: M1 has v2 in force and its covered product is degraded (5.2)', async () => {
     const { ports, engine } = await setup();
@@ -208,7 +142,7 @@ describe('project constraints (9.5): recorded from any mission, in force for eve
   });
 
   it('scope changes from two missions get their own ops (no OP_CONFLICT)', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
     await recordConstraint(ports, { mission: M, constraint: 'c5', kind: 'object', text: 'T', scope: { paths: ['a/**'], taskTypes: [] } });
     await recordConstraint(ports, { mission: M, constraint: 'c5', kind: 'object', text: 'T', scope: { paths: ['b/**'], taskTypes: [] } });
     await recordConstraint(ports, { mission: M2, constraint: 'c5', kind: 'object', text: 'T', scope: { paths: ['c/**'], taskTypes: [] } });
@@ -218,7 +152,7 @@ describe('project constraints (9.5): recorded from any mission, in force for eve
 });
 
 describe('review r3: ill-formed ids, withdrawals, line kinds', () => {
-  const words = { kind: 'words' as const, message: 'msg1', quote: 'as the user said' };
+  const words = { kind: 'words' as const, words: 'W-1', quote: 'as the user said' };
 
   it('lone surrogates are refused: idPart, plan standards and verification commands, items', async () => {
     const { idPart } = await import('../src/common/ids.ts');
@@ -231,11 +165,11 @@ describe('review r3: ill-formed ids, withdrawals, line kinds', () => {
     assert.ok(DetailedPlanDoc.safeParse(plan).success);
     assert.equal(DetailedPlanDoc.safeParse(bad({ verificationCommands: [{ id: '\ud800', command: 'a' }, { id: '\ud801', command: 'b' }] })).success, false);
     assert.equal(DetailedPlanDoc.safeParse(bad({ standards: [{ id: '\ud800', text: 'a' }] })).success, false);
-    await assert.rejects(recordItem(fakePorts(), { mission: M, item: '\ud800', type: 'goal', text: 't', source: words }), /not allowed/);
+    await assert.rejects(recordItem(memoryPorts(), { mission: M, item: '\ud800', type: 'goal', text: 't', source: words }), /not allowed/);
   });
 
   it('withdrawing "R!1" is refused and "R-1" stays; a missing item is refused; nothing is written', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
     await recordItem(ports, { mission: M, item: 'R-1', type: 'goal', text: 'keep me', source: words });
     const before = (await ports.ledger.records(['basis.withdrawn'])).length;
     await assert.rejects(withdrawItem(ports, { mission: M, item: 'R!1', reason: 'x' }), /item id "R!1" is not allowed/);
@@ -248,7 +182,7 @@ describe('review r3: ill-formed ids, withdrawals, line kinds', () => {
   });
 
   it('mission "constraint" with item "security" leaves the project constraint "security" intact', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
     const MC = 'constraint' as MissionId;
     const v = await recordConstraint(ports, { mission: M, constraint: 'security', kind: 'object', text: 'No secrets in logs', scope: { paths: ['**'], taskTypes: [] } });
     await recordItem(ports, { mission: MC, item: 'security', type: 'goal', text: 'harden it', source: words });
@@ -303,14 +237,14 @@ describe('review r1 #12: a stale Calibrator ① pass does not release the plan',
     const { ports, engine } = await setup();
     await engine.reconcile(M);
     const c = ports.scheduler.card<Calibrator1Card>('cal1.m1.1');
-    await recordItem(ports, { mission: M, item: 'g2', type: 'goal', text: 'Also TSV', source: { kind: 'words', message: 'msg1', quote: 'CSV parser' } });
-    ports.scheduler.run('cal1.m1.1', { handBack: cal1Pass(c) });
+    await recordItem(ports, { mission: M, item: 'g2', type: 'goal', text: 'Also TSV', source: { kind: 'words', words: 'W-1', quote: 'CSV parser' } });
+    await ports.scheduler.run('cal1.m1.1', { handBack: cal1Pass(c) });
     await engine.reconcile(M);
     assert.equal((await ports.ledger.events({ mission: M, event: 'pm-plan-effective' })).length, 0);
     assert.equal(ports.scheduler.queued('architect-decompose').length, 0);
     const re = ports.scheduler.card<Calibrator1Card>('cal1.m1.1.re1');
     assert.equal(re.mode.kind, 'full');
-    ports.scheduler.run('cal1.m1.1.re1', { handBack: cal1Pass(re) });
+    await ports.scheduler.run('cal1.m1.1.re1', { handBack: cal1Pass(re) });
     await engine.reconcile(M);
     assert.equal((await ports.ledger.events({ mission: M, event: 'pm-plan-effective' })).length, 1);
   });
@@ -338,7 +272,7 @@ describe('review r1 #13: recovery neither skips a step nor conflicts', () => {
     assert.equal((await ports.ledger.events({ mission: M, event: 'reanswer' })).length, 0, 'the answer is still to be applied');
     // the Secretary answers; carrying it out is lost once
     const sec = ports.scheduler.queued('secretary')[0] as FlowTask;
-    ports.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'answer', { instructions: 'multi-line quotes are allowed' }) });
+    await ports.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'answer', { instructions: 'multi-line quotes are allowed' }) });
     ports.ledger.failNext = (op) => op.startsWith('flow:reanswer:m1:');
     const r1 = await engine.reconcile(M);
     assert.equal(r1[0]?.errors.length, 1);
@@ -377,7 +311,7 @@ describe('review r1 #14: notices and Constructor questions survive a crash', () 
     const { ports, engine } = await setup();
     await drive(engine, ports.scheduler, withKinds({ 'calibrator-2': (t) => ({ handBack: cal2Escalate(t.card as unknown as Calibrator2Card, 'a public format') }), secretary: () => null }));
     const sec = ports.scheduler.queued('secretary')[0] as FlowTask;
-    ports.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'ask-user') });
+    await ports.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'ask-user') });
     ports.ledger.failNotifyNext = (n) => n.category === 'needs-user-decision';
     const r = await engine.reconcile(M);
     assert.equal(r[0]?.errors.length, 1, 'the notice failed');
@@ -389,93 +323,38 @@ describe('review r1 #14: notices and Constructor questions survive a crash', () 
   it("the Constructor's questions are raised even when the escalation write is lost after the product", async () => {
     const { ports, engine } = await setup();
     ports.ledger.failNext = (op) => op.startsWith('flow:escalation:m1:cdec.');
-    await drive(engine, ports.scheduler, withKinds({ constructor: (t: FlowTask): FakeOutcome | null => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Skip empty lines?'] } : {}) }), secretary: () => null })).catch(() => undefined);
+    await drive(engine, ports.scheduler, withKinds({ constructor: (t: FlowTask): ScriptedOutcome | null => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Skip empty lines?'] } : {}) }), secretary: () => null })).catch(() => undefined);
     await drive(engine, ports.scheduler, withKinds({ secretary: () => null }));
     assert.equal(ports.scheduler.queued('secretary').filter((t) => t.task.includes('cdec')).length, 1);
   });
 });
 
-describe('review r1 #15: a failed verification unit has a disposition exit', () => {
-  it('the unit needs disposition: the Secretary restarts it and the task goes on', async () => {
-    const { ports, engine } = await setup();
-    const unit = 'verify.prod-x';
-    let failedOnce = false;
-    ports.scheduler.actions = {
-      verify: async (req) => {
-        const st = ports.scheduler.tasks.get(unit);
-        if (!failedOnce) {
-          failedOnce = true;
-          ports.scheduler.tasks.set(unit, { spec: { ...(ports.scheduler.tasks.values().next().value as { spec: FlowTask }).spec, task: unit, lineage: 'verify.m1' }, state: 'needs-disposition', note: 'seat failure', disposition: 'seat-failure', launches: [`${unit}.L1` as never], handBack: null });
-          throw Object.assign(new Error(`the verification unit ${unit} ended needs-disposition`), { code: 'verification-failed', detail: { task: unit, lineage: 'verify.m1', state: 'needs-disposition' } });
-        }
-        if (st?.state === 'needs-disposition') throw Object.assign(new Error('still failed'), { code: 'verification-failed', detail: { task: unit, lineage: 'verify.m1', state: 'needs-disposition' } });
-        return req.commands.map((c) => ({ evidence: `ev.${req.object}.${c.id}`, command: c.command, summary: 'exit 0', passed: true }));
-      },
-    };
-    let restarted = false;
-    const base = withKinds({
-        secretary: (t) => {
-          const c = t.card as unknown as SecretaryCard;
-          assert.equal(c.request.source, 'needs-disposition');
-          restarted = true;
-          return { handBack: secretary(c, 'restart') };
-        },
-      });
-    // the verification unit is the program's, not a seat: never run by the script
-    await drive(engine, ports.scheduler, (t, sch) => (t.task === unit ? null : base(t, sch)));
-    assert.ok(restarted, 'the failure reached the Secretary');
-    assert.equal(ports.scheduler.tasks.get(unit)?.state, 'queued', 'the verification unit was restarted');
-    assert.equal((await ports.ledger.events({ mission: M, event: 'accepted' })).length, 2, 'the task went on after the restart');
-  });
-});
+// review r1 #15 (4.0: a failed verification unit) has no 4.1 counterpart: `mp` runs the declared commands
+// itself, inside the hand-back and the flow's verify step, and a run that cannot start is a recorded result.
 
-describe('review r1 #16: a product recorded before its result file is recovered, not regenerated', () => {
-  it('a lost ledger write reuses the generated commit; a lost result file is rebuilt from the recorded version', async () => {
-    const repo = initRepo(fx, 'r16');
-    const M0 = rawCommit(fx, repo, { 'src/a.ts': 'a\n' }, null, 'M0');
-    checkoutMain(fx, repo, M0);
-    const layout = await discoverRepo(fx.git, repo);
-    const description = await readTransformDescription(fx.git, layout, fx.user);
-    const ports = fakePorts();
-    const work = mkdtempSync(join(tmpdir(), 'mp-r1-16-'));
-    const store = new ContentStore(join(work, 'content'));
-    store.init();
-    const ctx: ActionContext = {
-      git: fx.git,
-      repo: layout,
-      description,
-      workDir: join(work, 'flow'),
-      exports: store,
-      ledger: ports.ledger,
-      base: async () => M0,
-      disk: { reserve: { recoveryReserveBytes: 0, evaluatorPoolBytes: 0 }, sharesVolume: () => false },
-      // no date: git would stamp "now", so a regenerated commit would differ (the reviewer's case)
-      ident: { name: 'Mission Pipeline', email: 'engine@example.invalid' },
-    };
-    const actions = programActions(ctx, { units: { submit: async () => undefined, status: async () => null } });
-    const text = 'export const b = 1;\n';
-    const exportHash = store.put(JSON.stringify({ format: 'mp4.tree.v1', entries: [{ path: 'src/b.ts', kind: 'file', mode: 0o644, size: text.length, hash: store.put(text), target: null }] } satisfies TreeDocument));
-    const req = { mission: M, module: 'm', task: 'con.m1.t.1', launch: 'con.m1.t.1.L1' as never, export: exportHash, base: M0, writeScope: ['src/b.ts'], taskType: 'implementation', prerequisites: [], reviews: [{ review: 'reviewer', basisLines: [], reliesOn: [] }], predecessor: null };
+describe('review r1 #16 (4.1): a product version is recorded once for its candidate commit', () => {
+  it('a second product call returns the same version; the bound transform description is stored by its hash', async () => {
+    const pp = processProject();
     try {
-      ports.ledger.failNext = (op) => op.startsWith('flow:product-version:m1:');
-      await assert.rejects(actions.product(req));
+      const base = pp.git('rev-parse', 'HEAD');
+      write(pp.dir, 'src/b.ts', 'export const b = 1;\n');
+      pp.git('add', 'src/b.ts');
+      pp.git('commit', '-q', '-m', 'candidate');
+      const candidate = pp.git('rev-parse', 'HEAD');
+      const actions = gitActions(pp.ctx);
+      const req = { mission: M, module: 'm', task: 'con.m1.t.1', dispatch: 'D-1', candidate, base, writeScope: ['src/b.ts'], taskType: 'implementation', prerequisites: [], reviews: [{ review: 'reviewer', basisLines: [], reliesOn: [] }] as never, predecessor: null };
       const first = await actions.product(req);
-      assert.equal(fx.raw(['rev-parse', `${first.commit}^`], repo), M0);
-      rmSync(join(work, 'flow', 'products', first.object, 'product.json'));
-      rmSync(join(work, 'flow', 'products', first.object, 'candidate'), { recursive: true, force: true });
       const again = await actions.product(req);
-      assert.equal(again.commit, first.commit, 'the recorded commit, not a new one');
-      assert.deepEqual(again.changedPaths, ['src/b.ts']);
-      assert.equal(readFileSync(join(again.snapshot, 'src/b.ts'), 'utf8'), text, 'the candidate is rebuilt');
-      const versions = (await ports.ledger.records(['object.version'])).map((c) => c.record as ObjectVersionRecord);
+      assert.deepEqual(again, first);
+      assert.deepEqual(first.changedPaths, ['src/b.ts']);
+      const versions = pp.ctx.memory.read((db) => db.stmt("SELECT record FROM log WHERE kind = 'object.version'").all() as Array<{ record: string }>).map((r) => JSON.parse(r.record) as ObjectVersionRecord);
       assert.equal(versions.length, 1);
-      // e2e B4: the landing reads the bound transform description back by its hash (cli/adapters/delivery.ts boundDescription)
+      assert.equal(versions[0]!.source!.commit, candidate);
       const hash = versions[0]!.source!.transform;
-      const bound = JSON.parse(ports.ledger.content.get(hash)) as typeof description;
-      assert.deepEqual(bound, JSON.parse(JSON.stringify(description)));
+      const bound = JSON.parse(pp.ctx.memory.data.text(hash));
       assert.equal(transformDescriptionHash(bound), hash, 'the stored bytes are the ones hashed');
     } finally {
-      rmSync(work, { recursive: true, force: true });
+      pp.cleanup();
     }
   });
 });
@@ -485,7 +364,8 @@ void (null as unknown as DetailedPlanDoc);
 describe('review r1 #2 (decision layer): plans rest on the proof of the explorations they plan from', () => {
   const X = 'X1';
   async function explorationWorld(artifactProven: boolean) {
-    const ports = fakePorts();
+    const ports = memoryPorts();
+    say(ports, SEED_TEXT);
     await seedMission(ports, M);
     const plan = pmPlan(M);
     const doc = {
@@ -499,7 +379,7 @@ describe('review r1 #2 (decision layer): plans rest on the proof of the explorat
           provenance: { by: 'pm' as const },
           after: [],
           items: [],
-          exploration: { id: X, deliverable: 'a design', fuzzyGoal: { quote: 'Build me a CSV parser', message: 'msg1' }, attackScope: ['contradictions'], decision: { id: 'd1', type: 'structure' as const }, budget: { rounds: 3, micros: null }, stop: '', research: false },
+          exploration: { id: X, deliverable: 'a design', fuzzyGoal: { quote: 'Build me a CSV parser', words: 'W-1' }, attackScope: ['contradictions'], decision: { id: 'd1', type: 'structure' as const }, budget: { rounds: 3, micros: null }, stop: '', research: false },
         },
         { ...plan.elements[1]!, after: [X] },
       ],
@@ -515,7 +395,7 @@ describe('review r1 #2 (decision layer): plans rest on the proof of the explorat
       records,
       events: [{ mission: M, line: `exploration:${X}`, event: 'settled', key: X, body: { exploration: X, decision: { id: 'd1', type: 'structure' }, outcome: 'conclusion', stop: 'converged', artifact, summary: 'stream it', unresolved: [] } }],
     });
-    await submitPmBatch(ports, { mission: M, plan: doc, userWords: ['msg1'], mode: 'stable' });
+    await submitPmBatch(ports, { mission: M, plan: doc, userWords: ['W-1'], mode: 'stable' });
     return { ports, engine: new FlowEngine(ports), artifact };
   }
 
@@ -544,7 +424,8 @@ describe('review r1 #2 (decision layer): plans rest on the proof of the explorat
     assert.deepEqual(card.output.calibrator2.reliesOn, ['pmplan.m1.1']);
     const esc = ports.scheduler.queued('secretary').map((t) => t.card as unknown as SecretaryCard).find((x) => x.request.subject === `exploration:${X}`);
     assert.ok(esc !== undefined, 'routed as no conclusion (to the Secretary, the PM and the user), not to the Architect');
-    assert.deepEqual(esc.options.map((o) => o.id), ['ask-user']);
+    // a decision the flow carries out (code review S1): the PM re-plans the waiting part with the user
+    assert.deepEqual(esc.options.map((o) => o.id), ['replan', 'ask-user']);
   });
 
   it('the detailed plan relies on the exploration product: negating it degrades the plan and the products built on it', async () => {
@@ -571,7 +452,7 @@ describe('derived ids stay injective (review r1 #17)', () => {
     const { aid } = await import('../src/flow/audit/flow.ts');
     const { standardLine } = await import('../src/flow/planning.ts');
     const { idPart } = await import('../src/flow/context.ts');
-    assert.throws(() => flowCtx(fakePorts(), 'a.b' as MissionId), /mission id "a\.b" is not allowed/);
+    assert.throws(() => flowCtx(memoryPorts(), 'a.b' as MissionId), /mission id "a\.b" is not allowed/);
     assert.notEqual(xid.lineage('m', 'a.ev1'), xid.evidenceLineage('m', 'a', 1));
     assert.notEqual(xid.basisLine('m', 'x.v1'), xid.basisVersion('m', 'x', 1));
     assert.notEqual(aid.stampOp('m', 'L.r2', 1), aid.stampOp('m', 'L', 2));
@@ -591,7 +472,7 @@ describe('derived ids stay injective (review r1 #17)', () => {
     assert.equal(idPart('a-b'), 'a-2db');
     assert.equal(idPart('a.b'), 'a-2eb');
     // exploration: both definitions commit (the fake ledger refuses a reused op with another payload, as the real one)
-    const { ledger, scheduler } = fakePorts();
+    const { ledger, scheduler } = memoryPorts();
     const M1 = 'M1' as MissionId;
     const raws = ['a.b', idPart('a.b'), 'a-b-2e7336dc', 'a-b'];
     for (const x of raws) {
@@ -605,7 +486,7 @@ describe('derived ids stay injective (review r1 #17)', () => {
   });
 
   it('item and constraint ids keep only characters their ledger lines keep ("R_1" would meet "R-1")', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
     const M1 = 'M1' as MissionId;
     await assert.rejects(recordConstraint(ports, { mission: M1, constraint: 'c_1', kind: 'object', text: 't', scope: { paths: ['**'], taskTypes: [] } }), /constraint id "c_1" is not allowed/);
     await assert.rejects(recordItem(ports, { mission: M1, item: 'R_1', type: 'goal', text: 't', source: { kind: 'pm' } as never }), /item id "R_1" is not allowed/);

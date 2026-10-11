@@ -1,11 +1,12 @@
-// Structural validation of records at the ledger boundary (6.1 "发布前复核":
+// Structural validation of records at the memory's boundary (6.1 "发布前复核":
 // a record that would make the derived state uncomputable, or a fact the
-// evaluator would read differently from its writer, never enters the log).
+// labels would read differently from its writer, never enters the log).
 //
-// Checks shapes and value domains only. Whether referenced content exists, and
-// whether ids collide with earlier facts, is checked by the ledger service.
+// Checks shapes and value domains only. Whether referenced data exists, and
+// whether ids collide with earlier facts, is checked inside the memory's write
+// (memory/data.ts, memory/domain/facts.ts).
 
-import { LOOP_KINDS, WI_CATALOG, type BaseRecord } from './records.ts';
+import { LOOP_KINDS, RUN_CLASSES, WI_CATALOG, type BaseRecord } from './records.ts';
 
 export class RecordInvalid extends Error {
   constructor(message: string) {
@@ -71,14 +72,22 @@ function scope(r: Obj, k: string, nullable: boolean): void {
   strings(v, 'paths');
   strings(v, 'taskTypes');
 }
-function exit(r: Obj, k: string): void {
-  const v = r[k];
-  if (!isObj(v)) fail(String(r.kind), `${k} is not an exit status`);
-  const code = v.code;
-  const signal = v.signal;
-  const codeOk = code === null || (typeof code === 'number' && Number.isSafeInteger(code) && code >= 0 && code <= 255);
-  const sigOk = signal === null || (typeof signal === 'string' && /^SIG[A-Z0-9]+$/.test(signal));
-  if (!codeOk || !sigOk || (code === null) === (signal === null)) fail(String(r.kind), `${k} must have exactly one of code (0..255) or signal (SIG...)`);
+
+/** 4.1 §6.5: an environment identity's parts: bounded strings, at most 64 version commands. */
+function environmentParts(v: unknown): void {
+  if (!isObj(v)) fail('env.snapshot', 'parts is not an object');
+  for (const k of ['os', 'osVersion', 'arch']) {
+    if (typeof v[k] !== 'string' || (v[k] as string).length > 512) fail('env.snapshot', `parts.${k} is not a string of at most 512 characters`);
+  }
+  const versions = v.versions;
+  if (!isObj(versions) || Object.keys(versions).length > 64) fail('env.snapshot', 'parts.versions maps at most 64 version commands to their output');
+  for (const [cmd, out] of Object.entries(versions)) {
+    if (cmd.length === 0 || cmd.length > 1000 || typeof out !== 'string' || out.length > 2000) fail('env.snapshot', 'parts.versions maps a command (1 to 1000 characters) to its output (at most 2000 characters)');
+  }
+  const digests = v.digests;
+  if (digests !== undefined && (!isObj(digests) || !Object.entries(digests).every(([cmd, h]) => Object.hasOwn(versions, cmd) && typeof h === 'string' && HEX64.test(h)))) {
+    fail('env.snapshot', 'parts.digests maps each version command to the sha256 of its whole output');
+  }
 }
 
 /** Validate one base record's shape. Throws RecordInvalid. */
@@ -110,12 +119,13 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
     case 'env.snapshot':
       id(r, 'line');
       id(r, 'snapshot');
+      if (r.parts !== undefined) environmentParts(r.parts);
       return;
     case 'evidence': {
       id(r, 'evidence');
       id(r, 'envLine');
       id(r, 'envSnapshot');
-      oneOf(r, 'runClass', ['closed', 'open', 'sampling']);
+      oneOf(r, 'runClass', RUN_CLASSES);
       const f = r.fields;
       if (!isObj(f) || !Object.values(f).every((x) => typeof x === 'string')) fail('evidence', 'fields must map names to strings');
       return;
@@ -211,7 +221,7 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
       list(r, 'tests');
       list(r, 'inputs');
       if ((r.tests as { count: number }).count === 0) fail('issue.coverage', 'a regression registration names at least one test');
-      // The prefixes of the input entries are checked by the ledger after resolving the list (it holds the content).
+      // The prefixes of the input entries are checked inside the write after resolving the list (memory/data.ts checkCoverageInputs).
       return;
     case 'op.pending':
       id(r, 'op');
@@ -248,58 +258,13 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
       if (r.ok === true) hash(r, 'inputs');
       else if (r.inputs !== null) fail('continuation.check', 'a failed check has no merged inputs');
       return;
-    case 'install.state':
-      str(r, 'item');
-      str(r, 'value');
-      if (typeof r.accepted !== 'boolean') fail('install.state', 'accepted is a boolean');
-      oneOf(r, 'by', ['user', 'installer']);
-      hash(r, 'detail');
-      return;
-    case 'termination.proof':
-      id(r, 'launch');
-      exit(r, 'exit');
-      nat(r, 'controlOomKill');
-      nat(r, 'unitOomKill');
-      nat(r, 'unitOom');
-      return;
-    case 'cleanup.state':
-      id(r, 'launch');
-      oneOf(r, 'state', ['pending', 'done']);
-      list(r, 'resources');
-      if (r.state === 'done' && (r.resources as { count: number }).count !== 0) fail('cleanup.state', 'done leaves no resources');
-      return;
-    case 'run.layer':
-      id(r, 'launch');
-      id(r, 'run');
-      for (const k of ['finalOom', 'finalOomKill', 'oomDelta', 'oomKillDelta']) nat(r, k);
-      oneOf(r, 'status', ['completed', 'resource-exceeded', 'environment-failure', 'timed-out']);
-      return;
-    case 'claude-code.exit':
-      id(r, 'launch');
-      exit(r, 'exit');
-      return;
     case 'alert':
       id(r, 'alert');
       str(r, 'category');
-      if (r.wi !== undefined && (typeof r.wi !== 'string' || !WI_CATALOG.has(r.wi))) fail('alert', `wi must be one of the 3.11 work instructions (WI-01..WI-${WI_CATALOG.size})`);
+      if (r.wi !== undefined && (typeof r.wi !== 'string' || !WI_CATALOG.has(r.wi))) fail('alert', `wi must be one of the 4.1 work instructions (${[...WI_CATALOG].join(', ')})`);
       if (r.informational !== undefined && r.informational !== true) fail('alert', 'informational is true or absent');
       if ((r.wi === undefined) !== (r.informational === true)) fail('alert', 'an exception alert names its WI (3.11); a notice that is not an exception says informational: true, without a WI');
       hash(r, 'body');
-      return;
-    case 'spend.limit':
-      id(r, 'mission');
-      nat(r, 'micros', true);
-      return;
-    case 'spend.reserve':
-      id(r, 'reservation');
-      id(r, 'mission');
-      id(r, 'launch');
-      nat(r, 'micros');
-      return;
-    case 'spend.settle':
-      id(r, 'reservation');
-      nat(r, 'micros');
-      oneOf(r, 'how', ['usage', 'reservation']);
       return;
     case 'loop.attempt':
       str(r, 'lineage');
@@ -334,6 +299,14 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
       str(r, 'lineage');
       id(r, 'mission');
       hash(r, 'card');
+      if (r.queuedBy !== undefined) {
+        const q = r.queuedBy;
+        if (!isObj(q)) fail('task.queued', 'queuedBy is { dispatch, task, objects, step }');
+        if (q.dispatch !== null && (typeof q.dispatch !== 'string' || q.dispatch.length === 0 || q.dispatch.length > 200)) fail('task.queued', 'queuedBy.dispatch is a dispatch id or null');
+        if (q.task !== null && (typeof q.task !== 'string' || q.task.length === 0 || q.task.length > 200)) fail('task.queued', 'queuedBy.task is a task id or null');
+        if (!Array.isArray(q.objects) || q.objects.length > 32 || !q.objects.every((o) => typeof o === 'string' && o.length > 0 && o.length <= 200)) fail('task.queued', 'queuedBy.objects lists at most 32 ids');
+        if (typeof q.step !== 'string' || q.step.length === 0 || q.step.length > 300) fail('task.queued', 'queuedBy.step is 1 to 300 characters');
+      }
       return;
     case 'task.dequeued':
       id(r, 'task');

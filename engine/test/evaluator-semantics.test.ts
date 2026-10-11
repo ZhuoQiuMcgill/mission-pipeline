@@ -1,10 +1,21 @@
 // Reference semantics (design v30: 5.2–5.3, 5.6, 8.1, 10.1, 11.2).
+//
+// With MP_LABELS_STORED=1 (labels-semantics.test.ts) every scenario also runs on
+// the stored labels of a project memory (4.1 §4.1): each record goes to the
+// memory as it is added, and every state, label and continuation the
+// assertions read comes from the stored tables, after a check that they equal
+// the reference semantics over the same records. A state at an earlier
+// revision is read from the reference semantics only (the memory keeps the
+// current labels).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Derivation, Index, fullCompute, type ContinuationRequest, type DerivedState, type ResolvedCommitted, type ResolvedRecord } from '../src/evaluator/semantics.ts';
 import { revision, type Revision } from '../src/common/ids.ts';
 import { encodeConstraintCheck, fixKey, reviewPosition } from '../src/common/records.ts';
+import { labelProject, Mirror } from './labels-fixtures.ts';
+
+const STORED = process.env['MP_LABELS_STORED'] === '1';
 
 /** A required review: just its kind (empty contract), or the kind with its contract. */
 type Review = string | { review: string; basisLines?: string[]; reliesOn?: string[] };
@@ -17,12 +28,16 @@ class Log {
   /** Paths of each object, and members of each unit, for constraint checks given as a bare version. */
   private readonly paths = new Map<string, string[]>();
   private readonly members = new Map<string, string[]>();
+  /** The stored labels the same records go to (MP_LABELS_STORED=1). */
+  private readonly mirror: Mirror | null = STORED ? new Mirror(labelProject().m) : null;
   add(r: Record<string, unknown>): Revision {
     const rev = revision(this.records.length + 1);
     this.records.push({ revision: rev, record: r as unknown as ResolvedRecord });
+    this.mirror?.append([r]);
     return rev;
   }
   state(at?: Revision): DerivedState {
+    if (this.mirror !== null && (at === undefined || at === this.records.length)) return this.mirror.state();
     return fullCompute(this.records, at ?? revision(this.records.length));
   }
   /** The program's continuation check (v32 5.2 part 5) against the current records. */
@@ -31,13 +46,18 @@ class Log {
   ): ReturnType<Derivation['continuation']> {
     const ix = new Index();
     for (const c of this.records) ix.add(c);
-    return new Derivation(ix).continuation({
+    const full = {
       target: (ix.judgments.get(req.extends as never)?.rec.target as string | undefined) ?? '',
       changedLines: [],
       draft: { evidence: [], bases: [], constraints: [], reliesOn: [] },
       superseded: [],
       ...req,
-    } as ContinuationRequest);
+    } as ContinuationRequest;
+    const want = new Derivation(ix).continuation(full);
+    if (this.mirror === null) return want;
+    const got = this.mirror.continuation(full);
+    assert.deepEqual(got, want, 'the stored labels answer the continuation check as the reference semantics');
+    return got;
   }
   label(t: string, at?: Revision): string {
     return this.state(at).targets.get(t)?.label ?? 'missing';
@@ -49,7 +69,7 @@ class Log {
     this.add({ kind: 'env.snapshot', line, snapshot });
   }
   evidence(id: string, envLine = 'py', envSnapshot = 'py@1', fields: Record<string, string> = { exit: '0' }): void {
-    this.add({ kind: 'evidence', evidence: id, envLine, envSnapshot, runClass: 'closed', fields });
+    this.add({ kind: 'evidence', evidence: id, envLine, envSnapshot, runClass: 'declared', fields });
   }
   object(id: string, o: { prereqs?: string[]; reviews?: Review[]; paths?: string[]; objectKind?: string; predecessor?: string } = {}): void {
     this.paths.set(id, o.paths ?? [`src/${id}.ts`]);
@@ -747,18 +767,18 @@ test('renewal is honoured only when the 5.3 rule holds for the judgment\'s decla
   L.evidence('E2', 'py', 'py@2', { exit: '1', out: 'h' });
   L.add({ kind: 'evidence.renewal', judgment: 'J', original: 'E1', replacement: 'E2' });
   assert.equal(L.label('P'), 'not-fully-proven');
-  // An open run does not renew.
-  L.add({ kind: 'evidence', evidence: 'E3', envLine: 'py', envSnapshot: 'py@2', runClass: 'open', fields: { exit: '0', out: 'h' } });
+  // An other run does not renew (4.1 §6.5: only declared runs).
+  L.add({ kind: 'evidence', evidence: 'E3', envLine: 'py', envSnapshot: 'py@2', runClass: 'other', fields: { exit: '0', out: 'h' } });
   L.add({ kind: 'evidence.renewal', judgment: 'J', original: 'E1', replacement: 'E3' });
   assert.equal(L.label('P'), 'not-fully-proven');
-  // A closed run with equal used fields renews (an unused field may differ).
+  // A declared run with equal used fields renews (an unused field may differ).
   L.evidence('E4', 'py', 'py@2', { exit: '0', out: 'h', ms: '99' });
   L.add({ kind: 'evidence.renewal', judgment: 'J', original: 'E1', replacement: 'E4' });
   assert.equal(L.label('P'), 'proven');
 });
 
-test('a regression run counts only when closed, applicable, every registered test passed and the inputs unchanged (5.6, core review r1 #11)', () => {
-  const build = (fields: Record<string, string>, runClass = 'closed'): string => {
+test('a regression run counts only when declared, applicable, every registered test passed and the inputs unchanged (5.6, core review r1 #11)', () => {
+  const build = (fields: Record<string, string>, runClass = 'declared'): string => {
     const L = provenProduct();
     L.add({ kind: 'evidence', evidence: 'R', envLine: 'py', envSnapshot: 'py@1', runClass, fields });
     L.add({ kind: 'issue.coverage', issue: 'N', version: 'P', evidence: 'R', command: 'pytest', tests: ['t1', 't2'], inputs: ['testfile:t/a.py=h1', 'runner:cfg=h2'] });
@@ -766,7 +786,8 @@ test('a regression run counts only when closed, applicable, every registered tes
   };
   const ok = { exit: '0', 'test:t1': 'passed', 'test:t2': 'passed', 'input:testfile:t/a.py': 'h1', 'input:runner:cfg': 'h2' };
   assert.equal(build(ok), 'fixed');
-  assert.equal(build(ok, 'open'), 'unfixed');
+  assert.equal(build(ok, 'other'), 'unfixed');
+  assert.equal(build(ok, 'sampling'), 'unfixed', 'only a declared run counts mechanically (4.1 §6.5)');
   assert.equal(build({ ...ok, 'test:t2': 'skipped' }), 'unfixed');
   const { 'test:t2': _t2, ...missing } = ok;
   assert.equal(build(missing), 'unfixed');
@@ -918,7 +939,7 @@ test('F9: an incomplete regression registration never fixes an issue mechanicall
   const ok = { exit: '0', 'test:t1': 'passed', 'input:testfile:t/a.py': 'h1', 'input:runner:cfg': 'h2' };
   const build = (reg: { command?: string; tests?: string[]; inputs?: string[] }, fields: Record<string, string> = ok): string => {
     const L = provenProduct();
-    L.add({ kind: 'evidence', evidence: 'R', envLine: 'py', envSnapshot: 'py@1', runClass: 'closed', fields });
+    L.add({ kind: 'evidence', evidence: 'R', envLine: 'py', envSnapshot: 'py@1', runClass: 'declared', fields });
     L.add({
       kind: 'issue.coverage', issue: 'N', version: 'P', evidence: 'R',
       command: reg.command ?? 'pytest -q', tests: reg.tests ?? ['t1'], inputs: reg.inputs ?? ['testfile:t/a.py=h1', 'runner:cfg=h2'],

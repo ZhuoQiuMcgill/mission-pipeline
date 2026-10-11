@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import type { BaseRecord } from '../src/common/records.ts';
-import { fakePorts } from '../src/flow/fakes.ts';
+import { memoryPorts, say } from './flow-memory-fixtures.ts';
 import { advanceLegalization, legalizationState, requestLegalization, startLegalization } from '../src/flow/audit/flow.ts';
 import type { AuditChainCard, AuditChainResult, AuditNodeCard, AuditNodeResult } from '../src/seat/cards/auditor.ts';
 
@@ -18,7 +18,7 @@ const COMMIT = (i: number): string => String(i % 10).repeat(40);
 /** A chain of `count` products: P0 relies on P1..P(count-1); every product but P0 has a current pass. */
 async function auditWorld(count: number, o: { readonly withText?: boolean; readonly mission?: MissionId } = {}) {
   const mission = o.mission ?? M;
-  const p = fakePorts();
+  const p = memoryPorts();
   const c = p.ledger.content;
   const recs: BaseRecord[] = [{ kind: 'basis.version', basisKind: 'standard', line: 'std.task.S1' as never, version: 'std.task.S1.v1' as never, mission, scope: null }];
   for (let i = 0; i < count; i++) {
@@ -65,7 +65,7 @@ async function auditWorld(count: number, o: { readonly withText?: boolean; reado
           line: 'requirements',
           event: 'item',
           key: 'std.task.S1.v1',
-          body: { line: 'std.task.S1', version: 'std.task.S1.v1', type: 'acceptance', text: 'every product passes its tests', source: { kind: 'words', message: 'm1', quote: 'all tests pass' }, restatement: null, confirmedBy: null, notifyCondition: null },
+          body: { line: 'std.task.S1', version: 'std.task.S1.v1', type: 'acceptance', text: 'every product passes its tests', source: { kind: 'words', words: 'W-1', quote: 'all tests pass' }, restatement: null, confirmedBy: null, notifyCondition: null },
         },
       ],
     });
@@ -73,7 +73,7 @@ async function auditWorld(count: number, o: { readonly withText?: boolean; reado
   const snapshots: Array<{ purpose: string; commit?: string; products?: readonly string[] }> = [];
   p.scheduler.actions.snapshot = async (req) => {
     snapshots.push({ purpose: req.purpose, ...(req.commit !== undefined ? { commit: req.commit } : {}), ...(req.products !== undefined ? { products: req.products } : {}) });
-    return { path: `/fake/snapshots/${req.purpose}`, commit: req.commit ?? 'c'.repeat(40) };
+    return { path: `fake-snapshots/${req.purpose}`, commit: req.commit ?? 'c'.repeat(40) };
   };
   const ports = { ledger: p.ledger, scheduler: p.scheduler, evaluator: p.evaluator };
   await requestLegalization(ports, { legalization: 'L1', mission, endpoint: 'P0', words: 'legalize', chainEvidence: [], capabilities: [] });
@@ -120,13 +120,13 @@ describe('review r1 #3: the Auditor reviews the bound content', () => {
   test('the chain Auditor reads every product of the chain laid over the endpoint\'s commit', async () => {
     const p = await auditWorld(3);
     const t = p.scheduler.queued('auditor-node')[0] as NonNullable<ReturnType<typeof p.scheduler.queued>[0]>;
-    assert.deepEqual(p.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
+    assert.deepEqual(await p.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
     await advanceLegalization(p.ports, M, 'L1');
     const chain = p.scheduler.queued('auditor-chain')[0]?.card as unknown as AuditChainCard;
     const snap = p.snapshots.find((x) => x.purpose.endsWith('-chain'));
     assert.equal(snap?.commit, COMMIT(0));
     assert.deepEqual([...(snap?.products ?? [])].sort(), ['P0', 'P1', 'P2']);
-    assert.equal(chain.workspace.snapshot, `/fake/snapshots/${snap?.purpose}`);
+    assert.equal(chain.workspace.snapshot, `fake-snapshots/${snap?.purpose}`);
   });
 });
 
@@ -134,7 +134,7 @@ describe('review r1 #4: no seam is dropped', () => {
   test('62 required seams: all on the card, the complete table must-read; a hand-back answering 60 is refused', async () => {
     const p = await auditWorld(63);
     let t = p.scheduler.queued('auditor-node')[0] as NonNullable<ReturnType<typeof p.scheduler.queued>[0]>;
-    assert.deepEqual(p.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
+    assert.deepEqual(await p.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
     await advanceLegalization(p.ports, M, 'L1');
     t = p.scheduler.queued('auditor-chain')[0] as NonNullable<ReturnType<typeof p.scheduler.queued>[0]>;
     const chain = t.card as unknown as AuditChainCard;
@@ -142,9 +142,9 @@ describe('review r1 #4: no seam is dropped', () => {
     const table = chain.materials.find((m) => m.id === 'seams');
     assert.equal(table?.mustRead, true);
     assert.equal(p.ledger.content.get(table?.ref as string).split('\n').length, 62);
-    const partial = p.scheduler.run(t.task, { handBack: chainPass(chain, chain.seams.slice(0, 60)) });
+    const partial = await p.scheduler.run(t.task, { handBack: chainPass(chain, chain.seams.slice(0, 60)) });
     assert.ok(partial.some((x) => x.includes('"seam-61" is answered 0 times')), partial.join('; '));
-    assert.deepEqual(p.scheduler.run(t.task, { handBack: chainPass(chain) }), []);
+    assert.deepEqual(await p.scheduler.run(t.task, { handBack: chainPass(chain) }), []);
     const r = await advanceLegalization(p.ports, M, 'L1');
     assert.equal(r.result?.outcome, 'stamped');
   });
@@ -154,10 +154,10 @@ describe('review r1 #5: the stamp and its result are one transaction; the PM is 
   async function chained() {
     const p = await auditWorld(2);
     const t = p.scheduler.queued('auditor-node')[0] as NonNullable<ReturnType<typeof p.scheduler.queued>[0]>;
-    assert.deepEqual(p.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
+    assert.deepEqual(await p.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
     await advanceLegalization(p.ports, M, 'L1');
     const c = p.scheduler.queued('auditor-chain')[0] as NonNullable<ReturnType<typeof p.scheduler.queued>[0]>;
-    assert.deepEqual(p.scheduler.run(c.task, { handBack: chainPass(c.card as unknown as AuditChainCard) }), []);
+    assert.deepEqual(await p.scheduler.run(c.task, { handBack: chainPass(c.card as unknown as AuditChainCard) }), []);
     return p;
   }
 
@@ -196,14 +196,14 @@ describe('review r1 #5: the stamp and its result are one transaction; the PM is 
     assert.equal((await p.ledger.records(['op.executed'])).length, 1);
   });
 
-  test('the ledger ended the operation (derived state not computable, WI-11): a new operation is registered and stamped', async () => {
+  test('the memory has no such operation pending (NOT_PENDING): a new operation is registered and stamped', async () => {
     const p = await chained();
     const orig = p.ledger.commitProofOp.bind(p.ledger);
     let first = true;
     p.ledger.commitProofOp = async (req) => {
       if (first) {
         first = false;
-        throw Object.assign(new Error('EVALUATOR_FAULT: the derived state cannot be computed'), { code: 'EVALUATOR_FAULT' });
+        throw Object.assign(new Error('NOT_PENDING: no such operation is pending'), { code: 'NOT_PENDING' });
       }
       return orig(req);
     };
@@ -222,7 +222,7 @@ describe('review r1 #17: legalization ids are per mission', () => {
       const w = await auditWorld(1, { mission });
       const n = w.scheduler.queued('auditor-node')[0] as NonNullable<ReturnType<typeof w.scheduler.queued>[0]>;
       const card = n.card as unknown as AuditNodeCard;
-      assert.deepEqual(w.scheduler.run(n.task, { handBack: nodePass(card) }), []);
+      assert.deepEqual(await w.scheduler.run(n.task, { handBack: nodePass(card) }), []);
       await advanceLegalization(w.ports, mission, 'L1');
       const c = w.scheduler.queued('auditor-chain')[0]?.card as unknown as AuditChainCard;
       out.push({ task: n.task, lineage: n.lineage, judgment: card.positions[0]?.binding.judgment ?? '', chain: c.chain.object });
@@ -236,7 +236,7 @@ describe('review r1 #17: legalization ids are per mission', () => {
 
 describe('review r1 #3: a proof unit is audited on its members', () => {
   test('the unit Auditor reads every member laid over the base, with all members\' paths', async () => {
-    const p = fakePorts();
+    const p = memoryPorts();
     const c = p.ledger.content;
     const obj = (id: string, prereqs: string[], i: number): BaseRecord => ({
       kind: 'object.version',
@@ -263,14 +263,14 @@ describe('review r1 #3: a proof unit is audited on its members', () => {
           line: 'requirements',
           event: 'item',
           key: 'std.task.S1.v1',
-          body: { line: 'std.task.S1', version: 'std.task.S1.v1', type: 'acceptance', text: 'X and Y work together', source: { kind: 'words', message: 'm1', quote: 'they must work together' }, restatement: null, confirmedBy: null, notifyCondition: null },
+          body: { line: 'std.task.S1', version: 'std.task.S1.v1', type: 'acceptance', text: 'X and Y work together', source: { kind: 'words', words: 'W-1', quote: 'they must work together' }, restatement: null, confirmedBy: null, notifyCondition: null },
         },
       ],
     });
     const snapshots: Array<{ products?: readonly string[] }> = [];
     p.scheduler.actions.snapshot = async (req) => {
       snapshots.push({ ...(req.products !== undefined ? { products: req.products } : {}) });
-      return { path: `/fake/snapshots/${req.purpose}`, commit: 'c'.repeat(40) };
+      return { path: `fake-snapshots/${req.purpose}`, commit: 'c'.repeat(40) };
     };
     const ports = { ledger: p.ledger, scheduler: p.scheduler, evaluator: p.evaluator };
     await requestLegalization(ports, { legalization: 'LU', mission: M, endpoint: 'X', words: 'legalize', chainEvidence: [], capabilities: [] });

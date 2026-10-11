@@ -19,13 +19,13 @@ import type { IssueId, JudgmentId, ModuleId, ObjectVersionId, ProofUnitId } from
 import type { BaseRecord, IssueRecord, JudgmentRecord, ListRef } from '../../common/records.ts';
 import { validateRecord } from '../../common/validate.ts';
 import type { SnapshotFiles } from '../results.ts';
-import { Binding, Command, Item, Material, Workspace, commonCardFields, list, renderCommon, renderMaterials, TOOLS_NOTE_SNAPSHOT } from './common.ts';
+import { Binding, Command, Item, Material, Workspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
 import { registerSeatCard, type CardRecordContext, type CardResultContext, type SeatCardEntry } from './registry.ts';
 
 /** A read-only workspace whose declared commands may write into scratch copies (as the Reviewer's). */
 const AuditWorkspace = Workspace.extend({ writablePaths: z.array(z.string()).max(0, 'an Auditor has no writable paths; name scratch paths instead') });
 
-/** A run the Auditor may cite (evidence:<id>): reusable closed runs, or the reruns of 7.3. */
+/** A run the Auditor may cite (evidence:<id>): a declared run of the program on the bound content that still applies (4.1 §6.5), or one it has `mp` rerun. */
 const AuditEvidence = z.object({ id: z.string().min(1), command: z.string(), summary: z.string() });
 
 // ---------------------------------------------------------------- pointers
@@ -203,16 +203,6 @@ function nodeRecords(card: AuditNodeCard, r: AuditNodeResult, ctx: CardRecordCon
   return out;
 }
 
-export const AUDITOR_NODE_DEFINITION = [
-  'You are the Auditor seat of a software pipeline, legalizing one node of a lineage the user asked to have legalized. The node (an object version, or a proof unit judged as a whole) is not fully proven: some of its required review positions have no judgment, only an undecided one, a judgment that is no longer current, or lack review against a constraint. You fill exactly those positions, independently.',
-  TOOLS_NOTE_SNAPSHOT,
-  'What you do: for each position on the card, judge every basis item (the requirement items, standards and authorizations of the position\'s contract, current text) with pointers: "evidence:<id>" for a run listed on the card, "file:<path>:<line>" for what you read. Review every object constraint over the paths listed. A position marked "coverage" was already passed; review only the constraint paths listed, as an addition to that judgment. You may have the program rerun a declared command.',
-  'Card fields: the node (required), the positions with their reasons, bases, constraints and prior judgments (required), runs you may cite, declared commands, materials (for an old-engine boundary node: the archived evidence).',
-  'Hand-back (submit_result, once): one entry per position: a verdict (pass only when every basis is met and every constraint path was reviewed; fail; undecided when the bases themselves are unclear), one judgment per basis item, the paths reviewed per constraint; findings outside the bases; a summary. Then end your turn.',
-  'Prohibitions: you change nothing; your judgment cannot overturn a negation and is not asked to; do not judge positions that are not on the card.',
-  'Upstream: the user, through the PM (the legalization request). Downstream: the program records your judgments; when every node is proven, the chain Auditor.',
-  'Your tools: read_file, list_directory, search_content, read_material, rerun_declared_command, submit_result.',
-].join('\n\n');
 
 export function renderAuditNodeCard(c: AuditNodeCard): string {
   return (
@@ -230,8 +220,7 @@ export function renderAuditNodeCard(c: AuditNodeCard): string {
       .join('') +
     list('Runs you may cite (evidence:<id>)', c.evidence.map((e) => `[${e.id}] ${e.command}: ${e.summary}`)) +
     list('Commands you may have rerun', c.declaredCommands.map((d) => `[${d.id}] ${d.command}`)) +
-    renderMaterials(c.materials) +
-    'When done, call submit_result once, then end your turn.'
+    renderMaterials(c.materials)
   );
 }
 
@@ -241,7 +230,6 @@ export const auditNodeEntry: SeatCardEntry<AuditNodeCard, AuditNodeResult> = {
   schema: AuditNodeCardSchema,
   resultShape: AuditNodeResultShape,
   resultSchema: AuditNodeResultSchema,
-  definition: AUDITOR_NODE_DEFINITION,
   toolProfile: 'read-rerun',
   render: renderAuditNodeCard,
   problems: nodeProblems,
@@ -331,16 +319,6 @@ function chainRecords(card: AuditChainCard, r: AuditChainResult, ctx: CardRecord
   ];
 }
 
-export const AUDITOR_CHAIN_DEFINITION = [
-  'You are the Auditor seat of a software pipeline, judging a whole chain the user asked to have legalized. Every node of the chain is proven; you judge the chain-acceptance object: does the endpoint honour the user\'s words, and does every seam between the nodes hold?',
-  TOOLS_NOTE_SNAPSHOT,
-  'What you do: for each quote of the user (verbatim), judge whether the endpoint honours it; for each seam (where two nodes meet: an interface, a call, a data format), judge whether it holds; cite pointers ("evidence:<id>" for a run on the card, "file:<path>:<line>"). You may have the program rerun a declared command.',
-  'Card fields: the chain (object, endpoint, nodes, excluded branches; required), the quotes (required), the seams, runs you may cite, declared commands, materials.',
-  'Hand-back (submit_result, once): one entry per quote and per seam, findings outside them, and one verdict: pass only when every quote is honoured and every seam holds; fail; undecided when the words themselves are unclear. Then end your turn.',
-  'Prohibitions: you change nothing; you do not re-judge the nodes (they are proven); a fail of yours is not overturned by another Auditor: the user\'s next legalization makes a new chain object.',
-  'Upstream: the program, after every node Auditor of this legalization. Downstream: the program stamps the chain when your judgment passes; the result goes to the user through the PM.',
-  'Your tools: read_file, list_directory, search_content, read_material, rerun_declared_command, submit_result.',
-].join('\n\n');
 
 export function renderAuditChainCard(c: AuditChainCard): string {
   return (
@@ -355,8 +333,7 @@ export function renderAuditChainCard(c: AuditChainCard): string {
     ) +
     list('Runs you may cite (evidence:<id>)', c.evidence.map((e) => `[${e.id}] ${e.command}: ${e.summary}`)) +
     list('Commands you may have rerun', c.declaredCommands.map((d) => `[${d.id}] ${d.command}`)) +
-    renderMaterials(c.materials) +
-    'When done, call submit_result once, then end your turn.'
+    renderMaterials(c.materials)
   );
 }
 
@@ -366,7 +343,6 @@ export const auditChainEntry: SeatCardEntry<AuditChainCard, AuditChainResult> = 
   schema: AuditChainCardSchema,
   resultShape: AuditChainResultShape,
   resultSchema: AuditChainResultSchema,
-  definition: AUDITOR_CHAIN_DEFINITION,
   toolProfile: 'read-rerun',
   render: renderAuditChainCard,
   problems: chainProblems,

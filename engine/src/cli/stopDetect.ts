@@ -1,8 +1,9 @@
-// Conservative stop detection in the user's words (design 6.4: in force at once, wider rather than narrower; 3.1).
+// Conservative stop scopes from the user's words (design 4.1 §6.6, v51 6.4: in force at once,
+// wider rather than narrower).
 //
-// The PM's prompt hook runs this on every user message. Stop, forbid and withdraw
-// phrases in Chinese and English trigger a stop at once, without asking the user
-// again. False positives are accepted by design (risk 9: the PM can narrow or
+// `mp pm stop "<the words>"` derives its scope here when no --scope is given. Stop, forbid and
+// withdraw phrases in Chinese and English are recognised; false positives are accepted by design
+// (the PM can narrow or release the stop right away); misses are not. False positives are accepted by design (risk 9: the PM can narrow or
 // release the stop right away); misses are not, so every rule leans towards
 // detecting. Scopes are conservative:
 //  - a capability-specific form ("不许联网") restricts every unit with that capability,
@@ -13,7 +14,7 @@
 //    exactly one known mission.
 
 import type { MissionId } from '../common/ids.ts';
-import type { StopScope } from '../ledger/stops.ts';
+import type { StopScope } from '../memory/index.ts';
 
 interface Rule {
   readonly id: string;
@@ -58,10 +59,8 @@ const CAPABILITY_RULES: ReadonlyArray<{ readonly cap: string; readonly re: RegEx
 ];
 
 /**
- * Capabilities units are reliably tagged with. None today: the scheduler and the landing tag
- * units and intents with the capabilities on their cards, and no shared vocabulary exists yet,
- * so a capability stop could match nothing; every capability form widens to the generic scope
- * (wider rather than narrower) until the installation lists tagged capabilities (CliConfig.taggedCapabilities).
+ * Capabilities tasks are reliably tagged with. None by default: a capability stop could match
+ * nothing, so every capability form widens to the generic scope (wider rather than narrower).
  */
 export const DEFAULT_TAGGED_CAPABILITIES: readonly string[] = [];
 
@@ -114,10 +113,15 @@ export function stopScopeFor(
   }
   const named = namedMissions(text, o.knownMissions ?? []);
   const widened = d.capability !== null ? ` (units are not reliably tagged with the capability "${d.capability}": widened)` : '';
+  // the words ask for everything ("stop everything, including m1"): a named or only-open mission never narrows that
+  const global = globalWords(text);
+  if (global !== null) {
+    return { scope: { kind: 'all' }, why: `the words ask to stop everything ("${global}"): restricts everything${named.length > 0 ? ` (including ${named.join(', ')})` : ''}${widened}` };
+  }
   if (o.complete !== true) {
     return {
       scope: { kind: 'all' },
-      why: `a generic stop, and the ledger did not say in time which missions are related: restricts everything${named.length > 0 ? ` (including ${named.join(', ')})` : ''}${widened}`,
+      why: `a generic stop, and which missions are related is not known: restricts everything${named.length > 0 ? ` (including ${named.join(', ')})` : ''}${widened}`,
     };
   }
   if (named.length === 1) {
@@ -131,6 +135,16 @@ export function stopScopeFor(
     scope: { kind: 'all' },
     why: `a generic stop, the mission is unclear: restricts everything${named.length > 1 ? ` (${named.length} missions named)` : ''}${widened}`,
   };
+}
+
+/** Words that ask for everything (Chinese, and English as whole words). */
+const GLOBAL_ZH = /全部|所有|一切|全都|统统|通通|全体|整个项目|全面/u;
+const GLOBAL_EN = /\b(all|everything|every\s+(mission|task|thing|one|seat|dispatch|delivery)|anything|entire|whole)\b/i;
+
+/** The global word in a stop's words, or null: such a stop restricts everything (it only ever widens the scope). */
+export function globalWords(text: string): string | null {
+  const t = text.normalize('NFKC');
+  return GLOBAL_ZH.exec(t)?.[0] ?? GLOBAL_EN.exec(t)?.[0] ?? null;
 }
 
 export function describeScope(s: StopScope): string {

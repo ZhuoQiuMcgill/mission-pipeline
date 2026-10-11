@@ -11,15 +11,16 @@
 //
 // The program must record ObjectVersionRecord.content with this same function
 // when it records a product version from a generated commit, and put the
-// document behind it (writeScopeDocument) into the content store first: the
-// ledger refuses an object version whose content is not stored (6.1), and
-// ContentStore.put(writeScopeDocument(...)) returns exactly the identity.
+// document behind it (writeScopeDocument) into the skeleton's data first
+// (memory/data.ts): the memory refuses an object version whose content is not
+// stored (6.1), and `data.put(writeScopeDocument(...))` returns exactly the
+// identity.
 
 import type { ContentHash, GitOid } from '../common/ids.ts';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import { pathMatches } from '../evaluator/semantics.ts';
 import { lsTree, type RepoLayout, type TreeEntry } from '../git/objects.ts';
-import type { SafeGit } from '../git/safeGit.ts';
+import type { GitExec } from '../git/plainGit.ts';
 
 export const WRITE_SCOPE_IDENTITY_VERSION = 'mp4-write-scope/1';
 
@@ -34,7 +35,7 @@ function byPathBytes(a: { path: string }, b: { path: string }): number {
 /**
  * The document whose sha256 is the identity: canonical JSON of
  * {files: [[path, mode, oid], ...], version}. The program stores it in the
- * content store when it records the version (ContentStore.put returns the identity).
+ * skeleton's data when it records the version (`data.put` returns the identity).
  */
 export function writeScopeDocument(entries: readonly TreeEntry[], scope: readonly string[]): string {
   const files = entries
@@ -50,6 +51,6 @@ export function writeScopeIdentity(entries: readonly TreeEntry[], scope: readonl
 }
 
 /** Identity of a write scope in a commit or tree. */
-export async function writeScopeIdentityAt(git: SafeGit, repo: RepoLayout, treeish: GitOid, scope: readonly string[]): Promise<ContentHash> {
+export async function writeScopeIdentityAt(git: GitExec, repo: RepoLayout, treeish: GitOid, scope: readonly string[]): Promise<ContentHash> {
   return writeScopeIdentity(await lsTree(git, repo, treeish, { recursive: true }), scope);
 }

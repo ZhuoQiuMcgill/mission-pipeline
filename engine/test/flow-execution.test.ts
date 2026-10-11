@@ -1,27 +1,31 @@
 // Execution flows with scripted seat results (no models): design 4.1–4.2, 8.1, 5.6, 6.2, 6.5,
-// 3.8, 3.11, and restarting the flow from ledger state.
+// 3.8, 3.11, and restarting the flow from the memory's state. The flows run on a real project
+// memory (4.1: test/flow-memory-fixtures.ts); seats hand back through `mp seat <id> handback`.
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { WI_CATALOG } from '../src/common/records.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { fakePorts } from '../src/flow/fakes.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import type { DetailedPlanDoc } from '../src/flow/plandoc.ts';
 import { answerEscalation } from '../src/flow/secretary.ts';
 import { architect, constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, type Script } from '../src/flow/scripted.ts';
 import type { ConstructorCard, ReviewerCard } from '../src/seat/card.ts';
 import type { SecretaryCard } from '../src/seat/cards/secretary.ts';
-import type { FakeOutcome } from '../src/flow/fakes.ts';
+import type { ScriptedOutcome } from '../src/flow/scripted.ts';
+import { memoryPorts, say } from './flow-memory-fixtures.ts';
+import { SEED_TEXT } from '../src/flow/scripted.ts';
+import { commitStop, dispatchInfo, recordHandback, releaseStop } from '../src/memory/index.ts';
 import type { FlowTask } from '../src/flow/ports.ts';
 
 const M = 'm1' as MissionId;
 
 async function setup(mode: 'stable' | 'fast' = 'stable') {
-  const ports = fakePorts();
+  const ports = memoryPorts();
+  say(ports, SEED_TEXT);
   await seedMission(ports, M);
-  await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['msg1'], mode });
+  await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['W-1'], mode });
   return { ports, engine: new FlowEngine(ports) };
 }
 
@@ -39,14 +43,14 @@ function assertNoticesHaveWi(notices: ReadonlyArray<{ category: string; wi: stri
   }
 }
 
-const accepted = async (ports: ReturnType<typeof fakePorts>): Promise<string[]> => (await ports.ledger.events({ mission: M, event: 'accepted' })).map((e) => e.line).sort();
+const accepted = async (ports: ReturnType<typeof memoryPorts>): Promise<string[]> => (await ports.ledger.events({ mission: M, event: 'accepted' })).map((e) => e.line).sort();
 
 describe('flow: cards from detailed-plan tasks (4.2, 8.1)', () => {
   it('the Constructor and Reviewer cards carry the task, the product, the program runs and the contract binding', async () => {
     const { ports, engine } = await setup();
     await drive(engine, ports.scheduler, happyScript(M));
     const con = ports.scheduler.card<ConstructorCard>('con.m1.impl.1');
-    assert.deepEqual(con.workspace.writablePaths, ['src/parser/impl']);
+    assert.deepEqual(con.workspace.writablePaths, ['src/parser/impl/**'], 'the write paths are the task\'s write scope (4.1 §5.3)');
     assert.deepEqual(con.standards.map((s) => s.id), ['S1', 'S2']);
     assert.deepEqual(con.requirementItems.map((i) => i.text), ['A CSV parser', 'It has tests']);
     assert.equal(con.interfaces.implements[0]?.definition, 'parse(text: string): string[][]');
@@ -180,7 +184,7 @@ describe('flow: escalations from execution (3.8, 3.2)', () => {
       engine,
       ports.scheduler,
       withKinds({
-        constructor: (t: FlowTask): FakeOutcome | null => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Should empty lines be skipped?'] } : {}) }),
+        constructor: (t: FlowTask): ScriptedOutcome | null => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Should empty lines be skipped?'] } : {}) }),
         secretary: (t) => {
           const c = t.card as unknown as SecretaryCard;
           asked.push(c);
@@ -193,21 +197,30 @@ describe('flow: escalations from execution (3.8, 3.2)', () => {
     assert.equal((await new FlowEngine(ports).reconcile(M))[0]?.passes, 1, 'settled');
   });
 
-  it('a seat failure needs disposition: the Secretary restarts it (cap 2); past the cap the user decides (WI-08)', async () => {
+  it('an interrupted Constructor dispatch is released and dispatched again (decision 15: 2 times); then WI-08 and the Secretary; past its grant the user decides', async () => {
     const { ports, engine } = await setup();
-    let failures = 0;
+    let releases = 0;
+    const secretaries: SecretaryCard[] = [];
     await drive(
       engine,
       ports.scheduler,
       withKinds({
-        constructor: (t: FlowTask): FakeOutcome | null => (t.task === 'con.m1.iface.1' && failures++ < 3 ? { fail: 'seat-failure' } : { handBack: constructorDone() }),
-        secretary: (t) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'restart') }),
+        constructor: (t: FlowTask): ScriptedOutcome | null => (t.task === 'con.m1.iface.1' && releases++ < 6 ? { release: 'abandoned' } : { handBack: constructorDone() }),
+        secretary: (t) => {
+          const c = t.card as unknown as SecretaryCard;
+          secretaries.push(c);
+          return { handBack: c.grantAvailable ? secretary(c, 'grant', { grantExtra: 1 }) : secretary(c, 'ask-user') };
+        },
       }),
     );
-    // two restarts, then the third failure: the restart is refused by the cap
-    const toUser = ports.ledger.notices.find((n) => n.category === 'loop-exhausted-needs-user');
-    assert.ok(toUser !== undefined, 'past the restart cap the user decides');
-    assert.equal(toUser.wi, 'WI-08');
+    // three dispatches released: the third exhausts the loop; the Secretary grants once; exhausted again, only the user can add more
+    assert.equal(secretaries.length, 2);
+    assert.equal(secretaries[1]?.grantAvailable, false);
+    assert.equal(secretaries[0]?.request.source, 'loop-exhausted');
+    assert.deepEqual(secretaries[0]?.options.map((o) => o.id), ['grant', 'replan', 'abandon', 'ask-user']);
+    assert.ok(ports.ledger.notices.some((n) => n.wi === 'WI-08' && n.category === 'loop-exhausted'));
+    const toUser = ports.ledger.notices.find((n) => n.category === 'needs-user-decision');
+    assert.ok(toUser !== undefined && toUser.askUser === true, 'past the Secretary\'s grant the user decides');
     assert.deepEqual(await accepted(ports), []);
     await answerEscalation(ports, { mission: M, escalation: (toUser.detail as { escalation: string }).escalation, option: 'abandon', words: 'Drop it.' });
     await drive(engine, ports.scheduler, happyScript(M));
@@ -229,7 +242,7 @@ describe('flow: restart from ledger state (6.1, 4.1)', () => {
     assert.equal(ports.ledger.appended.length, before, 'a restarted flow repeats nothing');
     // the product write is lost once (transient): the next reconciliation does it
     ports.ledger.failNext = (op) => op.startsWith('flow:product:m1:');
-    ports.scheduler.run('con.m1.iface.1', { handBack: constructorDone() });
+    await ports.scheduler.run('con.m1.iface.1', { handBack: constructorDone() });
     const r = await engine2.reconcile(M);
     assert.equal(r[0]?.errors.length, 1);
     assert.equal(ports.ledger.notices.length, 0, 'a transient error is not a program defect');
@@ -246,19 +259,23 @@ describe('flow: restart from ledger state (6.1, 4.1)', () => {
 describe('flow: every exception names its WI (3.11)', () => {
   it('a Secretary that cannot decide hands the decision to the PM (WI-24); a stopped decision-layer seat waits (WI-26); a malformed acceptance is a defect (WI-20)', async () => {
     const { ports, engine } = await setup();
-    // Calibrator ① cancelled by a stop: nothing the program can carry out → WI-26, the plan waits
+    // Calibrator ①'s hand-back arrives after a stop (recorded, not accepted): nothing the program can carry out → WI-26, the plan waits
     await engine.reconcile(M);
-    ports.scheduler.run('cal1.m1.1', { fail: 'stop' });
+    await ports.scheduler.run('cal1.m1.1', {
+      handBack: {},
+      before: () => ports.memory.write({ stop: true }, (tx) => commitStop(tx, { stop: 'st1' as never, scope: { kind: 'mission', mission: M }, words: 'stop', at: 1 })),
+    } as never);
+    ports.memory.write({}, (tx) => releaseStop(tx, 'st1' as never));
     await engine.reconcile(M);
     assert.ok(ports.ledger.notices.some((n) => n.wi === 'WI-26'));
     // a new batch after the stop: Calibrator ② escalates, the Secretary's seat fails → WI-24
-    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { goalsBeyond: ['later: a CLI'] }), userWords: ['msg1'] });
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { goalsBeyond: ['later: a CLI'] }), userWords: ['W-1'] });
     await drive(
       engine,
       ports.scheduler,
       withKinds({
         'calibrator-2': (t) => ({ handBack: { mappings: [], supplements: [], verdict: 'escalate', escalation: 'x' } as never }),
-        secretary: () => ({ fail: 'seat-failure' }),
+        secretary: () => ({ release: 'ended' }),
       }),
     ).catch(() => undefined);
     // (the scripted escalate above is refused by the program's rules: the Calibrator must judge every focus element)
@@ -270,7 +287,7 @@ describe('flow: every exception names its WI (3.11)', () => {
           const c = t.card as unknown as import('../src/seat/cards/calibrator.ts').Calibrator2Card;
           return { handBack: { mappings: c.focus.filter((f) => c.elements.find((e) => e.id === f)?.mapsTo).map((f) => ({ element: f, faithful: false, reason: 'narrowed' })), supplements: c.focus.filter((f) => !c.elements.find((e) => e.id === f)?.mapsTo).map((f) => ({ element: f, finding: 'detail' as const, reason: 'ok' })), verdict: 'escalate', escalation: 'a mapping narrows the user goal' } };
         },
-        secretary: () => ({ fail: 'seat-failure' }),
+        secretary: () => ({ release: 'ended' }),
       }),
     );
     const undecided = ports.ledger.notices.find((n) => n.category === 'secretary-undecided');
@@ -278,13 +295,15 @@ describe('flow: every exception names its WI (3.11)', () => {
     assertNoticesHaveWi(ports.ledger.notices);
   });
 
-  it('an accepted Constructor hand-back without its export is a program defect (WI-20): only that task waits', async () => {
+  it('an accepted Constructor hand-back without its candidate is a program defect (WI-20): only that task waits', async () => {
     const { ports, engine } = await setup('fast');
     await drive(engine, ports.scheduler, withKinds({ constructor: () => null }));
-    ports.scheduler.run('con.m1.iface.1', { handBack: constructorDone() });
-    const t = ports.scheduler.tasks.get('con.m1.iface.1');
-    assert.ok(t !== undefined && t.handBack !== null);
-    t.handBack = { ...t.handBack, export: null };
+    // a hand-back recorded without the candidate (a defect: mp seat handback always collects one)
+    const d = ports.scheduler.dispatchOf('con.m1.iface.1');
+    ports.memory.write({ op: `defect:${d}`, payload: d }, (tx) =>
+      recordHandback(tx, { dispatch: d, report: 'done', result: { format: 'mp41.handback.v1', kind: 'handed-back', seat: 'x', fields: constructorDone(), records: [], candidate: null, request: null, notes: null, runs: [] } }),
+    );
+    assert.equal(ports.memory.read((db) => dispatchInfo(db, d))?.handback, 'accepted');
     await engine.reconcile(M);
     const n = ports.ledger.notices.find((x) => x.category === 'flow-internal-error');
     assert.ok(n !== undefined && n.wi === 'WI-20');
@@ -301,13 +320,13 @@ describe('flow: every exception names its WI (3.11)', () => {
       ports.scheduler,
       withKinds({
         'architect-decompose': () => ({ handBack: architect(planVersion++ === 0 ? withDocs : detailedPlan(M)) }),
-        constructor: (t: FlowTask): FakeOutcome | null => (t.task.startsWith('con.m1.docs') ? null : { handBack: constructorDone() }),
+        constructor: (t: FlowTask): ScriptedOutcome | null => (t.task.startsWith('con.m1.docs') ? null : { handBack: constructorDone() }),
       }),
     );
     const docs = ports.scheduler.tasks.get('con.m1.docs.1');
     assert.ok(docs !== undefined);
-    docs.state = 'running'; // the docs Constructor is running when the plan changes
-    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] }), userWords: ['msg1'] });
+    ports.scheduler.dispatchOf('con.m1.docs.1'); // the docs Constructor is running when the plan changes
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] }), userWords: ['W-1'] });
     await drive(engine, ports.scheduler, withKinds({ 'architect-decompose': () => ({ handBack: architect(detailedPlan(M)) }) }));
     const n = ports.ledger.notices.find((x) => x.wi === 'WI-23');
     assert.ok(n !== undefined, 'the PM is told about work in flight on a dropped task');

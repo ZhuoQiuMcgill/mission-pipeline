@@ -17,7 +17,7 @@
 
 ## 1. Problem and evidence
 
-Long missions drift. The seven-mission DIVRA ledger (Week 21–27, 433 artifacts) shows the
+Long missions drift. A field site's multi-mission ledger shows the
 three concrete forms:
 
 1. **Monotone drift by legal steps.** Full-suite verification narrowed 100% → 0% across six
@@ -305,7 +305,7 @@ mp adopt                                    import a v0.3-era prose ledger
 
 ### 7.5 Validation (acceptance test for the substrate)
 
-`mp adopt` on the DIVRA export (433 artifacts, 7 missions, in `data/`) followed by
+`mp adopt` on a field site's exported ledger (in `data/`) followed by
 `mp metrics` must **mechanically reproduce the per-mission table in
 `analysis/mission-summary.md`** (task counts, round distributions, escalations). The
 retrospective that was done once by hand becomes a `SELECT` — and stays the regression
@@ -391,7 +391,7 @@ history.
 
 | Milestone | Contents | Gate (must pass before the next begins) |
 |---|---|---|
-| **M1 — substrate** | `mp` toolbelt, schema, journal, `adopt`, `doctor` | DIVRA corpus (433 artifacts): `mp adopt` + `mp metrics` mechanically reproduce the per-mission table in `analysis/mission-summary.md` |
+| **M1 — substrate** | `mp` toolbelt, schema, journal, `adopt`, `doctor` | a field site's exported ledger: `mp adopt` + `mp metrics` mechanically reproduce the per-mission table in `analysis/mission-summary.md` |
 | **M2 — evidence law** | machine-readable headers, R/F/D/X + the six rules wired into templates/roles, `lint`, `gate close` hardening, fingerprint binding | `mp lint` catches seeded violations of each of the six rules |
 | **M3 — calibration** | Charter + templates, both cells, five layers, invariant-12 changes (defaults flipped, repudiation list, interview shrink), new roles | dry-run mission exercises L1/L2/L3/L5 (prohibition catch, Charter-lint catch, triggered task cell, SUSPICION ratchet + DRIFT halt); **≥1 real dogfooded mission before freeze** |
 | **Release** | one changelog entry, one tag; invariants 12–13 land together | all three gates green |

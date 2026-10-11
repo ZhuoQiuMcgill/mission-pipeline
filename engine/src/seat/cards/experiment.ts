@@ -1,17 +1,22 @@
-// Blind evidence executions (design 4.3 "证据执行", 6.2 async evidence, 8.2): the Constructor's
-// blind-experiment card, and the pieces it shares with the Researcher's blind reading card
-// (src/seat/cards/researcher.ts). The executor's card holds only the steps, the data, what to
-// record and the assertions, never the author's or the attacker's expectation (4.3). It hands
-// back, step by step, what it did, the recorded quantities and whether each assertion held;
-// the program records that as one evidence record (5.1 "探索的执行记录") whose full report is
-// a document in the content store. A run that failed or never ran gets its record from the
-// program instead (8.2: no measurement is required of a failed attempt).
+// Blind evidence executions (design 4.1 §6.3; 4.0 4.3 "证据执行", 6.2 async evidence, 8.2): the
+// Constructor's blind-experiment card, and the pieces it shares with the Researcher's blind
+// reading card (src/seat/cards/researcher.ts). The executor's card holds only the steps, the
+// data, what to record, the assertions and (an experiment) the commands the steps run, never the
+// author's or the attacker's expectation (4.3). An experiment runs each command with
+// `mp seat <id> rerun <command-id>`: every rerun is a sampling run (§6.5) with its own run id,
+// cited as run:<run id>. A reading fetches pages with the harness's own tools and cites them as
+// url:<address> with the quoted passage (decision 12: `mp` does not verify them; it checks only
+// that the address is one the card allows). The executor hands back, step by step, what it did,
+// the recorded quantities and whether each assertion held; the program records that as one
+// evidence record (5.1 "探索的执行记录") whose full report is a data value. A run that failed or
+// never ran gets its record from the program instead (8.2: no measurement is required of a
+// failed attempt).
 
 import { z } from 'zod';
 import type { EnvLineId, EnvSnapshotId, EvidenceId } from '../../common/ids.ts';
 import type { BaseRecord, EvidenceRecord } from '../../common/records.ts';
 import { validateRecord } from '../../common/validate.ts';
-import { Material, Workspace, commonCardFields, list, renderCommon, renderMaterials, TOOLS_NOTE_SNAPSHOT } from './common.ts';
+import { Command, Material, Workspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
 import type { SnapshotFiles } from '../results.ts';
 import { registerSeatCard, type CardRecordContext, type SeatCardEntry } from './registry.ts';
 
@@ -48,7 +53,7 @@ export const BlindResultShape = {
       z.object({
         measure: z.string().describe('A quantity named on the card, verbatim.'),
         value: z.string().describe('The recorded value, or "not obtained: <why>".'),
-        source: z.string().describe('Where it came from, as pointers the program checks: run:<k> (your k-th run_command, from 1), fetch:<k> (your k-th fetched page, from 1), file:<path>[:<line>].'),
+        source: z.string().describe('Where it came from, as pointers: run:<run id> (a run you had mp rerun), url:<address> with the quoted passage (a reading), file:<path>[:<line>] (a file of the commit the card names).'),
       }),
     )
     .describe('Exactly one entry per quantity on the card.'),
@@ -57,7 +62,7 @@ export const BlindResultShape = {
       z.object({
         assertion: z.number().int().positive().describe('1-based assertion number.'),
         holds: z.enum(['yes', 'no', 'not-checked']),
-        basis: z.string().min(1).describe('For yes or no: the pointers it rests on (run:<k>, fetch:<k>, file:<path>[:<line>]) and why.'),
+        basis: z.string().min(1).describe('For yes or no: the pointers it rests on (run:<run id>, url:<address>, file:<path>[:<line>]) and why.'),
       }),
     )
     .describe('Exactly one entry per assertion on the card.'),
@@ -66,7 +71,7 @@ export const BlindResultShape = {
 const BlindResultSchema = z.object(BlindResultShape);
 export type BlindResult = z.infer<typeof BlindResultSchema>;
 
-type BlindCard = { readonly steps: readonly string[]; readonly data: string; readonly measure: readonly string[]; readonly assertions: readonly string[]; readonly evidence: EvidenceBindingT; readonly launch: string; readonly seat: string };
+type BlindCard = { readonly steps: readonly string[]; readonly data: string; readonly measure: readonly string[]; readonly assertions: readonly string[]; readonly evidence: EvidenceBindingT; readonly task: string; readonly seat: string; readonly network?: { readonly allowed: readonly string[] } };
 
 export function blindProblems(card: BlindCard, r: BlindResult, snapshot?: SnapshotFiles): string[] {
   const out: string[] = [];
@@ -86,13 +91,16 @@ export function blindProblems(card: BlindCard, r: BlindResult, snapshot?: Snapsh
   }
   for (const a of r.assertions) if (a.assertion > card.assertions.length) out.push(`assertions: there is no assertion ${a.assertion} on the card`);
   // every claim names the program record it rests on (review r1 #20: no evidence without an execution behind it)
-  const allowed = card.seat === 'researcher-reader' ? ['fetch', 'file'] : ['run', 'file'];
+  const allowed = card.seat === 'researcher-reader' ? ['url', 'file'] : ['run', 'file'];
+  const show: Readonly<Record<string, string>> = { run: 'run:<run id>', url: 'url:<address>', file: 'file:<path>[:<line>]' };
+  const addresses = card.network?.allowed ?? [];
   const check = (where: string, text: string): void => {
     const ps = blindPointers(text);
-    if (ps.length === 0) out.push(`${where}: cite the record it rests on (${allowed.map((a) => (a === 'file' ? 'file:<path>[:<line>]' : `${a}:<k>`)).join(', ')})`);
+    if (ps.length === 0) out.push(`${where}: cite the record it rests on (${allowed.map((a) => show[a]).join(', ')})`);
     for (const p of ps) {
       if (!allowed.includes(p.kind)) out.push(`${where}: ${p.text} is not a record this seat can make`);
-      else if (p.kind === 'file' && snapshot !== undefined && snapshot.lines(p.path) === null) out.push(`${where}: ${p.text}: ${p.path} is not a file of the snapshot`);
+      else if (p.kind === 'file' && snapshot !== undefined && snapshot.lines(p.path) === null) out.push(`${where}: ${p.text}: ${p.path} is not a file of the commit the card names`);
+      else if (p.kind === 'url' && !addresses.some((a) => p.path.startsWith(a))) out.push(`${where}: ${p.text} is not an address the card allows`);
     }
   };
   for (const x of r.measurements) if (!/^not obtained/i.test(x.value.trim())) check(`measurements[${x.measure}]`, x.source);
@@ -101,33 +109,31 @@ export function blindProblems(card: BlindCard, r: BlindResult, snapshot?: Snapsh
 }
 
 export interface BlindPointer {
-  readonly kind: 'run' | 'fetch' | 'file';
+  readonly kind: 'run' | 'url' | 'file';
   readonly text: string;
-  /** run, fetch: 1-based index. */
-  readonly k: number;
-  /** file: the path. */
+  /** run: the run id; url: the address; file: the path. */
   readonly path: string;
 }
 
-/** The record pointers in a source or basis text: run:<k>, fetch:<k>, file:<path>[:<a>[-<b>]]. */
+/** The record pointers in a source or basis text: run:<run id>, url:<address>, file:<path>[:<a>[-<b>]]. */
 export function blindPointers(text: string): BlindPointer[] {
   const out: BlindPointer[] = [];
-  for (const m of text.matchAll(/\b(run|fetch):(\d+)\b|\bfile:([^\s:,;]+)(?::\d+(?:-\d+)?)?/g)) {
-    if (m[1] !== undefined) out.push({ kind: m[1] as 'run' | 'fetch', text: m[0], k: Number(m[2]), path: '' });
-    else out.push({ kind: 'file', text: m[0], k: 0, path: m[3] as string });
+  for (const m of text.matchAll(/\brun:([A-Za-z0-9][A-Za-z0-9._:-]*[A-Za-z0-9])|\burl:(\S+)|\bfile:([^\s:,;]+)(?::\d+(?:-\d+)?)?/g)) {
+    if (m[1] !== undefined) out.push({ kind: 'run', text: m[0], path: m[1] });
+    else if (m[2] !== undefined) out.push({ kind: 'url', text: m[0], path: m[2].replace(/[),.;]+$/, '') });
+    else out.push({ kind: 'file', text: m[0], path: m[3] as string });
   }
   return out;
 }
 
 /**
- * Whether every claim of a blind hand-back rests on a record that exists (review r1 #20): run:<k>
- * must be the k-th run of the launch and have completed; fetch:<k> the k-th fetched page; file
- * pointers were checked against the snapshot at hand-back. Returns the claims that do not.
+ * Whether every claim of a blind hand-back rests on a record (review r1 #20): run:<id> must be
+ * a run of this dispatch (`mp seat <id> rerun`) that completed; url and file pointers were
+ * checked at hand-back (an allowed address; a file of the commit). Returns the claims that do not.
  */
-export function unbackedClaims(r: BlindResult, records: { readonly runs: number | null; readonly runOk: (k: number) => boolean; readonly fetches: number | null }): string[] {
+export function unbackedClaims(r: BlindResult, records: { readonly runs: ReadonlyArray<{ readonly run: string; readonly completed: boolean }> | null }): string[] {
   const out: string[] = [];
-  const ok = (p: BlindPointer): boolean =>
-    p.kind === 'file' || (p.kind === 'run' && records.runs !== null && p.k >= 1 && p.k <= records.runs && records.runOk(p.k)) || (p.kind === 'fetch' && records.fetches !== null && p.k >= 1 && p.k <= records.fetches);
+  const ok = (p: BlindPointer): boolean => p.kind === 'file' || p.kind === 'url' || (p.kind === 'run' && records.runs !== null && records.runs.some((x) => x.run === p.path && x.completed));
   for (const x of r.measurements) if (!/^not obtained/i.test(x.value.trim()) && !blindPointers(x.source).some(ok)) out.push(`measurement "${x.measure}" (${x.source.slice(0, 80)})`);
   for (const a of r.assertions) if (a.holds !== 'not-checked' && !blindPointers(a.basis).some(ok)) out.push(`assertion ${a.assertion} (${a.basis.slice(0, 80)})`);
   return out;
@@ -141,7 +147,7 @@ export function blindReportDocument(card: BlindCard, r: BlindResult): string {
   // what was asked (so the attacker can judge whether the run covers the counterexample, 8.2) and what came back
   return JSON.stringify({
     format: 'mp4.blind-report.v1',
-    launch: card.launch,
+    task: card.task,
     executor: card.seat,
     evidence: card.evidence.id,
     attempt: card.evidence.attempt,
@@ -150,45 +156,57 @@ export function blindReportDocument(card: BlindCard, r: BlindResult): string {
   });
 }
 
-/** A page a reading seat fetched (the host's fetch record, mp4.web-fetch.v1, is in the content store). */
-export interface FetchedPage {
-  readonly url: string;
-  readonly finalUrl: string;
-  readonly status: number;
-  readonly record: string;
-}
-
-/** The program's record of a blind run (runClass "open": seat-performed, never reused or renewed, 7.3). */
+/** The program's record of a blind run (4.1 §6.5: an exploration's experiment is a sampling run, never reused or renewed). */
 export function blindEvidenceRecord(
   card: BlindCard,
   r: BlindResult,
   executor: 'experiment' | 'reading',
-  ctx: Pick<CardRecordContext, 'content'> & { readonly webFetches?: readonly FetchedPage[] },
-  runs: ReadonlyArray<{ readonly run: string; readonly status: string }> | null = null,
+  ctx: Pick<CardRecordContext, 'content'>,
+  runs: ReadonlyArray<{ readonly run: string; readonly completed: boolean; readonly envLine?: string; readonly envSnapshot?: string }> | null = null,
 ): EvidenceRecord {
-  const pages = ctx.webFetches ?? [];
-  const unbacked = unbackedClaims(r, { runs: runs?.length ?? null, runOk: (k) => runs?.[k - 1]?.status === 'completed', fetches: ctx.webFetches !== undefined ? pages.length : null });
-  const doc = { ...(JSON.parse(blindReportDocument(card, r)) as object), ...(pages.length > 0 ? { fetched: pages.map((f) => ({ url: f.url, finalUrl: f.finalUrl, status: f.status, record: f.record })) } : {}), ...(runs !== null ? { runs } : {}), unbacked };
-  // "completed" only when every claim rests on a record the program holds; else "unverified" (no rebuttal can rest on it)
+  const unbacked = unbackedClaims(r, { runs });
+  const urls = [...new Set([...r.measurements.map((x) => x.source), ...r.assertions.map((a) => a.basis)].flatMap((t) => blindPointers(t).filter((p) => p.kind === 'url').map((p) => p.path)))];
+  const doc = { ...(JSON.parse(blindReportDocument(card, r)) as object), ...(urls.length > 0 ? { cited: urls } : {}), ...(runs !== null ? { runs } : {}), unbacked };
+  // "completed" only when every claim rests on a record; else "unverified" (no rebuttal can rest on it)
   const fields: Record<string, string> = { status: unbacked.length === 0 ? 'completed' : 'unverified', executor, report: ctx.content.put(JSON.stringify(doc)) };
   if (unbacked.length > 0) fields['unbacked'] = String(unbacked.length);
-  if (pages.length > 0) fields['fetches'] = String(pages.length);
-  pages.slice(0, 20).forEach((f, i) => (fields[`fetch:${i + 1}`] = f.record));
-  (runs ?? []).slice(0, 20).forEach((x, i) => (fields[`run:${i + 1}`] = `${x.run} ${x.status}`));
+  if (urls.length > 0) fields['urls'] = String(urls.length);
+  urls.slice(0, 20).forEach((u, i) => (fields[`url:${i + 1}`] = short(u)));
+  (runs ?? []).slice(0, 20).forEach((x, i) => (fields[`run:${i + 1}`] = `${x.run} ${x.completed ? 'completed' : 'failed'}`));
   if (card.evidence.attempt !== null) fields['attempt'] = card.evidence.attempt;
   for (const s of r.steps) fields[`step:${s.step}`] = s.done;
   for (const m of r.measurements) fields[`measure:${m.measure}`] = short(m.value);
   for (const a of r.assertions) fields[`assertion:${a.assertion}`] = a.holds;
+  const env = runsEnvironment(r, runs) ?? { envLine: card.evidence.envLine, envSnapshot: card.evidence.envSnapshot };
   const rec: EvidenceRecord = {
     kind: 'evidence',
     evidence: card.evidence.id as EvidenceId,
-    envLine: card.evidence.envLine as EnvLineId,
-    envSnapshot: card.evidence.envSnapshot as EnvSnapshotId,
-    runClass: 'open',
+    envLine: env.envLine as EnvLineId,
+    envSnapshot: env.envSnapshot as EnvSnapshotId,
+    runClass: 'sampling',
     fields,
   };
   validateRecord(rec);
   return rec;
+}
+
+/**
+ * The environment identity an experiment's evidence is bound to (code review r1 #3; 4.1 §6.5,
+ * decision 11): that of the runs it cites (`run:<id>`), or of every run of the dispatch when it
+ * cites none; when they differ, the earliest one's, so a change in between leaves the evidence
+ * needing a rerun. Null (a reading, no runs): the exploration's own line, environment-free.
+ */
+export function runsEnvironment(
+  r: BlindResult,
+  runs: ReadonlyArray<{ readonly run: string; readonly envLine?: string; readonly envSnapshot?: string }> | null,
+): { readonly envLine: string; readonly envSnapshot: string } | null {
+  if (runs === null || runs.length === 0) return null;
+  const cited = new Set([...r.measurements.map((x) => x.source), ...r.assertions.map((a) => a.basis)].flatMap((t) => blindPointers(t).filter((p) => p.kind === 'run').map((p) => p.path)));
+  const bound = runs.filter((x) => x.envLine !== undefined && x.envSnapshot !== undefined);
+  const chosen = bound.filter((x) => cited.has(x.run));
+  const from = chosen.length > 0 ? chosen : bound;
+  const first = from[0];
+  return first === undefined ? null : { envLine: first.envLine!, envSnapshot: first.envSnapshot! };
 }
 
 /**
@@ -198,7 +216,7 @@ export function blindEvidenceRecord(
 export function failedEvidenceRecord(b: EvidenceBindingT, status: 'failed' | 'not-run', reason: string, executor: 'experiment' | 'reading'): EvidenceRecord {
   const fields: Record<string, string> = { status, executor, reason: short(reason) };
   if (b.attempt !== null) fields['attempt'] = b.attempt;
-  const rec: EvidenceRecord = { kind: 'evidence', evidence: b.id as EvidenceId, envLine: b.envLine as EnvLineId, envSnapshot: b.envSnapshot as EnvSnapshotId, runClass: 'open', fields };
+  const rec: EvidenceRecord = { kind: 'evidence', evidence: b.id as EvidenceId, envLine: b.envLine as EnvLineId, envSnapshot: b.envSnapshot as EnvSnapshotId, runClass: 'sampling', fields };
   validateRecord(rec);
   return rec;
 }
@@ -222,6 +240,8 @@ export const ExperimentCardSchema = z.object({
   workspace: Workspace,
   /** The interpreter and tools the steps assume (e.g. "node 22"). */
   interpreter: z.string(),
+  /** The commands the steps run (decision 11): the seat runs each with `mp seat <id> rerun <command-id>`. */
+  commands: z.array(Command),
   ...blindFields,
 });
 export type ExperimentCard = z.infer<typeof ExperimentCardSchema>;
@@ -232,27 +252,15 @@ function experimentProblems(card: ExperimentCard, r: BlindResult, snapshot?: Sna
   return out;
 }
 
-export const EXPERIMENT_DEFINITION = [
-  'You are the Constructor seat of a software pipeline, on a blind-experiment card. You carry out one evidence run exactly as the card\'s steps say, and record what happened. You do not know, and must not guess, what anyone expects the result to be.',
-  TOOLS_NOTE_SNAPSHOT,
-  'What you do: follow the steps in order, with the data given; run commands with run_command; write files only under the writable paths, if the card lists any, or from your commands into /tmp (all of it is scratch: nothing you write is a product). Record each quantity the card names, exactly once, and answer each assertion: holds, does not hold, or not checked. Every value and every answer cites the record it rests on: run:<k> for your k-th run_command (counting from 1), or file:<path>[:<line>] for a file of the snapshot. The program checks these records; a claim without one does not count as evidence. A run has a declared memory peak; nothing a command starts outlives that command.',
-  'Card fields: steps (required), data, quantities to record (required, may be empty only when there are assertions), assertions, the evidence id, materials, and the interpreter.',
-  'Hand-back (submit_result, once): one entry per step (done yes / no / partly, with a note), one per quantity (the value, or "not obtained: <why>", and its source), one per assertion, and your observations. Then end your turn.',
-  'Prohibitions: do not change the steps, skip one silently, or "fix" what you are measuring; do not interpret the result; if a step cannot be done, say so in its note and go on with the next one if you can.',
-  'Upstream: the program, on behalf of the exploration that asked for the evidence. Downstream: the program records your report as evidence; the exploration\'s author and attacker read it.',
-  'Your tools: read_file, list_directory, search_content, write_file, edit_file, run_command, read_material, submit_result.',
-].join('\n\n');
 
 export function renderExperimentCard(c: ExperimentCard): string {
   return (
     renderCommon(c) +
     renderBlind(c) +
-    (c.workspace.writablePaths.length > 0
-      ? list('Writable paths (scratch; nothing written is kept as a product)', c.workspace.writablePaths)
-      : '## Writable paths\nNone: write scratch files from your commands into /tmp.\n\n') +
+    list('The commands of the steps (run each with the rerun command below; cite each run as run:<run id>)', c.commands.map((x) => `[${x.id}] ${x.command}${x.cwd !== undefined ? ` (in ${x.cwd})` : ''}`)) +
+    list('Scratch paths (the commands may write there in their checkout; nothing written is kept)', c.workspace.writablePaths) +
     (c.interpreter !== '' ? `## Interpreter\n${c.interpreter}\n\n` : '') +
-    renderMaterials(c.materials) +
-    'When done, call submit_result once with your report, then end your turn.'
+    renderMaterials(c.materials)
   );
 }
 
@@ -262,12 +270,11 @@ export const experimentEntry: SeatCardEntry<ExperimentCard, BlindResult> = {
   schema: ExperimentCardSchema,
   resultShape: BlindResultShape,
   resultSchema: BlindResultSchema,
-  definition: EXPERIMENT_DEFINITION,
   toolProfile: 'write',
   render: renderExperimentCard,
   problems: (c, r, ctx) => experimentProblems(c, r, ctx.snapshot),
   // the evidence record is the program's (review r1 #20): the exploration flow writes it once it
-  // has checked the claims against the launch's run records (records.ts RunLayerRecord)
+  // has checked the claims against the dispatch's runs
   records: (): BaseRecord[] => [],
 };
 

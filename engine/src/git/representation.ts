@@ -18,8 +18,8 @@
 //   commit and RE-MATERIALIZES a canonical candidate from it; verification and
 //   review run on that candidate, never on the seat's raw bytes.
 // - The transform description (attribute sources outside the tree, the
-//   effective transform keys, the rules version) is a bound input; its hash goes
-//   into the environment snapshot id (7.2) and the landing view uses it (6.6).
+//   effective transform keys, the rules version) is a bound input; its hash is
+//   recorded with each object version (`source.transform`) and each delivery.
 // - Attribute evaluation is a pure read: `git check-attr` in a scratch
 //   repository whose info/attributes and core.attributesFile hold the bound
 //   description's copies and whose objects are the real repository's (alternates).
@@ -74,7 +74,7 @@ import {
   type RepoLayout,
   type TreeEntry,
 } from './objects.ts';
-import type { GitLocators, SafeGit, UserGitEnvironment } from './safeGit.ts';
+import type { GitExec, GitLocators } from './plainGit.ts';
 
 export const REPRESENTATION_RULES_VERSION = 'mp4-representation/1';
 
@@ -90,7 +90,9 @@ export type RepresentationErrorCode =
   | 'object-missing'
   | 'unsupported-transform'
   | 'snapshot-changed'
-  | 'git-disagrees';
+  | 'git-disagrees'
+  /** 4.1 (§9): two paths of a tree name one file on the target filesystem (case or Unicode normalization folding). */
+  | 'path-collision';
 
 export class RepresentationError extends Error {
   readonly code: RepresentationErrorCode;
@@ -106,7 +108,7 @@ export class RepresentationError extends Error {
 /**
  * v49 (6.6, 7.1; WI-13): objects a snapshot, a commit or a candidate needs are
  * not in the repository: a partial clone, a shallow clone or pruned objects.
- * The program never fetches them (GIT_NO_LAZY_FETCH from SafeGit, rev-list
+ * The program never fetches them (GIT_NO_LAZY_FETCH from the git runner, rev-list
  * --missing=print): the work that needs them is not done until they are local.
  * `objects`: the missing object ids; `paths`: where they are used, when known.
  */
@@ -122,10 +124,10 @@ export class MissingObjectsError extends RepresentationError {
 /**
  * The objects of `commit` itself (the commit, its trees and blobs; not its
  * history, not submodule commits) that the repository does not have, listed
- * without fetching anything (`rev-list --missing=print`; SafeGit sets
+ * without fetching anything (`rev-list --missing=print`; the git runner sets
  * GIT_NO_LAZY_FETCH). Null when that cannot be determined.
  */
-export async function missingObjectsOf(git: SafeGit, repo: RepoLayout, commit: string): Promise<string[] | null> {
+export async function missingObjectsOf(git: GitExec, repo: RepoLayout, commit: string): Promise<string[] | null> {
   const self = await batchCheck(git, repo, [commit as GitOid]).catch(() => null);
   if (self === null) return null;
   const info = self.get(commit as GitOid);
@@ -143,7 +145,7 @@ export async function missingObjectsOf(git: SafeGit, repo: RepoLayout, commit: s
 }
 
 /** Where the missing blobs of `commit` are used (best effort: needs its trees). */
-async function pathsUsing(git: SafeGit, repo: RepoLayout, commit: string, missing: ReadonlySet<string>): Promise<string[]> {
+async function pathsUsing(git: GitExec, repo: RepoLayout, commit: string, missing: ReadonlySet<string>): Promise<string[]> {
   try {
     return (await lsTree(git, repo, commit, { recursive: true })).filter((e) => missing.has(e.oid)).map((e) => e.path);
   } catch {
@@ -156,7 +158,7 @@ async function pathsUsing(git: SafeGit, repo: RepoLayout, commit: string, missin
  * looks for objects of `commits` that are missing and, if there are any,
  * reports them as MissingObjectsError (WI-13) instead of the raw failure.
  */
-export async function missingObjectsAsTyped<T>(git: SafeGit, repo: RepoLayout, commits: readonly string[], what: string, work: () => Promise<T>): Promise<T> {
+export async function missingObjectsAsTyped<T>(git: GitExec, repo: RepoLayout, commits: readonly string[], what: string, work: () => Promise<T>): Promise<T> {
   try {
     return await work();
   } catch (e) {
@@ -194,6 +196,12 @@ export interface TransformDescription {
   readonly symlinks: boolean;
   /** core.filemode: false keeps the recorded executable bit instead of reading it from the worktree. */
   readonly fileMode: boolean;
+  /**
+   * The platform's native line end where it is CRLF (git for Windows): "native"
+   * and an unset core.eol then mean CRLF (git's text_eol_is_crlf). Absent: LF
+   * (Linux, macOS), so descriptions read there hash as before.
+   */
+  readonly nativeEol?: 'crlf';
   /** Attribute sources outside the tree (the tree's own .gitattributes are fixed by the commit). Empty files are null. */
   readonly attributes: {
     readonly info: string | null;
@@ -209,7 +217,7 @@ export function transformDescriptionHash(d: TransformDescription): ContentHash {
 /** Field names that differ, for the PM's explanation (6.6 step 7.5). */
 export function transformDescriptionDifferences(bound: TransformDescription, actual: TransformDescription): string[] {
   const out: string[] = [];
-  const scalar: (keyof TransformDescription)[] = ['rulesVersion', 'objectFormat', 'autocrlf', 'eol', 'ignoreCase', 'symlinks', 'fileMode'];
+  const scalar: (keyof TransformDescription)[] = ['rulesVersion', 'objectFormat', 'autocrlf', 'eol', 'nativeEol', 'ignoreCase', 'symlinks', 'fileMode'];
   for (const k of scalar) {
     if (bound[k] !== actual[k]) out.push(`${k}: ${JSON.stringify(bound[k])} -> ${JSON.stringify(actual[k])}`);
   }
@@ -253,19 +261,18 @@ function readAttributesFile(path: string | null): string | null {
  * `git var`), nothing executed.
  */
 export async function readTransformDescription(
-  git: SafeGit,
+  git: GitExec,
   repo: RepoLayout,
-  user: UserGitEnvironment,
   cwd?: string,
   /** Name the repository (and worktree) explicitly instead of discovering it from `cwd` (landing, 6.6 v37). */
   locators?: GitLocators,
+  /** Whose native line end applies (default: this platform's; tests force Windows). */
+  platform: NodeJS.Platform = process.platform,
 ): Promise<TransformDescription> {
-  const scope = { kind: 'user', environment: user } as const;
   const where = cwd ?? locators?.workTree ?? repo.worktree ?? repo.commonDir;
   const loc = locators !== undefined ? { locators } : {};
   const r = await git.ok(['config', '-z', '--get-regexp', '^core\\.(autocrlf|eol|ignorecase|symlinks|filemode)$'], {
     cwd: where,
-    scope,
     okCodes: [0, 1],
     ...loc,
   });
@@ -290,8 +297,8 @@ export async function readTransformDescription(
     eol = s === 'lf' || s === 'crlf' || s === 'native' ? s : 'unset';
   }
   const bool = (k: string, dflt: boolean): boolean => (values.has(k) ? parseGitBool(k, values.get(k) ?? null) : dflt);
-  const globalPath = await git.run(['var', 'GIT_ATTR_GLOBAL'], { cwd: where, scope, ...loc });
-  const systemPath = await git.run(['var', 'GIT_ATTR_SYSTEM'], { cwd: where, scope, ...loc });
+  const globalPath = await git.run(['var', 'GIT_ATTR_GLOBAL'], { cwd: where, ...loc });
+  const systemPath = await git.run(['var', 'GIT_ATTR_SYSTEM'], { cwd: where, ...loc });
   return {
     rulesVersion: REPRESENTATION_RULES_VERSION,
     objectFormat: repo.objectFormat,
@@ -300,6 +307,7 @@ export async function readTransformDescription(
     ignoreCase: bool('core.ignorecase', false),
     symlinks: bool('core.symlinks', true),
     fileMode: bool('core.filemode', true),
+    ...(platform === 'win32' ? { nativeEol: 'crlf' as const } : {}),
     attributes: {
       info: readAttributesFile(join(repo.commonDir, 'info', 'attributes')),
       global: globalPath.code === 0 ? readAttributesFile(globalPath.stdout.toString('utf8').trim()) : null,
@@ -358,23 +366,23 @@ function emptyAttributes(): { -readonly [K in keyof ConversionAttributes]: AttrV
 export class AttributeEvaluator {
   readonly description: TransformDescription;
   readonly dir: string;
-  private readonly git: SafeGit;
+  private readonly git: GitExec;
   private readonly gitDir: string;
 
-  private constructor(git: SafeGit, description: TransformDescription, dir: string, gitDir: string) {
+  private constructor(git: GitExec, description: TransformDescription, dir: string, gitDir: string) {
     this.git = git;
     this.description = description;
     this.dir = dir;
     this.gitDir = gitDir;
   }
 
-  static async create(git: SafeGit, repo: RepoLayout, description: TransformDescription, scratchParent: string): Promise<AttributeEvaluator> {
+  static async create(git: GitExec, repo: RepoLayout, description: TransformDescription, scratchParent: string): Promise<AttributeEvaluator> {
     if (description.objectFormat !== repo.objectFormat) {
       throw new RepresentationError('description-mismatch', 'transform description is for another object format');
     }
     const dir = mkdtempSync(join(scratchParent, 'mp-attr-'));
     const gitDir = join(dir, 'attr.git');
-    // The scratch repository is named explicitly (never discovered), also inside a landing view (6.6 v37).
+    // The scratch repository is named explicitly (never discovered, 6.6 v37).
     const own = { gitDir };
     await git.ok(['init', '--bare', '--quiet', '--template=', `--object-format=${description.objectFormat}`, gitDir], { cwd: dir, locators: own });
     mkdirSync(join(gitDir, 'info'), { recursive: true });
@@ -390,11 +398,11 @@ export class AttributeEvaluator {
   }
 
   /**
-   * The same scratch repository queried through another SafeGit (e.g. outside a
-   * landing view once the push is over: the scratch repository is the program's
-   * own, so its queries do not depend on the user's directories).
+   * The same scratch repository queried through another git runner (the scratch
+   * repository is the program's own, so its queries do not depend on the user's
+   * directories).
    */
-  withGit(git: SafeGit): AttributeEvaluator {
+  withGit(git: GitExec): AttributeEvaluator {
     return new AttributeEvaluator(git, this.description, this.dir, this.gitDir);
   }
 
@@ -495,11 +503,12 @@ function crlfFromAttr(v: AttrValue): RawCrlf {
   }
 }
 
-/** text_eol_is_crlf(): the engine runs on Linux, where the native line end is LF. */
+/** git's text_eol_is_crlf(): core.eol "native" or unset follows the platform's native line end (CRLF on Windows). */
 export function textEolIsCrlf(d: TransformDescription): boolean {
   if (d.autocrlf === 'true') return true;
   if (d.autocrlf === 'input') return false;
-  return d.eol === 'crlf';
+  if (d.eol === 'crlf') return true;
+  return (d.eol === 'native' || d.eol === 'unset') && d.nativeEol === 'crlf';
 }
 
 function isUtf8Name(s: string): boolean {
@@ -857,7 +866,7 @@ export interface SnapshotManifest {
 }
 
 export interface MaterializeOptions {
-  readonly git: SafeGit;
+  readonly git: GitExec;
   readonly repo: RepoLayout;
   readonly commit: string;
   /** Carries the bound transform description. */
@@ -866,6 +875,64 @@ export interface MaterializeOptions {
   readonly dest?: string;
   /** Paths left out of the snapshot (e.g. project instruction files, 7.1). */
   readonly exclude?: (path: string) => boolean;
+  /** How the destination's filesystem folds names (default: probed in `dest`); tests force a case-insensitive one. */
+  readonly folding?: NameFolding;
+}
+
+/** Whether a filesystem treats names that differ in case, or in Unicode normalization, as one name. */
+export interface NameFolding {
+  readonly case: boolean;
+  readonly normalization: boolean;
+}
+
+/** Probe `dir` (an existing, writable directory): create one name and look it up under its folded forms. */
+export function probeNameFolding(dir: string): NameFolding {
+  const stem = `.mp-fold-probe-${randomBytes(6).toString('hex')}-`;
+  const probe = join(dir, `${stem}a\u00e9`);
+  writeFileSync(probe, '', { flag: 'wx' });
+  try {
+    return { case: existsSync(join(dir, `${stem}A\u00c9`)), normalization: existsSync(join(dir, `${stem}ae\u0301`)) };
+  } finally {
+    rmSync(probe, { force: true });
+  }
+}
+
+function foldName(path: string, f: NameFolding): string {
+  let p = f.normalization ? path.normalize('NFC') : path;
+  if (f.case) p = p.toLowerCase();
+  return p;
+}
+
+/**
+ * Groups of tree paths that would name one file on a filesystem that folds
+ * names as `f` does (A.txt and a.txt; é as one or two code points; a file `a`
+ * beside a directory `A/`). Empty when nothing collides.
+ */
+export function nameCollisions(paths: readonly string[], f: NameFolding): string[][] {
+  if (!f.case && !f.normalization) return [];
+  const files = new Map<string, string[]>();
+  const dirs = new Map<string, Set<string>>();
+  for (const p of paths) {
+    const key = foldName(p, f);
+    const l = files.get(key);
+    if (l === undefined) files.set(key, [p]);
+    else l.push(p);
+    for (let i = p.indexOf('/'); i > 0; i = p.indexOf('/', i + 1)) {
+      const d = p.slice(0, i);
+      const dk = foldName(d, f);
+      let set = dirs.get(dk);
+      if (set === undefined) dirs.set(dk, (set = new Set()));
+      set.add(d);
+    }
+  }
+  const out: string[][] = [];
+  for (const [key, l] of files) {
+    if (l.length > 1) out.push([...l].sort(compareBytes));
+    const d = dirs.get(key);
+    if (d !== undefined) out.push([...l, ...[...d].map((x) => `${x}/`)].sort(compareBytes));
+  }
+  // Directories that differ only in folding merge into one: no file is lost, so they are not refused.
+  return out;
 }
 
 function prepareEmptyDir(dir: string): void {
@@ -875,7 +942,13 @@ function prepareEmptyDir(dir: string): void {
 
 function writeRegular(path: string, data: Uint8Array, executable: boolean): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, data, { mode: executable ? 0o755 : 0o644 });
+  // Never over an existing file: on a folding filesystem a second name for it is a collision, not a rewrite.
+  try {
+    writeFileSync(path, data, { mode: executable ? 0o755 : 0o644, flag: 'wx' });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new RepresentationError('path-collision', `${path} already exists in the snapshot: two tree paths name one file on this filesystem`, [path]);
+    throw e;
+  }
   chmodSync(path, executable ? 0o755 : 0o644);
 }
 
@@ -899,7 +972,14 @@ async function materializeSnapshotFrom(opts: MaterializeOptions): Promise<Snapsh
   if (unsafe.length > 0) {
     throw new RepresentationError('unsafe-path', `commit ${commit} has paths that cannot be materialized`, unsafe.map((e) => e.path));
   }
-  if (opts.dest !== undefined) prepareEmptyDir(opts.dest);
+  if (opts.dest !== undefined) {
+    prepareEmptyDir(opts.dest);
+    // §9: a case- or normalization-insensitive filesystem cannot hold every path of the tree: refused, never overwritten.
+    const clashes = nameCollisions(entries.map((e) => e.path), opts.folding ?? probeNameFolding(opts.dest));
+    if (clashes.length > 0) {
+      throw new RepresentationError('path-collision', `commit ${commit} has paths that name one file on this filesystem: ${clashes.map((c) => c.join(' / ')).join('; ')}`, clashes.flat());
+    }
+  }
   const regular = entries.filter((e) => e.mode === '100644' || e.mode === '100755');
   const attrs = await opts.attributes.atTree(tree, regular.map((e) => e.path));
   const conv = new Map<string, PathConversion>();
@@ -975,7 +1055,7 @@ export interface LfsPresence {
  * snapshot of `commit` would need that is not in the local store. Pure reads.
  */
 export async function checkLfsObjectsPresent(o: {
-  readonly git: SafeGit;
+  readonly git: GitExec;
   readonly repo: RepoLayout;
   readonly commit: GitOid;
   readonly attributes: AttributeEvaluator;
@@ -998,7 +1078,7 @@ export async function checkLfsObjectsPresent(o: {
 }
 
 async function lfsPresence(o: {
-  readonly git: SafeGit;
+  readonly git: GitExec;
   readonly repo: RepoLayout;
   readonly commit: GitOid;
   readonly attributes: AttributeEvaluator;
@@ -1149,6 +1229,7 @@ export function copyVerifiedLfsObject(commonDir: string, pointer: LfsPointer, de
       closeSync(wfd);
       wfd = null;
       chmodSync(tmp, fileMode);
+      if (existsSync(dest)) throw new RepresentationError('path-collision', `${dest} already exists in the snapshot: two tree paths name one file on this filesystem`, paths);
       renameSync(tmp, dest);
     }
   } finally {
@@ -1172,7 +1253,9 @@ export type RejectionCode =
   | 'special-file'
   | 'non-utf8-path'
   | 'excluded-path-written'
-  | 'gitlink-modified';
+  | 'gitlink-modified'
+  /** 4.1: the seat's index hides paths (skip-worktree, sparse checkout) whose files are absent: a deletion cannot be told from a hidden path. */
+  | 'hidden-entries';
 
 /** A seat result the program refuses before generating a commit (7.1: never hand the user a commit that is already wrong). */
 export interface RepresentationRejection {
@@ -1182,7 +1265,7 @@ export interface RepresentationRejection {
 }
 
 export interface PlanOptions {
-  readonly git: SafeGit;
+  readonly git: GitExec;
   readonly repo: RepoLayout;
   /** Manifest of the snapshot the seat started from. */
   readonly base: SnapshotManifest;
@@ -1190,6 +1273,24 @@ export interface PlanOptions {
   readonly snapshotDir: string;
   readonly attributes: AttributeEvaluator;
   readonly exclude?: (path: string) => boolean;
+  /**
+   * 4.1 (§5.3): the paths the plan looks at, when `snapshotDir` is a seat's git
+   * worktree rather than a 4.0 snapshot: the walk enters only the directories
+   * and files for which it returns true (`isDir`: a directory about to be
+   * entered), and every base path it does not select comes from the base
+   * unchanged. The worktree's `.git` and everything git ignores are never selected.
+   */
+  readonly select?: (path: string, isDir: boolean) => boolean;
+  /**
+   * 4.1 (decision 17): with core.filemode=false the executable bit, and with
+   * core.symlinks=false whether a path is a link (120000), are not read from
+   * the files: the mode the seat recorded for the path (its commits and its
+   * index) wins over the base's. Null: the seat's index has no entry for the
+   * path, so it is a new file, recorded as `git add` would (a regular file,
+   * 100644 when the executable bit is not tracked). Absent option: no such
+   * information; the base's mode decides (4.0 behaviour).
+   */
+  readonly recordedMode?: (path: string) => FileMode | null;
 }
 
 type BlobSource =
@@ -1236,6 +1337,7 @@ function reject(code: RejectionCode, detail: string, paths: readonly string[] = 
 function walkSnapshot(
   root: string,
   gitlinks: ReadonlySet<string>,
+  select?: (path: string, isDir: boolean) => boolean,
 ): { found: Map<string, Found>; rejection: RepresentationRejection | null } {
   const found = new Map<string, Found>();
   const stack: string[] = [''];
@@ -1261,6 +1363,7 @@ function walkSnapshot(
         return { found, rejection: { code: 'non-utf8-path', detail: `file name is not UTF-8 under ${rel || '.'}`, paths: [rel] } };
       }
       const p = rel === '' ? name : `${rel}/${name}`;
+      if (select !== undefined && !select(p, ent.isDirectory())) continue;
       const why = unsafePathReason(p);
       if (why !== null) return { found, rejection: { code: 'unsafe-path', detail: `${p}: ${why}`, paths: [p] } };
       const full = join(root, p);
@@ -1297,12 +1400,13 @@ export async function planCommit(opts: PlanOptions): Promise<PlanResult> {
   const manifest = new Map<string, SnapshotEntry>();
   for (const e of base.entries) manifest.set(e.path, e);
   const excluded = (p: string): boolean => opts.exclude?.(p) ?? false;
+  const selected = (p: string): boolean => opts.select?.(p, false) ?? true;
   for (const p of baseEntries.keys()) {
-    if (!excluded(p) && !manifest.has(p)) throw new Error(`manifest does not list ${p}: wrong manifest or exclude predicate`);
+    if (!excluded(p) && selected(p) && !manifest.has(p)) throw new Error(`manifest does not list ${p}: wrong manifest or exclude predicate`);
     if (excluded(p) && baseName(p) === '.gitattributes') throw new Error('.gitattributes files cannot be excluded from snapshots');
   }
   const gitlinks = new Set([...baseEntries.values()].filter((e) => e.mode === '160000' && !excluded(e.path)).map((e) => e.path));
-  const walked = walkSnapshot(opts.snapshotDir, gitlinks);
+  const walked = walkSnapshot(opts.snapshotDir, gitlinks, opts.select);
   if (walked.rejection !== null) return { ok: false, rejection: walked.rejection };
   const found = walked.found;
 
@@ -1315,8 +1419,8 @@ export async function planCommit(opts: PlanOptions): Promise<PlanResult> {
   const toConvert: { path: string; file: string; mode: FileMode }[] = [];
   const newBlobs: NewBlob[] = [];
 
-  // Excluded paths come from the base unchanged.
-  for (const [p, e] of baseEntries) if (excluded(p)) files.set(p, { mode: e.mode as FileMode, oid: e.oid });
+  // Excluded paths, and paths not selected, come from the base unchanged.
+  for (const [p, e] of baseEntries) if (excluded(p) || !selected(p)) files.set(p, { mode: e.mode as FileMode, oid: e.oid });
 
   for (const [p, f] of found) {
     if (excluded(p)) {
@@ -1330,11 +1434,16 @@ export async function planCommit(opts: PlanOptions): Promise<PlanResult> {
     }
     const m = manifest.get(p);
     const wasLink = m !== undefined && m.mode === '120000';
-    const isLink = f.kind === 'symlink' || (f.kind === 'file' && !d.symlinks && wasLink);
+    // core.symlinks=false: a link is a plain file holding its target; its type comes from what the seat
+    // recorded for the path (a new link, a link turned into a file), else from the base.
+    const recordedType = opts.recordedMode === undefined ? undefined : opts.recordedMode(p);
+    const isLink = f.kind === 'symlink' || (f.kind === 'file' && !d.symlinks && (recordedType === undefined ? wasLink : recordedType === '120000'));
     const sha = f.kind === 'symlink' ? sha256Hex(readlinkSync(f.file, { encoding: 'buffer' })) : sha256File(f.file).sha256;
     let mode: FileMode;
     if (isLink) mode = '120000';
     else if (d.fileMode) mode = (f as Found & { kind: 'file' }).executable ? '100755' : '100644';
+    else if (recordedType === '100644' || recordedType === '100755') mode = recordedType;
+    else if (recordedType === null || recordedType === '120000') mode = '100644'; // a new file (no index entry), or a link the seat turned into a file
     else mode = m !== undefined && (m.mode === '100644' || m.mode === '100755') ? m.mode : '100644';
     const sameKind = m !== undefined && (isLink ? m.mode === '120000' : m.mode === '100644' || m.mode === '100755');
     if (m !== undefined && sameKind && m.sha256 === sha) {
@@ -1357,7 +1466,7 @@ export async function planCommit(opts: PlanOptions): Promise<PlanResult> {
     return reject('excluded-path-written', 'the seat wrote paths that are excluded from snapshots', excludedWritten.sort(compareBytes));
   }
   for (const e of manifest.values()) {
-    if (!found.has(e.path)) deleted.push(e.path);
+    if (!found.has(e.path) && selected(e.path)) deleted.push(e.path);
   }
 
   // Attributes as `git add` would see them in the snapshot.
@@ -1444,31 +1553,7 @@ export async function planCommit(opts: PlanOptions): Promise<PlanResult> {
   };
 }
 
-export interface CommitWriteSizes {
-  /** New blobs, trees and the commit, with their uncompressed sizes (6.5: git object directory). */
-  readonly newObjects: readonly { readonly type: 'blob' | 'tree' | 'commit'; readonly size: number }[];
-  /** New LFS objects (6.5: LFS object directory). */
-  readonly lfsObjectSizes: readonly number[];
-  /** Converted contents staged as temporary files for hash-object. */
-  readonly tempFileSizes: readonly number[];
-}
-
-export function commitWriteSizes(plan: CommitPlan, message: string, author: Ident, committer: Ident): CommitWriteSizes {
-  const hex = plan.objectFormat === 'sha1' ? 40 : 64;
-  const identLen = (i: Ident): number => Buffer.byteLength(i.name) + Buffer.byteLength(i.email) + 64;
-  const commitSize = 2 * (hex + 16) + identLen(author) + identLen(committer) + Buffer.byteLength(message) + 64;
-  return {
-    newObjects: [
-      ...plan.newBlobs.map((b) => ({ type: 'blob' as const, size: b.size })),
-      ...plan.newTrees.map((t) => ({ type: 'tree' as const, size: t.size })),
-      { type: 'commit' as const, size: commitSize },
-    ],
-    lfsObjectSizes: plan.lfsObjects.map((o) => o.pointer.size),
-    tempFileSizes: plan.newBlobs.filter((b) => b.source.kind !== 'regular' || !b.source.identity || b.source.file.includes('\n')).map((b) => b.size),
-  };
-}
-
-async function blobBytesFor(git: SafeGit, repo: RepoLayout, nb: NewBlob): Promise<Buffer> {
+async function blobBytesFor(git: GitExec, repo: RepoLayout, nb: NewBlob): Promise<Buffer> {
   const s = nb.source;
   if (s.kind === 'symlink-target') return s.isLink ? readlinkSync(s.file, { encoding: 'buffer' }) : readFileSync(s.file);
   const content = readFileSync(s.file);
@@ -1538,7 +1623,7 @@ export interface WriteCommitOptions {
  * object id git returns is checked against the id computed while planning, so
  * a filter or a concurrent change of the snapshot cannot slip in unnoticed.
  */
-export async function writeCommit(git: SafeGit, repo: RepoLayout, plan: CommitPlan, opts: WriteCommitOptions): Promise<GitOid> {
+export async function writeCommit(git: GitExec, repo: RepoLayout, plan: CommitPlan, opts: WriteCommitOptions): Promise<GitOid> {
   const tmp = mkdtempSync(join(opts.tempDir, 'mp-commit-'));
   try {
     const inputs: string[] = [];
@@ -1576,8 +1661,6 @@ export async function writeCommit(git: SafeGit, repo: RepoLayout, plan: CommitPl
 export interface CanonicalizeOptions extends PlanOptions, WriteCommitOptions {
   /** Where the canonical candidate is materialized (created; must be empty). */
   readonly candidateDir: string;
-  /** Commit-generation admission (6.5). Return false to stop before anything is written. */
-  readonly admit?: (sizes: CommitWriteSizes) => boolean;
 }
 
 export type CanonicalizeResult =
@@ -1589,8 +1672,7 @@ export type CanonicalizeResult =
       /** Manifest of the canonical candidate: what verification and review run on. */
       readonly candidate: SnapshotManifest;
     }
-  | { readonly kind: 'rejected'; readonly rejection: RepresentationRejection }
-  | { readonly kind: 'not-admitted'; readonly sizes: CommitWriteSizes };
+  | { readonly kind: 'rejected'; readonly rejection: RepresentationRejection };
 
 /**
  * 7.1 先规范化，再验证: seat result -> commit (repository representation) ->
@@ -1605,8 +1687,6 @@ async function canonicalizeFrom(opts: CanonicalizeOptions): Promise<Canonicalize
   const planned = await planCommit(opts);
   if (!planned.ok) return { kind: 'rejected', rejection: planned.rejection };
   const plan = planned.plan;
-  const sizes = commitWriteSizes(plan, opts.message, opts.author, opts.committer);
-  if (opts.admit !== undefined && !opts.admit(sizes)) return { kind: 'not-admitted', sizes };
   const commit = await writeCommit(opts.git, opts.repo, plan, opts);
   const candidate = await materializeSnapshot({
     git: opts.git,

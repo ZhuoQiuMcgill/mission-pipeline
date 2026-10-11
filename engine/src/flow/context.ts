@@ -6,8 +6,7 @@ import { missionIdProblem, type MissionId } from '../common/ids.ts';
 import { type BaseRecord, type BasisVersionRecord, type JudgmentRecord, type ListRef, type LoopKind, type ObjectVersionRecord } from '../common/records.ts';
 import type { CardBinding } from '../seat/cards/common.ts';
 import { CARD_FORMAT, materialPageCount, type MaterialRef } from '../seat/cards/common.ts';
-import { RUN_AREA_FLOOR_BYTES, runAreaBytes } from '../exec/resources.ts';
-import type { FlowEvent, FlowEventInput, FlowNotice, FlowPorts, FlowTaskStatus, LoopStatus } from './ports.ts';
+import type { AppendGuard, FlowEvent, FlowEventInput, FlowNotice, FlowPorts, FlowTaskStatus, LoopStatus } from './ports.ts';
 
 export interface FlowCtx {
   readonly ports: FlowPorts;
@@ -22,6 +21,11 @@ export function flowCtx(ports: FlowPorts, mission: MissionId): FlowCtx {
   const bad = missionIdProblem(mission);
   if (bad !== null) throw new Error(bad);
   return { ports, mission, now: ports.now ?? Date.now, progressed: false };
+}
+
+/** Whether the mission is closed (4.1 §6.7): the flows queue no production work for it; post-close work (audits, deliveries, re-reviews) goes on. */
+export async function missionClosed(ctx: FlowCtx): Promise<boolean> {
+  return (await ctx.ports.ledger.missionClosed?.(ctx.mission)) === true;
 }
 
 /** Ids are opaque, printable, without separators (src/common/ids.ts ID): unsafe characters become "-". */
@@ -54,7 +58,7 @@ export function ev(ctx: FlowCtx, line: string, event: string, key: string, body:
 }
 
 /** Append (idempotent by op) and mark progress. */
-export async function commit(ctx: FlowCtx, op: string, entries: { readonly events?: readonly FlowEventInput[]; readonly records?: readonly BaseRecord[] }): Promise<void> {
+export async function commit(ctx: FlowCtx, op: string, entries: { readonly events?: readonly FlowEventInput[]; readonly records?: readonly BaseRecord[]; readonly guard?: AppendGuard }): Promise<void> {
   await ctx.ports.ledger.append(op, entries);
   ctx.progressed = true;
 }
@@ -139,45 +143,21 @@ export function currentVersions(ix: BasisIndex, lines: readonly string[]): strin
 
 export const SEAT_CAPABILITIES = ['seat', 'model'] as const;
 
-/**
- * Default limits per tool profile (6.2, 6.5): seats without runs declare a small run peak.
- * A run seat's writable area (7.1) is sized from its writable paths when the workspace is
- * given (the copies plus room for output, exec/resources.ts runAreaBytes), else the floor
- * (RUN_AREA_FLOOR_BYTES): a flat 1 GiB put every ordinary Constructor and Reviewer over the
- * image threshold, so none could run without fuse2fs. The area stays a capped tmpfs (or an
- * image when it is that large): never uncapped.
- */
-export function defaultLimits(kind: 'materials' | 'read' | 'run', workspace?: { readonly snapshot: string; readonly writablePaths: readonly string[] }): {
-  run: { memoryMax: number; timeoutMs: number };
-  areaBytes: number;
-  export: { maxLogicalBytes: number; maxFiles: number };
-  recoveryStateBytes: number;
-  maxTurns: number;
-} {
-  const MiB = 1024 * 1024;
-  if (kind === 'run') {
-    const areaBytes = workspace !== undefined ? runAreaBytes(workspace.snapshot, workspace.writablePaths) : RUN_AREA_FLOOR_BYTES;
-    return { run: { memoryMax: 2048 * MiB, timeoutMs: 30 * 60_000 }, areaBytes, export: { maxLogicalBytes: 256 * MiB, maxFiles: 20_000 }, recoveryStateBytes: 0, maxTurns: 400 };
-  }
-  return { run: { memoryMax: 256 * MiB, timeoutMs: 60_000 }, areaBytes: 64 * MiB, export: { maxLogicalBytes: 32 * MiB, maxFiles: 2_000 }, recoveryStateBytes: 0, maxTurns: kind === 'materials' ? 80 : 200 };
-}
-
 /** The common card fields (src/seat/cards/common.ts commonCardFields). */
-export function cardBase(ctx: FlowCtx, task: string, o: { module?: string | null; duties: string; decisionQuotes?: readonly string[]; constraints?: ReadonlyArray<{ id: string; text: string; kind: 'object' | 'instruction' }>; limits: ReturnType<typeof defaultLimits> }) {
+export function cardBase(ctx: FlowCtx, task: string, o: { module?: string | null; duties: string; decisionQuotes?: readonly string[]; constraints?: ReadonlyArray<{ id: string; text: string; kind: 'object' | 'instruction' }> }) {
   return {
     format: CARD_FORMAT,
-    launch: safeId(task),
+    task: safeId(task),
     mission: ctx.mission as string,
     module: o.module ?? null,
     capabilities: [...SEAT_CAPABILITIES],
     duties: o.duties,
     decisionQuotes: [...(o.decisionQuotes ?? [])],
     constraints: [...(o.constraints ?? [])],
-    limits: o.limits,
   };
 }
 
-/** A material: the document stored, its page count, must-read by default. */
+/** A material: the document stored (a data value; written as a leaf when the card is dispatched), its page count, must-read by default. */
 export function material(ctx: FlowCtx, id: string, title: string, doc: string, mustRead = true, role?: MaterialRef['role']): MaterialRef {
   const text = doc.trim() === '' ? '(empty)' : doc;
   return { id, title, ref: ctx.ports.ledger.content.put(text), pages: materialPageCount(text), mustRead, ...(role !== undefined ? { role } : {}) };

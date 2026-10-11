@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { JudgmentId, ObjectVersionId } from '../../common/ids.ts';
 import type { JudgmentRecord, ListRef, Verdict } from '../../common/records.ts';
 import { validateRecord } from '../../common/validate.ts';
-import { Binding, Material, TOOLS_NOTE_MATERIALS, commonCardFields, list, renderCommon, renderMaterials, unreadMustRead, type CardBinding } from './common.ts';
+import { Binding, Material, commonCardFields, list, renderCommon, renderMaterials, unreadMustRead, type CardBinding } from './common.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
 const Mode = z.discriminatedUnion('kind', [z.object({ kind: z.literal('full') }), z.object({ kind: z.literal('continuation'), extends: z.string().min(1) })]);
@@ -123,24 +123,7 @@ export type Calibrator2Result = z.infer<typeof Calibrator2ResultSchema>;
 
 // ---------------------------------------------------------------- definitions
 
-export const CALIBRATOR_1_DEFINITION = [
-  'You are the Calibrator seat of a software pipeline, first position: you audit the direction of the PM plan against what the user actually said. You catch the PM filling in direction the user never gave. The card in the first message lists the plan elements to judge and the materials.',
-  TOOLS_NOTE_MATERIALS,
-  'For each focus element give one finding: "user-said" only when you found the user\'s words that say it (cite the material pages); "detail-within-authority" for a PM supplement that a recorded authorization covers; "ask-user" for an important design decision the user has not made (it changes what the user gets, it is hard to undo or you cannot tell whether it can be undone, or it conflicts with the user\'s words); "contradicts-user" when it goes against the user\'s words. An element marked "user said" whose words you cannot find counts as a PM supplement.',
-  'Also report the five error kinds (made up, left out, distorted, a premise that does not hold, elements contradicting each other), and for each exploration whether its definition presets the answer and whether the plan goes past it before it stands. Put one question for the PM to ask the user for every "ask-user" finding.',
-  'In a continuation review (the card says so) focus on the changes, but judge them against the whole plan: you have the old and the new full text. If you cannot judge how far a change reaches, answer verdict "needs-full-review" instead of guessing.',
-  'Verdict: "pass" only when every finding is user-said or detail-within-authority and there is no error and no exploration problem; otherwise "fail". Call submit_result once, then end your turn.',
-  'You see neither the PM\'s reasoning nor any progress of the work. Upstream: the PM, who records the plan with the user. Downstream: a pass goes to the Architect; a fail goes back to the PM with your reasons and questions.',
-].join('\n\n');
 
-export const CALIBRATOR_2_DEFINITION = [
-  'You are the Calibrator seat of a software pipeline, second position: you audit the detailed plan the Architect derived from an approved PM plan. You check that what claims to come from a PM plan element says what that element says, and you classify everything the Architect added.',
-  TOOLS_NOTE_MATERIALS,
-  'For each focus element that claims a PM plan element: is it faithful (no narrowing, widening, reordering of a user-specified order, or changed meaning)? For each element the Architect added: "detail" (the user would not care), "important-decision" (it changes what the user gets, it is hard to undo, or you cannot tell whether it can be undone), or "contradicts-user".',
-  'In a continuation review focus on the changes but judge them against the whole plan (you have both full texts). If you cannot judge how far a change reaches, answer "needs-full-review".',
-  'Verdict: "pass" only when every mapping is faithful and every supplement is a detail; otherwise "escalate", with what the Secretary must decide. You never send the plan back to the Architect yourself. Call submit_result once, then end your turn.',
-  'Upstream: the Architect (decomposition). Downstream: a pass releases the plan\'s tasks to the program; an escalation goes to the Secretary.',
-].join('\n\n');
 
 // ---------------------------------------------------------------- render
 
@@ -165,8 +148,7 @@ export function renderCalibrator1(c: Calibrator1Card): string {
     renderMode(c.mode) +
     renderMaterials(c.materials) +
     renderElements(c) +
-    list('Explorations the plan defines', c.explorations) +
-    'When done, call submit_result with one finding per focus element, the errors, the exploration checks, the questions and one verdict; then end your turn.'
+    list('Explorations the plan defines', c.explorations)
   );
 }
 
@@ -176,8 +158,7 @@ export function renderCalibrator2(c: Calibrator2Card): string {
     `## Target\nDetailed plan version ${c.target} (review position: calibrator-2), derived from PM plan version ${c.pmPlan}\n\n` +
     renderMode(c.mode) +
     renderMaterials(c.materials) +
-    renderElements(c) +
-    'When done, call submit_result with the mappings, the supplements and one verdict; then end your turn.'
+    renderElements(c)
   );
 }
 
@@ -290,7 +271,6 @@ const calibrator1Entry: SeatCardEntry<Calibrator1Card, Calibrator1Result> = {
   schema: Calibrator1CardSchema,
   resultShape: Calibrator1ResultShape,
   resultSchema: Calibrator1ResultSchema,
-  definition: CALIBRATOR_1_DEFINITION,
   toolProfile: 'materials',
   render: renderCalibrator1,
   problems: (c, r, ctx) => calibrator1Problems(c, r, ctx.materialsRead),
@@ -306,7 +286,6 @@ const calibrator2Entry: SeatCardEntry<Calibrator2Card, Calibrator2Result> = {
   schema: Calibrator2CardSchema,
   resultShape: Calibrator2ResultShape,
   resultSchema: Calibrator2ResultSchema,
-  definition: CALIBRATOR_2_DEFINITION,
   toolProfile: 'materials',
   render: renderCalibrator2,
   problems: (c, r, ctx) => calibrator2Problems(c, r, ctx.materialsRead),

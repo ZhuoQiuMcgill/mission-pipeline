@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import type { BaseRecord, ReviewContract } from '../src/common/records.ts';
-import { fakePorts } from '../src/flow/fakes.ts';
+import { memoryPorts, say } from './flow-memory-fixtures.ts';
 import type { FlowTask } from '../src/flow/ports.ts';
 import { advanceLegalization, legalizationState, requestLegalization, startLegalization } from '../src/flow/audit/flow.ts';
 import type { AuditChainCard, AuditChainResult, AuditNodeCard, AuditNodeResult } from '../src/seat/cards/auditor.ts';
@@ -15,7 +15,7 @@ import type { AuditChainCard, AuditChainResult, AuditNodeCard, AuditNodeResult }
 const M = 'M1' as MissionId;
 
 function setup() {
-  const p = fakePorts();
+  const p = memoryPorts();
   const c = p.ledger.content;
   const obj = (id: string, prereqs: string[], reviews: ReviewContract[]): BaseRecord => ({
     kind: 'object.version',
@@ -54,7 +54,7 @@ function setup() {
         line: 'requirements',
         event: 'item',
         key: 'S1.v1',
-        body: { line: 'S1', version: 'S1.v1', type: 'acceptance', text: 'parses every header field', source: { kind: 'words', message: 'm1', quote: 'it must parse all the fields' }, restatement: null, confirmedBy: null, notifyCondition: null },
+        body: { line: 'S1', version: 'S1.v1', type: 'acceptance', text: 'parses every header field', source: { kind: 'words', words: 'W-1', quote: 'it must parse all the fields' }, restatement: null, confirmedBy: null, notifyCondition: null },
       },
     ],
   });
@@ -66,8 +66,8 @@ const BASE = (c: { putList(x: readonly string[]): unknown }): BaseRecord[] => {
   return [
     { kind: 'basis.version', basisKind: 'standard', line: 'S1' as never, version: 'S1.v1' as never, mission: M, scope: null },
     { kind: 'env.snapshot', line: 'env.t' as never, snapshot: 'snap.1' as never },
-    { kind: 'evidence', evidence: 'ev.A' as never, envLine: 'env.t' as never, envSnapshot: 'snap.1' as never, runClass: 'closed', fields: { exit: '0' } },
-    { kind: 'evidence', evidence: 'ev.seam' as never, envLine: 'env.t' as never, envSnapshot: 'snap.1' as never, runClass: 'closed', fields: { exit: '0', command: 'npm run integration' } },
+    { kind: 'evidence', evidence: 'ev.A' as never, envLine: 'env.t' as never, envSnapshot: 'snap.1' as never, runClass: 'declared', fields: { exit: '0' } },
+    { kind: 'evidence', evidence: 'ev.seam' as never, envLine: 'env.t' as never, envSnapshot: 'snap.1' as never, runClass: 'declared', fields: { exit: '0', command: 'npm run integration' } },
   ];
 };
 
@@ -134,7 +134,7 @@ describe('legalization', () => {
     assert.deepEqual(card1.positions.map((p) => [p.review, p.reason]), [['reviewer', 'missing']]);
     assert.deepEqual(s.c.getList(card1.positions[0]?.binding.reliesOn as never), ['A']);
     assert.deepEqual(s.c.getList(card1.positions[0]?.binding.bases as never), ['S1.v1']);
-    assert.deepEqual(s.scheduler.run(t1.task, { handBack: nodePass(card1) }), []);
+    assert.deepEqual(await s.scheduler.run(t1.task, { handBack: nodePass(card1) }), []);
     await advanceLegalization(s.ports, M, 'L1');
 
     // B proven made C's own judgment current again: C needs no backfill
@@ -148,7 +148,7 @@ describe('legalization', () => {
     const chainObj = (await s.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.object === 'chain.M1.L1');
     assert.equal(chainObj?.objectKind, 'chain-acceptance');
     assert.deepEqual(chainObj?.reviews.map((x) => [x.review, [...x.reliesOn]]), [['auditor-chain', ['A', 'B', 'C']]]);
-    assert.deepEqual(s.scheduler.run(t2.task, { handBack: chainPass(card2) }), []);
+    assert.deepEqual(await s.scheduler.run(t2.task, { handBack: chainPass(card2) }), []);
     r = await advanceLegalization(s.ports, M, 'L1');
     assert.equal(r.state, 'ended');
     assert.equal(r.result?.outcome, 'stamped');
@@ -193,7 +193,7 @@ describe('legalization', () => {
     await startLegalization(s.ports, M, 'L3', 'go');
     await advanceLegalization(s.ports, M, 'L3');
     const t = only(s, 'auditor-node');
-    assert.deepEqual(s.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard, 'fail') }), []);
+    assert.deepEqual(await s.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard, 'fail') }), []);
     const r = await advanceLegalization(s.ports, M, 'L3');
     assert.equal(r.result?.outcome, 'not-legalized');
     assert.equal(r.result?.wi, 'WI-25');
@@ -222,12 +222,12 @@ describe('legalization', () => {
     const bad = nodePass(card);
     const first = bad.positions[0];
     if (first !== undefined && first.items[0] !== undefined) first.items[0] = { ...first.items[0], met: 'unclear' };
-    assert.ok(s.scheduler.run(t.task, { handBack: bad }).some((p) => p.includes('"pass" leaves a basis')));
-    assert.deepEqual(s.scheduler.run(t.task, { handBack: nodePass(card) }), []);
+    assert.ok((await s.scheduler.run(t.task, { handBack: bad })).some((p) => p.includes('"pass" leaves a basis')));
+    assert.deepEqual(await s.scheduler.run(t.task, { handBack: nodePass(card) }), []);
     await advanceLegalization(s.ports, M, 'L4');
     assert.deepEqual((await s.evaluator.labels(['OLD', 'P'])).labels, { OLD: 'proven', P: 'proven' });
     const tc = only(s, 'auditor-chain');
-    assert.deepEqual(s.scheduler.run(tc.task, { handBack: chainPass(tc.card as unknown as AuditChainCard, ['file:src/p.ts:1']) }), []);
+    assert.deepEqual(await s.scheduler.run(tc.task, { handBack: chainPass(tc.card as unknown as AuditChainCard, ['file:src/p.ts:1']) }), []);
     const r = await advanceLegalization(s.ports, M, 'L4');
     assert.equal(r.result?.outcome, 'stamped');
   });
@@ -242,7 +242,7 @@ describe('legalization', () => {
     const card = t.card as unknown as AuditChainCard;
     assert.deepEqual(card.seams, [], 'a one-node chain has no seams');
     const res = chainPass(card);
-    assert.deepEqual(s.scheduler.run(t.task, { handBack: { ...res, quotes: res.quotes.map((q) => ({ ...q, honored: 'no' as const })), verdict: 'fail' } }), []);
+    assert.deepEqual(await s.scheduler.run(t.task, { handBack: { ...res, quotes: res.quotes.map((q) => ({ ...q, honored: 'no' as const })), verdict: 'fail' } }), []);
     const r = await advanceLegalization(s.ports, M, 'L5');
     assert.equal(r.result?.outcome, 'chain-refused');
     assert.equal(r.result?.wi, 'WI-25');
@@ -306,7 +306,7 @@ describe('legalization: a generation in parallel', () => {
     assert.equal(r.why, 'node Auditors are running');
     const q = s.scheduler.queued('auditor-node').map((t) => (t.card as unknown as AuditNodeCard).target.id).sort();
     assert.deepEqual(q, ['B1', 'B2']);
-    for (const t of s.scheduler.queued('auditor-node')) assert.deepEqual(s.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
+    for (const t of s.scheduler.queued('auditor-node')) assert.deepEqual(await s.scheduler.run(t.task, { handBack: nodePass(t.card as unknown as AuditNodeCard) }), []);
     await advanceLegalization(s.ports, M, 'L9');
     // C has no judgment of its own: it is the next generation
     const c = only(s, 'auditor-node').card as unknown as AuditNodeCard;
@@ -315,7 +315,7 @@ describe('legalization: a generation in parallel', () => {
   });
 });
 
-describe('legalization: a failed node Auditor', () => {
+describe('legalization: a node Auditor whose dispatches are used up', () => {
   test('goes to the Secretary; abandoned, the legalization ends with WI-25', async () => {
     const { answerEscalation } = await import('../src/flow/secretary.ts');
     const { SECRETARY_LINE } = await import('../src/flow/plandoc.ts');
@@ -325,8 +325,12 @@ describe('legalization: a failed node Auditor', () => {
     await startLegalization(s.ports, M, 'L10', 'go');
     await advanceLegalization(s.ports, M, 'L10');
     const t = only(s, 'auditor-node');
-    s.scheduler.run(t.task, { fail: 'seat-failure' });
+    // the PM releases its dispatch three times: re-dispatched twice (decision 15), then used up
     let r = await advanceLegalization(s.ports, M, 'L10');
+    for (let i = 0; i < 3; i++) {
+      await s.scheduler.run(t.task, { release: 'abandoned' });
+      r = await advanceLegalization(s.ports, M, 'L10');
+    }
     assert.equal(r.state, 'waiting');
     const esc = (await s.ledger.events<{ id: string; source: string; subject: string }>({ mission: M, line: SECRETARY_LINE, event: 'escalation' })).map((e) => e.body);
     assert.equal(esc[0]?.subject, 'audit:L10');

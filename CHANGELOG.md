@@ -6,6 +6,87 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.1.0] — 2026-10-11
+
+Mission Pipeline becomes three parts and nothing else: an objective project memory, role
+descriptions, and a process, read and written only through the `mp` command line. Any harness
+that can run a shell command can be the PM or fill a seat, with any model. The design contract is
+`docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md`. 4.1 does not read 4.0.x ledgers.
+
+### Added
+- A neutral memory in the project folder, `.mission-pipeline/`: `memory.db` (SQLite, journal
+  mode DELETE) is the skeleton (the run chain, states, links between versions, program check
+  results, counts, an append-only hash-chained event log); Markdown files are the leaves (your
+  words as `W-<n>` entries, requirements with their quotes, decisions, plans, each seat's card and
+  report, run summaries, deliveries). Copy the folder to another machine, OS or harness and
+  continue; the first `mp` command in a copy repairs the worktrees, verifies the event chain,
+  rebuilds the state and checks every leaf and commit it names (WI-29, WI-30, WI-31).
+- `mp init`: creates the folder and its memory, copies the role descriptions and the PM handbook
+  with its work instructions, writes `config.json`, adds `.mission-pipeline/` to
+  `.git/info/exclude`, optionally adds one pointer line to `CLAUDE.md` / `AGENTS.md`.
+  `mp docs update`, `mp config`, `mp recompute`.
+- The command groups: `mp pm …` (the PM: `session`, `say`, `next`, `dispatch`, `release`, `renew`,
+  `drain`, `stop`, the alignment, delivery and landing commands), `mp seat <dispatch> …` (a seat:
+  `card`, `read`, `checkout`, `rerun`, `handback`, `request-evidence`), `mp read …` (`status`,
+  `show`, `leaf`, and the tree reads `why`, `from`, `chain`, `tree`). Text by default, `--json`
+  for programs; every `mp pm` command carries an operation id and is attributed to the PM
+  session's filler.
+- A seat hands back with one document on stdin: `mp seat <id> handback --stdin` (the report, ending with
+  the structured fields as a fenced json block; `mp` files both), so a harness whose sub-agents may not
+  write files can fill any seat; `request-evidence --stdin` likewise. The two-file form stays.
+- The read-depth rule: `mp read status` gives layer 0 (with the count of blocked subtasks) plus the layer-1
+  entries of only the subtasks whose state changed since the user last asked; `mp read blocked` lists
+  every blocked subtask with its reason and next step; `mp read show` is layer 2, `mp read leaf` layer 3.
+- `mp pm plan template <mission>`: an annotated, valid PM plan skeleton prefilled with the mission's
+  requirement items; `mp help <group> <command>` prints one command's arguments.
+- The PM dispatches: `mp pm next` lists the ready steps, `mp pm dispatch` claims one and prints a
+  fixed prompt for a sub-agent of the PM's own harness; `mp pm release --ended|--abandoned` for a
+  seat that ended without handing back (WI-28).
+- Any harness and model per seat; the filler is recorded as information and never invalidates a
+  conclusion.
+- The Stabilizer in the exploration loop: after every attack round it judges each finding (in
+  scope, shifts direction, out of scope) and the round (on track, drifting); direction questions
+  and drift go to the Secretary (WI-33).
+- A Constructor works in its own git worktree; at hand-back `mp` collects every change git does
+  not ignore as the candidate commit and runs the declared verification on a clean checkout of it.
+- Stored proof labels with bounded propagation (`mp pm drain`, WI-32); an environment identity per
+  run, and `mp pm renew` to restore proof after an environment change without a seat.
+- Landing fast-forwards the target branch from the recorded base only, with an intent recorded
+  before git runs and checked by any later command (WI-06); `mp pm land --close-not-landed`.
+- `mp` runs on Linux, Windows and macOS with Node 22.12+ (`npm install -g .` in `engine/`). Only Linux
+  (WSL2) has been run so far; Windows and macOS use the same code but have not been through the
+  scenario suites yet.
+- New work instructions WI-28 to WI-33.
+
+### Changed
+- The Claude Code plugin is an optional adapter: it records each prompt with `mp pm say` and
+  prints the handbook core and `mp pm next` at session start. Nothing requires it.
+- The PM handbook, the work instructions and the role descriptions are harness-neutral and are
+  copied into each project.
+- Commands that cite your words name a words entry: `--words W-<n>`.
+- A decision takes effect in one write: the ruling that revokes a negation is written only together with
+  the record that the decision was carried out. A Secretary decision you override before it is carried
+  out leaves no ruling (WI-24).
+- When work leaves the plan (a re-plan drops a task or changes its card, a newer PM plan is submitted, an
+  exploration settles or is redefined, a legalization ends), its open escalations are closed in the same
+  write and their Secretary steps are cancelled. A late hand-back on a closed escalation is kept as
+  history and not accepted. An answer to an escalation already carried out or closed is refused.
+- An exploration can settle more than once. A move to another machine, or a changed tool version, re-runs
+  the experiments its conclusion rests on, and any stop after that reopening goes to the Secretary like a
+  first stop. While proof labels recompute, the decision layer and legalization wait instead of
+  recording "no conclusion" or "not legalized".
+- A requirement line that was withdrawn cannot be added again under the same id (add it under a new id).
+  A task given up under one card runs again when a newer plan changes its card.
+
+### Removed
+- The ledger service, the evaluator process, the scheduler, the watchdog, systemd units and the
+  control plane: each `mp` command opens the memory itself.
+- The seat host on the Claude Agent SDK, its in-process tools, the metering proxy, spend limits and
+  quota waits, credential handling, model configuration and the startup self-check.
+- The bubblewrap sandbox, cgroups, fuse2fs areas, toolchain freezing and environment copies.
+- `mp install`, `mp watch-notices`, `mp resume`; the work instructions about sandboxes, budgets,
+  services and storage faults (WI-09 to WI-12, WI-14, WI-15, WI-17, WI-18, WI-22, WI-27).
+
 ## [4.0.1] — 2026-10-10
 
 ### Added
@@ -664,8 +745,8 @@ invariants an enforcement layer. Rationale record:
 - **Machine-readable headers** on the task-spec, dev-report, and critique
   templates, plus the evidence-type column — verdict-bearing artifacts are now
   mechanically lintable (`mp lint`: typing present, D-only chains, staleness).
-- **Tests** (`tests/`): the M1 gate — `mp adopt` on the DIVRA export (433
-  artifacts, 7 missions, 67 tasks) followed by `mp metrics` mechanically reproduces
+- **Tests** (`tests/`): the M1 gate — `mp adopt` on a field site's exported ledger
+  followed by `mp metrics` mechanically reproduces
   the retrospective once done by hand; the analysis is now a SELECT and stays the
   regression test (`tests/m1_acceptance.py`, plus `tests/m1_smoke.py`). The M2
   gate (`tests/m2_lint.py`): `mp lint` catches seeded violations of each of the six
@@ -695,7 +776,7 @@ invariants an enforcement layer. Rationale record:
 - Released ahead of the first dogfooded mission by the principal's decision: the
   mechanical gates are green; the first field deployments are the dogfood, and their
   ledgers return for analysis through the same `mp adopt` + `mp metrics` path.
-- `tests/m1_acceptance.py` needs the DIVRA export under `data/`, which is not
+- `tests/m1_acceptance.py` needs a field site's exported ledger under `data/`, which is not
   distributed; the other three test files are self-contained.
 
 ## [0.3.0] — 2026-08-19

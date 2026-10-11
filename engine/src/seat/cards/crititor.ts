@@ -1,26 +1,33 @@
-// The Crititor seat (design 2, 4.3, 8.2): the exploration's attacker. Read-only and adversarial:
-// it attacks one version of the exploration's product, re-checks every earlier finding the
-// author disposed of (revised, or rebutted with an evidence execution), and may ask for an
-// evidence execution itself (async, 6.2). It hands back findings (severity, basis, consequence,
-// direction), one re-check per finding awaiting it, and the directions that need no further
-// change. In a discussion turn (4.3 step 1) it answers the author's framing instead.
+// The Crititor seat (design 4.1 §6.3; 4.0 2, 4.3, 8.2): the exploration's attacker. Read-only
+// and adversarial: it attacks one version of the exploration's product, re-checks every earlier
+// finding the author disposed of (revised, or rebutted with an evidence execution), and may ask
+// for an evidence execution itself (`mp seat <id> request-evidence`). It hands back findings
+// (severity, basis, consequence, direction), one re-check per finding awaiting it, and the
+// directions that need no further change. In a discussion turn (4.3 step 1) it answers the
+// author's framing instead.
 //
-// This module also holds the exploration pieces the author cards share (src/seat/cards/
-// researcher.ts): severities, finding and evidence items, the exploration reference, the new
-// version binding, and attackOutcome(), the one rule that turns a round into a verdict (the
-// program's rule, also used by the exploration flow to decide convergence, 8.2).
+// This module also holds the exploration pieces the author and Stabilizer cards share
+// (src/seat/cards/researcher.ts, stabilizer.ts): severities, finding and evidence items, the
+// exploration reference, the new version binding, and attackOutcome(), the rule that turns a
+// round into the attack judgment's verdict (also used by the exploration flow, 8.2).
+//
+// 4.1 §6.3: the review position of an exploration version is the pair "crititor + stabilizer"
+// (review "crititor"). A finding the Stabilizer judged out of scope or shifting direction never
+// refutes the version; a new fatal or serious finding leaves the position pending ("undecided")
+// until the round's Stabilizer judges it (stabilizer.ts records that judgment); an earlier
+// finding the Stabilizer judged in scope and that is still unresolved refutes it ("fail").
 //
 // Records (5.2, 10.1 "Crititor 攻击与裁决"): the round is a judgment on the review position
 // (attacked version, 'crititor'), bound by the card's contract inputs (the exploration
 // definition's version); each new finding is an issue record (5.6) observed on the version,
-// its words a document in the content store; each re-check is the judgment's response to that
-// issue (fixed / not-fixed).
+// its words a data value; each re-check is the judgment's response to that issue (fixed /
+// not-fixed).
 
 import { z } from 'zod';
 import type { IssueId, JudgmentId, ModuleId, ObjectVersionId } from '../../common/ids.ts';
 import type { BaseRecord, IssueRecord, JudgmentRecord, ListRef } from '../../common/records.ts';
 import { validateRecord } from '../../common/validate.ts';
-import { Binding, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials, TOOLS_NOTE_SNAPSHOT } from './common.ts';
+import { Binding, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
 import { registerSeatCard, type CardRecordContext, type SeatCardEntry } from './registry.ts';
 
 // ---------------------------------------------------------------- shared exploration pieces
@@ -72,6 +79,8 @@ export const PriorFinding = z.object({
   disposition: z.object({ action: DispositionAction, note: z.string(), evidence: z.string().nullable(), question: z.string().nullable() }).nullable(),
   /** The decision layer's ruling on it, verbatim, if any. */
   ruling: z.string().nullable(),
+  /** The Stabilizer's verdict on it (4.1 §6.3), null before its round was stabilized. Only in-scope findings bind the author. */
+  scope: z.enum(['in-scope', 'shifts-direction', 'out-of-scope']).nullable().optional(),
 });
 export type PriorFindingT = z.infer<typeof PriorFinding>;
 
@@ -133,7 +142,7 @@ export function renderPriorFindings(title: string, findings: readonly PriorFindi
     findings.map((f) => {
       const d = f.disposition;
       const disp = d === null ? '' : ` — author: ${d.action}${d.evidence !== null ? ` (evidence:${d.evidence})` : ''}${d.note !== '' ? `: ${d.note}` : ''}${d.question !== null ? ` [question: ${d.question}]` : ''}`;
-      return `[${f.id}] (${f.severity}, ${f.class}, round ${f.round}, ${f.status}) ${f.title}${f.material !== null ? ` (full text: material ${f.material})` : ''}${disp}${f.ruling !== null ? ` — ruling: ${f.ruling}` : ''}`;
+      return `[${f.id}] (${f.severity}, ${f.class}, round ${f.round}, ${f.status}${f.scope != null ? `, Stabilizer: ${f.scope}` : ''}) ${f.title}${f.material !== null ? ` (full text: material ${f.material})` : ''}${disp}${f.ruling !== null ? ` — ruling: ${f.ruling}` : ''}`;
     }),
   );
 }
@@ -226,7 +235,7 @@ export interface AttackOutcome {
   readonly resolved: readonly string[];
   /** Earlier findings re-checked and not resolved. */
   readonly notResolved: readonly string[];
-  /** Fatal and serious findings still unresolved after this round (earlier ones and new ones by index "new:<i>"). */
+  /** Fatal and serious findings still unresolved after this round (earlier in-scope ones, and new ones by index "new:<i>"). */
   readonly unresolvedBlocking: readonly string[];
   /** Of those, the ones that only wait for a ruling of the decision layer. */
   readonly awaitingRuling: readonly string[];
@@ -234,9 +243,11 @@ export interface AttackOutcome {
 }
 
 /**
- * The program's rule (8.2): a round passes when no fatal or serious finding is unresolved after
- * it (new ones, and earlier ones not confirmed resolved by a re-check this round or by a
- * ruling); it is undecided when the only ones left wait for a ruling; otherwise it fails.
+ * The attack judgment's verdict (8.2 with 4.1 §6.3). Earlier findings the Stabilizer judged out
+ * of scope or shifting direction never count. It fails when an earlier fatal or serious finding
+ * (in scope, or not judged yet) is still unresolved and not only waiting for a ruling; it is
+ * undecided (pending) when the round raised new fatal or serious findings, which the round's
+ * Stabilizer judges, or when the only ones left wait for a ruling; otherwise it passes.
  */
 export function attackOutcome(priorFindings: readonly PriorFindingT[], r: Pick<CrititorResult, 'findings' | 'rechecks'>): AttackOutcome {
   const yes = new Set(r.rechecks.filter((x) => x.resolved === 'yes').map((x) => x.finding));
@@ -244,15 +255,17 @@ export function attackOutcome(priorFindings: readonly PriorFindingT[], r: Pick<C
   const unresolved: string[] = [];
   const awaiting: string[] = [];
   for (const f of priorFindings) {
+    if (f.scope === 'out-of-scope' || f.scope === 'shifts-direction') continue;
     if (!isBlocking(f.severity) || f.status === 'resolved' || yes.has(f.id)) continue;
     unresolved.push(f.id);
     if (f.status === 'awaiting-ruling') awaiting.push(f.id);
   }
+  const standing = unresolved.length - awaiting.length;
   r.findings.forEach((f, i) => {
     if (isBlocking(f.severity)) unresolved.push(`new:${i}`);
   });
   const newBlocking = r.findings.filter((f) => isBlocking(f.severity)).length;
-  const verdict = unresolved.length === 0 ? 'pass' : unresolved.length === awaiting.length ? 'undecided' : 'fail';
+  const verdict = standing > 0 ? 'fail' : newBlocking > 0 || awaiting.length > 0 ? 'undecided' : 'pass';
   return { verdict, resolved: [...yes], notResolved: [...no], unresolvedBlocking: unresolved, awaitingRuling: awaiting, newBlocking };
 }
 
@@ -340,14 +353,16 @@ function crititorRecords(card: CrititorCard, r: CrititorResult, ctx: CardRecordC
     review: 'crititor',
     executor: 'crititor',
     target,
-    verdict: o.verdict,
+    // the position "crititor + stabilizer" is pending until the round's Stabilizer judged it (4.1
+    // §6.3, code review r1 #1): the attacker's own pass is recorded as pending; only its fail stands
+    verdict: o.verdict === 'pass' ? 'undecided' : o.verdict,
     evidence: evidence as ListRef,
     bases: b.bases as ListRef,
     constraints: b.constraints as ListRef,
     reliesOn: b.reliesOn as ListRef,
     issues: r.rechecks.filter((x) => issueOf.has(x.finding)).map((x) => ({ issue: x.finding as IssueId, response: x.resolved === 'yes' ? 'fixed' : 'not-fixed' })),
-    // a pass names the negation it revokes (8.1, 5.2); a fail or an undecided revokes nothing
-    revokes: o.verdict === 'pass' ? (b.revokes as JudgmentId | null) : null,
+    // a fail or a pending judgment revokes nothing (the Stabilizer's pass names the negation it revokes)
+    revokes: null,
     evidenceUse: b.evidenceUse,
     superseded: b.superseded,
     extends: null,
@@ -359,17 +374,6 @@ function crititorRecords(card: CrititorCard, r: CrititorResult, ctx: CardRecordC
 
 // ---------------------------------------------------------------- definition and card text
 
-export const CRITITOR_DEFINITION = [
-  'You are the Crititor seat of a software pipeline: the attacker of an exploration. An exploration is work whose acceptance cannot be written down in advance; it is accepted by surviving attack. The card in the first message names the exploration, the user\'s acceptance goal (verbatim), the attack scope, and the version you attack.',
-  TOOLS_NOTE_SNAPSHOT,
-  'What you do: attack the version, adversarially and read-only. Your goal is to find real problems, not to get the product through. Do not invent problems to fill a quota; say plainly when a direction needs no further change (settled). You may criticize a direction the maintainer set, but give the reason and the consequence.',
-  'Card fields: exploration (required), goal (required, verbatim), attack scope (required), mode (attack or discuss), round, target version and the version before it (their full texts are materials), earlier findings with the author\'s dispositions, evidence executions, the discussion so far, rulings of the decision layer. "fresh" means you are the closing attacker: a new session that has not seen the earlier rounds\' conversation; attack with a fresh view.',
-  'Hand-back (submit_result, once): attack mode: findings, each with severity (fatal, serious, general, minor), class, title, basis, consequence and direction; one re-check per earlier finding marked awaiting-recheck: for a revision, is it really fixed in this version; for a rebuttal, does the cited evidence execution really cover the original counterexample (yes or no, with the reason); settled directions; a short assessment. Discuss mode: your reply to the framing and attack scope, no findings. Then end your turn.',
-  'Evidence: when a claim can only be settled by running or reading something, call request_evidence with the steps, the data, what to record and the assertions, written so that a blind executor can follow them. Your session ends and resumes with the results. You may also attack the steps of an evidence execution (for example a probe that prints but never fails).',
-  'Prohibitions: you change nothing; you do not judge whether the product "should pass"; you do not repeat a finding already resolved unless it came back.',
-  'Upstream: the Researcher who authors the product. Downstream: the Researcher, who disposes of every finding; when the exploration converges or stops, the decision layer.',
-  'Your tools: read_file, list_directory, search_content, read_material (the card\'s materials), request_evidence, submit_result.',
-].join('\n\n');
 
 export function renderCrititorCard(c: CrititorCard): string {
   return (
@@ -383,8 +387,7 @@ export function renderCrititorCard(c: CrititorCard): string {
     renderEvidence(c.evidence) +
     list('Discussion so far', c.discussion.map((d) => `(${d.from}, round ${d.round}) ${d.text}`)) +
     list('Rulings of the decision layer (verbatim)', c.rulings) +
-    renderMaterials(c.materials) +
-    'When done, call submit_result once, then end your turn.'
+    renderMaterials(c.materials)
   );
 }
 
@@ -394,7 +397,6 @@ export const crititorEntry: SeatCardEntry<CrititorCard, CrititorResult> = {
   schema: CrititorCardSchema,
   resultShape: CrititorResultShape,
   resultSchema: CrititorResultSchema,
-  definition: CRITITOR_DEFINITION,
   toolProfile: 'read-evidence',
   render: renderCrititorCard,
   problems: (c, r) => crititorProblems(c, r),

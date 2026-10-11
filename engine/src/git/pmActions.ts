@@ -10,7 +10,7 @@
 //
 // The design names `git switch --detach`. The program does the same thing more
 // narrowly: `git update-ref --no-deref HEAD <commit> <commit>` with the
-// worktree's own explicit locators (no discovery), hooks off (SafeGit). It
+// worktree's own explicit locators (no discovery). It
 // writes HEAD and its reflog only: it never reads or writes the index or a file,
 // so no filter of any configuration runs (switch would refresh the index). git
 // holds HEAD's lock during the update, and the old-value check makes it refuse
@@ -20,9 +20,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GitOid } from '../common/ids.ts';
-import { shellQuote } from './landingView.ts';
 import { discoverRepo, gitOid } from './objects.ts';
-import type { SafeGit } from './safeGit.ts';
+import { shellQuote, type GitExec } from './plainGit.ts';
 import { occupies, registeredWorktrees } from './worktreeRecord.ts';
 
 export type DetachResult =
@@ -43,13 +42,25 @@ function indexHash(gitDir: string): string | null {
   return existsSync(p) ? createHash('sha256').update(readFileSync(p)).digest('hex') : null;
 }
 
+/** What a PM git action needs: the git runner and the memory's git-writes hold (§3.3 step 2). */
+export interface PmGitContext {
+  readonly memory: { assertGitWrites(what: string): void };
+  readonly git: GitExec;
+}
+
 /**
  * WI-01 option 2: detach `worktree`, one of several checkouts of `targetBranch`.
- * Refused unless the worktree is registered, present, has the branch checked out
- * with no rebase or bisect in progress, and at least one OTHER registered
- * worktree also holds the branch (the option exists only for "many").
+ * It writes to the repository (a worktree's HEAD), so it is refused while git
+ * writes are held after a move (GIT_WRITES_HELD, §3.3), before anything is
+ * read. Refused unless the worktree is registered, present, has the branch
+ * checked out with no rebase or bisect in progress, and at least one OTHER
+ * registered worktree also holds the branch (the option exists only for
+ * "many"). A bare git runner (4.0's callers, without the memory) is refused.
  */
-export async function detachDuplicateCheckout(git: SafeGit, o: { readonly repoPath: string; readonly worktree: string; readonly targetBranch: string }): Promise<DetachResult> {
+export async function detachDuplicateCheckout(ctx: PmGitContext | GitExec, o: { readonly repoPath: string; readonly worktree: string; readonly targetBranch: string }): Promise<DetachResult> {
+  if (!('memory' in ctx)) return { kind: 'refused', reason: 'this action needs the project memory (to check that git writes are not held after a move)' };
+  ctx.memory.assertGitWrites('detaching a duplicate checkout');
+  const git = ctx.git;
   const targetRef = `refs/heads/${o.targetBranch}`;
   const repo = await discoverRepo(git, o.repoPath);
   const commonDir = repo.commonDir;

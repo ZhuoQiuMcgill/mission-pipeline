@@ -1,6 +1,6 @@
 // The requirement hub (design 3.1) and the important-decision routing (3.2).
 //
-// 3.1: the user's words are booked by the PM session's prompt hook (user.words, elsewhere).
+// 3.1 (4.1 §6.1): the user's words are recorded by the PM (`mp pm say`) as words entries W-<n>.
 // Requirement items are typed (goal, limit, authorization, acceptance standard, decision), each
 // with its provenance (the quoted words of a message; a decision points at the authorization it
 // rests on), versioned item by item; states: valid, replaced, withdrawn, contested. Every item
@@ -27,8 +27,8 @@ import type { FlowEvent, FlowPorts } from './ports.ts';
 export type ItemType = 'goal' | 'limit' | 'authorization' | 'acceptance' | 'decision';
 
 export type ItemSource =
-  /** The user's words: the booked message and the quoted span. */
-  | { readonly kind: 'words'; readonly message: string; readonly quote: string }
+  /** The user's words: the words entry (W-<n>) and the quoted span, verbatim in it (`mp pm requirement add --quote --words`). */
+  | { readonly kind: 'words'; readonly words: string; readonly quote: string }
   /** A decision: the authorization line it rests on. */
   | { readonly kind: 'authorization'; readonly line: string };
 
@@ -157,6 +157,17 @@ export async function recordItem(
   const line = itemLine(req.mission, req.item);
   const ix = await basisIndex(ctx);
   checkKind(ix, line, 'a requirement item', ITEM_KINDS, req.mission);
+  // a withdrawn line stays withdrawn (v51 3.1 states: valid, replaced, withdrawn, contested): a new version
+  // of it would never be in force, so it is refused before anything is written; the item comes back under a new id
+  if (ix.withdrawn.has(line)) {
+    const why = (await eventsOf<{ line: string; reason: string }>(ctx, REQUIREMENTS_LINE, 'withdrawn')).find((e) => e.body.line === line)?.body.reason ?? '';
+    throw Object.assign(
+      new Error(
+        `requirement item ${req.item} of mission ${req.mission} was withdrawn${why !== '' ? ` (${why})` : ''} and stays withdrawn, so nothing was recorded. Add it under a new id, quoting the user's words: mp pm requirement add ${req.mission} <new-id> --type ${req.type} --text "<item>" --quote "<verbatim>" --words W-<n>`,
+      ),
+      { code: 'withdrawn-item', detail: { mission: req.mission, item: req.item, line } },
+    );
+  }
   const prev = ix.current.get(line);
   const prevBody = (await eventsOf<ItemVersionBody>(ctx, REQUIREMENTS_LINE, 'item')).filter((e) => e.body.line === line).at(-1)?.body ?? null;
   const identity = shortHash({ type: req.type, text: req.text, source: req.source });

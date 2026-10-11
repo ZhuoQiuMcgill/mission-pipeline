@@ -1,24 +1,25 @@
-// The flow's narrow ports (design 3, 4, 8, 11.1): everything the orchestration reads and does
-// goes through these three interfaces, so the flows run against in-memory fakes in tests
-// (src/flow/fakes.ts) and against the real ledger, scheduler and evaluator through adapters
-// (src/flow/adapters.ts).
+// The flow's narrow ports (design 4.1 §14 "Process"; 4.0 3, 4, 8, 11.1): everything the
+// orchestration reads and does goes through these three interfaces. In 4.1 they run on the
+// project memory (src/process/ports.ts): the ledger port is the memory's domain functions inside
+// its writes, the content port its data table, the scheduler port the dispatch table (a
+// submitted task is a ready step for `mp pm next`; a hand-back recorded by `mp seat <id>
+// handback` is what `status()` returns), and the evaluator port the stored labels.
 //
-// Restartability: the flow keeps no state of its own. Everything it decided is a ledger fact
-// (a flow event, a base record, a task in the ledger's queue, a loop count), every action it
-// takes has a deterministic identity (op id, task id, event key), so a flow restarted from
-// ledger state recomputes the same next actions and repeats nothing (duplicates are no-ops).
+// Restartability: the flow keeps no state of its own. Everything it decided is a memory fact
+// (a flow event, a base record, a task in the queue, a loop count), every action it takes has
+// a deterministic identity (op id, task id, event key), so a flow restarted from the memory
+// recomputes the same next actions and repeats nothing (duplicates are no-ops).
 //
-// Flow events are the one ledger record kind the flow needs that does not exist yet
-// ('flow.event', see RECORDS-NEEDED.md): (mission, line, event, key) is its identity; its body
-// is a JSON document in the content store, typed by the flow module that owns the line.
+// Flow events ('flow.event'): (mission, line, event, key) is their identity; the body is a JSON
+// document in the data table, typed by the flow module that owns the line.
 
-import type { ContentHash, LaunchId, MissionId } from '../common/ids.ts';
-import type { BaseRecord, BaseRecordKind, Committed, ListRef, LoopKind, ReviewContract, SeatResultRecord } from '../common/records.ts';
+import type { ContentHash, MissionId } from '../common/ids.ts';
+import type { BaseRecord, BaseRecordKind, Committed, ListRef, LoopKind, ReviewContract } from '../common/records.ts';
 import type { DecidingView, Label } from '../evaluator/semantics.ts';
 
 // ---------------------------------------------------------------- content
 
-/** The content store as the flow uses it (ContentStore satisfies it, with string results). */
+/** The memory's data table as the flow uses it (DataStore satisfies it, with string results). */
 export interface FlowContent {
   put(doc: string): ContentHash;
   get(hash: string): string;
@@ -28,7 +29,7 @@ export interface FlowContent {
 
 // ---------------------------------------------------------------- flow events (proposed ledger kind)
 
-/** The proposed base record (RECORDS-NEEDED.md). Bookkeeping: never an evaluator input. */
+/** The flow event base record (src/common/records.ts). Bookkeeping: never an evaluator input. */
 export interface FlowEventRecord {
   readonly kind: 'flow.event';
   readonly mission: MissionId;
@@ -38,7 +39,7 @@ export interface FlowEventRecord {
   readonly event: string;
   /** Unique within (mission, line, event). */
   readonly key: string;
-  /** The event body: a JSON document in the content store. */
+  /** The event body: a JSON document in the data table. */
   readonly body: ContentHash;
 }
 
@@ -77,8 +78,8 @@ export interface LoopStatus {
 }
 
 /**
- * A notice to the PM (3.9): an exception with its WI (3.11, or a proposed WI in
- * src/flow/WI-NEEDED.md), or a normal-branch notice (`wi: null`: Secretary notices, Calibrator ①
+ * A notice to the PM (3.9): an exception with its WI (3.11; the pages are plugin/pm/wi/), or a
+ * normal-branch notice (`wi: null`: Secretary notices, Calibrator ①
  * returns, results of work the user asked for). Idempotent by (category, key).
  */
 export interface FlowNotice {
@@ -98,6 +99,17 @@ export interface FlowNotice {
 
 // ---------------------------------------------------------------- the ledger port
 
+/**
+ * A precondition checked inside an append's own write: none of `absent` may be committed, else
+ * nothing is written and an error with `code` and `message` is thrown (a decision that must not be
+ * recorded once another one was carried out).
+ */
+export interface AppendGuard {
+  readonly absent: ReadonlyArray<{ readonly mission: string; readonly line: string; readonly event: string; readonly key: string }>;
+  readonly code: string;
+  readonly message: string;
+}
+
 export interface FlowLedgerPort {
   readonly content: FlowContent;
   /**
@@ -105,7 +117,7 @@ export interface FlowLedgerPort {
    * same op with the same payload is a no-op; the same op with another payload, or an event
    * identity committed with another body, is refused (OP_CONFLICT / FACT_CONFLICT).
    */
-  append(op: string, entries: { readonly events?: readonly FlowEventInput[]; readonly records?: readonly BaseRecord[] }): Promise<void>;
+  append(op: string, entries: { readonly events?: readonly FlowEventInput[]; readonly records?: readonly BaseRecord[]; readonly guard?: AppendGuard }): Promise<void>;
   /** Committed flow events of a mission, in commit order (optionally one line and/or one event type). */
   events<B = unknown>(q: { readonly mission: MissionId; readonly line?: string; readonly event?: string }): Promise<readonly FlowEvent<B>[]>;
   /**
@@ -119,12 +131,12 @@ export interface FlowLedgerPort {
   /** The committed judgment with this id, or null (an indexed lookup). */
   judgment(judgment: string): Promise<Extract<BaseRecord, { kind: 'judgment' }> | null>;
   /**
-   * Execute a proof-conditioned operation (6.1: a legalization stamp, a delivery) "as of" a
-   * published revision: the ledger checks it was registered (op.pending), that `asOf` is the
-   * latest published revision (the publication floor), the stop scope and the evaluator's health,
-   * and records op.executed. Idempotent by `op`. A stale `asOf` is a retryable refusal (code
-   * NOT_READY): read the evaluator again and retry on the next pass. `events` are committed in
-   * the same transaction as the execution (e.g. the legalization result).
+   * Execute a proof-conditioned operation (6.1: a legalization stamp): the memory checks it was
+   * registered (op.pending), the stop scope, and the labels (every listed object proven, nothing
+   * recomputing), and records op.executed. Idempotent by `op`. A refusal while the labels are
+   * recomputing, or a stop that covers it for now, is retryable (code NOT_READY): the flow
+   * retries on the next pass. `asOf` is kept for the record (4.1 has no publication floor).
+   * `events` are committed in the same transaction as the execution (e.g. the legalization result).
    * An `append` that carries op.executed is routed here (with the append's events).
    */
   commitProofOp(req: { readonly op: string; readonly opId: string; readonly asOf: number; readonly events?: readonly FlowEventInput[] }): Promise<void>;
@@ -136,17 +148,25 @@ export interface FlowLedgerPort {
   notify(n: FlowNotice): Promise<void>;
   /** Missions that have flow events (the engine reconciles each). */
   missions(): Promise<readonly MissionId[]>;
+  /** Whether the mission is closed (4.1 §6.7: its production steps are held; post-close work goes on). Absent: never closed. */
+  missionClosed?(mission: MissionId): Promise<boolean>;
 }
 
-// ---------------------------------------------------------------- the scheduler port
+// ---------------------------------------------------------------- the scheduler port (the dispatch table)
 
-/** src/scheduler/tasks.ts TaskState. */
+/**
+ * A task's state as the flows see it: queued (a ready step, or held by a stop or a lease),
+ * running (a dispatch in flight), waiting-evidence (its hand-back asked for evidence), done
+ * (accepted hand-back), needs-disposition (a hand-back not accepted because it came after a stop),
+ * exhausted (released dispatches used up its re-dispatch loop, decision 15), abandoned
+ * (cancelled or superseded). The 4.0 states budget-blocked and blocked are never set.
+ */
 export type FlowTaskState = 'queued' | 'running' | 'waiting-evidence' | 'done' | 'needs-disposition' | 'exhausted' | 'budget-blocked' | 'blocked' | 'abandoned';
 
 /** A card of any registered kind (src/seat/cards). */
 export type AnyCard = { readonly seat: string } & Readonly<Record<string, unknown>>;
 
-/** A seat task as the flow submits it (the adapter turns it into a scheduler TaskSpec). */
+/** A seat task as the flow submits it: the task's spec, kept in the memory's data table. */
 export interface FlowTask {
   /** Deterministic id: submitting the same task again is a no-op. */
   readonly task: string;
@@ -154,12 +174,13 @@ export interface FlowTask {
   readonly lineage: string;
   readonly mission: MissionId;
   readonly card: AnyCard;
-  /** Higher first. */
+  /** Higher first (`mp pm next` lists ready steps by priority). */
   readonly priority: number;
+  /** The task's stop scope (6.4). */
   readonly capabilities: readonly string[];
   readonly mode: 'stable' | 'fast';
-  /** The spend estimate (micro-dollars, 6.5). */
-  readonly estimateMicros: number;
+  /** Informational only (4.1 meters nothing). */
+  readonly estimateMicros?: number;
   /** A Secretary task runs in the lineage it handles (6.5 "Secretary 自己被调用的次数也计入它所处理的谱系"). */
   readonly secretaryFor?: string;
   /** Objects the result binds (6.2 routing). */
@@ -168,29 +189,45 @@ export interface FlowTask {
   readonly writeScope?: readonly string[];
   /** A continuation review's changed basis lines (5.2 part 5). */
   readonly changedLines?: readonly string[];
-  /** The commit the seat's snapshot is made from (LFS objects must be local, 7.1). */
+  /** The commit the seat reads, or its worktree is created at (a Constructor). */
   readonly snapshot?: { readonly repo: string; readonly commit: string };
+  /** Exclusive resources (§6.2): leased to the dispatch while it is in flight; the step waits while another holds one. */
+  readonly exclusive?: readonly string[];
   /**
    * Work that outlives the mission's close (6.6): an audit, a delivery (or its conflict
    * integration), a repair after an audit. Unset: production work, cancelled when the mission
-   * closes. (Auditor seats are inferred by the scheduler.)
+   * closes.
    */
   readonly afterClose?: 'audit' | 'delivery' | 'repair';
+  /**
+   * Who hands the task over (4.1 §3.2, U-13), when the flow knows better than the advance that
+   * queues it: the task whose hand-back led to it (null: none), the object versions it is handed
+   * over on, the step in words. Unset parts come from the advance (the hand-back or PM command
+   * that triggered it) and the task's binds.
+   */
+  readonly handover?: { readonly from?: string | null; readonly objects?: readonly string[]; readonly step?: string };
 }
 
-/** What an accepted launch handed back (its seat.result and the pending results accepted with it). */
+/** What an accepted hand-back brought (its structured fields, and the records accepted with it). */
 export interface AcceptedHandBack {
-  readonly launch: LaunchId;
-  readonly status: SeatResultRecord['status'];
-  /** The typed hand-back (the payload of submit_result), or null. */
+  /** The dispatch that handed back. */
+  readonly dispatch: string;
+  /** handed-back, or needs-evidence (`mp seat <id> request-evidence`, decision 13). */
+  readonly status: 'handed-back' | 'needs-evidence';
+  /** The structured fields (the seat's result JSON), or null. */
   readonly result: unknown;
   readonly resultHash: ContentHash | null;
-  readonly export: ContentHash | null;
+  /** Constructor (§5.3): the candidate commit collected from its worktree, on its base. */
+  readonly candidate: { readonly commit: string; readonly base: string; readonly changedPaths: readonly string[] } | null;
+  /** needs-evidence: the request (a data value). */
   readonly evidenceRequest: ContentHash | null;
-  readonly recoveryState: ContentHash | null;
-  /** The session to resume after async evidence (6.2), when known. */
-  readonly sessionId: string | null;
-  /** The accepted pending results of the launch: judgments, object versions, issues. */
+  /** needs-evidence: the notes the seat saved to continue from (a data value). */
+  readonly notes: ContentHash | null;
+  /** The report leaf (`missions/<m>/dispatches/<d>/report.md`). */
+  readonly report: string | null;
+  /** The runs the dispatch had `mp` rerun (`mp seat <id> rerun`), in order, with the environment identity each was recorded under. */
+  readonly runs: ReadonlyArray<{ readonly run: string; readonly completed: boolean; readonly envLine?: string; readonly envSnapshot?: string }>;
+  /** The records accepted with it: judgments, object versions, issues. */
   readonly records: readonly BaseRecord[];
 }
 
@@ -198,20 +235,24 @@ export interface FlowTaskStatus {
   readonly task: string;
   readonly state: FlowTaskState;
   readonly note: string | null;
-  readonly disposition: 'stop' | 'quarantine' | 'seat-failure' | 'resource-exceeded' | 'full-review' | null;
-  readonly launches: readonly LaunchId[];
+  readonly disposition: 'stop' | 'full-review' | null;
+  /** Every dispatch of the task, oldest first. */
+  readonly dispatches: readonly string[];
   /** The last accepted hand-back (state done or waiting-evidence), else null. */
   readonly handBack: AcceptedHandBack | null;
+  /** exhausted: the loop that is used up. */
+  readonly loop?: LoopKind;
 }
 
-/** 4.2: the product version the program makes from an accepted Constructor export. */
+/** 4.2: the product version the program records from an accepted Constructor candidate. */
 export interface ProductRequest {
   readonly mission: MissionId;
   readonly module: string;
   readonly task: string;
-  readonly launch: LaunchId;
-  readonly export: ContentHash;
-  /** The snapshot commit the Constructor worked on. */
+  readonly dispatch: string;
+  /** The candidate commit (§5.3). */
+  readonly candidate: string;
+  /** The base commit the Constructor's worktree was created at. */
   readonly base: string;
   readonly writeScope: readonly string[];
   readonly taskType: string;
@@ -222,9 +263,9 @@ export interface ProductRequest {
 
 export interface ProductVersion {
   readonly object: string;
-  /** The generated commit. */
+  /** The candidate commit. */
   readonly commit: string;
-  /** The canonical candidate snapshot (7.1), for the Reviewer and the verification runs. */
+  /** What the Reviewer and the verification runs read: the candidate commit. */
   readonly snapshot: string;
   readonly changedPaths: readonly string[];
 }
@@ -232,6 +273,7 @@ export interface ProductVersion {
 export interface VerifyRequest {
   readonly mission: MissionId;
   readonly object: string;
+  /** The candidate commit the runs check out clean (§5.3). */
   readonly snapshot: string;
   readonly commands: ReadonlyArray<{ readonly id: string; readonly command: string; readonly cwd?: string }>;
 }
@@ -244,45 +286,50 @@ export interface VerificationRun {
 }
 
 export interface FlowSchedulerPort {
-  /** Queue a seat task (idempotent by task id). */
+  /** Queue a seat task (idempotent by task id): a ready step for `mp pm next`. */
   submit(task: FlowTask): Promise<void>;
-  /** The task's state, or null when the scheduler does not know it. */
+  /** The task's state, or null when the memory does not know it. */
   status(task: string): Promise<FlowTaskStatus | null>;
-  /** Give a task up (not running): it leaves the queue. */
+  /** Give a task up (not in flight): it leaves the queue. */
   cancel(task: string): Promise<boolean>;
-  /** Replace a task that is not running (e.g. waiting for evidence) by another in the same lineage (6.5: counts go on). */
+  /** Replace a task that is not in flight by another in the same lineage (6.5: counts go on). */
   supersede(task: string, by: FlowTask): Promise<void>;
-  /** The Secretary restarts a task that needs disposition (quarantine-restart loop, 6.5). Null: not restartable. */
+  /** The Secretary restarts a task that needs disposition (counted on the quarantine-restart loop, 6.5). Null: not restartable. */
   restart(task: string, signature: string): Promise<LoopStatus | null>;
   /** Extra attempts for an exhausted loop (6.5): the Secretary once per lineage, at most 2; the user any. */
   grant(req: { readonly op: string; readonly lineage: string; readonly loop: LoopKind; readonly by: 'secretary' | 'user'; readonly extra: number; readonly reason: string }): Promise<{ readonly granted: boolean; readonly why?: string }>;
   /**
-   * 7.1: a read-only snapshot of the project (default: the mission's base commit), optionally
-   * with accepted product versions laid over it (a dependent task sees its prerequisites, 5.3).
+   * The commit a seat reads (default: the mission's base commit, the target branch's), with
+   * accepted product versions laid over it when given (a dependent task sees its prerequisites,
+   * 5.3). `path` is what the card names: the commit, or a project-relative path.
    */
   snapshot(req: {
     readonly mission: MissionId;
     readonly purpose: string;
     readonly commit?: string;
     readonly products?: readonly string[];
-    /** The seat's write-scope patterns: the result names the sandbox writable paths prepared for them (they must exist in the snapshot). */
+    /** The seat's write paths (kept on the card as they are; nothing is prepared in 4.1). */
     readonly writable?: readonly string[];
   }): Promise<{ readonly path: string; readonly commit: string; readonly writable?: readonly string[] }>;
   /** 3.5: whether a file of a snapshot exists and contains a symbol (the interface check; read-only, no model). */
   findSymbol(req: { readonly snapshot: string; readonly file: string; readonly symbol: string }): Promise<boolean>;
   /** 3.4: git history and run durations, exported into the Architect's card. */
   history(mission: MissionId): Promise<{ readonly gitLog: string; readonly runs: ReadonlyArray<{ readonly task: string; readonly seat: string; readonly durationMs: number; readonly costMicros: number }> }>;
-  /** 4.2: the product version of an accepted Constructor export (idempotent per launch). */
+  /** 4.2: the product version of an accepted Constructor candidate (idempotent per dispatch). */
   product(req: ProductRequest): Promise<ProductVersion>;
-  /** 4.1: the program's verification runs on a product version (idempotent; 'pending' while they run). */
+  /** 4.1 §5.3: the program's declared runs on a candidate's clean checkout (idempotent: reused; 'pending' never in 4.1). */
   verify(req: VerifyRequest): Promise<readonly VerificationRun[] | 'pending'>;
 }
 
 // ---------------------------------------------------------------- the evaluator port
 
 export interface FlowEvaluatorPort {
-  /** Display labels of objects / proof units (5.2), at one published revision (null: unknown target). */
-  labels(ids: readonly string[]): Promise<{ readonly revision: number; readonly labels: Readonly<Record<string, Label | null>> }>;
+  /**
+   * Labels of objects / proof units for a decision (5.2; 4.1 §4.1): "recomputing" for every id
+   * while a propagation frontier is left (nothing may be used as proven then), null for an
+   * unknown target. The revision is the one the stored labels reflect.
+   */
+  labels(ids: readonly string[]): Promise<{ readonly revision: number; readonly labels: Readonly<Record<string, Label | 'recomputing' | null>> }>;
   /** What decides each target's proof: positions, their states and deciding judgments (5.2, 8.1). */
   deciding(ids: readonly string[]): Promise<{ readonly revision: number; readonly views: Readonly<Record<string, DecidingView | null>> }>;
   /** Whether each judgment is current (null: unknown). */

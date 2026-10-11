@@ -45,7 +45,7 @@ async function world(): Promise<World> {
   const M0 = rawCommit(fx, repo, BASE, null, 'M0');
   checkoutMain(fx, repo, M0);
   const layout = await discoverRepo(fx.git, repo);
-  const d = await readTransformDescription(fx.git, layout, fx.user);
+  const d = await readTransformDescription(fx.git, layout);
   const dh = transformDescriptionHash(d);
   const CA1 = rawCommit(fx, repo, { ...BASE, 'a/x.ts': 'export const x = 2;\n' }, M0, 'A1');
   const { 'b/gone.ts': _gone, ...withoutGone } = BASE;

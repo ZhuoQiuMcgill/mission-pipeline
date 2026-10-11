@@ -25,7 +25,9 @@
 //   rounds (3.10)            explorations defined in the PM plan settle (event "settled" on
 //                            their line): structure type → the Architect decomposes the waiting
 //                            part; direction type, no conclusion, or the key conclusion not
-//                            standing → the Secretary, the PM and the user.
+//                            standing → the Secretary, the PM and the user. Only the current
+//                            settle counts (one per opening: a rerun after an environment change
+//                            reopens it); a changed conclusion after a reopening is routed again.
 //   re-plan requests         from execution (a Secretary's "re-plan") → a new Architect attempt.
 
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId, ObjectVersionId } from '../common/ids.ts';
@@ -40,7 +42,6 @@ import {
   cardBase,
   commit,
   currentVersions,
-  defaultLimits,
   ev,
   eventOf,
   eventsOf,
@@ -56,17 +57,17 @@ import {
   countedReturn,
   nextBasisVersion,
   tellOnce,
+  missionClosed,
   type FlowCtx,
 } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
 import {
   DetailedPlanDoc,
-  EXPLORATION_SETTLED,
   PLAN_LINE,
   PM_PLAN_EFFECTIVE,
   PmPlanDoc,
-  explorationLine,
+  SECRETARY_LINE,
   pmPlanIdProblems,
   feasibilityRequired,
   type ExplorationSettledBody,
@@ -75,9 +76,9 @@ import {
 } from './plandoc.ts';
 import type { FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
-import { appliedEvent, decisionFor, escalateToUser, escalation, isApplied, markApplied, raiseEscalation } from './secretary.ts';
+import { cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
-import { settledArtifactProven } from './exploration/step.ts';
+import { currentSettle, settledArtifactProven } from './exploration/step.ts';
 
 export interface PmBatchBody {
   readonly batch: string;
@@ -204,7 +205,14 @@ export async function submitPmBatch(
   if (!ix.current.has(setLine)) {
     records.unshift({ kind: 'basis.version', basisKind: 'requirement-set', line: setLine as BasisLineId, version: safeId(`${setLine}.v1`) as BasisVersionId, mission: req.mission, scope: null, snapshot: ports.ledger.content.putList([]) });
   }
-  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body)], records });
+  // planning handles only the latest batch from now on: the earlier batches' open escalations close in
+  // the batch's own write (nothing would carry a decision on them out; code review round 10)
+  const stale: string[] = [];
+  for (const o of batches) for (const e of await openEscalations(ctx, `plan:${o.body.plan}`)) stale.push(e.id);
+  const close = closing(ctx, stale, `PM plan ${plan} (batch b${n}) was submitted: a decision on the earlier batch is not carried out`);
+  const guard = carryGuard([close]);
+  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, ...(guard !== undefined ? { guard } : {}) });
+  await cancelSecretarySteps(ctx, stale);
   return { batch: body.batch, plan };
 }
 
@@ -226,7 +234,7 @@ function renderPmPlan(d: PmPlanDoc): string {
     `PM plan, round ${d.round}; order: ${d.order === 'user' ? 'specified by the user' : 'free'}`,
     ...d.elements.map(
       (e) =>
-        `[${e.id}] (${e.kind}) ${e.text}\n  provenance: ${e.provenance.by === 'user' ? `user said (message ${e.provenance.message}): "${e.provenance.quote}"` : 'PM supplement'}${e.after.length > 0 ? `\n  waits for: ${e.after.join(', ')}` : ''}${e.items.length > 0 ? `\n  items: ${e.items.join(', ')}` : ''}${e.exploration ? `\n  exploration ${e.exploration.id}: ${e.exploration.deliverable}; goal "${e.exploration.fuzzyGoal.quote}"; scope ${e.exploration.attackScope.join(', ')}; serves ${e.exploration.decision.type} decision ${e.exploration.decision.id}; budget ${e.exploration.budget.rounds} rounds` : ''}`,
+        `[${e.id}] (${e.kind}) ${e.text}\n  provenance: ${e.provenance.by === 'user' ? `user said (${e.provenance.words}): "${e.provenance.quote}"` : 'PM supplement'}${e.after.length > 0 ? `\n  waits for: ${e.after.join(', ')}` : ''}${e.items.length > 0 ? `\n  items: ${e.items.join(', ')}` : ''}${e.exploration ? `\n  exploration ${e.exploration.id}: ${e.exploration.deliverable}; goal "${e.exploration.fuzzyGoal.quote}"; scope ${e.exploration.attackScope.join(', ')}; serves ${e.exploration.decision.type} decision ${e.exploration.decision.id}; budget ${e.exploration.budget.rounds} rounds` : ''}`,
     ),
     d.goalsBeyond.length > 0 ? `Goals beyond this round:\n${d.goalsBeyond.map((g) => `- ${g}`).join('\n')}` : '',
     d.authorizations.length > 0 ? `Authorizations relied on: ${d.authorizations.join(', ')}` : '',
@@ -241,36 +249,41 @@ function renderDetailedPlan(p: DetailedPlanDoc): string {
     ...p.reusedInterfaces.map((i) => `reused interface ${i.name} at ${i.file}:${i.location} (${prov(i)})`),
     ...p.newInterfaces.map((i) => `new interface ${i.name}: ${i.definition}; searched: ${i.searched} (${prov(i)})`),
     ...p.modules.map((m) => `module ${m.id}: ${m.writeScope.join(', ')} (${prov(m)})`),
-    ...p.tasks.map((t) => `task ${t.id} (${t.kind}${t.module ? ` of ${t.module}` : ''}): ${t.goal}; standards: ${t.standards.map((s) => `[${s.id}] ${s.text}`).join(' ')}; writes ${t.writeScope.join(', ')}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t)})`),
+    ...p.tasks.map((t) => `task ${t.id} (${t.kind}${t.module ? ` of ${t.module}` : ''}): ${t.goal}; standards: ${t.standards.map((s) => `[${s.id}] ${s.text}`).join(' ')}; writes ${t.writeScope.join(', ') || 'nothing (reads and runs only)'}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t)})`),
     ...p.risks.map((r) => `risk: ${r}`),
   ].join('\n');
 }
 
-async function userWordsText(ctx: FlowCtx, messages: readonly string[]): Promise<string> {
-  const want = new Set(messages);
+/** The user's words entries (W-<n>, 4.1 §6.1), verbatim; an entry not recorded says so. */
+async function userWordsText(ctx: FlowCtx, entries: readonly string[]): Promise<string> {
+  const want = new Set(entries);
   const out: string[] = [];
   for (const c of await ctx.ports.ledger.records(['user.words'])) {
-    const r = c.record as UserWordsRecord;
-    if (!want.has(r.message)) continue;
+    // the 4.1 record carries its entry id (memory/domain/pm.ts recordWords); the message id stands in for an older one
+    const r = c.record as UserWordsRecord & { readonly words?: string };
+    const id = r.words ?? r.message;
+    if (!want.has(id)) continue;
     let text = r.excerpt;
     try {
       text = ctx.ports.ledger.content.get(r.text);
     } catch {
       /* the excerpt stands in */
     }
-    out.push(`[message ${r.message}]\n${text}`);
+    out.push(`[${id}]\n${text}`);
   }
-  for (const m of messages) if (!out.some((o) => o.startsWith(`[message ${m}]`))) out.push(`[message ${m}] (not booked)`);
+  for (const m of entries) if (!out.some((o) => o.startsWith(`[${m}]`))) out.push(`[${m}] (not recorded)`);
   return out.join('\n\n');
 }
 
 function renderItems(items: readonly CurrentItem[]): string {
-  return items.map((i) => `[${i.line}] (${i.type}, ${i.version}${i.state === 'contested' ? ', contested' : ''}) ${i.text}${i.source.kind === 'words' ? `\n  user said (message ${i.source.message}): "${i.source.quote}"` : `\n  rests on authorization ${i.source.line}`}`).join('\n');
+  return items.map((i) => `[${i.line}] (${i.type}, ${i.version}${i.state === 'contested' ? ', contested' : ''}) ${i.text}${i.source.kind === 'words' ? `\n  user said (${i.source.words}): "${i.source.quote}"` : `\n  rests on authorization ${i.source.line}`}`).join('\n');
 }
 
 // ---------------------------------------------------------------- the step
 
 export async function planningStep(ctx: FlowCtx): Promise<void> {
+  // a closed mission's production is held (4.1 §6.7): no decision-layer seat is queued for it
+  if (await missionClosed(ctx)) return;
   const batches = await eventsOf<PmBatchBody>(ctx, PLAN_LINE, 'pm-batch');
   const latest = batches.at(-1);
   if (latest === undefined) return;
@@ -288,8 +301,15 @@ export async function planningStep(ctx: FlowCtx): Promise<void> {
   const doc = pmDoc(ctx, b);
   if ((await eventOf(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, b.plan)) === null) {
     const body: PmPlanEffectiveBody = { plan: b.plan, batch: b.batch, round: b.round, doc: b.doc, explorations: doc.elements.flatMap((e) => (e.exploration ? [e.exploration.id] : [])) };
-    await commit(ctx, `flow:pm-effective:${ctx.mission}:${b.plan}`, { events: [ev(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, b.plan, body)] });
+    // the routing escalations of explorations this plan no longer has close in its own write
+    const dropped = await routingLeftBehind(ctx, doc);
+    const close = closing(ctx, dropped, `PM plan ${b.plan} took effect without the exploration: the work that waited for it is planned there`);
+    const guard = carryGuard([close]);
+    await commit(ctx, `flow:pm-effective:${ctx.mission}:${b.plan}`, { events: [ev(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, b.plan, body), ...close.events], ...(guard !== undefined ? { guard } : {}) });
+    await cancelSecretarySteps(ctx, dropped);
   }
+  // a crash net for both closes (the batch write, the effective write)
+  await closeLeftBehind(ctx, b, doc, batches.slice(0, -1).map((x) => x.body));
   await decompositionStep(ctx, b, doc);
 }
 
@@ -427,7 +447,7 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
   }
   const j0Lines = j0rec === null ? [] : ctx.ports.ledger.content.getList(j0rec.bases).map((v) => ix.lineOf.get(v)).filter((l): l is string => l !== undefined);
   const touchedItems = mode.kind === 'full' ? items : items.filter((i) => b.changedItems.includes(i.line) || b.dependentItems.includes(i.line) || doc.elements.some((e) => focus.includes(e.id) && e.items.some((x) => itemLine(ctx.mission, x) === i.line)));
-  const words = mode.kind === 'full' ? [...new Set([...b.userWords, ...items.flatMap((i) => (i.source.kind === 'words' ? [i.source.message] : []))])] : [...b.userWords];
+  const words = mode.kind === 'full' ? [...new Set([...b.userWords, ...items.flatMap((i) => (i.source.kind === 'words' ? [i.source.words] : []))])] : [...b.userWords];
   const auths = items.filter((i) => i.type === 'authorization');
   const materials = [
     material(ctx, 'words', "The user's words (verbatim)", await userWordsText(ctx, words), true, 'user-words'),
@@ -437,7 +457,7 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
     material(ctx, 'authorizations', 'Authorizations (verbatim)', renderItems(auths) || '(none)', true, 'authorizations'),
   ];
   const card: Calibrator1Card = {
-    ...cardBase(ctx, task, { duties: 'Audit the direction of this PM plan batch against the user\'s words; report every finding; ask what only the user can decide.', limits: defaultLimits('materials') }),
+    ...cardBase(ctx, task, { duties: 'Audit the direction of this PM plan batch against the user\'s words; report every finding; ask what only the user can decide.' }),
     seat: 'calibrator-1',
     target: b.plan,
     review: 'calibrator-1',
@@ -474,11 +494,13 @@ async function attempts(ctx: FlowCtx, b: PmBatchBody): Promise<AttemptBody[]> {
   return (await eventsOf<AttemptBody>(ctx, PLAN_LINE, 'attempt')).filter((e) => e.key.startsWith(`${b.plan}#`)).map((e) => e.body);
 }
 
-async function newAttempt(ctx: FlowCtx, b: PmBatchBody, a: Omit<AttemptBody, 'k'>, k: number, with_: readonly FlowEventInput[] = []): Promise<void> {
+async function newAttempt(ctx: FlowCtx, b: PmBatchBody, a: Omit<AttemptBody, 'k'>, k: number, with_: readonly FlowEventInput[] = [], carries: readonly Carry[] = []): Promise<void> {
   if ((await eventOf(ctx, PLAN_LINE, 'attempt', `${b.plan}#${k}`)) !== null) return; // already decided: not progress
   const body: AttemptBody = { ...a, k };
-  // the attempt and what decided it (a routing, an applied decision) are one append (code review r1 #13)
-  await commit(ctx, `flow:attempt:${ctx.mission}:${b.plan}:${k}`, { events: [ev(ctx, PLAN_LINE, 'attempt', `${b.plan}#${k}`, body), ...with_] });
+  // the attempt and what decided it (a routing, a decision carried out) are one append (code review r1 #13, round 10)
+  const guard = carryGuard(carries);
+  await commit(ctx, `flow:attempt:${ctx.mission}:${b.plan}:${k}`, { events: [ev(ctx, PLAN_LINE, 'attempt', `${b.plan}#${k}`, body), ...with_, ...carries.flatMap((c) => c.events)], records: carries.flatMap((c) => c.records), ...(guard !== undefined ? { guard } : {}) });
+  await carried(ctx, carries);
 }
 
 /** The latest effective detailed plan of the mission (any PM plan version), or null. */
@@ -487,37 +509,99 @@ export async function latestEffective(ctx: FlowCtx): Promise<EffectiveBody | nul
 }
 
 /**
- * Explorations of the plan, and which of them stand (3.10): settled with a conclusion, of
- * structure type or accepted within authority, AND its artifact proven now (code review r1 #2:
- * the "settled" event is history; a conclusion whose product lost its proof does not stand).
+ * An exploration's current settle as the decision layer reads it (exploration/step.ts
+ * currentSettle): the body, and the settle that first recorded the same conclusion (`route`, the
+ * key the conclusion is routed and accepted under: the exploration id for the first settle, so an
+ * older memory reads the same; "<id>#<n>" for a changed conclusion after a reopening).
+ */
+interface SettledExploration {
+  readonly body: ExplorationSettledBody;
+  readonly route: string;
+  readonly routeN: number;
+}
+
+/**
+ * Explorations of the plan, and which of them stand (3.10): currently settled with a conclusion,
+ * of structure type or accepted within authority, AND its artifact proven now (code review r1 #2: a
+ * settle is a record; a conclusion whose product lost its proof does not stand). An exploration a
+ * rerun reopened has no current settle: unsettled until it settles again (code review r1 #3).
  * `artifacts`: the products the plan rests on, for its contracts.
  */
-async function explorationState(ctx: FlowCtx, doc: PmPlanDoc): Promise<{ unsettled: Set<string>; settled: Map<string, ExplorationSettledBody>; proven: Set<string>; artifacts: string[] }> {
+async function explorationState(ctx: FlowCtx, doc: PmPlanDoc): Promise<{ unsettled: Set<string>; settled: Map<string, SettledExploration>; proven: Set<string>; artifacts: string[]; recomputing: boolean }> {
   const unsettled = new Set<string>();
-  const settled = new Map<string, ExplorationSettledBody>();
+  const settled = new Map<string, SettledExploration>();
   const proven = new Set<string>();
   const artifacts: string[] = [];
+  // a conclusion whose product label is recomputing is pending, not "not proven" (4.1 §4.1): the
+  // planning step takes no decision on it and writes nothing until the labels are current
+  let recomputing = false;
   for (const e of doc.elements) {
     if (!e.exploration) continue;
     const id = e.exploration.id;
-    const s = await eventOf<ExplorationSettledBody>(ctx, explorationLine(id), EXPLORATION_SETTLED, id);
-    if (s !== null) settled.set(id, s.body);
+    const c = await currentSettle(ctx.ports, ctx.mission, id);
+    const s = c === null ? null : { body: c.body, route: c.since.key, routeN: c.since.n };
+    if (s !== null) settled.set(id, s);
     const artifact = s !== null && s.body.outcome === 'conclusion' ? await settledArtifactProven(ctx.ports, ctx.mission, id) : null;
+    if (artifact?.label === 'recomputing') recomputing = true;
     if (artifact?.proven === true) proven.add(id);
-    const stands = artifact?.proven === true && s !== null && (s.body.decision.type === 'structure' || (await explorationAccepted(ctx, id)));
+    const stands = artifact?.proven === true && s !== null && (s.body.decision.type === 'structure' || (await explorationAccepted(ctx, id, s.routeN)));
     if (!stands) unsettled.add(id);
     else if (artifact?.artifact) artifacts.push(artifact.artifact);
   }
-  return { unsettled, settled, proven, artifacts };
+  return { unsettled, settled, proven, artifacts, recomputing };
 }
 
-/** The escalation about an exploration's outcome (the id encoded injectively, review r2). */
-const exploreEscalation = (mission: string, exploration: string): string => safeId(`explore.${mission}.${idPart(exploration)}`);
+/**
+ * The escalation about an exploration's outcome (the id encoded injectively, review r2): one per
+ * conclusion routed (`n`: the settle that first recorded it; the first keeps the plain id).
+ */
+const exploreEscalation = (mission: string, exploration: string, n = 1): string => safeId(`explore.${mission}.${idPart(exploration)}${n > 1 ? `.s${n}` : ''}`);
 
-async function explorationAccepted(ctx: FlowCtx, exploration: string): Promise<boolean> {
-  const id = exploreEscalation(ctx.mission, exploration);
-  const d = await decisionFor(ctx, id);
+/**
+ * The routing escalation in force for a conclusion: the plain one, or, once that one was closed
+ * without being carried out (a PM plan in effect without the exploration, a rerun that reopened it),
+ * the next one, ".r1", ".r2"...: the first that is not closed.
+ */
+async function routingEscalation(ctx: FlowCtx, exploration: string, n: number): Promise<string> {
+  const base = exploreEscalation(ctx.mission, exploration, n);
+  for (let i = 0; ; i++) {
+    const id = i === 0 ? base : safeId(`${base}.r${i}`);
+    if ((await closedEscalation(ctx, id)) === null) return id;
+  }
+}
+
+async function explorationAccepted(ctx: FlowCtx, exploration: string, n = 1): Promise<boolean> {
+  const d = await decisionFor(ctx, await routingEscalation(ctx, exploration, n));
   return d !== null && d.option === 'accept';
+}
+
+/**
+ * A PM plan in effect leaves the earlier batches behind (planningStep handles only the latest): their
+ * open "plan:" escalations, and the routing escalations of explorations it no longer has, are closed
+ * as superseded and their queued Secretary steps cancelled (nothing would carry a decision on them out).
+ */
+/** The open routing escalations (explore.*) of explorations the plan does not have. */
+async function routingLeftBehind(ctx: FlowCtx, doc: PmPlanDoc): Promise<string[]> {
+  const kept = new Set(doc.elements.flatMap((e) => (e.exploration ? [e.exploration.id] : [])));
+  const out: string[] = [];
+  for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
+    if (!e.key.startsWith('explore.') || !e.body.subject.startsWith('exploration:') || kept.has(e.body.subject.slice('exploration:'.length))) continue;
+    if (!(await isApplied(ctx, e.key))) out.push(e.key);
+  }
+  return out;
+}
+
+async function closeLeftBehind(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, older: readonly PmBatchBody[]): Promise<void> {
+  for (const o of older) {
+    await closeEscalations(ctx, `flow:superseded:${ctx.mission}:plan:${o.plan}`, `plan:${o.plan}`, `PM plan ${b.plan} took effect: a decision on the earlier batch ${o.plan} is not carried out`);
+  }
+  const kept = new Set(doc.elements.flatMap((e) => (e.exploration ? [e.exploration.id] : [])));
+  const subjects = new Set((await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).filter((e) => e.key.startsWith('explore.') && e.body.subject.startsWith('exploration:')).map((e) => e.body.subject));
+  for (const subject of subjects) {
+    const x = subject.slice('exploration:'.length);
+    if (kept.has(x)) continue;
+    await closeEscalations(ctx, `flow:superseded:${ctx.mission}:${subject}`, subject, `PM plan ${b.plan} took effect without exploration ${x}: the work that waited for it is planned there`, { keep: (e) => !e.id.startsWith('explore.') });
+  }
 }
 
 async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): Promise<void> {
@@ -525,15 +609,32 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   const list = await attempts(ctx, b);
   if (list.length === 0) {
     const ex0 = await explorationState(ctx, doc);
+    // 4.1 §4.1: while an exploration's product label recomputes, the decisions that rest on its proof
+    // (what to decompose, the routing, the Architect's card, the mechanical check) wait and write
+    // nothing; the Calibrator ②, feasibility and order decisions do not rest on it and go on
+    if (ex0.recomputing) return;
     const decomposable = doc.elements.some((e) => e.kind !== 'exploration' && !e.after.some((x) => ex0.unsettled.has(x)));
     if (!decomposable) {
       // 3.10: nothing to plan before the nearest exploration stands; its settling starts the Architect
-      await roundsStep(ctx, b, doc, null, null, ex0.settled, ex0.proven);
+      await roundsStep(ctx, b, doc, null, null);
       return;
     }
-    // a new PM plan version re-plans from the latest effective detailed plan, if any
+    // a new PM plan version re-plans from the latest effective detailed plan, if any. The explorations
+    // that stand now are planned from in this attempt (its card carries their conclusions): they are
+    // routed with it, in the same append (an accepted direction conclusion's escalation carried out),
+    // so no second attempt routes them again and no accepted escalation stays open
     const prev = await latestEffective(ctx);
-    await newAttempt(ctx, b, { reason: 'initial', previous: prev?.dplan ?? null, mechanicalFailures: [], feasibilityFindings: [], instructions: prev !== null ? [`The PM plan changed to version ${b.plan}; revise the previous detailed plan to it.`] : [], conclusions: [] }, 1);
+    const routedNow: FlowEventInput[] = [];
+    const carries: Carry[] = [];
+    for (const [id, c] of ex0.settled) {
+      if (ex0.unsettled.has(id) || (await eventOf(ctx, PLAN_LINE, 'exploration-routed', c.route)) !== null) continue;
+      routedNow.push(ev(ctx, PLAN_LINE, 'exploration-routed', c.route, { exploration: id, route: 'initial', ...(c.routeN > 1 ? { settle: c.routeN } : {}) }));
+      if (c.body.decision.type !== 'structure') {
+        const esc = await routingEscalation(ctx, id, c.routeN);
+        if ((await escalation(ctx, esc)) !== null && !(await isApplied(ctx, esc))) carries.push(await carryOut(ctx, esc, { option: 'accept' }));
+      }
+    }
+    await newAttempt(ctx, b, { reason: 'initial', previous: prev?.dplan ?? null, mechanicalFailures: [], feasibilityFindings: [], instructions: prev !== null ? [`The PM plan changed to version ${b.plan}; revise the previous detailed plan to it.`] : [], conclusions: [] }, 1, routedNow, carries);
     return;
   }
   const a = list.at(-1) as AttemptBody;
@@ -559,6 +660,8 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   // 3.5 mechanical checks
   let mc = (await eventOf<MechanicalResult>(ctx, PLAN_LINE, 'mechanical-check', dplan))?.body ?? null;
   if (mc === null) {
+    // it reads which explorations are unsettled: never from a label that recomputes
+    if (ex.recomputing) return;
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
     mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }) });
     await commit(ctx, `flow:mechanical:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'mechanical-check', dplan, mc)] });
@@ -678,7 +781,7 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   }
 
   // 3.10: settled explorations, and re-plan requests from execution
-  await roundsStep(ctx, b, doc, a, dplan, ex.settled, ex.proven);
+  await roundsStep(ctx, b, doc, a, dplan);
 }
 
 export const standardLine = (mission: string, task: string, standard: string): string => safeId(`std.${mission}.${idPart(task)}.${idPart(standard)}`);
@@ -794,36 +897,58 @@ async function calibrator2Step(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   return 'pass';
 }
 
-async function roundsStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody | null, dplan: string | null, settled: ReadonlyMap<string, ExplorationSettledBody>, proven: ReadonlySet<string>): Promise<void> {
+async function roundsStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody | null, dplan: string | null): Promise<void> {
+  // the routing rests on the explorations' proof: one read, taken here (never one from before this
+  // pass's writes), both waits while a product label recomputes and gives what it routes from
+  const { settled, proven, recomputing } = await explorationState(ctx, doc);
+  if (recomputing) return;
   const k = (a?.k ?? 0) + 1;
   const lineage = planLineage(ctx.mission, b.n);
-  // explorations that settled since: route by decision type (3.10); a conclusion whose artifact is not proven is no conclusion
-  for (const [id, s0] of settled) {
-    if ((await eventOf(ctx, PLAN_LINE, 'exploration-routed', id)) !== null) continue;
+  // explorations that settled since: route by decision type (3.10); a conclusion whose artifact is not proven is no conclusion.
+  // Each conclusion is routed once, under the settle that first recorded it: a re-check that confirms it after a
+  // reopening is not routed again; a changed one (another product, or no conclusion) is (code review r1 #3)
+  for (const [id, c] of settled) {
+    if ((await eventOf(ctx, PLAN_LINE, 'exploration-routed', c.route)) !== null) continue;
+    const s0 = c.body;
     const s: ExplorationSettledBody = s0.outcome === 'conclusion' && !proven.has(id) ? { ...s0, outcome: 'no-conclusion' } : s0;
-    const routed = (route: string): FlowEventInput => ev(ctx, PLAN_LINE, 'exploration-routed', id, { exploration: id, route });
+    const again = c.routeN > 1;
+    const routed = (route: string): FlowEventInput => ev(ctx, PLAN_LINE, 'exploration-routed', c.route, { exploration: id, route, ...(again ? { settle: c.routeN } : {}) });
     if (s.decision.type === 'structure' && s.outcome === 'conclusion') {
-      await newAttempt(ctx, b, { reason: 'exploration', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [`Exploration ${id} has stood: plan the part that waited for it.`], conclusions: [{ exploration: id, summary: s.summary }] }, k, [routed('architect')]);
+      const instruction = again ? `Exploration ${id} has stood again with a changed result after an environment change reopened it: revise the plan to it.` : `Exploration ${id} has stood: plan the part that waited for it.`;
+      await newAttempt(ctx, b, { reason: 'exploration', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [instruction], conclusions: [{ exploration: id, summary: s.summary }] }, k, [routed('architect')]);
       return;
     }
-    const esc = exploreEscalation(ctx.mission, id);
+    const esc = await routingEscalation(ctx, id, c.routeN);
     await raiseEscalation(ctx, {
       id: esc,
       source: s.stop === 'budget' ? 'exploration-budget' : s.stop === 'repeated-fatal' || s.stop === 'no-progress' ? 'exploration-repeated-fatal' : 'exploration-direction',
       lineage,
       subject: `exploration:${id}`,
-      summary: `Exploration ${id} stopped (${s.stop}, ${s.outcome}) and serves a ${s.decision.type} decision (${s.decision.id}): ${s.summary}`,
+      summary: `Exploration ${id} stopped (${s.stop}, ${s.outcome})${again ? ' again after an environment change reopened it' : ''} and serves a ${s.decision.type} decision (${s.decision.id}): ${s.summary}`,
       reasons: [...s.unresolved],
-      options: s.outcome === 'conclusion' ? ['accept', 'ask-user'] : ['ask-user'],
+      // every routing escalation offers a decision the flow carries out: accept a conclusion, or have
+      // the PM re-plan the waiting part with the user when there is none (code review S1)
+      options: s.outcome === 'conclusion' ? ['accept', 'ask-user'] : ['replan', 'ask-user'],
       facts: s,
     });
     const d = await decisionFor(ctx, esc);
     if (d === null) continue;
     if (d.option === 'accept') {
-      await newAttempt(ctx, b, { reason: 'exploration', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [`Exploration ${id} has stood (accepted within authority): plan the part that waited for it.`], conclusions: [{ exploration: id, summary: s.summary }] }, k, [routed('accept'), appliedEvent(ctx, esc, { option: 'accept' })]);
+      await newAttempt(ctx, b, { reason: 'exploration', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [`Exploration ${id} has stood (accepted within authority): plan the part that waited for it.`], conclusions: [{ exploration: id, summary: s.summary }] }, k, [routed('accept')], [await carryOut(ctx, esc, { option: 'accept' })]);
       return;
     }
-    await commit(ctx, `flow:exploration-routed:${ctx.mission}:${id}`, { events: [routed(d.option), appliedEvent(ctx, esc, { option: d.option })] });
+    if (d.option === 'replan') {
+      // the PM re-plans the part that waited for it with the user (a notice, WI-08); the routing is done
+      await notify(ctx, {
+        category: 'exploration-no-conclusion',
+        wi: WI.loopExhausted,
+        key: `${id}:${c.route}`,
+        trigger: `exploration ${id} ended without a conclusion that stands (${s.stop}): ${s.summary.slice(0, 300)}`,
+        defaultAction: `re-plan the part that waited for it with the user (a new exploration id or another approach): mp pm plan submit with their words; until then the work that waited for exploration ${id} stays unplanned and the rest of the mission goes on`,
+        detail: { exploration: id, settle: c.route, stop: s.stop, decision: s.decision },
+      });
+    }
+    await commitCarrying(ctx, `flow:exploration-routed:${ctx.mission}:${c.route}`, [routed(d.option)], [await carryOut(ctx, esc, { option: d.option })]);
   }
   // re-plan requests from execution (a Secretary's or the user's "re-plan")
   for (const r of await eventsOf<{ escalation: string; task: string; instructions: string }>(ctx, PLAN_LINE, 'replan-request')) {
@@ -838,15 +963,17 @@ async function roundsStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: Attem
 
 async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody, task: string, dplan: string): Promise<void> {
   const ex = await explorationState(ctx, doc);
+  // its card names the unsettled explorations and the products the plan rests on: not while they recompute
+  if (ex.recomputing) return;
   const items = await currentItems(ctx);
   const planItems = new Set(doc.elements.flatMap((e) => e.items.map((i) => itemLine(ctx.mission, i))));
   const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
   const history = await ctx.ports.scheduler.history(ctx.mission);
   const previous = a.previous === null ? null : await detailedPlanOf(ctx, a.previous);
   const conclusions = [...a.conclusions];
-  for (const [id, s] of ex.settled) if (!ex.unsettled.has(id) && !conclusions.some((c) => c.exploration === id)) conclusions.push({ exploration: id, summary: s.summary });
+  for (const [id, s] of ex.settled) if (!ex.unsettled.has(id) && !conclusions.some((c) => c.exploration === id)) conclusions.push({ exploration: id, summary: s.body.summary });
   const card: ArchitectDecomposeCard = {
-    ...cardBase(ctx, task, { duties: 'Decompose the approved PM plan into a detailed plan for this round; trace every element; fix exactly what a revision asks.', limits: defaultLimits('read') }),
+    ...cardBase(ctx, task, { duties: 'Decompose the approved PM plan into a detailed plan for this round; trace every element; fix exactly what a revision asks.' }),
     seat: 'architect-decompose',
     workspace: { snapshot: snap.path, writablePaths: [] },
     pmPlan: {
@@ -884,7 +1011,7 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
   const history = await ctx.ports.scheduler.history(ctx.mission);
   const ix = await basisIndex(ctx);
   const card: ArchitectFeasibilityCard = {
-    ...cardBase(ctx, task, { duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.', limits: defaultLimits('read') }),
+    ...cardBase(ctx, task, { duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
     seat: 'architect-feasibility',
     workspace: { snapshot: snap.path, writablePaths: [] },
     target: dplan,
@@ -924,7 +1051,7 @@ async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a
     material(ctx, 'authorizations', 'Authorizations (verbatim)', renderItems(items.filter((i) => i.type === 'authorization')) || '(none)', true, 'authorizations'),
   ];
   const card: Calibrator2Card = {
-    ...cardBase(ctx, task, { duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate.", limits: defaultLimits('materials') }),
+    ...cardBase(ctx, task, { duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
     seat: 'calibrator-2',
     target: dplan,
     review: 'calibrator-2',

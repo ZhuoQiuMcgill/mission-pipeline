@@ -12,7 +12,7 @@ import {
   LFS_SPEC_URL,
   parseLfsPointer,
 } from '../src/git/lfs.ts';
-import { batchCheck, discoverRepo, gitObjectId, type RepoLayout } from '../src/git/objects.ts';
+import { discoverRepo, type RepoLayout } from '../src/git/objects.ts';
 import {
   AttributeEvaluator,
   canonicalize,
@@ -55,7 +55,7 @@ async function setup(files: Record<string, FileSpec>, config: Record<string, str
   const base = rawCommit(fx, repo, files, null, 'base');
   checkoutMain(fx, repo, base);
   const layout = await discoverRepo(fx.git, repo);
-  const d = await readTransformDescription(fx.git, layout, fx.user);
+  const d = await readTransformDescription(fx.git, layout);
   const ev = await AttributeEvaluator.create(fx.git, layout, d, fx.root);
   return { repo, layout, base, d, ev };
 }
@@ -109,21 +109,21 @@ test('transform description: effective settings from the user configuration, has
     const h0 = transformDescriptionHash(s.d);
     mkdirSync(join(s.layout.commonDir, 'info'), { recursive: true });
     writeFileSync(join(s.layout.commonDir, 'info', 'attributes'), '');
-    assert.equal(transformDescriptionHash(await readTransformDescription(fx.git, s.layout, fx.user)), h0, 'empty info/attributes equals none');
+    assert.equal(transformDescriptionHash(await readTransformDescription(fx.git, s.layout)), h0, 'empty info/attributes equals none');
     // The user's global config and global attributes are part of the effective settings.
     writeFileSync(join(fx.home, '.gitconfig'), '[core]\n\tautocrlf = input\n');
     mkdirSync(join(fx.home, '.config', 'git'), { recursive: true });
     writeFileSync(join(fx.home, '.config', 'git', 'attributes'), '*.md text\n');
     try {
-      const d2 = await readTransformDescription(fx.git, s.layout, fx.user);
+      const d2 = await readTransformDescription(fx.git, s.layout);
       assert.equal(d2.autocrlf, 'input');
       assert.equal(d2.attributes.global, '*.md text\n');
       assert.notEqual(transformDescriptionHash(d2), h0);
       fx.raw(['config', 'core.autocrlf', 'false'], s.repo); // repository config overrides global
-      assert.equal((await readTransformDescription(fx.git, s.layout, fx.user)).autocrlf, 'false');
+      assert.equal((await readTransformDescription(fx.git, s.layout)).autocrlf, 'false');
       fx.raw(['config', '--unset', 'core.autocrlf'], s.repo);
       writeFileSync(join(s.layout.commonDir, 'config'), readFileSync(join(s.layout.commonDir, 'config'), 'utf8') + '[core]\n\tautocrlf\n');
-      assert.equal((await readTransformDescription(fx.git, s.layout, fx.user)).autocrlf, 'true', 'a valueless key is true');
+      assert.equal((await readTransformDescription(fx.git, s.layout)).autocrlf, 'true', 'a valueless key is true');
       fx.raw(['config', '--unset', 'core.autocrlf'], s.repo);
     } finally {
       rmSync(join(fx.home, '.gitconfig'));
@@ -288,10 +288,6 @@ test('Git LFS pointers are produced and resolved by the program itself (git-lfs 
       message: 'lfs\n',
       author: ident,
       committer: ident,
-      admit: (sizes) => {
-        assert.deepEqual(sizes.lfsObjectSizes, [100_000]);
-        return true;
-      },
     }).catch((e: unknown) => e);
     // ptr.bin's object does not exist locally, so the candidate cannot be materialized: reported, typed.
     assert.ok(r instanceof RepresentationError && r.code === 'lfs-object-missing', String(r));
@@ -388,45 +384,6 @@ test('seat snapshots: special files, nested .git, excluded paths, non-UTF-8 name
     } finally {
       other.dispose();
     }
-  } finally {
-    s.ev.dispose();
-  }
-});
-
-test('commit-generation admission sees every write before anything is written (6.5)', async () => {
-  const s = await setup({ '.gitattributes': '*.txt eol=crlf\n', 'a.txt': 'a\n' });
-  try {
-    const snap = dir('snap');
-    const manifest = await materializeSnapshot({ git: fx.git, repo: s.layout, commit: s.base, attributes: s.ev, dest: snap });
-    mkdirSync(join(snap, 'd1', 'd2'), { recursive: true });
-    writeFileSync(join(snap, 'd1', 'd2', 'n.txt'), 'x\r\ny\r\n'); // converted: staged in a temp file
-    writeFileSync(join(snap, 'raw.bin'), Buffer.from([1, 2, 3])); // identity: read from the snapshot directly
-    let seen: { newObjects: readonly { type: string; size: number }[]; tempFileSizes: readonly number[] } | null = null;
-    const r = await canonicalize({
-      git: fx.git,
-      repo: s.layout,
-      base: manifest,
-      snapshotDir: snap,
-      attributes: s.ev,
-      candidateDir: dir('candidate'),
-      tempDir: fx.root,
-      message: 'm\n',
-      author: ident,
-      committer: ident,
-      admit: (sizes) => {
-        seen = sizes;
-        return false;
-      },
-    });
-    assert.equal(r.kind, 'not-admitted');
-    assert.ok(seen !== null);
-    const sizes = seen as { newObjects: readonly { type: string; size: number }[]; tempFileSizes: readonly number[] };
-    // Two blobs, three new trees (root, d1, d1/d2), one commit.
-    assert.deepEqual(sizes.newObjects.map((o) => o.type), ['blob', 'blob', 'tree', 'tree', 'tree', 'commit']);
-    assert.deepEqual(sizes.tempFileSizes, [4]);
-    const blob = gitObjectId('sha1', 'blob', Buffer.from('x\ny\n'));
-    const info = await batchCheck(fx.git, s.layout, [blob]);
-    assert.equal(info.get(blob), null, 'nothing was written');
   } finally {
     s.ev.dispose();
   }

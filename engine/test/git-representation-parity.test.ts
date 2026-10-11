@@ -88,7 +88,7 @@ test('materialized snapshots equal git checkout for every attribute, config and 
     const commit = rawCommit(fx, repo, files, null, 'parity');
     checkoutMain(fx, repo, commit);
     const layout = await discoverRepo(fx.git, repo);
-    const d = await readTransformDescription(fx.git, layout, fx.user);
+    const d = await readTransformDescription(fx.git, layout);
     assert.equal(d.autocrlf, cfg.autocrlf === null ? 'false' : cfg.autocrlf);
     const ev = await AttributeEvaluator.create(fx.git, layout, d, fx.root);
     try {
@@ -139,7 +139,7 @@ test('generated blobs equal what git add stores, including the safer-autocrlf ru
       staged.set(rec.slice(tab + 1), gitOid(rec.slice(0, tab).split(' ')[1] as string));
     }
     const layout = await discoverRepo(fx.git, repo);
-    const d = await readTransformDescription(fx.git, layout, fx.user);
+    const d = await readTransformDescription(fx.git, layout);
     const ev = await AttributeEvaluator.create(fx.git, layout, d, fx.root);
     try {
       const attrs = await ev.atTree(commit, paths.map((p) => p.path));

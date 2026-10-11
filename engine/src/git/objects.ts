@@ -1,17 +1,17 @@
-// Object-level plumbing shared by representation, refs and landing (7.1, 6.6).
+// Object-level plumbing shared by representation, workspaces, delivery and landing (7.1, 6.6).
 // Everything here reads or writes raw objects: no command used here applies a
 // content filter or an end-of-line conversion.
 
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import type { GitOid } from '../common/ids.ts';
-import type { GitSandbox, SafeGit } from './safeGit.ts';
+import type { GitExec } from './plainGit.ts';
 
 export type ObjectFormat = 'sha1' | 'sha256';
 
 /**
  * Builds a GitOid (ids.ts) from a field git's own output defines as an object id,
- * or from an id computed here; never from guessing at a string's shape (DIVRA D2
+ * or from an id computed here; never from guessing at a string's shape (3.0 once
  * read a path as a blob id).
  */
 export function gitOid(s: string): GitOid {
@@ -50,7 +50,7 @@ export function decodePath(raw: Buffer): string {
   }
 }
 
-export async function discoverRepo(git: SafeGit, path: string): Promise<RepoLayout> {
+export async function discoverRepo(git: GitExec, path: string): Promise<RepoLayout> {
   const out = await git.text(
     ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--is-bare-repository', '--show-object-format'],
     { cwd: path },
@@ -123,7 +123,7 @@ function normalizeMode(m: string): EntryMode {
 
 /** `ls-tree -z --full-tree` of a tree-ish. `recursive` lists every file; `withTrees` also lists the subtrees. */
 export async function lsTree(
-  git: SafeGit,
+  git: GitExec,
   repo: RepoLayout,
   treeish: string,
   opts: { readonly recursive: boolean; readonly withTrees?: boolean },
@@ -151,16 +151,13 @@ export async function lsTree(
   return entries;
 }
 
-export async function resolveCommit(git: SafeGit, repo: RepoLayout, rev: string, sandbox?: GitSandbox): Promise<GitOid | null> {
-  const r = await git.run([...repoArgs(repo), 'rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`], {
-    cwd: repo.commonDir,
-    ...(sandbox ? { sandbox } : {}),
-  });
+export async function resolveCommit(git: GitExec, repo: RepoLayout, rev: string): Promise<GitOid | null> {
+  const r = await git.run([...repoArgs(repo), 'rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`], { cwd: repo.commonDir });
   if (r.code !== 0) return null;
   return gitOid(r.stdout.toString('utf8').trim());
 }
 
-export async function treeOfCommit(git: SafeGit, repo: RepoLayout, commit: GitOid): Promise<GitOid> {
+export async function treeOfCommit(git: GitExec, repo: RepoLayout, commit: GitOid): Promise<GitOid> {
   return gitOid(await git.text([...repoArgs(repo), 'rev-parse', '--verify', '--end-of-options', `${commit}^{tree}`], { cwd: repo.commonDir }));
 }
 
@@ -168,13 +165,13 @@ export type Ancestry = 'yes' | 'no' | 'unknown';
 
 /**
  * 6.6 v49: is `ancestor` contained in `descendant`, judged on the commit objects'
- * own parent edges: no grafts (GIT_GRAFT_FILE=/dev/null, SafeGit's environment),
- * no replace objects (forced), no commit-graph cache. 'unknown' when it cannot be
+ * own parent edges: no replace objects (the git runner's environment), no
+ * commit-graph cache. 'unknown' when it cannot be
  * confirmed: a shallow repository (the walk may stop at its boundary and answer
  * "no") or a missing commit (never fetched: GIT_NO_LAZY_FETCH).
  */
-export async function ancestry(git: SafeGit, repo: RepoLayout, ancestor: GitOid, descendant: GitOid, sandbox?: GitSandbox): Promise<Ancestry> {
-  const opts = { cwd: repo.commonDir, config: [['core.commitGraph', 'false']] as const, ...(sandbox ? { sandbox } : {}) };
+export async function ancestry(git: GitExec, repo: RepoLayout, ancestor: GitOid, descendant: GitOid): Promise<Ancestry> {
+  const opts = { cwd: repo.commonDir, config: [['core.commitGraph', 'false']] as const };
   const shallow = await git.run([...repoArgs(repo), 'rev-parse', '--is-shallow-repository'], opts);
   if (shallow.code !== 0 || shallow.stdout.toString('utf8').trim() !== 'false') return 'unknown';
   const r = await git.run([...repoArgs(repo), 'merge-base', '--is-ancestor', ancestor, descendant], opts);
@@ -182,8 +179,8 @@ export async function ancestry(git: SafeGit, repo: RepoLayout, ancestor: GitOid,
 }
 
 /** `ancestry`, for callers that cannot act on "unknown": it throws then. */
-export async function isAncestor(git: SafeGit, repo: RepoLayout, ancestor: GitOid, descendant: GitOid, sandbox?: GitSandbox): Promise<boolean> {
-  const a = await ancestry(git, repo, ancestor, descendant, sandbox);
+export async function isAncestor(git: GitExec, repo: RepoLayout, ancestor: GitOid, descendant: GitOid): Promise<boolean> {
+  const a = await ancestry(git, repo, ancestor, descendant);
   if (a === 'unknown') throw new Error(`whether ${ancestor} is an ancestor of ${descendant} cannot be confirmed (a shallow repository or a missing commit)`);
   return a === 'yes';
 }
@@ -196,7 +193,7 @@ export interface ObjectInfo {
 }
 
 /** `cat-file --batch-check`: type and size of each object, null when missing. */
-export async function batchCheck(git: SafeGit, repo: RepoLayout, oids: readonly GitOid[]): Promise<Map<GitOid, ObjectInfo | null>> {
+export async function batchCheck(git: GitExec, repo: RepoLayout, oids: readonly GitOid[]): Promise<Map<GitOid, ObjectInfo | null>> {
   const result = new Map<GitOid, ObjectInfo | null>();
   const unique = [...new Set(oids)];
   if (unique.length === 0) return result;
@@ -223,7 +220,7 @@ export const DEFAULT_BATCH_BYTES = 32 * 1024 * 1024;
  * requested object id (duplicates are read once).
  */
 export async function readObjects(
-  git: SafeGit,
+  git: GitExec,
   repo: RepoLayout,
   oids: readonly GitOid[],
   visit: (oid: GitOid, type: string, content: Buffer) => void | Promise<void>,
@@ -271,7 +268,7 @@ export async function readObjects(
   }
 }
 
-export async function readBlob(git: SafeGit, repo: RepoLayout, oid: GitOid): Promise<Buffer> {
+export async function readBlob(git: GitExec, repo: RepoLayout, oid: GitOid): Promise<Buffer> {
   let out: Buffer | null = null;
   await readObjects(git, repo, [oid], (_o, type, content) => {
     if (type !== 'blob') throw new Error(`${oid} is a ${type}, not a blob`);
@@ -378,7 +375,7 @@ function depth(d: string): number {
 }
 
 /** Writes one tree with `mktree -z` (git validates the entries and that the objects exist). */
-export async function mktree(git: SafeGit, repo: RepoLayout, items: readonly TreeItem[]): Promise<GitOid> {
+export async function mktree(git: GitExec, repo: RepoLayout, items: readonly TreeItem[]): Promise<GitOid> {
   const parts: Buffer[] = [];
   for (const it of items) {
     const type = it.mode === '040000' ? 'tree' : it.mode === '160000' ? 'commit' : 'blob';
@@ -396,7 +393,7 @@ export async function mktree(git: SafeGit, repo: RepoLayout, items: readonly Tre
 }
 
 /** Writes blobs from files with `hash-object -w --no-filters` (no filter, no eol conversion). */
-export async function writeBlobsFromFiles(git: SafeGit, repo: RepoLayout, files: readonly string[]): Promise<GitOid[]> {
+export async function writeBlobsFromFiles(git: GitExec, repo: RepoLayout, files: readonly string[]): Promise<GitOid[]> {
   if (files.length === 0) return [];
   for (const f of files) if (f.includes('\n')) throw new TypeError('path for --stdin-paths contains a newline');
   const out = await git.text([...repoArgs(repo), 'hash-object', '-w', '--no-filters', '--stdin-paths'], {
@@ -418,7 +415,7 @@ export interface Ident {
 }
 
 export async function commitTree(
-  git: SafeGit,
+  git: GitExec,
   repo: RepoLayout,
   tree: GitOid,
   parents: readonly GitOid[],

@@ -1,11 +1,17 @@
-// Shared fixtures of the exploration flow tests: the fakes of src/flow/fakes.ts, a definition,
-// and scripted seat hand-backs (no model is ever called).
+// Shared fixtures of the exploration flow tests: the flows' ports on a project memory
+// (test/flow-memory-fixtures.ts), a definition, and scripted seat hand-backs (no model is ever
+// called). Every attack round is judged by the Stabilizer (4.1 §6.3): once the author disposed of
+// its findings, or at once when it left the author nothing to answer. Unless a test turns it off,
+// the fixture hands back the Stabilizer's default judgment (every finding in scope at the
+// attacker's severity, the round on track), so the 4.0 rules of the rounds stay what is tested.
 
 import type { MissionId } from '../src/common/ids.ts';
-import { fakePorts, type FakeFlowEvaluator, type FakeFlowLedger, type FakeFlowScheduler } from '../src/flow/fakes.ts';
+import { memoryPorts, type HarnessLedger, type HarnessScheduler, type MemoryWorld } from './flow-memory-fixtures.ts';
+import type { MemoryFlowEvaluator } from '../src/process/index.ts';
+import type { StabilizerCard, StabilizerResult } from '../src/seat/cards/stabilizer.ts';
 import { explorationDefinition, type ExplorationDefinition } from '../src/flow/exploration/definition.ts';
 import { advanceExploration, defineExploration, type AdvanceReport } from '../src/flow/exploration/flow.ts';
-import type { CrititorCard, CrititorResult } from '../src/seat/cards/crititor.ts';
+import { attackOutcome, type CrititorCard, type CrititorResult } from '../src/seat/cards/crititor.ts';
 import type { AuthorCard, AuthorResult } from '../src/seat/cards/researcher.ts';
 import type { BlindResult } from '../src/seat/cards/experiment.ts';
 import type { FlowTask } from '../src/flow/ports.ts';
@@ -13,15 +19,20 @@ import type { FlowTask } from '../src/flow/ports.ts';
 export const M = 'M1' as MissionId;
 
 export interface World {
-  readonly ledger: FakeFlowLedger;
-  readonly scheduler: FakeFlowScheduler;
-  readonly evaluator: FakeFlowEvaluator;
+  readonly ledger: HarnessLedger;
+  readonly scheduler: HarnessScheduler;
+  readonly evaluator: MemoryFlowEvaluator;
+  readonly memory: MemoryWorld['memory'];
+  readonly ports: MemoryWorld;
   readonly x: string;
+  /** Hand back the Stabilizer's default judgment whenever a round is to be stabilized (default true). */
+  autoStabilize: boolean;
   advance(): Promise<AdvanceReport>;
 }
 
 export async function world(over: Omit<Partial<ExplorationDefinition>, 'budget'> & { rounds?: number } = {}): Promise<World> {
-  const { ledger, scheduler, evaluator } = fakePorts();
+  const ports = memoryPorts();
+  const { ledger, scheduler, evaluator } = ports;
   const x = over.exploration ?? 'E1';
   const def = explorationDefinition({
     exploration: x,
@@ -33,7 +44,15 @@ export async function world(over: Omit<Partial<ExplorationDefinition>, 'budget'>
     ...over,
   });
   await defineExploration({ ledger, scheduler }, def);
-  return { ledger, scheduler, evaluator, x, advance: () => advanceExploration({ ledger, scheduler }, M, x) };
+  return { ledger, scheduler, evaluator, memory: ports.memory, ports, x, autoStabilize: true, advance: () => advanceExploration({ ledger, scheduler }, M, x) };
+}
+
+/** The Stabilizer's default judgment: every finding of the round in scope at the attacker's severity, the round on track. */
+export function stabilizeAll(card: StabilizerCard, verdict: 'in-scope' | 'shifts-direction' | 'out-of-scope' = 'in-scope', o: { severity?: StabilizerResult['findings'][number]['severity']; drifting?: boolean } = {}): StabilizerResult {
+  return {
+    findings: card.findings.map((f) => ({ finding: f.id, verdict, severity: o.severity ?? f.severity, reason: `judged ${verdict}`, question: verdict === 'shifts-direction' ? `does ${f.title} change the question?` : '' })),
+    round: { verdict: o.drifting === true ? 'drifting' : 'on-track', reason: o.drifting === true ? 'moved away' : 'answers the question', question: o.drifting === true ? 'is the question still the same?' : '' },
+  };
 }
 
 /** The one queued task (of a kind), or throws. */
@@ -70,8 +89,11 @@ export function reviseAll(card: AuthorCard): AuthorResult['dispositions'] {
 }
 
 /** A blind hand-back whose claims cite records: run:1 for an experiment, a snapshot file for a reading. */
-export function blind(card: { seat?: string; steps: readonly string[]; measure: readonly string[]; assertions: readonly string[] }, holds: 'yes' | 'no' = 'yes'): BlindResult {
-  const ptr = card.seat === 'researcher-reader' ? 'file:README.md:1' : 'run:1';
+/** The placeholder a blind experiment's claims cite; hand() replaces it with the run id of the dispatch's rerun. */
+export const RUN_PLACEHOLDER = 'run:RUN-ID';
+
+export function blind(card: { seat?: string; steps: readonly string[]; measure: readonly string[]; assertions: readonly string[]; network?: { allowed: readonly string[] } }, holds: 'yes' | 'no' = 'yes'): BlindResult {
+  const ptr = card.seat === 'researcher-reader' ? `url:${card.network?.allowed[0] ?? 'https://example.org/'}doc` : RUN_PLACEHOLDER;
   return {
     steps: card.steps.map((_, i) => ({ step: i + 1, done: 'yes' as const, note: 'done' })),
     measurements: card.measure.map((m) => ({ measure: m, value: '42', source: `stdout of ${ptr}` })),
@@ -80,22 +102,33 @@ export function blind(card: { seat?: string; steps: readonly string[]; measure: 
   };
 }
 
-/** The run records the seat host commits with an experiment's hand-back (one completed run per entry). */
-export function withRuns(w: World, task: string, statuses: ReadonlyArray<'completed' | 'resource-exceeded'> = ['completed']): void {
-  const t = w.scheduler.tasks.get(task);
-  if (t?.handBack == null) throw new Error(`no hand-back on ${task}`);
-  const launch = t.handBack.launch;
-  const runs = statuses.map((status, i) => ({ kind: 'run.layer' as const, launch, run: `${launch}.run${i + 1}` as never, finalOom: 0, finalOomKill: 0, oomDelta: 0, oomKillDelta: 0, status }));
-  t.handBack = { ...t.handBack, records: [...t.handBack.records, ...runs] };
-}
-
-/** Run the one queued task of a kind with a hand-back; throws on refused hand-backs. */
-export function hand(w: World, kind: string, result: unknown): FlowTask {
+/**
+ * Run the one queued task of a kind with a hand-back; throws on refused hand-backs. An experiment
+ * first has `mp` rerun its command (a run of the dispatch, `runs` statuses), and its claims cite it.
+ * When the hand-back leaves a round to stabilize (an author's or interpreter's disposition, or an
+ * attack that left the author nothing to answer), the Stabilizer's default judgment is handed back
+ * too, unless the test turned it off.
+ */
+export async function hand(w: World, kind: string, result: unknown, o: { runs?: ReadonlyArray<'completed' | 'failed'> } = {}): Promise<FlowTask> {
   const t = only(w, kind);
-  const problems = w.scheduler.run(t.task, { handBack: result });
+  let fields = result;
+  if (kind === 'constructor-experiment') {
+    const d = w.scheduler.dispatchOf(t.task);
+    const runs = (o.runs ?? ['completed']).map((st) => w.scheduler.rerun(d, 'step', st === 'completed'));
+    fields = JSON.parse(JSON.stringify(result).split(RUN_PLACEHOLDER).join(`run:${runs[0] ?? 'none'}`));
+  }
+  const problems = await w.scheduler.run(t.task, { handBack: fields });
   if (problems.length > 0) throw new Error(`hand-back refused: ${problems.join('; ')}`);
-  // an experiment ran its commands: the host commits their run records with the hand-back
-  if (kind === 'constructor-experiment') withRuns(w, t.task);
+  // an attack the attacker passed goes to the Stabilizer at once; one it did not pass waits for the author's disposition first
+  const attackPassed = kind === 'crititor' && attackOutcome((t.card as unknown as CrititorCard).priorFindings, result as CrititorResult).verdict === 'pass';
+  if (w.autoStabilize && (kind === 'researcher-author' || kind === 'researcher-interpreter' || attackPassed)) {
+    await w.advance();
+    const st = w.scheduler.queued('stabilizer')[0];
+    if (st !== undefined) {
+      const sp = await w.scheduler.run(st.task, { handBack: stabilizeAll(st.card as unknown as StabilizerCard) });
+      if (sp.length > 0) throw new Error(`stabilizer hand-back refused: ${sp.join('; ')}`);
+    }
+  }
   return t;
 }
 

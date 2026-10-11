@@ -1,48 +1,49 @@
 # Mission Pipeline
 
-Mission Pipeline runs a software project as a traceable pipeline. You talk to one PM, the Claude Code session on your screen. Separate, sandboxed seats plan, build and review the work, and every step is recorded in a ledger. Version 4.0 is a new engine written in TypeScript, in [`engine/`](engine/).
+Mission Pipeline runs a software project as a traceable process that any agent harness and any model can carry out. You talk to one PM, the session on your screen. Seats, filled by whatever harness and model the PM chooses, plan, build, review and attack the work, and every step is kept in a memory that lives in your project folder. Version 4.1 is in [`engine/`](engine/).
+
+## What it is
+
+Three parts, and nothing else:
+
+- **An objective project memory**, in `<project>/.mission-pipeline/`. A SQLite database is the skeleton: the complete run chain (who handed which task to whom, on which version), every state, the links between versions, the result of every program check. Markdown files are the leaves: your words, decisions and their reasons, plans, each seat's card and report, run summaries. Copy the folder to another machine and continue with any harness.
+- **Role descriptions**: one page per seat: what it does, what it receives and hands back, which `mp` commands it uses.
+- **A process**: who comes after whom, what counts as accepted, what goes to you, how explorations are attacked and kept on course by a Stabilizer.
+
+`mp`, a command line, is the only way to read and write the memory. It starts no seats and runs no service: the PM dispatches seats through its own harness.
 
 ## Key ideas
 
-- **One PM, on your screen.** You talk only to the PM. It restates what you want, records each requirement with its source in your words, and writes the plan. It never builds or judges the product. A prompt hook books every message you send in the ledger. Only important design decisions come back to you: changes to what you get, choices that are hard to undo, and conflicts with what you said.
-- **Seats do the work.** Each seat is a separate Claude Code process that has only the program's typed tools. It runs in a bubblewrap sandbox with no network by default. Calibrators check the plan against your words, an Architect breaks it into tasks, Constructors build them and Reviewers accept them. Explorations, escalations and audits each have their own seats.
-- **One writer, one judge.** A single ledger service is the only process that writes the ledger. A separate evaluator works out what is proven and what has gone stale. Reads never rescan the whole ledger.
-- **Stops take effect at once.** When you say stop, forbid or withdraw, the hook writes the stop to two pre-allocated inboxes. Running units get the signal within 2 seconds, even while the ledger is down. If exactly one mission is involved, the stop covers that mission; if that is unclear, it covers everything. A stop made in error can be narrowed or released.
-- **The program delivers.** "Deliver" builds the candidate, checks the proofs, creates a delivery ref and lands it on your target branch in a controlled git view. Your worktrees are never reset or force-checked-out.
-- **Exceptions don't block everything.** An exception stops only the action it affects. You get a notice that names a work instruction (WI) with its options.
+- **A seat is a role, not a model.** Calibrators check the plan against your words, an Architect breaks it into tasks, Constructors build them in their own git worktrees, Reviewers accept them, Researchers and Crititors run explorations with a Stabilizer after every attack round, a Secretary decides escalations within your authority, an Auditor legalizes a lineage when you ask. Any model in any harness can fill any seat; who filled it is recorded and invalidates nothing.
+- **Your words are the root.** The PM records every message verbatim as a words entry; requirement items must quote it verbatim. `mp read why <anything>` walks from a delivered commit back to the words it rests on.
+- **Proof is the program's.** Verification runs on a clean checkout of the candidate commit; the labels (proven, not fully proven, refuted, …) are computed from the records and stored. Only important design decisions come back to you.
+- **Stops take effect at once.** `mp pm stop` is written before anything else; nothing in its scope is dispatched, accepted or landed afterwards.
+- **Landing never merges.** A delivery fast-forwards your target branch from the base it was proven on, or leaves a delivery ref for you.
+- **Security, logins and spending are your harness's business.** No sandbox, no credentials, no metering.
 
 ## Quick start
 
-You need Linux or WSL2, Node 22.12 or later, git 2.44 or later, a systemd user instance, cgroup v2, bubblewrap, and a Claude Code subscription login. The install checks all of these. The full list is in [engine/README.md](engine/README.md#requirements).
-
-The seats run on any Claude model your login can use (default `claude-opus-5-5`; `mp install --model sonnet`, for example, puts every seat on Sonnet). Codex or an OpenAI account is not needed. See [Models](engine/README.md#models).
+You need Node 22.12 or later and git, on Linux, Windows or macOS.
 
 ```sh
 git clone https://github.com/ZhuoQiuMcgill/mission-pipeline.git
 cd mission-pipeline/engine
-npm ci
-node --experimental-strip-types --disable-warning=ExperimentalWarning src/cli/main.ts install --project /path/to/your/repo
+npm install
+npm install -g .        # links the `mp` command to this folder
+cd /path/to/your/project
+mp init --pointer both  # adds one line to CLAUDE.md and AGENTS.md pointing the PM to its handbook
 ```
 
-The last command is `mp install`. It links `mp` into `~/.local/bin`, so later commands are just `mp ...`. Keep the clone where it is, because the engine runs from it.
-
-Then, in Claude Code:
-
-```text
-/plugin marketplace add ZhuoQiuMcgill/mission-pipeline
-/plugin install mission-pipeline@mission-pipeline
-```
-
-Open Claude Code in your project directory. That session is the PM: the engine starts, and the PM's handbook is loaded into its context. Tell it what you want.
+Then open your project with any agent harness (Claude Code, Codex, …) and tell it what you want. It acts as the PM: it reads `.mission-pipeline/pm/PM.md`, runs `mp pm session --filled-by "<harness>/<model>"`, and works through `mp pm next`.
 
 ## Documentation
 
-- [engine/README.md](engine/README.md): requirements, install flags, daily use, layout and known limitations.
-- [`docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md`](docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md): the design contract (in Chinese).
+- [engine/README.md](engine/README.md): install, `mp init`, the PM's loop, seats, the memory folder, the tree reads, platforms and known limitations.
+- [`docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md`](docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md): the design contract.
 - [CHANGELOG.md](CHANGELOG.md).
 
 ## Earlier versions
 
-3.x is at tag [v3.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v3.0.0). 4.0 does not read 3.x ledgers.
+4.0 (a Claude Code plugin with a ledger service and sandboxed seats) is at tag [v4.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v4.0.0); 3.x at [v3.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v3.0.0). 4.1 does not read 4.0 ledgers.
 
 [MIT](LICENSE) © 2026 Zhuo Qiu

@@ -16,13 +16,13 @@
 // used) asks the user (WI-08).
 
 import type { JudgmentId, MissionId, ObjectVersionId } from '../common/ids.ts';
-import type { JudgmentRecord, ListRef } from '../common/records.ts';
+import type { BaseRecord, JudgmentRecord, ListRef } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import type { CardBinding } from '../seat/cards/common.ts';
 import type { DecisionOption, EscalationSource, SecretaryCard, SecretaryResult } from '../seat/cards/secretary.ts';
-import { cardBase, commit, currentVersions, basisIndex, defaultLimits, ev, eventOf, eventsOf, flowCtx, judgmentRecordOf, material, safeId, taskView, tellOnce, type FlowCtx } from './context.ts';
+import { cardBase, commit, currentVersions, basisIndex, ev, eventOf, eventsOf, flowCtx, judgmentRecordOf, material, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { PLAN_LINE, SECRETARY_LINE } from './plandoc.ts';
-import type { FlowEventInput, FlowPorts } from './ports.ts';
+import type { AppendGuard, FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems } from './requirements.ts';
 import { WI } from './wi.ts';
 
@@ -44,6 +44,11 @@ export interface EscalationSpec {
   readonly position?: { readonly target: string; readonly review: string; readonly revokes: string } | null;
   /** Facts for the Secretary (and for the owning flow when it applies the decision). */
   readonly facts?: unknown;
+  /**
+   * Who hands the decision over (4.1 §3.2, U-13): the seat task whose hand-back raised it (null: the
+   * program's own check) and the object versions it is about. Unset: the advance that raised it.
+   */
+  readonly handover?: { readonly from: string | null; readonly objects: readonly string[] };
 }
 
 export interface EscalationBody extends EscalationSpec {
@@ -110,6 +115,10 @@ async function submitSecretary(ctx: FlowCtx, e: EscalationBody): Promise<void> {
     mode: 'fast',
     estimateMicros: 200_000,
     secretaryFor: e.lineage,
+    // a legalization's escalations are post-close work (§6.7)
+    ...(e.subject.startsWith('audit:') ? { afterClose: 'audit' as const } : {}),
+    // who hands it over (§3.2, U-13): the seat task that raised it, with the objects it is about (code review r2 #7)
+    handover: { ...(e.handover !== undefined ? { from: e.handover.from, objects: [...e.handover.objects] } : {}), step: `escalation ${e.id} (${e.source}) on ${e.subject}` },
   });
   ctx.progressed = true;
 }
@@ -139,7 +148,6 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
     ...cardBase(ctx, e.task, {
       duties: 'Decide this one escalation within the recorded authority, pick one option, classify it, and write the notice for the PM.',
       decisionQuotes: involved.filter((i) => i.type === 'decision').map((i) => i.text),
-      limits: defaultLimits('materials'),
     }),
     seat: 'secretary',
     request: { id: e.id, source: e.source, lineage: e.lineage, subject: e.subject, summary: e.summary, original: e.original ?? '', changed: e.changed ?? '', reasons: [...e.reasons] },
@@ -175,6 +183,13 @@ function rulingBinding(neg: JudgmentRecord, judgment: string): CardBinding {
 export async function secretaryStep(ctx: FlowCtx): Promise<void> {
   for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
     const esc = e.body;
+    // closed before its Secretary decided (its owner left scope: superseded), or decided by the user
+    // first: the Secretary step is moot. Before the task view: a cancelled step must not read as a
+    // Secretary that could not decide (that would ask the user, WI-24). No decision, no notice.
+    if ((await closedEscalation(ctx, esc.id)) !== null || ((await eventOf(ctx, SECRETARY_LINE, 'user-answer', esc.id)) !== null && (await eventOf(ctx, SECRETARY_LINE, 'decision', esc.id)) === null)) {
+      await cancelSecretarySteps(ctx, [esc.id]);
+      continue;
+    }
     const decided = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', esc.id);
     if (decided !== null) {
       // the notices a decision calls for are sent until marked told (code review r1 #14)
@@ -242,6 +257,12 @@ async function tellUndecided(ctx: FlowCtx, esc: EscalationBody, why: string): Pr
 async function tellPm(ctx: FlowCtx, esc: EscalationBody, d: DecisionBody): Promise<void> {
   if (d.classification === 'detail' || d.by === 'user') return;
   const needsUser = d.classification === 'needs-user';
+  // "in effect" only once the owning flow carried this very decision out (code review round 10): a
+  // decision overridden by the user, closed, or never carried out never says it
+  if (!needsUser) {
+    const a = await eventOf<{ readonly what?: { readonly option?: unknown }; readonly by?: unknown }>(ctx, SECRETARY_LINE, 'applied', esc.id);
+    if (a === null || a.body.by !== 'secretary' || a.body.what?.option !== d.option) return;
+  }
   await tellOnce(ctx, SECRETARY_LINE, {
     category: needsUser ? 'needs-user-decision' : 'secretary-decision',
     wi: null,
@@ -251,6 +272,13 @@ async function tellPm(ctx: FlowCtx, esc: EscalationBody, d: DecisionBody): Promi
     detail: { escalation: esc.id, notice: d.notice, option: d.option, reason: d.reason, options: esc.options, authorization: d.authorization },
     ...(needsUser ? { askUser: true } : {}),
   });
+}
+
+/** The "in effect" notice of a Secretary decision the flow carried out (sent at apply; again until told). */
+async function tellApplied(ctx: FlowCtx, id: string): Promise<void> {
+  const esc = await escalation(ctx, id);
+  const d = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', id);
+  if (esc !== null && d !== null && d.body.by === 'secretary') await tellPm(ctx, esc, d.body);
 }
 
 /** Hand a decided escalation to the user (e.g. the Secretary's grant was refused, WI-08). */
@@ -285,18 +313,170 @@ export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBod
   return d.body;
 }
 
+/**
+ * An escalation closed without being carried out (its owner left scope: a dropped task, a new card,
+ * a stop the exploration left, a settled exploration, an older PM batch): the why, or null.
+ */
+export async function closedEscalation(ctx: FlowCtx, id: string): Promise<string | null> {
+  const a = await eventOf<{ readonly what?: { readonly option?: unknown; readonly why?: unknown } }>(ctx, SECRETARY_LINE, 'applied', id);
+  if (a === null || a.body.what?.option !== 'superseded') return null;
+  return typeof a.body.what.why === 'string' ? a.body.what.why : 'the work it was about changed';
+}
+
+/** The "applied" event that closes an escalation without carrying it out (`superseded`): to commit with the change that made it moot. */
+export function supersededEvent(ctx: FlowCtx, id: string, why: string): FlowEventInput {
+  return appliedEvent(ctx, id, { what: { option: 'superseded', why } });
+}
+
+/** Cancel the queued Secretary steps of these escalations (one in flight is refused at its hand-back: process/seat.ts). */
+export async function cancelSecretarySteps(ctx: FlowCtx, ids: readonly string[]): Promise<void> {
+  for (const id of ids) {
+    const t = escalationTask(id);
+    if ((await ctx.ports.scheduler.status(t))?.state === 'queued') await ctx.ports.scheduler.cancel(t);
+  }
+}
+
+/**
+ * Close the open escalations of a subject that `keep` does not keep, as superseded, with `with_` in
+ * one append (the change that made them moot), then cancel their queued Secretary steps. Returns the
+ * ids closed.
+ */
+export async function closeEscalations(ctx: FlowCtx, op: string, subject: string, why: string, o: { readonly keep?: (e: EscalationBody) => boolean; readonly with?: readonly FlowEventInput[] } = {}): Promise<string[]> {
+  const ids = (await openEscalations(ctx, subject)).filter((e) => !(o.keep?.(e) ?? false)).map((e) => e.id);
+  const c = closing(ctx, ids, why);
+  const events = [...(o.with ?? []), ...c.events];
+  const guard = carryGuard([c]);
+  if (events.length > 0) await commit(ctx, `${op}:${shortHash(ids)}`, { events, ...(guard !== undefined ? { guard } : {}) });
+  await cancelSecretarySteps(ctx, ids);
+  return ids;
+}
+
 export async function isApplied(ctx: FlowCtx, id: string): Promise<boolean> {
   return (await eventOf(ctx, SECRETARY_LINE, 'applied', id)) !== null;
 }
 
-/** The "applied" event of an escalation, to commit atomically with the effect that carries it out (code review r1 #13). */
-export function appliedEvent(ctx: FlowCtx, id: string, what: unknown): FlowEventInput {
-  return ev(ctx, SECRETARY_LINE, 'applied', id, { what });
+/** The "applied" event of an escalation (its body: `what` was carried out, and who decided). Only through carryOut and the closes. */
+function appliedEvent(ctx: FlowCtx, id: string, body: Record<string, unknown>): FlowEventInput {
+  return ev(ctx, SECRETARY_LINE, 'applied', id, body);
 }
 
-export async function markApplied(ctx: FlowCtx, id: string, what: unknown): Promise<void> {
+/**
+ * What carrying out a decision appends, as one write with the effect that carries it out (code review
+ * round 10: the split commit of a decision). Its "applied" event names who decided (the Secretary's
+ * dispatch, or the user's words entry); accepting a negated position (accept, accept-risk on an
+ * escalation with a position) also writes the ruling judgment here and only here: j.sec.<id> when the
+ * Secretary decided, j.user.<id> when the user did, rebuilt from the negation it revokes. `absent`
+ * guards the write: nothing is written when the escalation was carried out or closed meanwhile.
+ */
+export interface Carry {
+  readonly id: string;
+  readonly events: readonly FlowEventInput[];
+  readonly records: readonly BaseRecord[];
+  readonly absent: AppendGuard['absent'];
+}
+
+export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, unknown>): Promise<Carry> {
+  const esc = await escalation(ctx, id);
+  const d = await decisionFor(ctx, id);
+  const records: BaseRecord[] = [];
+  let ruling: string | null = null;
+  const accepting = (o: unknown): boolean => o === 'accept' || o === 'accept-risk';
+  if (esc !== null && d !== null && esc.position && accepting(what['option']) && accepting(d.option)) {
+    const neg = await judgmentRecordOf(ctx, esc.position.revokes);
+    const jid = `j.${d.by === 'user' ? 'user' : 'sec'}.${esc.id}`;
+    if (neg !== null && (await judgmentRecordOf(ctx, jid)) === null) {
+      records.push(rulingRecord(neg, esc.position, jid, d.by === 'user' ? 'user' : 'secretary'));
+      ruling = jid;
+    }
+  }
+  const decider: Record<string, unknown> = d === null ? {} : { by: d.by };
+  if (d !== null && d.by === 'secretary' && esc !== null) {
+    const dispatch = (await ctx.ports.scheduler.status(esc.task))?.handBack?.dispatch ?? null;
+    if (dispatch !== null) decider['dispatch'] = dispatch;
+  }
+  if (d !== null && d.by === 'user') {
+    const w = /\((W-[0-9]+)\)\s*$/.exec(d.reason);
+    if (w !== null) decider['words'] = w[1];
+  }
+  return {
+    id,
+    events: [appliedEvent(ctx, id, { what, ...decider, ...(ruling !== null ? { ruling } : {}) })],
+    records,
+    absent: [
+      { mission: ctx.mission, line: SECRETARY_LINE, event: 'applied', key: id },
+      // a decision not the user's is the one in force only while the user has not answered (nor been handed it)
+      ...(d === null || d.by !== 'user' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'user-answer', key: id }, { mission: ctx.mission, line: SECRETARY_LINE, event: 'to-user', key: id }] : []),
+    ],
+  };
+}
+
+/** The guard of a write that carries out or closes these escalations (a concurrent writer did first: retried on the next pass). */
+export function carryGuard(carries: readonly Carry[]): AppendGuard | undefined {
+  const absent = carries.flatMap((c) => c.absent);
+  return absent.length === 0 ? undefined : { absent, code: 'STALE_REQUEST', message: `escalation ${carries.map((c) => c.id).join(', ')} was carried out, closed or answered by another writer meanwhile; nothing was written (the next pass reads it again)` };
+}
+
+/** After the write that carried decisions out: the "in effect" notices of the Secretary's decisions. */
+export async function carried(ctx: FlowCtx, carries: readonly Carry[]): Promise<void> {
+  for (const c of carries) await tellApplied(ctx, c.id);
+}
+
+/**
+ * One write: `events` together with the decisions carried out (and escalations closed) in it, guarded
+ * against a concurrent application; then the cancelled Secretary steps of what was closed (`closed`),
+ * and the "in effect" notices of what was carried out.
+ */
+export async function commitCarrying(ctx: FlowCtx, op: string, events: readonly FlowEventInput[], carries: readonly Carry[], closed: readonly string[] = []): Promise<void> {
+  const guard = carryGuard(carries);
+  await commit(ctx, op, { events: [...events, ...carries.flatMap((c) => c.events)], records: carries.flatMap((c) => c.records), ...(guard !== undefined ? { guard } : {}) });
+  await cancelSecretarySteps(ctx, closed);
+  await carried(ctx, carries);
+}
+
+/** Carry a decision out with nothing else in the write (the effect is in the decision's own event body, or elsewhere already). */
+export async function markApplied(ctx: FlowCtx, id: string, what: Record<string, unknown>): Promise<void> {
   if (await isApplied(ctx, id)) return; // already carried out: not progress
-  await commit(ctx, `flow:applied:${ctx.mission}:${id}`, { events: [ev(ctx, SECRETARY_LINE, 'applied', id, { what })] });
+  const c = await carryOut(ctx, id, what);
+  const guard = carryGuard([c]);
+  await commit(ctx, `flow:applied:${ctx.mission}:${id}`, { events: c.events, records: c.records, ...(guard !== undefined ? { guard } : {}) });
+  await carried(ctx, [c]);
+}
+
+/**
+ * Close escalations as superseded (their owner left scope), for inclusion in the write that makes them
+ * moot: the "applied" events and the guard. Cancel their queued Secretary steps after the write.
+ */
+export function closing(ctx: FlowCtx, ids: readonly string[], why: string): Carry {
+  return {
+    id: ids.join(', '),
+    events: ids.map((id) => supersededEvent(ctx, id, why)),
+    records: [],
+    absent: ids.map((id) => ({ mission: ctx.mission, line: SECRETARY_LINE, event: 'applied', key: id })),
+  };
+}
+
+/** The ruling judgment on a negated position (8.1, 5.2): a pass with the negation's contract inputs, revoking it. */
+function rulingRecord(neg: JudgmentRecord, position: NonNullable<EscalationSpec['position']>, judgment: string, executor: string): JudgmentRecord {
+  const b = rulingBinding(neg, judgment);
+  const rec: JudgmentRecord = {
+    kind: 'judgment',
+    judgment: b.judgment as JudgmentId,
+    review: position.review,
+    executor,
+    target: position.target as ObjectVersionId,
+    verdict: 'pass',
+    evidence: b.evidence as ListRef,
+    bases: b.bases as ListRef,
+    constraints: b.constraints as ListRef,
+    reliesOn: b.reliesOn as ListRef,
+    issues: [],
+    revokes: neg.judgment,
+    evidenceUse: b.evidenceUse,
+    superseded: [],
+    extends: null,
+  };
+  validateRecord(rec);
+  return rec;
 }
 
 /** Open escalations of a subject: raised and not applied yet. */
@@ -318,6 +498,11 @@ export async function answerEscalation(
   const esc = await escalation(ctx, req.escalation);
   if (esc === null) throw new Error(`no escalation ${req.escalation} in mission ${req.mission}`);
   if (req.option === 'ask-user' || !esc.options.includes(req.option)) throw new Error(`option ${req.option} is not a decision for ${req.escalation} (choose one of ${esc.options.filter((o) => o !== 'ask-user').join(', ')})`);
+  // an escalation already carried out (applied once) takes no later answer: it would never be carried out,
+  // and an accepting answer would write a ruling judgment that revokes a negation with no flow effect.
+  // Refused before anything is written.
+  const applied = await eventOf<{ readonly what?: unknown }>(ctx, SECRETARY_LINE, 'applied', esc.id);
+  if (applied !== null) throw await alreadyApplied(ctx, esc, applied.body.what);
   const d: DecisionBody = {
     escalation: esc.id,
     by: 'user',
@@ -330,33 +515,35 @@ export async function answerEscalation(
     notice: '',
     mayMatter: false,
   };
-  const records: JudgmentRecord[] = [];
-  if ((req.option === 'accept' || req.option === 'accept-risk') && esc.position) {
-    const neg = await judgmentRecordOf(ctx, esc.position.revokes);
-    if (neg !== null) {
-      const b = rulingBinding(neg, `j.user.${esc.id}`);
-      const rec: JudgmentRecord = {
-        kind: 'judgment',
-        judgment: b.judgment as JudgmentId,
-        review: esc.position.review,
-        executor: 'user',
-        target: esc.position.target as ObjectVersionId,
-        verdict: 'pass',
-        evidence: b.evidence as ListRef,
-        bases: b.bases as ListRef,
-        constraints: b.constraints as ListRef,
-        reliesOn: b.reliesOn as ListRef,
-        issues: [],
-        revokes: neg.judgment,
-        evidenceUse: b.evidenceUse,
-        superseded: [],
-        extends: null,
-      };
-      validateRecord(rec);
-      records.push(rec);
-    }
-  }
-  await commit(ctx, `flow:user-answer:${req.mission}:${esc.id}`, { events: [ev(ctx, SECRETARY_LINE, 'user-answer', esc.id, d)], records });
+  // the answer is the decision; its ruling (accepting a negated position) is written only in the write that
+  // carries it out (carryOut), so a decision overridden, closed or never carried out writes no ruling
+  // the same check inside the write that records the answer (a flow that carries the escalation out
+  // meanwhile wins; nothing is written)
+  await commit(ctx, `flow:user-answer:${req.mission}:${esc.id}`, {
+    events: [ev(ctx, SECRETARY_LINE, 'user-answer', esc.id, d)],
+    guard: { absent: [{ mission: req.mission, line: SECRETARY_LINE, event: 'applied', key: esc.id }], code: 'already-applied', message: `escalation ${esc.id} (${esc.source} on ${esc.subject}) was carried out or closed while this answer was being recorded; an answer now would not be carried out, so nothing was recorded (WI-24)` },
+  });
+}
+
+/**
+ * The refusal of an answer to an escalation already carried out (code "already-applied", WI-24): who
+ * decided it, with which option, and how it was carried out (or that it was closed as superseded).
+ */
+async function alreadyApplied(ctx: FlowCtx, esc: EscalationBody, what: unknown): Promise<Error> {
+  const w = (what ?? {}) as { readonly option?: unknown; readonly why?: unknown };
+  const d = await decisionFor(ctx, esc.id);
+  const { option: _o, ...rest } = w as Record<string, unknown>;
+  const how = Object.keys(rest).length > 0 ? ` (${JSON.stringify(rest).slice(0, 200)})` : '';
+  const done =
+    w.option === 'superseded'
+      ? `was closed without being carried out: ${typeof w.why === 'string' ? w.why : 'the work it was about changed'}`
+      : `was already decided by ${d === null ? 'the flow' : d.by === 'user' ? 'the user' : d.by === 'program' ? 'the program' : 'the Secretary'} (option ${d?.option ?? (typeof w.option === 'string' ? w.option : 'unknown')}) and carried out${how}`;
+  return Object.assign(
+    new Error(
+      `escalation ${esc.id} (${esc.source} on ${esc.subject}) ${done}; an answer now would not be carried out, so nothing was recorded. To change course with the user, take the change to the plan (mp pm plan submit with their words) or answer the next escalation the flow raises (WI-24)`,
+    ),
+    { code: 'already-applied', detail: { escalation: esc.id, subject: esc.subject, decidedBy: d?.by ?? null, option: d?.option ?? null, applied: what ?? null } },
+  );
 }
 
 /** The ruling judgment on a position, made by the Secretary's launch or the user's answer (null: none). */

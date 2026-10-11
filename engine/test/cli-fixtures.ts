@@ -1,122 +1,121 @@
-// Shared helpers for the CLI and hook suites (test/cli-*.test.ts). Not a test file.
-// Everything lives under os.tmpdir() (a Linux filesystem), never under /mnt; nothing
-// touches the repository's data/ directory; no model is ever called.
+// Shared helpers of the 4.1 CLI tests: a project folder with a git repository; `mp` run in this
+// process (runCli, with a fixed environment observation) or from a shell (bin/mp.mjs, as any
+// harness runs it); and scripted seats that read their card's fields, write their hand-back files
+// into tmp/<dispatch>/ and hand back with `mp seat`.
 
-import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runCli, type CliOutput } from '../src/cli/main.ts';
-import { CLI_CONFIG_FORMAT } from '../src/cli/config.ts';
-import { LedgerClient } from '../src/ledger/ipc.ts';
-import { makeEnv, type Env } from './scheduler-fixtures.ts';
-import { checkSocketPath } from '../src/common/socketPath.ts';
+import '../src/evaluator/index.ts';
+import { forgetObservedEnvironment, type EnvironmentParts } from '../src/evaluator/index.ts';
+import { PlainGit } from '../src/git/plainGit.ts';
+import { runCli } from '../src/cli/main.ts';
+import { openProcess } from '../src/process/index.ts';
+import { dispatchView } from '../src/process/seat.ts';
+import type { MaterialRef } from '../src/seat/cards/common.ts';
 
-export const CLI_MAIN = fileURLToPath(new URL('../src/cli/main.ts', import.meta.url));
-export const HOOK_MAIN = fileURLToPath(new URL('../src/cli/hooks/main.ts', import.meta.url));
-export const PLUGIN_ROOT = fileURLToPath(new URL('../plugin/', import.meta.url));
-export const NODE_ARGS = ['--experimental-strip-types', '--disable-warning=ExperimentalWarning'];
+export const ENGINE = fileURLToPath(new URL('..', import.meta.url));
+export const MP_BIN = join(ENGINE, 'bin', 'mp.mjs');
+const GIT_ENV = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+export const ENV_A: EnvironmentParts = { os: 'testos', osVersion: '1', arch: 'x64', versions: { 'node --version': 'v22' } };
 
-export interface CliEnv extends Env {
-  readonly configPath: string;
-  readonly cliState: string;
-  readonly project: string;
-  readonly schedulerSocket: string;
-  readonly evaluatorCheckpoint: string;
-  readonly modelConfig: string;
+export function write(root: string, rel: string, text: string): void {
+  const p = join(root, ...rel.split('/'));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, text);
 }
 
-export function cliEnv(prefix: string, o: { readonly scheduler?: boolean; readonly engineConfig?: string | null; readonly backupInbox?: string | null; readonly extra?: Record<string, unknown> } = {}): CliEnv {
-  const e = makeEnv(`cli-${prefix}`);
-  const project = join(e.root, 'project');
-  const cliState = join(e.root, 'cli-state');
-  mkdirSync(project, { recursive: true });
-  mkdirSync(cliState, { recursive: true });
-  const env: CliEnv = {
-    ...e,
-    configPath: join(e.root, 'engine4.json'),
-    cliState,
-    project,
-    schedulerSocket: checkSocketPath(join(e.root, 'scheduler.sock'), 'set a shorter TMPDIR (e.g. mktemp -d /tmp/mpc.XXXX)'),
-    evaluatorCheckpoint: join(e.root, 'evaluator.checkpoint'),
-    modelConfig: join(e.root, 'model_config.json'),
-  };
-  writeConfig(env, o);
-  return env;
+export interface TestProject {
+  readonly base: string;
+  readonly dir: string;
+  git(...args: string[]): string;
+  cleanup(): void;
 }
 
-export function writeConfig(env: CliEnv, o: { readonly scheduler?: boolean; readonly engineConfig?: string | null; readonly backupInbox?: string | null; readonly extra?: Record<string, unknown> } = {}): void {
-  writeFileSync(
-    env.configPath,
-    JSON.stringify({
-      format: CLI_CONFIG_FORMAT,
-      engineRoot: fileURLToPath(new URL('../', import.meta.url)),
-      ledgerRoot: env.ledgerRoot,
-      controlPlane: env.cp,
-      ledgerSocket: env.socket,
-      schedulerSocket: o.scheduler === true ? env.schedulerSocket : null,
-      evaluatorSocket: null,
-      evaluatorCheckpoint: env.evaluatorCheckpoint,
-      stateDir: env.cliState,
-      engineConfig: o.engineConfig ?? null,
-      ...(o.backupInbox !== undefined ? { backupInbox: o.backupInbox } : {}),
-      modelConfig: env.modelConfig,
-      selfCheckDir: null,
-      projects: [{ root: env.project, targetBranch: 'main', mainCheckout: env.project }],
-      timeouts: { ledgerMs: 3_000, schedulerMs: 10_000, hookLedgerMs: 1_500 },
-      ...(o.extra ?? {}),
-    }),
-  );
+/** A git repository on branch main (README.md, a .gitignore with *.local, a package.json), one commit. */
+export function gitProject(o: { files?: Record<string, string> } = {}): TestProject {
+  const base = mkdtempSync(join(tmpdir(), 'mp-cli-'));
+  const dir = join(base, 'project');
+  mkdirSync(dir, { recursive: true });
+  const git = (...args: string[]): string => execFileSync('git', args, { cwd: dir, encoding: 'utf8', env: { ...process.env, ...GIT_ENV } }).trim();
+  git('init', '-q', '-b', 'main');
+  write(dir, 'README.md', '# the project\n');
+  write(dir, '.gitignore', '*.local\n');
+  write(dir, 'package.json', '{ "name": "the-project", "private": true }\n');
+  for (const [rel, text] of Object.entries(o.files ?? {})) write(dir, rel, text);
+  git('add', '-A');
+  git('commit', '-q', '-m', 'first');
+  return { base, dir, git, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
 
-export function ioOf(env: CliEnv, cwd: string = env.project): { cwd: string; env: NodeJS.ProcessEnv; now: () => number } {
-  return { cwd, env: { ...process.env, MP_CONFIG: env.configPath, MP_PM_SESSION: '' }, now: Date.now };
+export interface Ran {
+  readonly code: number;
+  readonly out: string;
+  readonly err: string;
+  /** The parsed --json answer, when the command was asked for one. */
+  readonly json: any;
 }
 
-/** Run `mp` in this process. */
-export function mp(env: CliEnv, ...argv: string[]): Promise<CliOutput> {
-  return runCli(argv, ioOf(env));
-}
-
-/** Run `mp ... --json` and parse the output. */
-export async function mpJson(env: CliEnv, ...argv: string[]): Promise<{ exitCode: number; out: Record<string, unknown> }> {
-  const r = await runCli([...argv, '--json'], ioOf(env));
-  return { exitCode: r.exitCode, out: JSON.parse(r.stdout) as Record<string, unknown> };
-}
-
-export interface ProcResult {
-  readonly code: number | null;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly ms: number;
-}
-
-/** Run a script as its own process with stdin, the way Claude Code runs a hook or the PM runs mp. */
-export function runProcess(script: string, args: readonly string[], o: { readonly input?: string; readonly cwd: string; readonly env: NodeJS.ProcessEnv; readonly timeoutMs?: number }): Promise<ProcResult> {
-  const t0 = Date.now();
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [...NODE_ARGS, script, ...args], { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8').on('data', (c: string) => (stdout += c));
-    child.stderr.setEncoding('utf8').on('data', (c: string) => (stderr += c));
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`timed out: ${script} ${args.join(' ')}`));
-    }, o.timeoutMs ?? 60_000);
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr, ms: Date.now() - t0 });
-    });
-    child.stdin.end(o.input ?? '');
+/** `mp` in this process: a new "process" each call (the environment is observed again). */
+export async function cli(cwd: string, argv: readonly string[], o: { env?: EnvironmentParts; stdin?: string; now?: () => number } = {}): Promise<Ran> {
+  forgetObservedEnvironment();
+  const env = o.env ?? ENV_A;
+  const r = await runCli(argv, {
+    cwd,
+    env: { ...process.env, MP_PROJECT: '' },
+    ...(o.stdin !== undefined ? { stdin: () => o.stdin! } : {}),
+    ...(o.now !== undefined ? { now: o.now } : {}),
+    process: { observe: () => env, git: PlainGit.create(), ident: { name: 'mp test', email: 'mp@test' } },
   });
+  let json: any = null;
+  if (argv.includes('--json')) {
+    try {
+      json = JSON.parse(r.stdout || r.stderr);
+    } catch {
+      json = null;
+    }
+  }
+  return { code: r.exitCode, out: r.stdout, err: r.stderr, json };
 }
 
-export async function ledgerCall(env: CliEnv, method: string, params: unknown = {}): Promise<unknown> {
-  const c = new LedgerClient(env.socket, 5_000);
-  try {
-    return await c.call(method as never, params as never);
-  } finally {
-    c.close();
+/** `mp` from a shell, as a harness runs it (bin/mp.mjs, a new Node process). */
+export function sh(cwd: string, argv: readonly string[], o: { input?: string; env?: Record<string, string> } = {}): Ran {
+  const r = spawnSync(process.execPath, [MP_BIN, ...argv], { cwd, encoding: 'utf8', input: o.input ?? '', env: { ...process.env, ...GIT_ENV, MP_PROJECT: '', ...(o.env ?? {}) }, timeout: 300_000 });
+  let json: any = null;
+  if (argv.includes('--json')) {
+    try {
+      json = JSON.parse(r.stdout || r.stderr);
+    } catch {
+      json = null;
+    }
   }
+  return { code: r.status ?? -1, out: r.stdout, err: r.stderr, json };
+}
+
+/** A seat's card fields (what a scripted seat works from; a real seat reads `mp seat <id> card`). */
+export function cardOf(dir: string, dispatch: string): any {
+  forgetObservedEnvironment();
+  const ctx = openProcess(dir, { observe: () => ENV_A });
+  try {
+    return dispatchView(ctx, dispatch).card;
+  } finally {
+    ctx.memory.close();
+  }
+}
+
+/** The material pages a diligent seat reads: every page of every material. */
+export function materialPages(card: any): Array<[string, number]> {
+  const out: Array<[string, number]> = [];
+  for (const m of ((card.materials ?? []) as MaterialRef[])) for (let p = 1; p <= m.pages; p++) out.push([m.id, p]);
+  return out;
+}
+
+/** Write a seat's hand-back files into `.mission-pipeline/tmp/<dispatch>/`; returns their project-relative paths. */
+export function handBackFiles(dir: string, dispatch: string, fields: unknown, report = `# Report of ${dispatch}\n\nDone as the card says.\n`): { report: string; result: string } {
+  const rel = `.mission-pipeline/tmp/${dispatch}`;
+  write(dir, `${rel}/report.md`, report);
+  write(dir, `${rel}/result.json`, JSON.stringify(fields));
+  return { report: `${rel}/report.md`, result: `${rel}/result.json` };
 }

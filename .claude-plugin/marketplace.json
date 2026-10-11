@@ -7,7 +7,7 @@
     {
       "name": "mission-pipeline",
       "source": "./engine/plugin",
-      "description": "An on-screen PM that aligns with you while sandboxed seats plan, build and review the work over a single-writer ledger, with stops that take effect at once and deliveries landed by the program (Linux or WSL2; run mp install from a clone of this repository first)."
+      "description": "Optional Claude Code adapter for Mission Pipeline 4.1: prints the PM handbook core at session start and records each user message with mp pm say. Mission Pipeline itself is the mp command (npm install -g . in engine/ of a clone of this repository); any harness and any model can be the PM or fill a seat without this plugin."
     }
   ]
 }

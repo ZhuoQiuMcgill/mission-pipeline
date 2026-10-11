@@ -1,14 +1,16 @@
-// The flow engine: reconciles every mission's flows from ledger state (design 3, 4, 8, 11.1).
+// The flow engine: reconciles every mission's flows from the project memory (design 4.1 §5.1,
+// §14 "Process"; 4.0 3, 4, 8, 11.1).
 //
 // One pass runs every flow step of a mission once: the Secretary escalations, the decision layer,
 // execution, and the steps other flows register (exploration, legalization). A step reads the
-// ledger, takes the next deterministic actions (idempotent: op ids, task ids, event keys), and
+// memory, takes the next deterministic actions (idempotent: op ids, task ids, event keys), and
 // marks progress. The engine repeats passes until one makes no progress, so a call settles
-// everything that can move now; what waits on a seat or a run moves on a later call (the
-// scheduler calls reconcile after each accepted outcome and on its tick).
+// everything that can move now; what waits on a seat or a run moves on a later call (`mp`
+// reconciles after each hand-back, after the PM's flow commands, and in `mp pm next`).
 //
-// Errors stay inside their mission and step: a transient port error is retried on the next call;
-// anything else is a program defect, told to the PM with WI-20, and the other steps go on.
+// Errors stay inside their mission and step: a transient port error (the memory busy, labels
+// recomputing) is retried on the next call; anything else is a program defect, told to the PM
+// with WI-20, and the other steps go on.
 
 import { missionIdProblem, type MissionId } from '../common/ids.ts';
 import { flowCtx, type FlowCtx } from './context.ts';
@@ -33,7 +35,7 @@ export interface ReconcileReport {
   readonly errors: ReadonlyArray<{ readonly step: string; readonly message: string }>;
 }
 
-const TRANSIENT = new Set(['UNAVAILABLE', 'NOT_READY', 'STALE_GENERATION']);
+const TRANSIENT = new Set(['UNAVAILABLE', 'NOT_READY', 'BUSY', 'RECOMPUTING', 'BELOW_FLOOR', 'STALE_REQUEST']);
 
 export class FlowEngine {
   private readonly ports: FlowPorts;
@@ -94,12 +96,11 @@ export class FlowEngine {
           const message = `${(e as Error).message}`;
           errors.push({ step: s.name, message });
           if (!TRANSIENT.has(code)) {
-            const fault = code === 'EVALUATOR_FAULT'; // 6.1: the derived state cannot be computed
             await this.ports.ledger
               .notify({
                 mission,
-                category: fault ? 'derived-state-unavailable' : 'flow-internal-error',
-                wi: fault ? 'WI-11' : WI.internalError,
+                category: 'flow-internal-error',
+                wi: WI.internalError,
                 key: `${s.name}:${message.slice(0, 120)}`,
                 trigger: `the ${s.name} flow step of mission ${mission} failed: ${message}`,
                 defaultAction: `this step is retried on the next reconciliation; the other steps and missions go on`,

@@ -5,11 +5,11 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ObjectVersionRecord, ProofUnitRecord, ReviewContract } from '../src/common/records.ts';
-import { FakeContent } from '../src/flow/fakes.ts';
+import { memoryPorts } from './flow-memory-fixtures.ts';
 import { lineageSource, nextGeneration, requiredParents, walkLineage } from '../src/flow/audit/lineage.ts';
 import type { Label } from '../src/evaluator/semantics.ts';
 
-const c = new FakeContent();
+const c = memoryPorts().ledger.content;
 const obj = (id: string, prereqs: string[], reliesOn: string[] = []): ObjectVersionRecord => ({
   kind: 'object.version',
   object: id as never,

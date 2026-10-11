@@ -1,27 +1,10 @@
-// Conservative stop detection in the user's words (design 6.4: wider rather than narrower, 3.1; risk 9):
-// table tests in both languages, the scope rules, and scope parsing and narrowing.
+// Conservative stop scopes from the user's words (design 4.1 §6.6, v51 6.4: wider rather than
+// narrower; risk 9): table tests in both languages, the scope rules, and scope parsing and narrowing.
+// `mp pm stop` derives its scope with these rules from the missions the memory knows (cli-commands).
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { describeScope, detectStop, parseScope, scopeWithin, stopScopeFor } from '../src/cli/stopDetect.ts';
-import { conservativeScope, knownMissions } from '../src/cli/commands/stops.ts';
-import type { Ctx } from '../src/cli/context.ts';
-
-/** A Ctx whose ledger answers each query from `answers` (a function that throws stands for a failed or timed-out query). */
-function fakeCtx(answers: Record<string, () => unknown>): Ctx {
-  const client = {
-    call: async (method: string) => {
-      const a = answers[method];
-      if (a === undefined) throw new Error(`no ${method}`);
-      return a();
-    },
-    close: () => undefined,
-  };
-  return { ledger: () => client, config: {} } as unknown as Ctx;
-}
-const timeout = (): never => {
-  throw Object.assign(new Error('the ledger did not answer in time'), { code: 'TIMEOUT' });
-};
 
 const POSITIVE_ZH = [
   '停',
@@ -122,27 +105,6 @@ describe('the conservative scope', () => {
   test('never narrow on doubt: without complete answers, every generic stop is everything (review r1)', () => {
     assert.deepEqual(stopScopeFor('停', detectStop('停'), { knownMissions: ['m1'], openMissions: ['m1'] }).scope, { kind: 'all' }, 'complete defaults to false');
     assert.deepEqual(stopScopeFor('停 m1', detectStop('停 m1'), { knownMissions: ['m1'], openMissions: ['m1'], complete: false }).scope, { kind: 'all' });
-  });
-  test('reviewer repro: M1 and M2 open, the missions query times out, taskQueue has only M1, no launches: everything', async () => {
-    const ctx = fakeCtx({ missions: timeout, taskQueue: () => [{ mission: 'M1' }], launches: () => [] });
-    const k = await knownMissions(ctx, 50);
-    assert.deepEqual(k, { known: ['M1'], open: ['M1'], complete: false });
-    const d = await conservativeScope(ctx, '停');
-    assert.deepEqual(d.scope, { kind: 'all' });
-    assert.match(d.why, /did not say in time/);
-  });
-  test('an explicit mission name with failed queries: everything', async () => {
-    const ctx = fakeCtx({ missions: timeout, taskQueue: () => [{ mission: 'M1' }], launches: timeout });
-    assert.deepEqual((await conservativeScope(ctx, 'stop M1')).scope, { kind: 'all' });
-    assert.deepEqual((await conservativeScope(fakeCtx({ missions: () => [{ mission: 'M1' }], taskQueue: () => { throw new Error('boom'); }, launches: () => [] }), '停 M1')).scope, { kind: 'all' }, 'any failed query');
-  });
-  test('every query answers and one mission is related: that mission; a named one of two: that one', async () => {
-    const one = fakeCtx({ missions: () => [{ mission: 'M1' }], taskQueue: () => [{ mission: 'M1' }], launches: () => [] });
-    assert.equal((await knownMissions(one, 50)).complete, true);
-    assert.deepEqual((await conservativeScope(one, '停')).scope, { kind: 'mission', mission: 'M1' });
-    const two = fakeCtx({ missions: () => [{ mission: 'M1' }, { mission: 'M2' }], taskQueue: () => [], launches: () => [{ tag: { mission: 'M2' } }] });
-    assert.deepEqual((await conservativeScope(two, '停')).scope, { kind: 'all' });
-    assert.deepEqual((await conservativeScope(two, 'stop M2 please')).scope, { kind: 'mission', mission: 'M2' });
   });
   test('two capabilities named: generic', () => {
     const d = detectStop('不许联网也不许交付');

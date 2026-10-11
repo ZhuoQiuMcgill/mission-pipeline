@@ -9,10 +9,11 @@
 // crash in between re-decides the same task); a notice is sent before the event that makes it
 // unnecessary to send again (a crash in between sends the same notice again: a no-op).
 
-import { canonicalJson } from '../../common/hash.ts';
+import { canonicalJson, sha256 } from '../../common/hash.ts';
 import type { MissionId } from '../../common/ids.ts';
-import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord, RunLayerRecord } from '../../common/records.ts';
-import { attackOutcome, crititorFindingDocument, crititorFindingIds, versionId, type CrititorCard, type CrititorResult } from '../../seat/cards/crititor.ts';
+import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord } from '../../common/records.ts';
+import { attackOutcome, crititorEvidence, crititorFindingDocument, crititorFindingIds, versionId, type CrititorCard, type CrititorResult } from '../../seat/cards/crititor.ts';
+import { stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
 import { blindEvidenceRecord, blindReportDocument, failedEvidenceRecord, type BlindResult, type ExperimentCard } from '../../seat/cards/experiment.ts';
 import {
   authorSubmittedVersion,
@@ -24,12 +25,14 @@ import {
   type InterpreterResult,
   type ReaderCard,
 } from '../../seat/cards/researcher.ts';
-import type { AnyCard, FlowLedgerPort, FlowNotice, FlowSchedulerPort, FlowTask, FlowTaskStatus } from '../ports.ts';
-import { attackerCard, authorCard, executorCard, interpreterCard, parseEvidenceRequest, type EvidenceRequestDoc, type Resume } from './cards.ts';
+import type { AnyCard, AppendGuard, FlowEventInput, FlowLedgerPort, FlowNotice, FlowSchedulerPort, FlowTask, FlowTaskStatus } from '../ports.ts';
+import { attackerCard, authorCard, executorCard, interpreterCard, parseEvidenceRequest, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
 import { ExplorationDefinitionSchema, xid, type ExplorationDefinition } from './definition.ts';
 import {
   allowedRounds,
+  blocks,
   decide,
+  effectiveSeverity,
   fold,
   pendingTasks,
   type Action,
@@ -37,6 +40,7 @@ import {
   type DefinedBody,
   type Disposition,
   type QueuedBody,
+  type RerunBody,
   type Role,
   type RulingBody,
   type StopReason,
@@ -51,8 +55,8 @@ export interface ExplorationPorts {
 
 /**
  * What to do with a seat task that ended without a usable hand-back (needs disposition,
- * exhausted): the flow engine's step hands it to the Secretary (src/flow/failures.ts, WI-15 and
- * WI-08); without a hook the exploration simply waits at that task (the scheduler raised the WI).
+ * exhausted): the flow engine's step hands it to the Secretary (src/flow/failures.ts, WI-28 and
+ * WI-08); without a hook the exploration simply waits at that task.
  */
 export type FailedTaskHook = (q: QueuedBody, st: FlowTaskStatus) => Promise<void>;
 
@@ -105,9 +109,10 @@ export async function defineExploration(p: ExplorationPorts, input: ExplorationD
  * a new version of its basis line, so every judgment bound to the old version stops being current
  * (5.2) and the current version is attacked again under the new definition. Idempotent; returns
  * false when nothing changed. A settled exploration is not redefined (its result was handed on):
- * the caller defines a new exploration instead.
+ * the caller defines a new exploration instead. "Settled" is the current settle (machine.ts): while
+ * a rerun after an environment change has reopened it, the definition in force applies.
  */
-export async function redefineExploration(p: ExplorationPorts, input: ExplorationDefinition): Promise<boolean> {
+export async function redefineExploration(p: ExplorationPorts, input: ExplorationDefinition, extra: AppendExtra = {}): Promise<boolean> {
   const def = ExplorationDefinitionSchema.parse(input);
   const mission = def.mission as MissionId;
   const s = await load(p, mission, def.exploration);
@@ -117,20 +122,53 @@ export async function redefineExploration(p: ExplorationPorts, input: Exploratio
   const basisVersion = xid.basisVersion(def.mission, def.exploration, v);
   const definitionDoc = p.ledger.content.put(canonicalJson(def));
   const basis: PlainBasisVersionRecord = { kind: 'basis.version', basisKind: 'standard', line: s.defined.basisLine as never, version: basisVersion as never, mission, scope: null };
-  await p.ledger.append(xid.op(def.mission, def.exploration, `redefine:${v}`), { events: [{ mission, line: line(def.exploration), event: 'redefined', key: String(v), body: { definition: def, definitionDoc, basisVersion } }], records: [basis] });
+  await p.ledger.append(xid.op(def.mission, def.exploration, `redefine:${v}`), {
+    events: [{ mission, line: line(def.exploration), event: 'redefined', key: String(v), body: { definition: def, definitionDoc, basisVersion } }, ...(extra.events ?? [])],
+    records: [basis, ...(extra.records ?? [])],
+    ...(extra.guard !== undefined ? { guard: extra.guard } : {}),
+  });
   return true;
+}
+
+/** What a caller adds to one of this flow's writes, in the same append (e.g. escalations it closes, code review round 10). */
+export interface AppendExtra {
+  readonly events?: readonly FlowEventInput[];
+  readonly records?: readonly BaseRecord[];
+  readonly guard?: AppendGuard;
 }
 
 // ---------------------------------------------------------------- rulings
 
 /**
  * A ruling of the decision layer (3.8 Secretary, 3.2 user): accept findings as residual risks,
- * redirect them, extend the budget (WI-08), retry a given-up turn (WI-15), stop, or answer a
+ * redirect them, extend the budget (WI-08), retry a given-up turn (WI-28), stop, or answer a
  * direction question. Idempotent by ruling id.
  */
 export async function recordExplorationRuling(p: ExplorationPorts, mission: MissionId, x: string, r: RulingBody): Promise<void> {
+  await p.ledger.append(xid.op(mission, x, `ruling:${r.id}`), { events: [rulingEvent(mission, x, r)] });
+}
+
+/** The event of a ruling, for an append that carries a decision out (the ruling, the settle and the decision's "applied" as one write). */
+export function rulingEvent(mission: MissionId, x: string, r: RulingBody): FlowEventInput {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$/.test(r.id)) throw new Error(`bad ruling id ${JSON.stringify(r.id)}`);
-  await p.ledger.append(xid.op(mission, x, `ruling:${r.id}`), { events: [{ mission, line: line(x), event: 'ruling', key: r.id, body: r }] });
+  return { mission, line: line(x), event: 'ruling', key: r.id, body: r };
+}
+
+/** The state the exploration would have after these rulings (to build, in the same write, the settle they lead to). */
+export async function explorationStateAfter(p: Pick<ExplorationPorts, 'ledger'>, mission: MissionId, x: string, rulings: readonly RulingBody[]): Promise<XState> {
+  const events = await p.ledger.events({ mission, line: line(x) });
+  return fold([...events.map((e) => ({ event: e.event, key: e.key, body: e.body })), ...rulings.map((r) => ({ event: 'ruling', key: r.id, body: r }))]);
+}
+
+/**
+ * The environment changed under evidence executions a converged version rests on (code review r1
+ * #3): they run again (the same request) and the same position judges the version again; the
+ * exploration is reopened (its current settle, if any, becomes history: machine.ts). Idempotent by
+ * the evidence and the identity.
+ */
+export async function recordExplorationRerun(p: ExplorationPorts, mission: MissionId, x: string, r: RerunBody, extra: AppendExtra = {}): Promise<void> {
+  const key = `${r.environment.slice(0, 24)}.${sha256(canonicalJson([...r.evidence].sort())).slice(0, 16)}`;
+  await p.ledger.append(xid.op(mission, x, `rerun:${key}`), { events: [{ mission, line: line(x), event: 'rerun', key, body: r }, ...(extra.events ?? [])], ...(extra.records !== undefined ? { records: extra.records } : {}), ...(extra.guard !== undefined ? { guard: extra.guard } : {}) });
 }
 
 // ---------------------------------------------------------------- advance
@@ -157,7 +195,8 @@ export async function advanceExploration(p: ExplorationPorts, mission: MissionId
       steps++;
       continue;
     }
-    const a = decide(s, { spentMicros: s.def.budget.spendMicros !== null ? await spentMicros(p, s) : null });
+    // 4.1 meters nothing: an exploration's spend budget is informational (§13 Q1)
+    const a = decide(s, { spentMicros: null });
     if (a.kind === 'none') return report(x, s, steps, s.stopped !== null ? 'stopped' : 'waiting', a.why);
     await perform(p, mission, x, s, a);
     steps++;
@@ -176,27 +215,6 @@ export async function advanceAllExplorations(p: ExplorationPorts, missions?: rea
     for (const d of defs) if (d.line.startsWith('exploration:')) out.push(await advanceExploration(p, m, d.line.slice('exploration:'.length)));
   }
   return out;
-}
-
-/**
- * What the exploration's launches spent so far (6.5): settled requests at their actual cost, open
- * reservations at their reserved upper bound. Read from the ledger's spend records.
- */
-async function spentMicros(p: ExplorationPorts, s: XState): Promise<number> {
-  const launches = new Set<string>();
-  for (const q of s.tasks.values()) for (const l of (await p.scheduler.status(q.task))?.launches ?? []) launches.add(l);
-  if (launches.size === 0) return 0;
-  const reserved = new Map<string, number>();
-  for (const c of await p.ledger.records(['spend.reserve'])) if (launches.has(c.record.launch)) reserved.set(c.record.reservation, c.record.micros);
-  let total = 0;
-  const settled = new Set<string>();
-  for (const c of await p.ledger.records(['spend.settle'])) {
-    if (!reserved.has(c.record.reservation)) continue;
-    settled.add(c.record.reservation);
-    total += c.record.micros;
-  }
-  for (const [r, m] of reserved) if (!settled.has(r)) total += m;
-  return total;
 }
 
 // ---------------------------------------------------------------- consuming finished tasks
@@ -223,7 +241,7 @@ async function consumeFinished(p: ExplorationPorts, mission: MissionId, x: strin
     const records: BaseRecord[] = [];
     if (body.kind === 'evidence' && !body.auto && q.role === 'executor' && st.handBack !== null) {
       const card = cardOf<ExperimentCard | ReaderCard>(p, q);
-      // the experiment's evidence record is the program's (the hand-back made none)
+      // the experiment's evidence record is the program's (the hand-back made none): its claims checked against the dispatch's runs
       if (!st.handBack.records.some((x) => x.kind === 'evidence' && x.evidence === card.evidence.id)) records.push(blindRecordOf(p, card, st.handBack.result as BlindResult, st.handBack));
     }
     if (body.kind === 'evidence' && body.auto && q.evidence !== null) {
@@ -249,7 +267,7 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
   const hb = st.handBack;
   if (hb === null) return null;
   if (st.state === 'waiting-evidence' || hb.status === 'needs-evidence') {
-    return { kind: 'needs-evidence', task: q.task, role: q.role, request: hb.evidenceRequest, recoveryState: hb.recoveryState, sessionId: hb.sessionId };
+    return { kind: 'needs-evidence', task: q.task, role: q.role, request: hb.evidenceRequest, notes: hb.notes };
   }
   if (st.state !== 'done' || hb.status !== 'handed-back') return null;
   const put = (d: string): string => p.ledger.content.put(d);
@@ -293,7 +311,7 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
       const card = cardOf<CrititorCard>(p, q);
       const r = hb.result as CrititorResult;
       if (card.mode === 'discuss') return { kind: 'discuss-reply', task: q.task, reply: r.reply, result: hb.resultHash };
-      const ids = crititorFindingIds(card, r, hb.launch, put);
+      const ids = crititorFindingIds(card, r, hb.dispatch, put);
       const o = attackOutcome(card.priorFindings, r);
       return {
         kind: 'attack',
@@ -302,10 +320,26 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
         judgment: card.binding?.judgment ?? '',
         verdict: o.verdict,
         fresh: card.fresh,
-        findings: r.findings.map((f, i) => ({ id: ids[i] as string, severity: f.severity, class: f.class, title: f.title, doc: put(crititorFindingDocument(card, f, hb.launch)) })),
+        findings: r.findings.map((f, i) => ({ id: ids[i] as string, severity: f.severity, class: f.class, title: f.title, doc: put(crititorFindingDocument(card, f, hb.dispatch)) })),
         rechecks: r.rechecks.map((c) => ({ finding: c.finding, resolved: c.resolved, reason: c.reason })),
         settled: r.settled,
         reply: r.reply,
+        result: hb.resultHash,
+        evidence: crititorEvidence(card, r),
+      };
+    }
+    case 'stabilizer': {
+      const card = cardOf<StabilizerCard>(p, q);
+      const r = hb.result as StabilizerResult;
+      return {
+        kind: 'stabilized',
+        task: q.task,
+        round: card.round,
+        target: card.target,
+        judgment: card.binding.judgment,
+        verdict: stabilizedVerdict(card, r),
+        findings: r.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, question: f.question.trim() !== '' ? f.question : null })),
+        drift: { verdict: r.round.verdict, reason: r.round.reason, question: r.round.question.trim() !== '' ? r.round.question : null },
         result: hb.resultHash,
       };
     }
@@ -329,17 +363,16 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
 }
 
 /**
- * The evidence record of a blind run (review r1 #20): a reading's comes with the hand-back (the
- * host checked its fetch:<k> pointers against the pages it fetched); an experiment's is the
- * program's, written here from the claims checked against the launch's run records.
+ * The evidence record of a blind run (review r1 #20): a reading's comes with the hand-back (its
+ * url:<address> pointers were checked against the card's addresses); an experiment's is the
+ * program's, written here from the claims checked against the dispatch's runs (`mp seat <id> rerun`).
  */
 function blindRecordOf(p: ExplorationPorts, card: ExperimentCard | ReaderCard, r: BlindResult, hb: NonNullable<FlowTaskStatus['handBack']>): EvidenceRecord {
   if (card.seat === 'researcher-reader') {
     const rec = hb.records.find((x): x is EvidenceRecord => x.kind === 'evidence' && x.evidence === card.evidence.id);
     if (rec !== undefined) return rec;
   }
-  const runs = hb.records.filter((x): x is RunLayerRecord => x.kind === 'run.layer').map((x) => ({ run: x.run as string, status: x.status as string }));
-  return blindEvidenceRecord(card, r, card.seat === 'researcher-reader' ? 'reading' : 'experiment', { content: p.ledger.content }, card.seat === 'researcher-reader' ? null : runs);
+  return blindEvidenceRecord(card, r, card.seat === 'researcher-reader' ? 'reading' : 'experiment', { content: p.ledger.content }, card.seat === 'researcher-reader' ? null : hb.runs);
 }
 
 function blindSummary(card: { readonly assertions: readonly string[] }, r: BlindResult): string {
@@ -357,6 +390,20 @@ function blindSummary(card: { readonly assertions: readonly string[] }, r: Blind
 
 /** Notices a consumption brings (3.9, 3.11): direction questions go up (3.2: direction is the user's). */
 async function notifyConsumption(p: ExplorationPorts, mission: MissionId, x: string, s: XState, q: QueuedBody, c: ConsumedBody): Promise<void> {
+  if (c.kind === 'stabilized') {
+    const shifts = c.findings.filter((f) => f.verdict === 'shifts-direction');
+    if (shifts.length === 0 && c.drift.verdict !== 'drifting') return;
+    await p.ledger.notify({
+      category: 'exploration-awaiting-ruling',
+      wi: 'WI-33',
+      key: `${x}:${q.task}`,
+      mission,
+      trigger: `the Stabilizer of exploration ${x}, round ${c.round}, judged ${shifts.length > 0 ? `${shifts.length} finding(s) shifting the direction` : ''}${shifts.length > 0 && c.drift.verdict === 'drifting' ? ' and ' : ''}${c.drift.verdict === 'drifting' ? 'the round drifting' : ''} (4.1 §6.3)`,
+      defaultAction: 'the exploration awaits a ruling: its version stays pending and cannot be accepted; the questions go to the Secretary (a step in mp pm next); other work goes on',
+      detail: { exploration: x, round: c.round, questions: [...shifts.map((f) => f.question ?? f.reason), ...(c.drift.verdict === 'drifting' ? [c.drift.question ?? c.drift.reason] : [])], findings: shifts.map((f) => f.finding) },
+    });
+    return;
+  }
   if (c.kind !== 'author' && c.kind !== 'interpretation') return;
   const escalated = c.dispositions.filter((d) => d.action === 'escalate');
   const questions = c.kind === 'author' ? c.directionQuestions : [];
@@ -396,7 +443,11 @@ function taskOf(s: XState, task: string, lineage: string, card: AnyCard): FlowTa
 
 async function submitQueued(p: ExplorationPorts, mission: MissionId, x: string, s: XState, q: Omit<QueuedBody, 'card'>, card: AnyCard, supersedes: string | null): Promise<void> {
   const cardHash = p.ledger.content.put(canonicalJson(card));
-  const t = taskOf(s, q.task, q.lineage, card);
+  // who hands it over (§3.2, U-13): the task it continues, else the round's last consumed task
+  const last = [...s.consumed.keys()].map((k) => s.tasks.get(k)).filter((b): b is QueuedBody => b !== undefined).sort((a, b) => a.n - b.n).at(-1);
+  const from = supersedes ?? q.resumeOf ?? last?.task ?? null;
+  const objects = [...new Set([...(q.target !== null ? [q.target] : []), ...(s.version !== null ? [s.version.id] : [])])];
+  const t = { ...taskOf(s, q.task, q.lineage, card), handover: { from, objects, step: `exploration ${x}, round ${q.round + (q.role === 'attacker' ? 1 : 0)}: the ${q.role} turn${q.evidence?.rerunOf !== undefined ? ` (a rerun of ${q.evidence.rerunOf})` : ''}` } };
   if (supersedes !== null) await p.scheduler.supersede(supersedes, t);
   else await p.scheduler.submit(t);
   const body: QueuedBody = { ...q, card: cardHash };
@@ -408,7 +459,7 @@ const asCard = (c: object): AnyCard => c as unknown as AnyCard;
 async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XState, a: Exclude<Action, { kind: 'none' }>): Promise<void> {
   const lineage = xid.lineage(mission, x);
   const n = s.seq + 1;
-  const base = { n, round: s.rounds, phase: s.phase, fresh: false, target: null, judgment: null, evidence: null, resumeOf: null, versionPrefix: null, lineage };
+  const base = { n, round: s.rounds, phase: s.phase, fresh: false, target: null, judgment: null, evidence: null, resumeOf: null, versionPrefix: null, lineage, ...(s.defined !== null ? { basis: s.defined.basisVersion } : {}) };
   switch (a.kind) {
     case 'stop':
       await stop(p, mission, x, s, a.reason, a.wi);
@@ -427,6 +478,13 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const task = xid.task(mission, x, n, 'attacker');
       const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null);
       await submitQueued(p, mission, x, s, { ...base, task, role: 'attacker', purpose: a.mode, fresh: a.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), null);
+      return;
+    }
+    case 'stabilizer': {
+      // a new instance each round (4.1 §6.3)
+      const task = xid.task(mission, x, n, 'stabilizer');
+      const card = stabilizerCard(s, n, task, p.ledger.content);
+      await submitQueued(p, mission, x, s, { ...base, task, role: 'stabilizer', purpose: 'stabilize', target: card.target, judgment: card.binding.judgment }, asCard(card), null);
       return;
     }
     case 'evidence': {
@@ -472,6 +530,35 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       await submitQueued(p, mission, x, s, { ...base, task, lineage: evLineage, role: 'executor', purpose: 'evidence', evidence: { id: evidence, k, attempt: null, executor, requester: aw.requester } }, asCard(card), null);
       return;
     }
+    case 'rerun-evidence': {
+      // the same request as the evidence execution it replaces (its card, blind as before): a new
+      // run under the current environment identity (code review r1 #3)
+      const orig = [...s.tasks.values()].find((q) => q.evidence?.id === a.evidence);
+      if (orig === undefined || orig.evidence === null) return;
+      const was = cardOf<ExperimentCard | ReaderCard>(p, orig);
+      const req: EvidenceRequestDoc = {
+        steps: [...was.steps],
+        data: was.data,
+        measure: [...was.measure],
+        assertions: [...was.assertions],
+        executor: orig.evidence.executor,
+        ...(was.seat === 'constructor-experiment' && was.commands.length > 0 ? { commands: was.commands.map((c) => ({ ...c })) } : {}),
+      };
+      const k = s.evidenceSeq + 1;
+      const evidence = xid.evidence(mission, x, k);
+      const task = xid.task(mission, x, n, 'executor');
+      const card = executorCard(s, task, p.ledger.content, req, orig.evidence.executor, { id: evidence, attempt: orig.evidence.attempt });
+      await submitQueued(
+        p,
+        mission,
+        x,
+        s,
+        { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: orig.purpose === 'attempt' ? 'attempt' : 'evidence', evidence: { id: evidence, k, attempt: orig.evidence.attempt, executor: orig.evidence.executor, requester: null, rerunOf: a.evidence } },
+        asCard(card),
+        null,
+      );
+      return;
+    }
     case 'attempts': {
       // one at a time (each its own op); the loop in advanceExploration queues the rest
       const at = a.attempts[0];
@@ -489,20 +576,8 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       if (aw === null || rq === undefined) return;
       const ev = aw.evidence !== null ? s.evidence.get(aw.evidence) : undefined;
       const text = ev === undefined ? 'The evidence run left no record.' : `Evidence ${ev.id} (${ev.status}): ${ev.summary}${ev.report !== null ? `\nFull report: material evidence-${ev.id}.` : ''}`;
-      let resume: Resume | null = null;
-      if (aw.sessionId !== null) resume = { sessionId: aw.sessionId, state: aw.recoveryState, evidence: text };
-      else {
-        // WI-17: no session to resume: a new session from what the ledger holds (6.2)
-        await p.ledger.notify({
-          category: 'exploration-recovery-state-missing',
-          wi: 'WI-17',
-          key: `${x}:${a.requester}`,
-          mission,
-          trigger: `the ${rq.role} of exploration ${x} asked for evidence (task ${a.requester}) but no session id was kept, so its session cannot be resumed (6.2)`,
-          defaultAction: 'a new session starts with a card holding the ledger material (the current version, every finding and disposition, the evidence results); only the conversation is lost',
-          detail: { exploration: x, requester: a.requester, recoveryState: aw.recoveryState, evidence: aw.evidence },
-        });
-      }
+      // §5.4: continuation is a new card with the notes the seat saved and the evidence, never a harness session
+      const resume: Resume = { previous: a.requester, notes: aw.notes, evidence: text };
       const task = xid.task(mission, x, n, rq.role);
       const common = { ...base, task, role: rq.role, resumeOf: a.requester, lineage: rq.lineage };
       if (rq.role === 'author') {
@@ -512,7 +587,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
         const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume);
         await submitQueued(p, mission, x, s, { ...common, purpose: mode, fresh: rq.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), a.requester);
       } else {
-        // interpreters and executors have no request_evidence tool; nothing to resume
+        // interpreters and executors cannot ask for evidence; nothing to continue
         await submitQueued(p, mission, x, s, { ...common, purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content)), a.requester);
       }
       return;
@@ -558,7 +633,12 @@ export interface ExplorationHandoff {
     readonly rechecks: ReadonlyArray<{ readonly round: number; readonly resolved: string; readonly reason: string }>;
     readonly residualRisk: boolean;
     readonly ruling: string | null;
+    /** The Stabilizer's verdict and severity (4.1 §6.3), null before its round was stabilized. */
+    readonly scope: string | null;
+    readonly judgedSeverity: string | null;
   }>;
+  /** The Stabilizer's judgments, round by round (4.1 §6.3): what goes to the Secretary with the findings. */
+  readonly stabilizer: ReadonlyArray<{ readonly round: number; readonly verdict: string; readonly drift: string; readonly reason: string; readonly findings: ReadonlyArray<{ readonly finding: string; readonly verdict: string; readonly severity: string; readonly reason: string }> }>;
   readonly unresolvedBlocking: readonly string[];
   readonly residualRisks: readonly string[];
   readonly evidence: ReadonlyArray<{ readonly id: string; readonly status: string; readonly summary: string; readonly attempt: string | null }>;
@@ -584,8 +664,23 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
     rounds: s.rounds,
     allowedRounds: allowedRounds(s),
     lastAttack: s.lastAttack === null ? null : { judgment: s.lastAttack.judgment, verdict: s.lastAttack.verdict, target: s.lastAttack.target, result: s.lastAttack.result },
-    findings: findings.map((f) => ({ id: f.id, severity: f.severity, class: f.class, title: f.title, round: f.round, phase: f.phase, status: f.status, disposition: f.disposition, rechecks: f.rechecks, residualRisk: f.residualRisk, ruling: f.ruling })),
-    unresolvedBlocking: findings.filter((f) => (f.severity === 'fatal' || f.severity === 'serious') && f.status !== 'resolved').map((f) => f.id),
+    findings: findings.map((f) => ({
+      id: f.id,
+      severity: effectiveSeverity(f),
+      class: f.class,
+      title: f.title,
+      round: f.round,
+      phase: f.phase,
+      status: f.status,
+      disposition: f.disposition,
+      rechecks: f.rechecks,
+      residualRisk: f.residualRisk,
+      ruling: f.ruling,
+      scope: f.scope,
+      judgedSeverity: f.judgedSeverity,
+    })),
+    stabilizer: s.stabilizations.map((j) => ({ round: j.round, verdict: j.verdict, drift: j.drift.verdict, reason: j.drift.reason, findings: j.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason })) })),
+    unresolvedBlocking: findings.filter((f) => blocks(f) && f.status !== 'resolved').map((f) => f.id),
     residualRisks: findings.filter((f) => f.residualRisk).map((f) => f.id),
     evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt })),
     questions: [...s.questions],
@@ -603,7 +698,7 @@ const STOP_TEXT: Readonly<Record<StopReason, { readonly category: string; readon
   },
   'budget-exhausted': {
     category: 'exploration-budget-exhausted',
-    trigger: 'the exploration used its budget (rounds, or its own spend limit) without converging (8.2 stop 2, 6.5)',
+    trigger: 'the exploration used its round budget without converging (8.2 stop 2, 6.5; 4.1 meters no spend)',
     action: `no further round is queued; nothing else is affected; ${DECIDE}`,
   },
   'fatal-repeat': {
@@ -618,7 +713,7 @@ const STOP_TEXT: Readonly<Record<StopReason, { readonly category: string; readon
   },
   'seat-abandoned': {
     category: 'exploration-seat-abandoned',
-    trigger: 'an author, attacker or interpreter task of the exploration was given up after its failure (WI-15)',
+    trigger: 'an author, attacker, Stabilizer or interpreter task of the exploration was given up (WI-28)',
     action: 'no further round is queued; nothing else is affected. The PM retries the turn (recordExplorationRuling "retry") or stops the exploration ("stop")',
   },
   'stopped-by-decision': {

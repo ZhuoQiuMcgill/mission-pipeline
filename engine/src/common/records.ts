@@ -1,13 +1,12 @@
-// Base records: the immutable facts the ledger service commits (design 6.1).
-// Each committed record is assigned a Revision. Derived state (5.2) is never
-// stored in the ledger; the evaluator computes it from these records alone, and
-// "the derived state at revision R" is defined as a full recomputation over the
-// records with revision <= R.
+// Base records: the immutable facts appended to the project memory's event log
+// (design 4.1 §3.2; 4.0 6.1). Each committed record is assigned a Revision.
+// Derived state (the labels, 5.2) is computed from these records alone and
+// stored apart (src/evaluator); "the derived state at revision R" is defined as
+// a full recomputation over the records with revision <= R.
 //
 // Large lists (a judgment's evidence, an object's prerequisites, an operation's
-// objects) are stored in the content store; the record carries the list's hash
-// and length. The ledger read API resolves them, so the evaluator receives the
-// resolved form (`Resolved<...>`).
+// objects) are skeleton data (memory/data.ts): the record carries the list's
+// hash and length, and reads resolve them (`Resolved<...>`).
 
 import { canonicalJson, sha256 } from './hash.ts';
 import type {
@@ -28,13 +27,11 @@ import type {
   ObjectVersionId,
   OpId,
   ProofUnitId,
-  ReservationId,
-  RunId,
   Revision,
   StopId,
 } from './ids.ts';
 
-/** Reference to a list stored in the content store. */
+/** Reference to a list stored as skeleton data (memory/data.ts). */
 export interface ListRef {
   readonly hash: ContentHash;
   readonly count: number;
@@ -160,17 +157,52 @@ export interface BasisWithdrawnRecord {
 
 // ---------------------------------------------------------------- environments
 
-/** The current snapshot of an environment line is the latest one registered (7.2). */
+/**
+ * The current snapshot of an environment line is the latest one registered (7.2).
+ * 4.1 §6.5: the environment identity of the machine `mp` runs on, recorded when
+ * it changes (line "env", snapshot = the hash of `parts`).
+ */
 export interface EnvSnapshotRecord {
   readonly kind: 'env.snapshot';
   readonly line: EnvLineId;
-  readonly snapshot: EnvSnapshotId; // hash of rootfs copy + declared env + transform description + platform (7.1, 7.2)
+  readonly snapshot: EnvSnapshotId;
+  /** 4.1 §6.5: what the identity hashes, kept for reading. */
+  readonly parts?: EnvironmentParts;
+}
+
+/**
+ * An environment identity's parts (4.1 §6.5): operating system and version,
+ * architecture, and the output of each version command the project declares in
+ * `.mission-pipeline/config.json` (by command).
+ */
+export interface EnvironmentParts {
+  readonly os: string;
+  readonly osVersion: string;
+  readonly arch: string;
+  /** Each command's output, shortened for reading. */
+  readonly versions: Readonly<Record<string, string>>;
+  /** The sha256 of each command's whole output (what makes the identity cover all of it). */
+  readonly digests?: Readonly<Record<string, string>>;
 }
 
 // ---------------------------------------------------------------- evidence
 
-/** closed: frozen inputs, reusable. open / sampling: never reused, never renewed (7.3). */
-export type RunClass = 'closed' | 'open' | 'sampling';
+/**
+ * The run classes of 4.1 §6.5, fixed when the run is recorded, from its card:
+ * - declared: run by `mp` on a clean checkout of the candidate commit with the
+ *   card's declared commands, its environment identity recorded, no network
+ *   declared, not marked sampled. The only class reused (same candidate content,
+ *   commands and environment identity) and renewed mechanically (5.3);
+ * - sampling: one observation among possible others (a run the card marks
+ *   sampled, an exploration's experiment, every `mp seat <id> rerun`). Never
+ *   reused; a judgment that uses a timing, statistical or external field rests
+ *   only on sampling runs;
+ * - other: anything else (network declared, a seat's scratch run, a run on a
+ *   worktree). Never reused or renewed.
+ */
+export type RunClass = 'declared' | 'sampling' | 'other';
+
+export const RUN_CLASSES: readonly RunClass[] = ['declared', 'sampling', 'other'];
 
 export interface EvidenceRecord {
   readonly kind: 'evidence';
@@ -190,7 +222,7 @@ export interface EvidenceRevokedRecord {
 
 /**
  * Mechanical renewal (5.3): after an environment change, `replacement` (a new
- * closed run) stands in for `original` in `judgment`, because every field the
+ * declared run) stands in for `original` in `judgment`, because every field the
  * judgment uses is equal. The program writes this only when the rules hold.
  */
 export interface EvidenceRenewalRecord {
@@ -313,7 +345,7 @@ export interface IssueRecord {
   readonly issue: IssueId;
   readonly module: ModuleId | null;
   readonly observedOn: ListRef; // ObjectVersionId[]
-  /** The issue's text (a finding document) in the content store. */
+  /** The issue's text (a finding document) in skeleton data. */
   readonly text?: ContentHash;
 }
 
@@ -337,7 +369,7 @@ export interface SeatResultRecord {
   readonly evidenceRequest: ContentHash | null;
   /** The transcript was cut (export cap, 7.1); the reason is in the transcript's tree document. */
   readonly transcriptIncomplete?: boolean;
-  /** The seat's tool log in the content store (7.1), when the host kept one. */
+  /** The seat's tool log in skeleton data (7.1), when the host kept one. */
   readonly toolLog?: ContentHash | null;
   /** The tool log was cut; the reason is in its tree document. */
   readonly toolLogIncomplete?: boolean;
@@ -358,7 +390,7 @@ export interface IssueResponse {
  * Reviewer answers live on judgments. The registration names the exact test ids
  * covering the issue and the content hashes of the test files, the runner
  * configuration and the shared fixtures. The covering run counts only when it
- * is a closed run, reports every registered test id as actually run and
+ * is a declared run (4.1 §6.5), reports every registered test id as actually run and
  * passed (`fields["test:<id>"] === "passed"`), and its recorded input hashes
  * (`fields["input:<name>"]`) equal the registered ones.
  */
@@ -429,17 +461,17 @@ export interface NoticeRecord {
 }
 
 /**
- * The evaluator's answer to a continuation judgment (5.2 part 5; core review r3
- * F1), obtained by the scheduler at a published revision and recorded before the
- * judgment: a continuation judgment is committed only after a passing check at
- * the latest published revision; a failing one sends the work to a full review.
+ * The labels' answer to a continuation judgment (5.2 part 5; core review r3 F1),
+ * read at the current label revision and recorded before the judgment: a
+ * continuation judgment is committed only after a passing check at the latest
+ * revision; a failing one sends the work to a full review.
  */
 export interface ContinuationCheckRecord {
   readonly kind: 'continuation.check';
   readonly judgment: JudgmentId;
   readonly extends: JudgmentId;
   readonly target: string;
-  /** The published revision the evaluator answered at. */
+  /** The label revision the check answered at. */
   readonly revision: number;
   readonly ok: boolean;
   /** The evaluator's reason when it failed. */
@@ -466,152 +498,19 @@ export function continuationInputsHash(i: JudgmentInputs): string {
   return sha256(canonicalJson({ bases: set(i.bases), constraints: set(i.constraints), evidence: set(i.evidence), reliesOn: set(i.reliesOn) }));
 }
 
-/**
- * An installation fact (9.6, WI-18): a degradation the user accepted, such as
- * running the evaluator without a cgroup memory pool ('resource-limits'). Written
- * at install; the scheduler and the evaluator supervisor read it.
- */
-export interface InstallStateRecord {
-  readonly kind: 'install.state';
-  readonly item: string;
-  readonly value: string;
-  readonly accepted: boolean;
-  readonly by: 'user' | 'installer';
-  /** The facts and the user's words, in the content store. */
-  readonly detail: ContentHash;
-}
-
-/** Termination facts from a unit supervisor (7.1). Registering facts never decides acceptance. */
-export interface TerminationProofRecord {
-  readonly kind: 'termination.proof';
-  readonly launch: LaunchId;
-  readonly exit: { readonly code: number | null; readonly signal: string | null };
-  readonly controlOomKill: number;
-  readonly unitOomKill: number;
-  readonly unitOom: number;
-}
+// ---------------------------------------------------------------- state events (10.1: an append-only log the state tables can be rebuilt from)
 
 /**
- * Cleanup of one launch (v35 7.1, 6.3, 6.4): what is left of its sandbox,
- * mounts, images, network grants and cgroup. Separate from the immutable
- * termination proof so it can progress: pending (with the remaining resources)
- * → done. The current scheduler finishes pending cleanups even for launches
- * that already have a final disposition; "stopped" requires cleanup done.
- */
-export interface CleanupStateRecord {
-  readonly kind: 'cleanup.state';
-  readonly launch: LaunchId;
-  readonly state: 'pending' | 'done';
-  /** Remaining resources, one descriptor each (encoding defined by src/exec). Empty when done. */
-  readonly resources: ListRef;
-}
-
-// ---------------------------------------------------------------- host facts for acceptance (7.1)
-
-export type RunStatus = 'completed' | 'resource-exceeded' | 'environment-failure' | 'timed-out';
-
-/** The host's record of one run layer: final counters, deltas over the run, and what it told the seat. */
-export interface RunLayerRecord {
-  readonly kind: 'run.layer';
-  readonly launch: LaunchId;
-  readonly run: RunId;
-  readonly finalOom: number;
-  readonly finalOomKill: number;
-  readonly oomDelta: number;
-  readonly oomKillDelta: number;
-  readonly status: RunStatus;
-}
-
-/** How the Claude Code process of a seat unit ended, as its host recorded it (7.1 check 1). */
-export interface ClaudeCodeExitRecord {
-  readonly kind: 'claude-code.exit';
-  readonly launch: LaunchId;
-  readonly exit: { readonly code: number | null; readonly signal: string | null };
-}
-
-// ---------------------------------------------------------------- service events (10.1: an append-only log the state tables can be rebuilt from)
-
-/**
- * Every change the ledger service makes to its state tables is also an event in
- * the log, in the same transaction (10.1 rule 3). None of these is an
+ * Every change the program makes to the memory's state tables is also an event
+ * in the log, in the same transaction (10.1 rule 3). None of these is an
  * evaluator input.
  */
-/**
- * What one previous boot left in the stop inboxes (v45 6.1 "开机后的处理"), and
- * the row of the decision table it falls in.
- */
-export interface BootEvidence {
-  readonly boot: string;
-  readonly row: 'clean-shutdown' | 'fault-evidence' | 'abnormal-stop-spare-inbox' | 'abnormal-stop-no-spare-inbox';
-  /** Inboxes holding a clean-exit record of this boot. */
-  readonly cleanExit: readonly string[];
-  /** Fault records of this boot without a "fault ended" (inbox:fault). */
-  readonly openFaults: readonly string[];
-  /** Torn writes of this boot. */
-  readonly tornWrites: number;
-  /** Torn writes whose boot cannot be read (counted against every boot processed now). */
-  readonly unattributedTorn: number;
-  /** The last probe of this boot in each inbox. */
-  readonly lastProbes: Readonly<Record<string, number | null>>;
-  /** The two inboxes' last probes apart (both configured and both probed). */
-  readonly probeGapMs: number | null;
-  /** One inbox has probes of this boot and the other has none. */
-  readonly probesOneSided: boolean;
-  /** Configured inboxes that could not be read. */
-  readonly unreadable: readonly string[];
-  /** Stop records of this boot (all committed before the decision). */
-  readonly stops: number;
-}
-
-/**
- * What a start after a reboot rested on (v45 6.1 "开机后的处理"): the evidence of
- * every previous boot processed now, the row of the table that applied, and
- * whether any work could advance automatically.
- */
-export interface StartupBasis {
-  readonly boot: string;
-  readonly previousBoot: string | null;
-  /** Every boot processed now ended with clean-exit records on every configured inbox. */
-  readonly cleanShutdown: boolean;
-  /** The ledger service's own last run ended with a clean close (informative only: not a machine shutdown, core review r3 #13). */
-  readonly ledgerClosedCleanly: boolean;
-  /** The most severe row over the boots processed now. */
-  readonly evidence: 'clean-shutdown' | 'fault-evidence' | 'abnormal-stop-spare-inbox' | 'abnormal-stop-no-spare-inbox';
-  readonly backupConfigured: boolean;
-  readonly boots: readonly BootEvidence[];
-  /** Work that could advance automatically (6.1), by kind. */
-  readonly work: { readonly openMission: boolean; readonly undecidedLaunch: boolean; readonly unsettledIntent: boolean; readonly queuedTask: boolean };
-  /** Stops committed from the inboxes and the staging copy at this start, before the decision. */
-  readonly stopsCommitted: number;
-  /** What the PM tells the user when going on after an abnormal stop (WI-12, risk 28 option A); null otherwise. */
-  readonly reminder: string | null;
-}
-
-/**
- * The recovery pause (6.1, WI-12): `set` when a start after a reboot entered
- * it, `continued` when a start after a reboot decided to go on, both with the
- * basis; `cleared` when the PM confirmed resuming under WI-12.
- */
-export interface RecoveryPauseRecord {
-  readonly kind: 'recovery.pause';
-  readonly state: 'set' | 'continued' | 'cleared';
-  readonly basis: StartupBasis | null;
-  /** Cleared only: the user's answer to the WI-12 question, as the PM recorded it, and the PM's operation id. */
-  readonly answer?: string;
-  readonly op?: string;
-}
-
 export type ServiceEventRecord =
   /** `narrows`: the stop this one narrows (6.4 "再收窄"), released in the same transaction. */
   | { readonly kind: 'stop.committed'; readonly stop: StopId; readonly scope: unknown; readonly words: string; readonly at: number; readonly narrows?: StopId }
   /** `narrowedTo`: the narrower stop committed in the same transaction. */
   | { readonly kind: 'stop.released'; readonly stop: StopId; readonly narrowedTo?: StopId }
-  | { readonly kind: 'generation.begun'; readonly gen: number }
   | { readonly kind: 'mission.state'; readonly mission: MissionId; readonly state: 'open' | 'closed' }
-  | { readonly kind: 'launch.registered'; readonly launch: LaunchId; readonly gen: number; readonly mission: MissionId; readonly capabilities: readonly string[] }
-  | { readonly kind: 'launch.adopted'; readonly launch: LaunchId; readonly gen: number; readonly via: 'alive' | 'proof' }
-  | { readonly kind: 'result.pending'; readonly launch: LaunchId; readonly op: string; readonly records: ContentHash }
-  | { readonly kind: 'disposition'; readonly launch: LaunchId; readonly disposition: 'accepted' | 'failed' | 'cancelled'; readonly reason: string }
   | {
       readonly kind: 'intent.authorized';
       readonly intent: string;
@@ -627,12 +526,6 @@ export type ServiceEventRecord =
     }
   | { readonly kind: 'intent.state'; readonly intent: string; readonly state: string; readonly executor: unknown }
   | { readonly kind: 'op.receipt'; readonly op: string; readonly payloadHash: string; readonly launch: string | null; readonly response: ContentHash }
-  | { readonly kind: 'evaluator.begun'; readonly epoch: number; readonly gen: number; readonly identity: { readonly pid: number; readonly startTime: string; readonly bootId: string } }
-  | { readonly kind: 'evaluator.published'; readonly epoch: number; readonly revision: number }
-  | { readonly kind: 'evaluator.health'; readonly failures: number; readonly fault: string | null }
-  /** A proof-conditioned operation ended without executing (6.1, WI-11: "派生状态无法计算"); it is registered again under a new id. */
-  | { readonly kind: 'op.ended'; readonly op: OpId; readonly reason: 'derived-state-uncomputable' }
-  | RecoveryPauseRecord
   | { readonly kind: 'landing.phase'; readonly landing: string; readonly intent: string | null; readonly phase: string; readonly data: ContentHash }
   | {
       readonly kind: 'delivery.recorded';
@@ -644,7 +537,7 @@ export type ServiceEventRecord =
       readonly manifest: ContentHash;
       /** The target branch the delivery was built for, when the delivery side sends it. */
       readonly target?: string | null;
-      /** The bound transform description (7.1) in the content store, when the delivery side sends it. */
+      /** The bound transform description (7.1) in skeleton data, when the delivery side sends it. */
       readonly description?: ContentHash | null;
     }
   /** A notice's delivery to the PM (3.9): delivered, then acknowledged; never back. Absent: undelivered. */
@@ -652,7 +545,7 @@ export type ServiceEventRecord =
   /**
    * A PM action through the CLI (3.11 principle 3: the PM's choice per a WI is a
    * record with an operation id, open to review): started, then done or failed.
-   * `args` and `result` are canonical JSON in the content store.
+   * `args` and `result` are canonical JSON in skeleton data.
    */
   | {
       readonly kind: 'pm.action';
@@ -665,8 +558,8 @@ export type ServiceEventRecord =
       readonly result: ContentHash | null;
     }
   /**
-   * A mission closed (6.6 关闭), with its frozen closing snapshot: the evaluator's
-   * published revision it stands on (`asOf`), the unfinished tasks at that moment
+   * A mission closed (6.6 关闭), with its frozen closing snapshot: the label
+   * revision it stands on (`asOf`), the unfinished tasks at that moment
    * (content), and the caller's snapshot document (proof states, risk list), if
    * any. A later close after repairs is a new version.
    */
@@ -741,7 +634,7 @@ export const NO_PROGRESS_EXEMPT: ReadonlySet<LoopKind> = new Set<LoopKind>(['del
 
 /**
  * Loops whose attempt is recorded when it starts (a landing attempt entering the
- * push stage; a delivery rebuild, recorded before it runs), so the ledger
+ * push stage; a delivery rebuild, recorded before it runs), so the memory
  * refuses an attempt on an exhausted loop (LOOP_EXHAUSTED, WI-08) and no
  * automatic path can run it again (6.5 "耗尽之后"). Other loops record a failure
  * that already happened and are never refused.
@@ -784,7 +677,7 @@ export interface UserWordsRecord {
   readonly session: string;
   /** When the user sent it (ms since the epoch, as the hook saw it). */
   readonly at: number;
-  /** The full text in the content store. */
+  /** The full text in skeleton data. */
   readonly text: ContentHash;
   /** The first characters of the text (at most 280), for listings. */
   readonly excerpt: string;
@@ -795,7 +688,7 @@ export interface UserWordsRecord {
  * escalation and its decision, an exploration round...). Bookkeeping, never an
  * evaluator input. Its identity is (mission, line, event, key): the same
  * identity with the same body is a no-op, with another body FACT_CONFLICT. The
- * body is a canonical JSON document in the content store, typed by the flow
+ * body is a canonical JSON document in skeleton data, typed by the flow
  * module that owns the line.
  */
 export interface FlowEventRecord {
@@ -811,9 +704,9 @@ export interface FlowEventRecord {
 }
 
 /**
- * A task entered the scheduler's queue (4.1). The queue is persisted in the
- * ledger, so a scheduler restart rebuilds it; "only queued tasks" still counts
- * as work that can advance automatically (6.1).
+ * A task entered the dispatch queue: a ready step of `mp pm next` (4.1 §5). The
+ * queue is in the memory, so any later PM session sees it; "only queued tasks"
+ * still counts as work that can advance (6.1).
  */
 export interface TaskQueuedRecord {
   readonly kind: 'task.queued';
@@ -821,8 +714,23 @@ export interface TaskQueuedRecord {
   /** The work lineage its loop counters belong to (6.5). */
   readonly lineage: string;
   readonly mission: MissionId;
-  /** The task's card (its spec) in the content store. */
+  /** The task's card (its spec) in skeleton data. */
   readonly card: ContentHash;
+  /**
+   * Who handed the task over (4.1 §3.2, U-13): the dispatch whose hand-back led to it (null: a PM
+   * command or the program itself), the task it came from, the object versions it was handed
+   * over on, and the step in words. Absent on records written before 4.1 package A3 r1, and on
+   * the re-queue of a released dispatch (the original handover stands).
+   */
+  readonly queuedBy?: TaskHandover;
+}
+
+/** Who handed a queued task over (TaskQueuedRecord.queuedBy). */
+export interface TaskHandover {
+  readonly dispatch: string | null;
+  readonly task: string | null;
+  readonly objects: readonly string[];
+  readonly step: string;
 }
 
 /** A task left the queue: dispatched (as a launch), cancelled, or superseded by another task (which keeps the lineage, 6.5). */
@@ -847,15 +755,13 @@ export interface MissionBlockRecord {
 
 // ---------------------------------------------------------------- alerts and spend (bookkeeping)
 
-/** A system alert (3.9): delivered to the PM; also copied to the control plane. */
 /**
- * The PM's work instructions (design 3.11, v45: WI-01 to WI-22; 4.0 flows:
- * WI-23 a re-plan drops or changes an in-flight task, WI-24 the Secretary could
- * not decide (PM and user), WI-25 legalization exits (broken link, failed
- * backfill, chain judgment not passing), WI-26 a decision-layer step cancelled
- * by a stop, WI-27 a web fetch refused).
+ * The PM's work instructions of 4.1 (design 4.1 §6.9): WI-01..08, 13, 16, 19..21, 23..26 carried
+ * from 4.0, and WI-28..33 (interrupted dispatches, a broken event chain, missing or edited leaves and
+ * unreachable commits, a repository outside the folder, labels that keep recomputing, an
+ * exploration awaiting a ruling). Numbers of retired WIs are not reused.
  */
-export const WI_CATALOG: ReadonlySet<string> = new Set(Array.from({ length: 27 }, (_, i) => `WI-${String(i + 1).padStart(2, '0')}`));
+export const WI_CATALOG: ReadonlySet<string> = new Set(['01', '02', '03', '04', '05', '06', '07', '08', '13', '16', '19', '20', '21', '23', '24', '25', '26', '28', '29', '30', '31', '32', '33'].map((n) => `WI-${n}`));
 
 /**
  * A system alert (3.9). An exception carries the PM work instruction for it
@@ -871,33 +777,6 @@ export interface SystemAlertRecord {
   readonly wi?: string;
   readonly informational?: true;
   readonly body: ContentHash;
-}
-
-/** The metering proxy reserved an upper bound before forwarding one model request (6.5). Amounts in micro-dollars. */
-export interface SpendReserveRecord {
-  readonly kind: 'spend.reserve';
-  readonly reservation: ReservationId;
-  readonly mission: MissionId;
-  readonly launch: LaunchId;
-  readonly micros: number;
-}
-
-/** A mission's spend limit (6.5): micro-dollars, or null for `unlimited` (the default). */
-export interface SpendLimitRecord {
-  readonly kind: 'spend.limit';
-  readonly mission: MissionId;
-  readonly micros: number | null;
-}
-
-/**
- * A reservation settled: by the response's usage, or at the reserved amount when
- * the host or proxy died with the request in flight (6.5).
- */
-export interface SpendSettleRecord {
-  readonly kind: 'spend.settle';
-  readonly reservation: ReservationId;
-  readonly micros: number;
-  readonly how: 'usage' | 'reservation';
 }
 
 export type BaseRecord =
@@ -917,9 +796,7 @@ export type BaseRecord =
   | OpExecutedRecord
   | EpisodeBatchRecord
   | NoticeRecord
-  | RunLayerRecord
   | SeatResultRecord
-  | ClaudeCodeExitRecord
   | SystemAlertRecord
   | ServiceEventRecord
   | UserWordsRecord
@@ -927,15 +804,9 @@ export type BaseRecord =
   | TaskQueuedRecord
   | TaskDequeuedRecord
   | ContinuationCheckRecord
-  | InstallStateRecord
-  | CleanupStateRecord
   | LoopAttemptRecord
   | LoopGrantRecord
-  | MissionBlockRecord
-  | SpendLimitRecord
-  | SpendReserveRecord
-  | SpendSettleRecord
-  | TerminationProofRecord;
+  | MissionBlockRecord;
 
 export type BaseRecordKind = BaseRecord['kind'];
 
@@ -957,7 +828,7 @@ export const EVALUATOR_INPUT_KINDS: ReadonlySet<BaseRecordKind> = new Set<BaseRe
   'op.executed',
 ]);
 
-/** A committed record as read back from the ledger. */
+/** A committed record as read back from the memory. */
 export interface Committed<R extends BaseRecord = BaseRecord> {
   readonly revision: Revision;
   readonly record: R;

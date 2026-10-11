@@ -68,7 +68,7 @@ the principal-interface principle. These were saving tokens, not spending them.
 
 ## 5. Acceptance
 
-Five gates, 168 checks: the seven-mission DIVRA retrospective still reproduces
+Five gates, 168 checks: the field-site retrospective still reproduces
 mechanically (`m1_acceptance`); every evidence rule is refused at seal by name
 (`m2_lint`); a whole mission driven by documents alone lands at **2.00 journal events per
 artifact** with no declaration verb in the journal (`m3_dryrun`); a 1.0.0 ledger upgrades

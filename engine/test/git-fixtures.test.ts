@@ -2,9 +2,10 @@
 // tests); it is named *.test.ts because the git tests live under test/git-*.test.ts.
 //
 // Fixture setup uses RAW git (child_process) with an isolated environment, so
-// tests can build exact objects and reproduce hazards the engine's wrapper is
-// designed to prevent. Engine code never does this: it goes through SafeGit.
-// Everything lives under os.tmpdir() (a Linux filesystem), never under /mnt.
+// tests can build exact objects. Engine code goes through PlainGit, here with
+// the fixture's HOME and no system configuration, so the user's own git
+// configuration never reaches a test. Everything lives under os.tmpdir() (a
+// Linux filesystem), never under /mnt.
 
 import type { GitOid } from '../src/common/ids.ts';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -13,19 +14,14 @@ import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gitOid } from '../src/git/objects.ts';
-import { SafeGit, type UserGitEnvironment } from '../src/git/safeGit.ts';
-import type { Generation } from '../src/common/ids.ts';
-import { ContentStore } from '../src/ledger/content.ts';
-import { LedgerClient, serveLedger } from '../src/ledger/ipc.ts';
-import { LedgerService, ledgerPaths, type LedgerPaths } from '../src/ledger/service.ts';
+import { PlainGit } from '../src/git/plainGit.ts';
 
 export interface Fixture {
   readonly root: string;
-  /** Fake HOME for raw git and for the "user" scope of the transform description. */
+  /** Fake HOME for raw git and for the engine's git (the "user" configuration of the transform description). */
   readonly home: string;
   readonly env: Record<string, string>;
-  readonly git: SafeGit;
-  readonly user: UserGitEnvironment;
+  readonly git: PlainGit;
   /** Raw git for fixture setup. Returns stdout (trimmed). Throws on failure. */
   raw(args: readonly string[], cwd: string, opts?: { input?: string | Buffer; env?: Record<string, string> }): string;
   /** Raw git, returning the exit status and output instead of throwing. */
@@ -49,7 +45,7 @@ export function makeFixture(prefix: string): Fixture {
     GIT_AUTHOR_DATE: '1700000000 +0000',
     GIT_COMMITTER_DATE: '1700000000 +0000',
   };
-  const git = SafeGit.create({ stateDir: join(root, 'state') });
+  const git = PlainGit.create({ env: { HOME: home, XDG_CONFIG_HOME: join(home, '.config'), GIT_CONFIG_NOSYSTEM: '1' } });
   const raw = (args: readonly string[], cwd: string, opts: { input?: string | Buffer; env?: Record<string, string> } = {}): string => {
     const out = execFileSync('/usr/bin/git', [...args], {
       cwd,
@@ -69,12 +65,9 @@ export function makeFixture(prefix: string): Fixture {
     home,
     env,
     git,
-    user: { home },
     raw,
     rawStatus,
     cleanup(): void {
-      // The safe-git state directories are read-only; make everything writable first.
-      spawnSync('chmod', ['-R', 'u+w', root]);
       rmSync(root, { recursive: true, force: true });
     },
   };
@@ -197,42 +190,4 @@ export function gitLfsAvailable(): string | null {
     }
   }
   return null;
-}
-
-/** A real ledger service on a Unix socket, as the engine runs it (6.1), for adapter tests. */
-export interface LedgerHarness {
-  readonly svc: LedgerService;
-  readonly client: LedgerClient;
-  readonly content: ContentStore;
-  readonly paths: LedgerPaths;
-  readonly gen: Generation;
-  /** The ledger's IPC socket (for other processes such as the evaluator). */
-  readonly socket: string;
-  close(): Promise<void>;
-}
-
-export async function startLedger(root: string): Promise<LedgerHarness> {
-  mkdirSync(root, { recursive: true });
-  const paths = ledgerPaths(join(root, 'ledger'), join(root, 'control'));
-  const svc = new LedgerService({ paths });
-  svc.open();
-  const sock = join(root, 'ledger.sock');
-  const server = serveLedger(svc, sock);
-  const client = new LedgerClient(sock, 10_000);
-  const gen = (await client.call('beginGeneration', {})) as Generation;
-  return {
-    svc,
-    client,
-    content: new ContentStore(paths.content),
-    paths,
-    gen,
-    socket: sock,
-    async close(): Promise<void> {
-      client.close();
-      await new Promise<void>((r) => server.close(() => r()));
-      svc.close();
-      // A ledger's content store holds 65,536 fan-out directories: free them now, not at the end of the file.
-      rmSync(root, { recursive: true, force: true });
-    },
-  };
 }

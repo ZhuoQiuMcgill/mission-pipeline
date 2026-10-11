@@ -47,7 +47,6 @@ import {
   type RepoLayout,
   type TreeEntry,
 } from '../git/objects.ts';
-import type { AdmissionDecision } from '../git/admission.ts';
 import {
   materializeSnapshot,
   MissingObjectsError,
@@ -58,7 +57,7 @@ import {
   type AttributeEvaluator,
   type SnapshotManifest,
 } from '../git/representation.ts';
-import type { SafeGit } from '../git/safeGit.ts';
+import type { GitExec } from '../git/plainGit.ts';
 import type { DeliveryManifest, ManifestEntry } from './manifest.ts';
 import type { DeliveryObject, DeliveryProofView, DeliveryTarget } from './proofView.ts';
 import { inWriteScope, writeScopeIdentity } from './writeScope.ts';
@@ -93,27 +92,10 @@ export type CandidateResult =
   /** 6.6 step 3: conflicts are resolved by an integration task and accepted by a Reviewer. */
   | { readonly kind: 'conflict'; readonly base: GitOid; readonly conflicts: readonly OverlayConflict[] }
   /** 7.1: every object of a candidate must rest on one transform description; re-materialize and re-verify the others. */
-  | { readonly kind: 'description-mismatch'; readonly expected: ContentHash; readonly versions: readonly ObjectVersionId[] }
-  /**
-   * 6.5 (code review r1 #12): a write destination does not have the space or
-   * inodes. `objects`: refused before any object was written; `snapshot`: the
-   * new trees and the commit (admitted) exist, no snapshot file was written.
-   */
-  | { readonly kind: 'not-admitted'; readonly stage: 'objects' | 'snapshot'; readonly decision: AdmissionDecision };
-
-/**
- * Disk admission of a candidate's writes, per destination, before each is
- * written (6.5 "生成提交也是一处写入，单独准入"; code review r1 #12).
- */
-export interface CandidateAdmission {
-  /** Before any object is written: the new trees and the commit (uncompressed sizes; the caller applies the worst case). */
-  objects(newObjects: readonly { readonly type: 'tree' | 'commit'; readonly size: number }[]): AdmissionDecision;
-  /** Before any snapshot file is written: the exact materialized sizes (a dry run) and the directories to create. */
-  snapshot(fileSizes: readonly number[], directories: number): AdmissionDecision;
-}
+  | { readonly kind: 'description-mismatch'; readonly expected: ContentHash; readonly versions: readonly ObjectVersionId[] };
 
 export interface CandidateOptions {
-  readonly git: SafeGit;
+  readonly git: GitExec;
   readonly repo: RepoLayout;
   readonly manifest: DeliveryManifest;
   /** The target branch's current commit. */
@@ -125,15 +107,6 @@ export interface CandidateOptions {
   readonly message: string;
   readonly author: Ident;
   readonly committer: Ident;
-  /** Admission per destination before each write (6.5); without it nothing is checked (tests of the overlay only). */
-  readonly admission?: CandidateAdmission;
-}
-
-/** Bytes of a commit object with one parent, as git writes it (header lines, identities, message). */
-function commitObjectSize(format: RepoLayout['objectFormat'], message: string, author: Ident, committer: Ident): number {
-  const hex = format === 'sha1' ? 40 : 64;
-  const identLine = (i: Ident): number => Buffer.byteLength(i.name) + Buffer.byteLength(i.email) + 64;
-  return 2 * (hex + 16) + identLine(author) + identLine(committer) + Buffer.byteLength(message) + 64;
 }
 
 function sameEntry(a: EntryState | null | undefined, b: EntryState | null | undefined): boolean {
@@ -155,7 +128,7 @@ function entryMap(entries: readonly TreeEntry[]): Map<string, EntryState> {
  * null for a root commit. A recorded parent that is not in the repository is a
  * missing object (v49, WI-13), never "no parent".
  */
-async function recordedParent(git: SafeGit, repo: RepoLayout, commit: GitOid): Promise<GitOid | null> {
+async function recordedParent(git: GitExec, repo: RepoLayout, commit: GitOid): Promise<GitOid | null> {
   let raw: Buffer | null = null;
   await readObjects(git, repo, [commit], (_o, type, content) => {
     if (type !== 'commit') throw new Error(`${commit} is a ${type}, not a commit`);
@@ -239,33 +212,12 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
   const baseTrees = new Set((await lsTree(git, repo, o.base, { recursive: true, withTrees: true })).filter((x) => x.type === 'tree').map((x) => x.oid));
   const trees = buildTrees(repo.objectFormat, files);
   const newTrees = trees.filter((t) => !baseTrees.has(t.oid));
-  // 6.5: the repository's object directory, before any object is written.
-  if (o.admission !== undefined) {
-    const decision = o.admission.objects([
-      ...newTrees.map((t) => ({ type: 'tree' as const, size: t.size })),
-      { type: 'commit' as const, size: commitObjectSize(repo.objectFormat, o.message, o.author, o.committer) },
-    ]);
-    if (!decision.ok) return { kind: 'not-admitted', stage: 'objects', decision };
-  }
   for (const t of newTrees) {
     const written = await mktree(git, repo, t.items);
     if (written !== t.oid) throw new Error(`git wrote tree ${t.dir || '/'} as ${written}, expected ${t.oid}`);
   }
   const root = (trees[trees.length - 1] as (typeof trees)[number]).oid;
   const commit = await commitTree(git, repo, root, [o.base], o.message, o.author, o.committer);
-  // The snapshot's destination, before any of its files is written: exact sizes from a dry run (nothing written).
-  if (o.admission !== undefined) {
-    const dry = await materializeSnapshot({ git, repo, commit, attributes: o.attributes });
-    const dirs = new Set<string>();
-    for (const e of dry.entries) {
-      for (let d = e.path.lastIndexOf('/'); d > 0; d = e.path.lastIndexOf('/', d - 1)) dirs.add(e.path.slice(0, d));
-    }
-    const decision = o.admission.snapshot(
-      dry.entries.map((e) => e.size ?? 0),
-      dirs.size + 1, // and the snapshot directory itself
-    );
-    if (!decision.ok) return { kind: 'not-admitted', stage: 'snapshot', decision };
-  }
   const snapshot = await materializeSnapshot({ git, repo, commit, attributes: o.attributes, dest: o.snapshotDir });
   return {
     kind: 'candidate',
@@ -288,7 +240,7 @@ export type ProofMismatch =
 
 /**
  * 6.6 step 4: the candidate holds a NEW version of this object. To deliver it as
- * proven, the scheduler records it as a new product version (source = this
+ * proven, the process records it as a new product version (source = this
  * placement, content = `content`) and has it verified and reviewed again,
  * within the loop caps; otherwise it is delivered as not fully proven.
  */
@@ -306,7 +258,7 @@ export interface ProofCheck {
   readonly proven: readonly ObjectVersionId[];
   /** Deliverable only as "not fully proven", listed in the risk list with the reasons. */
   readonly notFullyProven: readonly { readonly id: ObjectVersionId; readonly reasons: readonly ProofMismatch[] }[];
-  /** Versions the candidate changed: new product versions to record and re-verify (the scheduler dispatches, not this module). */
+  /** Versions the candidate changed: new product versions to record and re-verify (the process dispatches them, not this module). */
   readonly needsReverification: readonly Reverification[];
 }
 
@@ -324,7 +276,7 @@ function candidateFileHash(snapshotDir: string, path: string): ContentHash | nul
 }
 
 export async function checkCandidateProofs(o: {
-  readonly git: SafeGit;
+  readonly git: GitExec;
   readonly repo: RepoLayout;
   readonly view: DeliveryProofView;
   readonly manifest: DeliveryManifest;

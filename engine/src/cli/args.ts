@@ -12,8 +12,8 @@ export interface ParsedArgs {
   readonly flags: Readonly<Record<string, string | boolean | readonly string[]>>;
 }
 
-/** Flags every command takes. */
-export const GLOBAL_FLAGS: Readonly<Record<string, FlagKind>> = { json: 'boolean', config: 'string', op: 'string', help: 'boolean' };
+/** Flags every command takes: machine-readable output, help, the project folder, the operation id of a PM command. */
+export const GLOBAL_FLAGS: Readonly<Record<string, FlagKind>> = { json: 'boolean', help: 'boolean', project: 'string', op: 'string' };
 
 export function parseArgs(argv: readonly string[], spec: Readonly<Record<string, FlagKind>>): ParsedArgs {
   const all: Record<string, FlagKind> = { ...GLOBAL_FLAGS, ...spec };

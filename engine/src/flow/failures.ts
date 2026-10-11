@@ -1,14 +1,14 @@
-// A seat task of a flow that ended without a usable hand-back (design 6.2 "交回之后的去向", 6.5,
-// WI-15, WI-08): the scheduler already raised its WI notice and counted the loop; the flow asks
-// the Secretary what to do with this one line of work, and carries out the generic choices
-// (restart, grant) itself. Abandon and re-plan go back to the caller, who owns the line.
+// A seat task of a flow that ended without a usable hand-back (design 4.1 §5.4, §6.6; 6.5,
+// WI-28, WI-08): the flow asks the Secretary what to do with this one line of work, and carries
+// out the generic choices (restart, grant) itself. Abandon and re-plan go back to the caller,
+// who owns the line.
 //
-//   needs disposition (seat failure, quarantine)   restart (quarantine-restart loop, cap 2) / abandon / re-plan / ask the user
-//   resource overflow                              re-plan (a smaller task) / abandon / ask the user (never restarted as it is)
-//   cancelled by a stop                            abandon / ask the user (never restarted while the stop holds)
-//   exhausted (environment retries)                grant (the Secretary's one grant) / abandon / re-plan / ask the user
-// A restart the scheduler refuses, or a grant the ledger refuses, goes to the user (WI-15 /
-// WI-08). Only this line waits; the rest of the mission goes on.
+//   exhausted (the PM released its dispatches more   grant (the Secretary's one grant) / abandon / re-plan / ask the user
+//   often than the re-dispatch loop allows, decision 15)
+//   needs disposition: its hand-back came after a     abandon / re-plan / ask the user (never restarted while
+//   stop (recorded, not accepted, §6.6)               the stop holds; a restart once it is released)
+// A restart the memory refuses, or a grant it refuses, goes to the user (WI-28 / WI-08). Only this
+// line waits; the rest of the mission goes on.
 
 import type { DecisionOption } from '../seat/cards/secretary.ts';
 import { safeId, type FlowCtx, type TaskView } from './context.ts';
@@ -31,16 +31,16 @@ export async function handleFailure(
 ): Promise<FailureOutcome> {
   const s = f.view.status;
   if (f.view.why === 'abandoned') return { kind: 'abandoned' };
-  const id = safeId(`fail.${f.task}.${s.launches.length}`);
+  const id = safeId(`fail.${f.task}.${s.dispatches.length}`);
   if ((await escalation(ctx, id)) === null) {
     const exhausted = f.view.why === 'exhausted';
     const options: DecisionOption[] = [];
     if (exhausted) options.push('grant');
-    else if (s.disposition !== 'stop' && s.disposition !== 'resource-exceeded') options.push('restart');
+    else if (s.disposition !== 'stop') options.push('restart');
     if (f.canReplan && s.disposition !== 'stop') options.push('replan');
     if (f.canAbandon) options.push('abandon');
     if (options.length === 0) {
-      // nothing the program can carry out (a decision-layer seat cancelled by a stop): wait and tell the PM (proposed WI-26)
+      // nothing the program can carry out (a decision-layer seat's hand-back came after a stop): wait and tell the PM (WI-26)
       await ctx.ports.ledger.notify({
         mission: ctx.mission,
         category: 'flow-step-stopped',
@@ -59,11 +59,13 @@ export async function handleFailure(
       lineage: f.lineage,
       subject: f.subject,
       summary: exhausted
-        ? `Task ${f.task} used up its environment retries (${s.note ?? ''}).`
+        ? `Task ${f.task} used up its attempts (${s.note ?? ''}).`
         : `Task ${f.task} ended without a usable result: ${s.disposition ?? f.view.why} (${s.note ?? ''}).`,
       reasons: [s.note ?? f.view.why],
       options,
-      facts: { task: f.task, state: s.state, disposition: s.disposition, launches: s.launches, loop: exhausted ? 'env-retry' : 'quarantine-restart' },
+      facts: { task: f.task, state: s.state, disposition: s.disposition, dispatches: s.dispatches, loop: s.loop ?? 'quarantine-restart' },
+      // the seat task that ended without a usable result (§3.2, U-13)
+      handover: { from: f.task, objects: [] },
     });
     if (exhausted) {
       await ctx.ports.ledger.notify({
@@ -71,7 +73,7 @@ export async function handleFailure(
         category: 'loop-exhausted',
         wi: WI.loopExhausted,
         key: id,
-        trigger: `task ${f.task} (lineage ${f.lineage}) exhausted its environment retries: ${s.note ?? ''}`,
+        trigger: `task ${f.task} (lineage ${f.lineage}) exhausted its ${s.loop ?? 'quarantine-restart'} loop: ${s.note ?? ''}`,
         defaultAction: `only ${f.subject} stops at "exhausted"; the Secretary decides (grant once, re-plan, abandon, or ask the user); the rest of the mission continues`,
         detail: { task: f.task, lineage: f.lineage, status: s },
       });
@@ -88,14 +90,14 @@ export async function handleFailure(
       return { kind: 'waiting' };
     }
     if (v.exhausted && (await ctx.ports.scheduler.status(f.task))?.state === 'exhausted') {
-      await escalateToUser(ctx, id, `task ${f.task}: the restarts after quarantine or seat failure are used up (${v.attempts}/${v.allowed}); only the user can allow more`, WI.loopExhausted);
+      await escalateToUser(ctx, id, `task ${f.task}: its restarts are used up (${v.attempts}/${v.allowed}); only the user can allow more`, WI.loopExhausted);
       return { kind: 'waiting' };
     }
     await markApplied(ctx, id, { restarted: f.task });
     return { kind: 'retrying' };
   }
   if (d.option === 'grant') {
-    const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}`, lineage: f.lineage, loop: 'env-retry', by: d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
+    const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}`, lineage: f.lineage, loop: s.loop ?? 'quarantine-restart', by: d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
     if (!g.granted) {
       await escalateToUser(ctx, id, `the Secretary's grant on lineage ${f.lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
       return { kind: 'waiting' };

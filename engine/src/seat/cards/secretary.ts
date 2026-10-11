@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { JudgmentId, ObjectVersionId } from '../../common/ids.ts';
 import type { JudgmentRecord, ListRef } from '../../common/records.ts';
 import { validateRecord } from '../../common/validate.ts';
-import { Binding, Item, Material, TOOLS_NOTE_MATERIALS, commonCardFields, list, renderCommon, renderMaterials, unreadMustRead } from './common.ts';
+import { Binding, Item, Material, commonCardFields, list, renderCommon, renderMaterials, unreadMustRead } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
@@ -84,14 +84,6 @@ export const SecretaryResultShape = {
 const SecretaryResultSchema = z.object(SecretaryResultShape);
 export type SecretaryResult = z.infer<typeof SecretaryResultSchema>;
 
-export const SECRETARY_DEFINITION = [
-  'You are the Secretary seat of a software pipeline: a one-shot decider for one escalated question. The card in the first message says what was escalated, by whom and why, which authorizations the user recorded, and which options the program can carry out.',
-  TOOLS_NOTE_MATERIALS,
-  'Decide within the recorded authority. Only three kinds of decision go to the user: one that changes what the user gets (scope, delivery form, visible behaviour); one that is hard to undo (external interfaces, data formats and storage, overall architecture, irreversible operations, commitments to others), including any where you cannot tell whether it can be undone; and one that conflicts with what the user said. Everything else is a detail.',
-  'Classify your decision: "detail" (recorded only; set mayMatter when it is clearly reversible but the user might care); "important-within-authority" (a recorded authorization covers it: cite it; it takes effect and the PM is told); "needs-user" (choose option "ask-user": related work pauses and the PM asks the user). When unsure between deciding and asking, ask.',
-  'Pick exactly one option from the card. For send-back, replan, rework and answer write the instructions the next seat will get. For grant (only when the card says your grant is available) give 1 or 2 extra attempts and a reason; when the same failure keeps repeating, prefer a different approach over more attempts. Write the notice the PM reads unless it is a detail. Call submit_result once, then end your turn.',
-  'Upstream: the program, which escalated this to you. Downstream: the program carries out your choice and notifies the PM.',
-].join('\n\n');
 
 export function renderSecretary(c: SecretaryCard): string {
   const r = c.request;
@@ -105,8 +97,7 @@ export function renderSecretary(c: SecretaryCard): string {
     list('Requirement items involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
     renderMaterials(c.materials) +
     list('Options', c.options.map((o) => `${o.id}: ${o.label}. Outcome: ${o.outcome}`)) +
-    `## Your extra grant on lineage ${r.lineage}\n${c.grantAvailable ? 'Available (once per lineage, at most 2 attempts).' : 'Already used: only the user can grant more (choose ask-user if more attempts are the only way).'}\n\n` +
-    'When done, call submit_result with one option, its classification and the notice; then end your turn.'
+    `## Your extra grant on lineage ${r.lineage}\n${c.grantAvailable ? 'Available (once per lineage, at most 2 attempts).' : 'Already used: only the user can grant more (choose ask-user if more attempts are the only way).'}\n\n`
   );
 }
 
@@ -160,15 +151,13 @@ const secretaryEntry: SeatCardEntry<SecretaryCard, SecretaryResult> = {
   schema: SecretaryCardSchema,
   resultShape: SecretaryResultShape,
   resultSchema: SecretaryResultSchema,
-  definition: SECRETARY_DEFINITION,
   toolProfile: 'materials',
   render: renderSecretary,
   problems: (c, r, ctx) => secretaryProblems(c, r, ctx.materialsRead),
-  records: (c, r) => {
-    if (r.option !== 'accept' && r.option !== 'accept-risk') return [];
-    const j = rulingJudgment(c, 'secretary');
-    return j === null ? [] : [j];
-  },
+  // the Secretary's hand-back records its decision only: the ruling that accepting a negated position
+  // makes (rulingJudgment's pass) is written by the owning flow in the write that carries the decision
+  // out (flow/secretary.ts carryOut), so a decision overridden, closed or never carried out writes none
+  records: () => [],
 };
 
 registerSeatCard(secretaryEntry);

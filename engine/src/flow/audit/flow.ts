@@ -17,7 +17,7 @@
 //
 // A broken link (a negated or withdrawn node on a required path), a backfill that does not
 // prove its node, or a chain judgment that does not pass ends the legalization with a work
-// result for the PM and the proposed WI-25 (src/flow/exploration/WI-NEEDED.md): nothing else
+// result for the PM and WI-25 (plugin/pm/wi/WI-25.md): nothing else
 // stops, and a new legalization (a new chain object) can follow once the cause is dealt with.
 //
 // Restartable like every flow: state is the fold of the line "audit:<id>"; every step has a
@@ -26,19 +26,19 @@
 import { canonicalJson } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, OpId } from '../../common/ids.ts';
 import { encodeConstraintCheck, type EvidenceRecord, type JudgmentRecord, type ObjectVersionRecord, type ProofUnitRecord, type ReviewContract } from '../../common/records.ts';
-import { constraintApplies, requiredRange } from '../../evaluator/semantics.ts';
+import { constraintApplies, requiredRange, type Label } from '../../evaluator/semantics.ts';
 import { SEAMS_ON_CARD, seamTable, type AuditChainCard, type AuditChainResult, type AuditNodeCard, type AuditNodeResult, type AuditPositionT } from '../../seat/cards/auditor.ts';
-import { materialPageCount, type MaterialRef } from '../../seat/cards/common.ts';
+import { CARD_FORMAT, materialPageCount, type MaterialRef } from '../../seat/cards/common.ts';
 import { SEAT_CAPABILITIES, basisIndex, flowCtx, idPart, type FlowCtx } from '../context.ts';
 import type { AnyCard, FlowPorts, FlowTaskStatus } from '../ports.ts';
 import { handleFailure } from '../failures.ts';
 import { detailedPlanOf, standardLine, type EffectiveBody } from '../planning.ts';
 import { PLAN_LINE, REQUIREMENTS_LINE } from '../plandoc.ts';
 import { currentConstraints, currentItems, requirementSetLine, type ItemVersionBody } from '../requirements.ts';
-import { markApplied } from '../secretary.ts';
+import { cancelSecretarySteps, carryGuard, closing, markApplied, openEscalations } from '../secretary.ts';
 import { lineageSource, nextGeneration, walkLineage, type Lineage, type LineageNode } from './lineage.ts';
 
-/** The proposed WI for a legalization that cannot complete (src/flow/exploration/WI-NEEDED.md). */
+/** The WI for a legalization that cannot complete (plugin/pm/wi/WI-25.md). */
 export const WI_LEGALIZATION = 'WI-25';
 
 /** Legalization ids go into ledger and launch ids: letters, digits, "." and "-". */
@@ -55,7 +55,7 @@ export const aid = {
   judgment: (m: string, l: string, n: number, i: number) => `audj.${ltok(m, l)}.${n}.${i}`,
   chainJudgment: (m: string, l: string, n: number) => `audc.${ltok(m, l)}.${n}`,
   chainObject: (m: string, l: string) => `chain.${ltok(m, l)}`,
-  /** The stamp's proof-conditioned operation; a new one after the ledger ended an earlier one (6.1, WI-11). */
+  /** The stamp's proof-conditioned operation; a new one when the memory has no earlier one pending (6.1). */
   stampOp: (m: string, l: string, k: number) => `legal.${ltok(m, l)}${k > 1 ? `.r${k}` : ''}`,
 };
 
@@ -121,7 +121,7 @@ export interface LegalizationState {
   readonly tasks: Map<string, QueuedBody>;
   readonly consumed: Map<string, ConsumedBody>;
   chain: { readonly object: string; readonly content: string } | null;
-  /** The stamp's operations, oldest first (a new one after the ledger ended one, WI-11). */
+  /** The stamp's operations, oldest first (a new one when the memory has no earlier one pending). */
   readonly ops: string[];
   result: ResultBody | null;
 }
@@ -245,10 +245,11 @@ async function lineage(ctx: FlowCtx, endpoint: string): Promise<Lineage> {
   const objects = (await ctx.ports.ledger.records(['object.version'])).map((c) => c.record as ObjectVersionRecord);
   const units = (await ctx.ports.ledger.records(['proof.unit'])).map((c) => c.record as ProofUnitRecord);
   const src = lineageSource(objects, units, ctx.ports.ledger.content);
-  // labels at one published revision (6.1)
+  // labels at one revision (6.1); while they are recomputing (4.1 §4.1) the walk waits for a later pass
   const all = [...src.objects.keys(), ...src.units.keys()];
   const labels = (await ctx.ports.evaluator.labels(all)).labels;
-  return walkLineage(src, endpoint, (ids) => Object.fromEntries(ids.map((i) => [i, labels[i] ?? null])));
+  if (all.some((i) => labels[i] === 'recomputing')) throw Object.assign(new Error('the labels are recomputing: the lineage is walked once they are done'), { code: 'NOT_READY' });
+  return walkLineage(src, endpoint, (ids) => Object.fromEntries(ids.map((i) => [i, (labels[i] ?? null) as Label | null])));
 }
 
 // ---------------------------------------------------------------- advance
@@ -294,7 +295,7 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
       continue;
     }
     if (st.state === 'needs-disposition' || st.state === 'exhausted' || (st.state === 'done' && st.handBack?.status !== 'handed-back')) {
-      // a failed Auditor goes to the Secretary like any flow's seat (failures.ts: restart, grant, abandon; WI-15, WI-08)
+      // a failed Auditor goes to the Secretary like any flow's seat (failures.ts: restart, grant, abandon; WI-28, WI-08)
       const why = st.state === 'exhausted' ? 'exhausted' : st.disposition === 'full-review' ? 'full-review' : 'needs-disposition';
       const o = await handleFailure(ctx, { task: q.task, lineage: aid.lineage(mission, l), subject: line, view: { kind: 'failed', status: st, why }, canAbandon: true, canReplan: false });
       if (o.kind === 'decided') {
@@ -311,7 +312,7 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
   }
   const running = [...s.tasks.values()].filter((t) => !s.consumed.has(t.task));
   const abandoned = [...s.consumed.values()].find((c) => c.kind === 'abandoned');
-  if (abandoned !== undefined) return end(ports, mission, l, 'not-legalized', `the Auditor of ${abandoned.node} was given up (WI-15)`, [abandoned.node]);
+  if (abandoned !== undefined) return end(ports, mission, l, 'not-legalized', `the Auditor of ${abandoned.node} was given up (WI-28)`, [abandoned.node]);
 
   // 2. the evaluator must have seen every judgment made so far (6.1: labels as of a published revision)
   const made = new Set([...s.consumed.values()].flatMap((c) => c.judgments));
@@ -320,6 +321,10 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
   const ids = s.chain !== null ? [...plan.chain, s.chain.object] : [...plan.chain];
   const lab = await ports.evaluator.labels(ids);
   if (lab.revision < needed) return `the evaluator has not published revision ${needed} yet`;
+  // 4.1 §4.1: a label that is recomputing is pending, not unproven: nothing is decided on it (no end,
+  // no Auditor queued, no chain object) until the labels are current. The step waits quietly (a thrown
+  // error would stop the engine's passes for every flow)
+  if (ids.some((id) => lab.labels[id] === 'recomputing')) return RECOMPUTING_WAIT;
   const proven = (id: string): boolean => lab.labels[id] === 'proven';
 
   // 3. a node that became negated or withdrawn: the endpoint cannot be legalized
@@ -349,6 +354,7 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
     const n = s.seq + 1;
     const task = aid.task(mission, l, n, 'node');
     const card = await nodeCard(ctx, req, plan, n, task, node);
+    if (card !== null && 'recomputing' in card) return RECOMPUTING_WAIT;
     if (card === null) return end(ports, mission, l, 'not-legalized', `${node} has no position an Auditor may fill (5.2 part 3)`, [node]);
     if ('missingBasis' in card) return end(ports, mission, l, 'not-legalized', `the text of ${card.missingBasis} that ${node} must be judged against is not recorded, so no Auditor can judge it honestly (5.2: every basis of the contract, current)`, [node]);
     await submit(ports, mission, l, req, { n, task, kind: 'node', node, positions: card.positions.map((p) => p.review) }, card);
@@ -404,19 +410,26 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
   const o = st.states[op];
   if (o === null || o === undefined) return 'the evaluator has not seen the stamp operation yet';
   if (o.executedAsOf !== null) return `the stamp ${op} is executed (as of ${o.executedAsOf}); its result is being read back`;
-  if (!o.allProven) return end(ports, mission, l, 'not-legalized', `the stamp's object ${s.chain.object} is no longer all proven at revision ${st.revision}`, [s.chain.object]);
+  if (!o.allProven) {
+    // the stored state of the stamp's object while the labels recompute is not a verdict: wait
+    if ((await ports.evaluator.labels([s.chain.object])).labels[s.chain.object] === 'recomputing') return RECOMPUTING_WAIT;
+    return end(ports, mission, l, 'not-legalized', `the stamp's object ${s.chain.object} is no longer all proven at revision ${st.revision}`, [s.chain.object]);
+  }
   const stamp = { op, asOf: st.revision, chainObject: s.chain.object, excluded: plan.excluded };
   const result: ResultBody = { outcome: 'stamped', wi: null, why: `stamped as of revision ${st.revision}`, nodes: plan.chain, stamp };
+  const close = await closingOpen(ports, mission, l);
   try {
     // the request op names the attempt (its asOf): a retry at a newer revision is a new request,
-    // and the ledger refuses a second execution of the same operation (FACT_CONFLICT)
-    await ports.ledger.commitProofOp({ op: aid.op(mission, l, `stamp:${op}:${st.revision}`), opId: op, asOf: st.revision, events: [{ mission, line, event: 'result', key: 'result', body: result }] });
+    // and the ledger refuses a second execution of the same operation (FACT_CONFLICT); the
+    // legalization's open escalations close in the same write
+    await ports.ledger.commitProofOp({ op: aid.op(mission, l, `stamp:${op}:${st.revision}`), opId: op, asOf: st.revision, events: [{ mission, line, event: 'result', key: 'result', body: result }, ...close.carry.events] });
+    await cancelSecretarySteps(flowCtx(ports, mission), close.ids);
   } catch (e) {
     const code = errCode(e);
-    if (code === 'BELOW_FLOOR' || code === 'NOT_READY' || code === 'UNAVAILABLE' || code === 'STALE_GENERATION' || code === 'PAUSED') return `the stamp waits for the next published revision (${code})`;
+    if (code === 'BELOW_FLOOR' || code === 'NOT_READY' || code === 'UNAVAILABLE' || code === 'RECOMPUTING') return `the stamp waits for the next published revision (${code})`;
     if (code === 'STOPPED') return 'a stop restriction covers the stamp (6.4): it waits while the stop holds; nothing is stamped';
-    if (code === 'NOT_PENDING' || code === 'EVALUATOR_FAULT') {
-      // the ledger ended the operation (derived state could not be computed, 6.1, WI-11): register it again under a new id
+    if (code === 'NOT_PENDING') {
+      // the memory has no such operation pending: register it again under a new id
       return register(ports, mission, l, req, s.chain.object, s.ops.length + 1);
     }
     if (code === 'FACT_CONFLICT') return `the stamp ${op} was executed by an earlier attempt; its result is read back on the next pass`;
@@ -424,6 +437,9 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
   }
   return null;
 }
+
+/** Why a step waits while the labels recompute (nothing is written meanwhile). */
+const RECOMPUTING_WAIT = 'the labels are recomputing: the legalization decides nothing until they are current';
 
 /** The code of a port error (`code`, or a "CODE: ..." message). */
 function errCode(e: unknown): string {
@@ -475,8 +491,19 @@ async function notifyResult(ports: FlowPorts, mission: MissionId, l: string, s: 
 
 async function end(ports: FlowPorts, mission: MissionId, l: string, outcome: LegalizationOutcome, why: string, nodes: readonly string[]): Promise<null> {
   const result: ResultBody = { outcome, wi: WI_LEGALIZATION, why, nodes, stamp: null };
-  await ports.ledger.append(aid.op(mission, l, 'result'), { events: [{ mission, line: aid.line(l), event: 'result', key: 'result', body: result }] });
+  // the legalization ends: its open escalations (a failed Auditor's) close in the result's own write
+  const close = await closingOpen(ports, mission, l);
+  const guard = carryGuard([close.carry]);
+  await ports.ledger.append(aid.op(mission, l, 'result'), { events: [{ mission, line: aid.line(l), event: 'result', key: 'result', body: result }, ...close.carry.events], ...(guard !== undefined ? { guard } : {}) });
+  await cancelSecretarySteps(flowCtx(ports, mission), close.ids);
   return null; // advanceLegalization tells the PM once the result is read back
+}
+
+/** The legalization's open escalations, closed as superseded (for the write that ends it). */
+async function closingOpen(ports: FlowPorts, mission: MissionId, l: string): Promise<{ readonly ids: string[]; readonly carry: ReturnType<typeof closing> }> {
+  const ctx = flowCtx(ports, mission);
+  const ids = (await openEscalations(ctx, aid.line(l))).map((e) => e.id);
+  return { ids, carry: closing(ctx, ids, `legalization ${l} ended: a decision on it is not carried out`) };
 }
 
 function consumption(q: QueuedBody, st: FlowTaskStatus): ConsumedBody | null {
@@ -489,7 +516,8 @@ function consumption(q: QueuedBody, st: FlowTaskStatus): ConsumedBody | null {
 }
 
 function taskOf(req: LegalizationRequest, task: string, card: AnyCard) {
-  return { task, lineage: aid.lineage(req.mission, req.legalization), mission: req.mission as MissionId, card, priority: 50, capabilities: [...new Set([...SEAT_CAPABILITIES, ...req.capabilities])], mode: 'fast' as const, estimateMicros: 0 };
+  // post-close work (§6.7): a legalization goes on after its mission closed
+  return { task, lineage: aid.lineage(req.mission, req.legalization), mission: req.mission as MissionId, card, priority: 50, capabilities: [...new Set([...SEAT_CAPABILITIES, ...req.capabilities])], mode: 'fast' as const, estimateMicros: 0, afterClose: 'audit' as const, handover: { step: `legalization ${req.legalization}` } };
 }
 
 async function submit(ports: FlowPorts, mission: MissionId, l: string, req: LegalizationRequest, q: Omit<QueuedBody, 'card'>, card: AuditNodeCard | AuditChainCard): Promise<void> {
@@ -501,19 +529,16 @@ async function submit(ports: FlowPorts, mission: MissionId, l: string, req: Lega
 
 // ---------------------------------------------------------------- cards
 
-const LIMITS = { run: { memoryMax: 1 << 30, timeoutMs: 30 * 60_000 }, areaBytes: 256 << 20, export: { maxLogicalBytes: 32 << 20, maxFiles: 2_000 }, recoveryStateBytes: 0 };
-
 function base(req: LegalizationRequest, task: string, duties: string) {
   return {
-    format: 'mp4.seat-card.v1' as const,
-    launch: task,
+    format: CARD_FORMAT,
+    task,
     mission: req.mission,
     module: null,
     capabilities: [...new Set([...SEAT_CAPABILITIES, ...req.capabilities])],
     duties,
     decisionQuotes: [],
     constraints: [],
-    limits: LIMITS,
   };
 }
 
@@ -527,10 +552,11 @@ function materialOf(ctx: FlowCtx, id: string, title: string, hash: string): Mate
 }
 
 /**
- * Evidence the Auditor may cite (11.1 "封闭运行可复用，其余按 7.3 重跑"): the runs the existing
- * judgments on these targets used, plus the given ones, that still apply (bound to the current
- * snapshot of their environment line and not revoked, 5.2). A run that needs a rerun is left off:
- * citing it would make the Auditor's own judgment not current.
+ * Evidence the Auditor may cite (11.1; 4.1 §6.5: a run is reused while its environment identity is
+ * current, otherwise it is rerun): the runs the existing judgments on these targets used, plus the
+ * given ones, that still apply (bound to the current snapshot of their environment line and not
+ * revoked, 5.2). A run that needs a rerun is left off: citing it would make the Auditor's own
+ * judgment not current.
  */
 async function evidenceFor(ctx: FlowCtx, targets: ReadonlySet<string>, extra: readonly string[]): Promise<Array<{ id: string; command: string; summary: string }>> {
   const ids = new Set<string>(extra);
@@ -626,7 +652,7 @@ function contentMaterials(ctx: FlowCtx, objects: readonly ObjectVersionRecord[])
 }
 
 /** The node Auditor's card: the positions it may fill (5.2 part 3), each with its contract's inputs. */
-async function nodeCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, n: number, task: string, node: string): Promise<AuditNodeCard | { readonly missingBasis: string } | null> {
+async function nodeCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, n: number, task: string, node: string): Promise<AuditNodeCard | { readonly missingBasis: string } | { readonly recomputing: true } | null> {
   const ports = ctx.ports;
   const objects = new Map((await ports.ledger.records(['object.version'])).map((c) => [c.record.object as string, c.record as ObjectVersionRecord]));
   const units = new Map((await ports.ledger.records(['proof.unit'])).map((c) => [c.record.unit as string, c.record as ProofUnitRecord]));
@@ -641,6 +667,8 @@ async function nodeCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, 
   const texts = await basisTexts(ctx);
   const constraints = (await currentConstraints(ctx)).filter((k) => k.kind === 'object');
   const label = (await ports.evaluator.labels([node])).labels[node] ?? 'unknown';
+  // the positions to fill are read from the labels: none is chosen (nor the node given up) while they recompute
+  if (label === 'recomputing') return { recomputing: true };
   const eligible: Array<{ contract: ReviewContract; reason: AuditPositionT['reason']; prior: string | null }> = [];
   for (const c of contracts) {
     const p = view?.positions.find((x) => x.review === c.review);

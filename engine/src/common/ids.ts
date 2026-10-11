@@ -1,22 +1,20 @@
 // Branded identifiers. Paths, hashes and ids are distinct types (design 9.1):
 // nothing is guessed from string length, which is how 3.0 misread a 64-char
-// path as a blob id (DIVRA D2).
+// path as a blob id.
 
 import { createHash } from 'node:crypto';
 
 declare const brand: unique symbol;
 export type Brand<T, B extends string> = T & { readonly [brand]: B };
 
-/** Ledger revision: the sequence number of a committed base record. */
+/** Memory revision: the sequence number of a committed record in the event log. */
 export type Revision = Brand<number, 'Revision'>;
-/** Hex sha256 of content in the content store. */
+/** Hex sha256 of a value in the skeleton's data (memory/data.ts) or of a leaf. */
 export type ContentHash = Brand<string, 'ContentHash'>;
 /** Business identity of a request; deduplicates retries (6.1). */
 export type OpId = Brand<string, 'OpId'>;
-/** One launch of an execution unit; fences late results (6.3). */
+/** The dispatch a seat result belongs to (4.1 §5: D-<n>); fences late results. */
 export type LaunchId = Brand<string, 'LaunchId'>;
-/** Scheduler generation; fences writes from an old scheduler (6.3). */
-export type Generation = Brand<number, 'Generation'>;
 
 export type MissionId = Brand<string, 'MissionId'>;
 export type ModuleId = Brand<string, 'ModuleId'>;
@@ -35,12 +33,8 @@ export type EnvSnapshotId = Brand<string, 'EnvSnapshotId'>;
 export type IssueId = Brand<string, 'IssueId'>;
 export type StopId = Brand<string, 'StopId'>;
 export type EpisodeBatchId = Brand<string, 'EpisodeBatchId'>;
-/** One command run inside a unit's tool sandbox (7.1). */
-export type RunId = Brand<string, 'RunId'>;
 /** A git object id (hex sha1 or sha256, per the repository's object format). */
 export type GitOid = Brand<string, 'GitOid'>;
-/** A spend reservation made by the metering proxy before forwarding a model request (6.5). */
-export type ReservationId = Brand<string, 'ReservationId'>;
 /** A system alert (3.9). */
 export type AlertId = Brand<string, 'AlertId'>;
 

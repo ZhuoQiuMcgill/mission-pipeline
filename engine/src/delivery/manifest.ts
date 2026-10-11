@@ -7,7 +7,7 @@
 // 2. Consistency: every path may have one version only, and so may every
 //    module. Two selected outputs depending on different versions of the same
 //    path or module make the manifest incompatible; the result names both
-//    sides, so the scheduler can create the integration task (6.6 step 2).
+//    sides, so an integration task can be planned (6.6 step 2).
 
 import type { ModuleId, ObjectVersionId, ProofUnitId, Revision } from '../common/ids.ts';
 import type { Label } from '../evaluator/semantics.ts';
@@ -57,7 +57,7 @@ export interface ManifestConflict {
 
 export type ManifestResult =
   | { readonly kind: 'manifest'; readonly manifest: DeliveryManifest }
-  /** 6.6 step 2: the scheduler creates an integration task producing compatible versions, then recomputes. */
+  /** 6.6 step 2: an integration task producing compatible versions is planned, then the manifest is recomputed. */
   | { readonly kind: 'incompatible'; readonly conflicts: readonly ManifestConflict[]; readonly entries: readonly ManifestEntry[] }
   /** The view does not know a selected or prerequisite id: a broken request, not a proof state. */
   | { readonly kind: 'unknown'; readonly missing: readonly DeliveryTarget[] }

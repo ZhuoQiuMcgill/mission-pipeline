@@ -20,7 +20,7 @@ import type { BaseRecord, JudgmentRecord, ListRef, ObjectVersionRecord, ReviewCo
 import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
 import { DetailedPlanDoc, DetailedTask, feasibilityRequired, planIdProblems, type StoredDetailedPlan } from '../../flow/plandoc.ts';
-import { Binding, Item, ReadOnlyWorkspace, TOOLS_NOTE_SNAPSHOT, commonCardFields, list, renderCommon } from './common.ts';
+import { Binding, Item, ReadOnlyWorkspace, commonCardFields, list, renderCommon } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
@@ -148,22 +148,7 @@ export type ArchitectFeasibilityResult = z.infer<typeof ArchitectFeasibilityResu
 
 // ---------------------------------------------------------------- definitions
 
-export const ARCHITECT_DECOMPOSE_DEFINITION = [
-  'You are the Architect seat of a software pipeline, decomposition: you turn an approved PM plan into a detailed plan. You only read: you cannot run commands; the git history and past run durations are on the card.',
-  TOOLS_NOTE_SNAPSHOT,
-  'Hand back: the existing interfaces you reuse, with file and location; the new interfaces, each with its definition and one line saying which existing interfaces you searched and why none was reused (required); the modules and their write scopes; the tasks: interface definition tasks, one implementation task per module, one integration task that depends on every implementation task (a plan with a single task still gets a full task card, only without the interface split). Each task has its goal, acceptance standards, requirement items, write scope, files to read, interpreter, verification commands, implemented and called interfaces, scheduling dependencies (the tasks whose interfaces it needs), exclusive resources, and an estimate of duration and cost with its basis.',
-  'Every element names its provenance: the PM plan element it comes from, or "architect" for your own addition. Tasks that can run in parallel must not have overlapping write scopes. Plan nothing that waits for an exploration that has not stood, and nothing for the goals beyond it. Keep a user-specified order; if it cannot work, say so in the risks instead of changing it. List the risks a read-only look cannot settle.',
-  'On a revision the card says why the plan came back (mechanical failures, feasibility findings, an instruction): fix exactly that. Call submit_result once, then end your turn.',
-  'Upstream: the PM plan approved by the Calibrator. Downstream: the program\'s mechanical checks, the feasibility review, then the Calibrator.',
-].join('\n\n');
 
-export const ARCHITECT_FEASIBILITY_DEFINITION = [
-  'You are the Architect seat of a software pipeline, feasibility review: you check independently whether a detailed plan can work. You only read: the plan is on the card, the project snapshot and the run history are available; you do not see how the plan was made.',
-  TOOLS_NOTE_SNAPSHOT,
-  'Check: whether recovery paths are accepted by the existing validators; limits of memory, disk and time; whether the estimates have a basis; the critical path; whether external dependencies are available; and everything a read-only look can rule out (missing or superfluous dependencies, inputs not present, interfaces that do not exist, wrong versions, parallel write conflicts, exclusive resource conflicts, exploration order).',
-  'Each finding has a category, a severity ("blocking": it cannot work as written; "risk": it can, with the stated risk), the tasks it concerns, the detail and a suggestion. Verdict "return" when any finding is blocking, "feasible" otherwise. Do not raise findings to look thorough. Call submit_result once, then end your turn.',
-  'Upstream: the detailed plan. Downstream: a return goes to the Architect (decomposition) once; what is still unresolved goes to the Secretary.',
-].join('\n\n');
 
 // ---------------------------------------------------------------- render
 
@@ -188,8 +173,7 @@ export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
         (r.previous !== null ? `Previous detailed plan: ${r.previous} (its tasks: ${(r.previousPlan?.tasks ?? []).map((t) => t.id).join(', ') || 'none'})\n` : '') +
         list('Mechanical check failures to fix', r.mechanicalFailures) +
         list('Feasibility findings to answer', r.feasibilityFindings) +
-        list('Instructions', r.instructions)) +
-    'When done, call submit_result with the detailed plan; then end your turn.'
+        list('Instructions', r.instructions))
   );
 }
 
@@ -205,13 +189,12 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
       'Tasks',
       p.tasks.map(
         (t) =>
-          `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ')}; depends on ${t.dependsOn.join(', ') || 'nothing'}; exclusive ${t.exclusive.join(', ') || 'none'}; estimate ${t.estimate.durationMs} ms / ${t.estimate.costMicros} micro-dollars (${t.estimate.basis}); verification ${t.verificationCommands.map((v) => v.command).join(' && ') || 'none'} (${prov(t.provenance)})`,
+          `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing (reads and runs only)'}; depends on ${t.dependsOn.join(', ') || 'nothing'}; exclusive ${t.exclusive.join(', ') || 'none'}; estimate ${t.estimate.durationMs} ms / ${t.estimate.costMicros} micro-dollars (${t.estimate.basis}); verification ${t.verificationCommands.map((v) => v.command).join(' && ') || 'none'} (${prov(t.provenance)})`,
       ),
     ) +
     list('Risks the Architect listed', p.risks) +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms`)) +
-    list('Findings of the earlier review this revision answers', c.earlierFindings) +
-    'When done, call submit_result with your findings, the critical path and one verdict; then end your turn.'
+    list('Findings of the earlier review this revision answers', c.earlierFindings)
   );
 }
 
@@ -308,7 +291,6 @@ const decomposeEntry: SeatCardEntry<ArchitectDecomposeCard, ArchitectDecomposeRe
   schema: ArchitectDecomposeCardSchema,
   resultShape: ArchitectDecomposeResultShape,
   resultSchema: ArchitectDecomposeResultSchema,
-  definition: ARCHITECT_DECOMPOSE_DEFINITION,
   toolProfile: 'read',
   render: renderArchitectDecompose,
   problems: (c, r) => decomposeProblems(c, r),
@@ -321,7 +303,6 @@ const feasibilityEntry: SeatCardEntry<ArchitectFeasibilityCard, ArchitectFeasibi
   schema: ArchitectFeasibilityCardSchema,
   resultShape: ArchitectFeasibilityResultShape,
   resultSchema: ArchitectFeasibilityResultSchema,
-  definition: ARCHITECT_FEASIBILITY_DEFINITION,
   toolProfile: 'read',
   render: renderArchitectFeasibility,
   problems: (c, r) => feasibilityProblems(c, r),

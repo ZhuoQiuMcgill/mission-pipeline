@@ -2,13 +2,14 @@
 //
 //   researcher-author       the exploration's author: owns the product; each round it picks one
 //                           step: discuss (align the framing with the attacker), evidence
-//                           (request_evidence: an async evidence execution, 6.2) or submit (a
+//                           (`mp seat <id> request-evidence`: an async evidence execution) or submit (a
 //                           new version, with a disposition for every open finding: revise,
 //                           rebut with an evidence execution, or escalate as a direction
 //                           question). In a research exploration its first product is the
 //                           method with the attempt register (4.3 "开题").
 //   researcher-reader       a blind reading investigation: steps, data, what to record and
-//                           assertions; may use the network the card allows (fetch_url).
+//                           assertions; reads the addresses the card allows with the harness's
+//                           own tools and cites them as url:<address> (decision 12).
 //   researcher-interpreter  research explorations: interprets the registered attempts' records
 //                           without having taken part in any execution, and defends and revises
 //                           that interpretation against the attack on its reasoning ("结题").
@@ -18,7 +19,7 @@
 // evidence record (src/seat/cards/experiment.ts).
 
 import { z } from 'zod';
-import { sha256 } from '../../common/hash.ts';
+import { canonicalJson, sha256 } from '../../common/hash.ts';
 import type { BaseRecord } from '../../common/records.ts';
 import {
   DiscussionEntry,
@@ -34,8 +35,8 @@ import {
   versionRecord,
   type PriorFindingT,
 } from './crititor.ts';
-import { Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials, TOOLS_NOTE_SNAPSHOT } from './common.ts';
-import { BlindResultShape, blindEvidenceRecord, blindFields, blindProblems, renderBlind, type BlindResult, type FetchedPage } from './experiment.ts';
+import { Command, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
+import { BlindResultShape, blindEvidenceRecord, blindFields, blindProblems, renderBlind, type BlindResult } from './experiment.ts';
 import { registerSeatCard, type CardRecordContext, type SeatCardEntry } from './registry.ts';
 
 const CurrentVersion = z.object({ version: z.string().min(1), content: z.string().regex(/^[0-9a-f]{64}$/), material: z.string().min(1) });
@@ -49,6 +50,7 @@ export const RegisteredAttempt = z.object({
   data: z.string(),
   measure: z.array(z.string().min(1)),
   assertions: z.array(z.string().min(1)),
+  commands: z.array(Command).optional().describe('experiment: the commands the steps run (the executor runs each with mp seat <id> rerun <command-id>).'),
 });
 export type RegisteredAttemptT = z.infer<typeof RegisteredAttempt>;
 
@@ -111,7 +113,7 @@ export const AuthorCardSchema = z.object({
 export type AuthorCard = z.infer<typeof AuthorCardSchema>;
 
 export const AuthorResultShape = {
-  step: z.enum(['discuss', 'submit']).describe('discuss: align the framing first; submit: a new version for attack. (For evidence, call request_evidence instead.)'),
+  step: z.enum(['discuss', 'submit']).describe('discuss: align the framing first; submit: a new version for attack. (For evidence, run mp seat <id> request-evidence instead.)'),
   message: z.string().describe('discuss: your message to the attacker; submit: what changed in this version and why.'),
   artifact: z
     .string()
@@ -127,7 +129,8 @@ export type AuthorResult = z.infer<typeof AuthorResultSchema>;
 export function authorVersionDocument(card: AuthorCard, r: AuthorResult): string | null {
   if (r.step !== 'submit' || r.artifact === '') return null;
   if (!card.registerAttempts) return r.artifact;
-  return JSON.stringify({ format: 'mp4.research-method.v1', exploration: card.exploration.id, method: r.artifact, attempts: r.attempts });
+  // canonical: the same document whether built from the seat's hand-back or from the stored result (its key order differs)
+  return canonicalJson({ format: 'mp4.research-method.v1', exploration: card.exploration.id, method: r.artifact, attempts: r.attempts });
 }
 
 function authorProblems(card: AuthorCard, r: AuthorResult, put: (doc: string) => string): string[] {
@@ -172,16 +175,6 @@ export function authorSubmittedVersion(card: AuthorCard, r: AuthorResult, put: (
   return { version: versionId(card.newVersion, content), content, changed: true };
 }
 
-export const AUTHOR_DEFINITION = [
-  'You are the Researcher seat of a software pipeline, as the author of an exploration. An exploration is work whose acceptance cannot be written down in advance: it is accepted by surviving attack. You own the product (a design, a method, an analysis or an answer), produce it, revise it and defend it against an attacker (the Crititor), round by round.',
-  TOOLS_NOTE_SNAPSHOT,
-  'Each turn you pick one step. Discuss: when the product has not taken shape or the framing is unclear, align the framing and the attack scope with the attacker (step "discuss", your message). Evidence: when a claim must be settled by running or reading something, call request_evidence with the steps, data, quantities and assertions written for a blind executor (no expectation in them); your session ends and resumes with the results. Submit: hand back the full text of the new version (step "submit"), with one disposition per open finding: revise (accepted and changed in this version), rebut (refuted by an evidence execution you name), or escalate (a direction question for the user, through the Secretary).',
-  'Card fields: exploration (required), goal (the user\'s words, required), attack scope (required), the decision served and its type, round and budget, the current version (a material), open findings (dispose of each), other findings, evidence executions, the discussion, rulings, materials. In a research exploration\'s method phase, a submission carries the attempt register: every experiment or reading you will rely on, registered before it runs.',
-  'Hand-back (submit_result, once): step, message, artifact (the full text; empty keeps the current version), dispositions, direction questions, attempts (research method only). Then end your turn.',
-  'Prohibitions: do not mark a finding "revise" without changing the version; do not rebut without an evidence execution; do not decide a direction question yourself; do not presuppose the answer in a research method.',
-  'Upstream: the decision layer (the definition), the Crititor (findings), evidence executions. Downstream: the Crititor, who attacks each version you submit.',
-  'Your tools: read_file, list_directory, search_content, read_material (the card\'s materials), request_evidence, submit_result.',
-].join('\n\n');
 
 export function renderAuthorCard(c: AuthorCard): string {
   return (
@@ -196,8 +189,7 @@ export function renderAuthorCard(c: AuthorCard): string {
     renderEvidence(c.evidence) +
     list('Discussion so far', c.discussion.map((d) => `(${d.from}, round ${d.round}) ${d.text}`)) +
     list('Rulings of the decision layer (verbatim)', c.rulings) +
-    renderMaterials(c.materials) +
-    'When done, call submit_result once (or request_evidence), then end your turn.'
+    renderMaterials(c.materials)
   );
 }
 
@@ -207,7 +199,6 @@ export const authorEntry: SeatCardEntry<AuthorCard, AuthorResult> = {
   schema: AuthorCardSchema,
   resultShape: AuthorResultShape,
   resultSchema: AuthorResultSchema,
-  definition: AUTHOR_DEFINITION,
   toolProfile: 'read-evidence',
   render: renderAuthorCard,
   problems: (c, r) => authorProblems(c, r, contentHashOf),
@@ -220,30 +211,19 @@ export const ReaderCardSchema = z.object({
   ...commonCardFields,
   seat: z.literal('researcher-reader'),
   workspace: ReadOnlyWorkspace,
-  /** The network the card allows (4.3 "阅读调查可按卡联网"): addresses fetch_url may read; empty: none. */
+  /** The addresses the card allows (4.3 "阅读调查可按卡联网"), read with the harness's own tools; empty: none. */
   network: z.object({ allowed: z.array(z.string().min(1)) }),
   ...blindFields,
 });
 export type ReaderCard = z.infer<typeof ReaderCardSchema>;
 
-export const READER_DEFINITION = [
-  'You are the Researcher seat of a software pipeline, on a blind reading card. You carry out one reading investigation exactly as the card\'s steps say and record what you found. You do not know, and must not guess, what anyone expects to find.',
-  'Every capability you have is a program tool. You can read the project snapshot (paths relative to its root) and the card\'s materials; when the card allows addresses, fetch_url reads them (the program fetches; nothing else is reachable). Tool output is capped; a cut output says so.',
-  'What you do: follow the steps in order; record each quantity the card names exactly once, and answer each assertion: holds, does not hold, or not checked. Every value and every answer cites the record it rests on: fetch:<k> for your k-th fetched page (counting from 1), or file:<path>[:<line>] for a file of the snapshot. The program checks these records; a claim without one does not count as evidence.',
-  'Card fields: steps (required), data, quantities to record (required, may be empty only when there are assertions), assertions, allowed addresses, the evidence id, materials.',
-  'Hand-back (submit_result, once): one entry per step, per quantity ("not obtained: <why>" when you could not) and per assertion, and your observations. Then end your turn.',
-  'Prohibitions: do not interpret what the findings mean for any question; do not skip a step silently; do not read addresses the card does not allow.',
-  'Upstream: the program, on behalf of the exploration that asked for the reading. Downstream: the program records your report as evidence; the exploration\'s author, attacker and interpreter read it.',
-  'Your tools: read_file, list_directory, search_content, read_material, fetch_url, submit_result.',
-].join('\n\n');
 
 export function renderReaderCard(c: ReaderCard): string {
   return (
     renderCommon(c) +
     renderBlind(c) +
-    list('Addresses you may read with fetch_url', c.network.allowed) +
-    renderMaterials(c.materials) +
-    'When done, call submit_result once with your report, then end your turn.'
+    list('Addresses you may read (with your own tools; cite as url:<address> with the passage)', c.network.allowed) +
+    renderMaterials(c.materials)
   );
 }
 
@@ -259,12 +239,11 @@ export const readerEntry: SeatCardEntry<ReaderCard, BlindResult> = {
   schema: ReaderCardSchema,
   resultShape: BlindResultShape,
   resultSchema: z.object(BlindResultShape),
-  definition: READER_DEFINITION,
   toolProfile: 'read-web',
   render: renderReaderCard,
   problems: (c, r, ctx) => readerProblems(c, r, ctx.snapshot),
-  // the host passes the pages it fetched (webFetches): fetch:<k> pointers are checked against them
-  records: (c, r, ctx) => [blindEvidenceRecord(c, r, 'reading', { ...ctx, webFetches: (ctx as { webFetches?: readonly FetchedPage[] }).webFetches ?? [] })],
+  // url:<address> pointers are checked against the card's addresses at hand-back, never fetched by mp (decision 12)
+  records: (c, r, ctx) => [blindEvidenceRecord(c, r, 'reading', ctx)],
 };
 
 // ---------------------------------------------------------------- researcher-interpreter (research explorations)
@@ -315,7 +294,7 @@ const InterpreterResultSchema = z.object(InterpreterResultShape);
 export type InterpreterResult = z.infer<typeof InterpreterResultSchema>;
 
 export function interpretationDocument(card: InterpreterCard, r: InterpreterResult): string {
-  return JSON.stringify({ format: 'mp4.research-interpretation.v1', exploration: card.exploration.id, method: card.method.version, answer: r.answer, conclusions: r.conclusions });
+  return canonicalJson({ format: 'mp4.research-interpretation.v1', exploration: card.exploration.id, method: card.method.version, answer: r.answer, conclusions: r.conclusions });
 }
 
 /** "没有结论" (8.2): a key conclusion does not stand. */
@@ -348,16 +327,6 @@ function interpreterRecords(card: InterpreterCard, r: InterpreterResult, ctx: Ca
   return [versionRecord(card, content, ctx)];
 }
 
-export const INTERPRETER_DEFINITION = [
-  'You are the Researcher seat of a software pipeline, as the interpreter of a research exploration. A research exploration answers a question: its method and attempt register were attacked first; the registered experiments and readings were then run blind. You took part in none of that. You interpret the records, and defend and revise your interpretation against the attack on its reasoning.',
-  TOOLS_NOTE_SNAPSHOT,
-  'What you do: read the method, the register and every record (materials). Write the answer and its conclusions; each conclusion cites the records it rests on (attempt ids or evidence ids); every registered attempt\'s record is cited at least once, failed and unrun ones included. Mark a conclusion "not-standing" when the records do not carry it; when part of the key answer does not stand, say so: the exploration then has no conclusion, and that is an acceptable result.',
-  'Card fields: exploration and question (required), goal (verbatim), attack scope, the method version, the attempt register with each record (required), other evidence, the current interpretation (when revising), open findings (dispose of each: revise, rebut with an evidence execution, or escalate), rulings, materials.',
-  'Hand-back (submit_result, once): the answer, the conclusions (id, text, cites, standing, key), a message, and the dispositions. Then end your turn.',
-  'Prohibitions: no conclusion without a record; do not drop an inconvenient record; do not run or ask for new evidence (raise the need in your message).',
-  'Upstream: the program (the records of the registered attempts) and the Crititor (findings on the reasoning). Downstream: the Crititor attacks your interpretation; when it converges, the decision layer.',
-  'Your tools: read_file, list_directory, search_content, read_material, submit_result.',
-].join('\n\n');
 
 export function renderInterpreterCard(c: InterpreterCard): string {
   return (
@@ -374,8 +343,7 @@ export function renderInterpreterCard(c: InterpreterCard): string {
     renderPriorFindings('Open findings (dispose of every one)', c.openFindings) +
     renderPriorFindings('Other findings (context)', c.otherFindings) +
     list('Rulings of the decision layer (verbatim)', c.rulings) +
-    renderMaterials(c.materials) +
-    'When done, call submit_result once, then end your turn.'
+    renderMaterials(c.materials)
   );
 }
 
@@ -385,7 +353,6 @@ export const interpreterEntry: SeatCardEntry<InterpreterCard, InterpreterResult>
   schema: InterpreterCardSchema,
   resultShape: InterpreterResultShape,
   resultSchema: InterpreterResultSchema,
-  definition: INTERPRETER_DEFINITION,
   toolProfile: 'read',
   render: renderInterpreterCard,
   problems: (c, r) => interpreterProblems(c, r, contentHashOf),

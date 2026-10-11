@@ -6,16 +6,18 @@ import { describe, it } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { WI_CATALOG } from '../src/common/records.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { fakePorts } from '../src/flow/fakes.ts';
+import { memoryPorts, say } from './flow-memory-fixtures.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import { detailedPlan, drive, happyScript, pmPlan, seedMission } from '../src/flow/scripted.ts';
+import { SEED_TEXT } from '../src/flow/scripted.ts';
 
 const M = 'm1' as MissionId;
 
 async function setup(mode: 'stable' | 'fast' = 'stable') {
-  const ports = fakePorts();
+  const ports = memoryPorts();
+  say(ports, SEED_TEXT);
   await seedMission(ports, M);
-  await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['msg1'], changedItems: ['g1', 's1', 'a1'], mode });
+  await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['W-1'], changedItems: ['g1', 's1', 'a1'], mode });
   return { ports, engine: new FlowEngine(ports) };
 }
 
@@ -83,7 +85,7 @@ describe('flow: Calibrator ① (3.3)', () => {
     const contested = await ports.ledger.events<{ line: string; contested: boolean }>({ mission: M, line: 'requirements', event: 'contested' });
     assert.deepEqual(contested.map((c) => [c.body.line, c.body.contested]), [['item.m1.s1', true]]);
     // the PM aligns with the user and records a new batch
-    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests in the repository' }] }), userWords: ['msg1'], changedItems: [] });
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests in the repository' }] }), userWords: ['W-1'], changedItems: [] });
     const ran2 = await drive(engine, ports.scheduler, withKinds({ 'calibrator-1': (t) => ({ handBack: cal1Pass(t.card as unknown as Calibrator1Card) }) }));
     assert.equal(ran2[0], 'cal1.m1.2');
     assert.ok(ran2.includes('arch.m1.2.1'), 'the Architect starts once the plan passes');
@@ -96,14 +98,14 @@ describe('flow: Calibrator ① (3.3)', () => {
   it('a batch after a pass is a continuation review of the changed elements, with old and new full text', async () => {
     const { ports, engine } = await setup();
     await drive(engine, ports.scheduler, happyScript(M));
-    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit and property tests' }] }), userWords: ['msg1'] });
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit and property tests' }] }), userWords: ['W-1'] });
     await engine.reconcile(M);
     const card = ports.scheduler.card<Calibrator1Card>('cal1.m1.2');
     assert.deepEqual(card.mode, { kind: 'continuation', extends: 'j.cal1.m1.1' });
     assert.deepEqual(card.focus, ['e2']);
     assert.ok(card.materials.some((m) => m.id === 'plan-old') && card.materials.some((m) => m.id === 'plan'));
     // "needs full review" → a full review task, not a verdict
-    ports.scheduler.run('cal1.m1.2', { handBack: { ...cal1Pass(card), verdict: 'needs-full-review' } });
+    await ports.scheduler.run('cal1.m1.2', { handBack: { ...cal1Pass(card), verdict: 'needs-full-review' } });
     await engine.reconcile(M);
     const full = ports.scheduler.card<Calibrator1Card>('cal1.m1.2.full');
     assert.equal(full.mode.kind, 'full');
@@ -180,9 +182,10 @@ describe('flow: mechanical checks (3.5) and their loop (6.5)', () => {
   });
 
   it('an order change against the user-specified order goes to the Secretary, not back to the Architect', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
+    say(ports, SEED_TEXT);
     await seedMission(ports, M);
-    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { order: 'user' }), userWords: ['msg1'] });
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { order: 'user' }), userWords: ['W-1'] });
     const engine = new FlowEngine(ports);
     const swapped = detailedPlan(M);
     const plan: DetailedPlanDoc = { ...swapped, tasks: swapped.tasks.map((t) => (t.id === 'iface' ? { ...t, provenance: { planElement: 'e2' } } : { ...t, provenance: { planElement: 'e1' } })) };
@@ -280,9 +283,10 @@ describe('flow: Calibrator ② (3.7) and the Secretary (3.8, 3.2)', () => {
 
 describe('flow: a single-task plan (3.4, 3.6)', () => {
   it('skips the feasibility review and the chain still proves the product (5.2)', async () => {
-    const ports = fakePorts();
+    const ports = memoryPorts();
+    say(ports, SEED_TEXT);
     await seedMission(ports, M);
-    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!] }), userWords: ['msg1'], mode: 'stable' });
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!] }), userWords: ['W-1'], mode: 'stable' });
     const engine = new FlowEngine(ports);
     const full = detailedPlan(M);
     const single: DetailedPlanDoc = { ...full, newInterfaces: [], tasks: [{ ...(full.tasks[1] as DetailedPlanDoc['tasks'][number]), implements: [], dependsOn: [], provenance: { planElement: 'e1' } }] };

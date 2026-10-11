@@ -1,6 +1,8 @@
 // Scripted seat results for runs without models (tests, rehearsals): valid hand-backs for each
-// decision-layer and execution card kind, and a driver that alternates the engine with the
-// fake scheduler until nothing scripted is left to run.
+// decision-layer and execution card kind, and a driver that alternates the engine with a
+// scheduler that can run a queued task as a seat would (the memory's dispatch table through
+// `mp pm dispatch` and `mp seat <id> handback`, test/flow-memory-fixtures.ts), until nothing
+// scripted is left to run.
 
 import type { ReviewerCard } from '../seat/card.ts';
 import type { ConstructorResult, ReviewerResult } from '../seat/results.ts';
@@ -8,9 +10,24 @@ import type { ArchitectDecomposeResult, ArchitectFeasibilityCard, ArchitectFeasi
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import type { DecisionOption, SecretaryCard, SecretaryResult } from '../seat/cards/secretary.ts';
 import type { FlowEngine } from './engine.ts';
-import type { FakeFlowScheduler, FakeOutcome } from './fakes.ts';
 import type { DetailedPlanDoc } from './plandoc.ts';
 import type { FlowTask } from './ports.ts';
+
+/** How a script ends a queued task (the seat's hand-back; its evidence request; or the PM's release of an interrupted dispatch). */
+export type ScriptedOutcome =
+  /** The seat handed back `result`; checked by the kind's program rules, then recorded. */
+  | { readonly handBack: unknown; readonly materialsRead?: ReadonlySet<string>; readonly report?: string }
+  /** The seat asked for evidence (decision 13): its notes and the request. */
+  | { readonly evidence: unknown; readonly notes?: string }
+  /** The seat ended without a hand-back: the PM released the dispatch (§5.4). */
+  | { readonly release: 'ended' | 'abandoned' };
+
+/** What drive() needs of a scheduler: the queued tasks and running one as a seat would. */
+export interface ScriptedScheduler {
+  queued(kind?: string): FlowTask[];
+  /** End a task's next dispatch; the problems when the hand-back is refused (the seat would fix it). */
+  run(task: string, outcome: ScriptedOutcome): Promise<string[]> | string[];
+}
 
 export function cal1Pass(c: Calibrator1Card): Calibrator1Result {
   return {
@@ -98,13 +115,13 @@ export function reviewer(c: ReviewerCard, verdict: ReviewerResult['verdict'], o:
 }
 
 /** What to do with a queued task: an outcome, or null to leave it queued. */
-export type Script = (task: FlowTask, scheduler: FakeFlowScheduler) => FakeOutcome | null;
+export type Script = (task: FlowTask, scheduler: ScriptedScheduler) => ScriptedOutcome | null;
 
 /**
  * Alternate reconcile and scripted runs until nothing scripted is queued. Returns the tasks run,
  * in order. Throws when a scripted hand-back is refused by the program's rules (a test defect).
  */
-export async function drive(engine: FlowEngine, scheduler: FakeFlowScheduler, script: Script, maxRounds = 200): Promise<string[]> {
+export async function drive(engine: FlowEngine, scheduler: ScriptedScheduler, script: Script, maxRounds = 200): Promise<string[]> {
   const ran: string[] = [];
   for (let round = 0; round < maxRounds; round++) {
     const reports = await engine.reconcile();
@@ -113,7 +130,7 @@ export async function drive(engine: FlowEngine, scheduler: FakeFlowScheduler, sc
     for (const t of scheduler.queued()) {
       const o = script(t, scheduler);
       if (o === null) continue;
-      const problems = scheduler.run(t.task, o);
+      const problems = await scheduler.run(t.task, o);
       if (problems.length > 0) throw new Error(`scripted hand-back for ${t.task} refused:\n- ${problems.join('\n- ')}`);
       ran.push(t.task);
       any = true;
@@ -129,22 +146,22 @@ export async function drive(engine: FlowEngine, scheduler: FakeFlowScheduler, sc
 // ---------------------------------------------------------------- a seeded mission
 
 import type { MissionId } from '../common/ids.ts';
-import type { FakeFlowLedger } from './fakes.ts';
 import type { FlowPorts } from './ports.ts';
 import { itemLine, recordItem } from './requirements.ts';
 import type { PmPlanDoc } from './plandoc.ts';
 
-/** Book a user message (what the PM session's prompt hook does, 3.1). */
-export function bookWords(ledger: FakeFlowLedger, message: string, text: string): void {
-  ledger.commit([{ kind: 'user.words', message, session: 'pm-session', at: 1_000 + ledger.head, text: ledger.content.put(text), excerpt: text.slice(0, 280) }]);
-}
+/** The words entry the seeded mission rests on (`mp pm say` records the user's first message as W-1). */
+export const SEED_WORDS = 'W-1';
+export const SEED_TEXT = 'Build me a CSV parser with tests. The details are yours to decide.';
 
-/** A mission with the user's words, a goal, an acceptance item and an authorization recorded. */
-export async function seedMission(ports: FlowPorts & { ledger: FakeFlowLedger }, mission: MissionId): Promise<void> {
-  bookWords(ports.ledger, 'msg1', 'Build me a CSV parser with tests. The details are yours to decide.');
-  await recordItem(ports, { mission, item: 'g1', type: 'goal', text: 'A CSV parser', source: { kind: 'words', message: 'msg1', quote: 'Build me a CSV parser' } });
-  await recordItem(ports, { mission, item: 's1', type: 'acceptance', text: 'It has tests', source: { kind: 'words', message: 'msg1', quote: 'with tests' } });
-  await recordItem(ports, { mission, item: 'a1', type: 'authorization', text: 'Details are the PM\'s', source: { kind: 'words', message: 'msg1', quote: 'The details are yours to decide' } });
+/**
+ * A mission with a goal, an acceptance item and an authorization recorded, quoting the user's
+ * words entry `words` (the caller records the message first: `mp pm say`, SEED_TEXT).
+ */
+export async function seedMission(ports: FlowPorts, mission: MissionId, words = SEED_WORDS): Promise<void> {
+  await recordItem(ports, { mission, item: 'g1', type: 'goal', text: 'A CSV parser', source: { kind: 'words', words, quote: 'Build me a CSV parser' } });
+  await recordItem(ports, { mission, item: 's1', type: 'acceptance', text: 'It has tests', source: { kind: 'words', words, quote: 'with tests' } });
+  await recordItem(ports, { mission, item: 'a1', type: 'authorization', text: 'Details are the PM\'s', source: { kind: 'words', words, quote: 'The details are yours to decide' } });
 }
 
 /** A two-element PM plan for the seeded mission. */
@@ -155,8 +172,8 @@ export function pmPlan(mission: string, o: Partial<PmPlanDoc> = {}): PmPlanDoc {
     round: 1,
     order: 'free',
     elements: [
-      { id: 'e1', kind: 'deliverable', text: 'A CSV parser library', provenance: { by: 'user', message: 'msg1', quote: 'Build me a CSV parser' }, after: [], items: ['g1'] },
-      { id: 'e2', kind: 'behavior', text: 'Covered by unit tests', provenance: { by: 'user', message: 'msg1', quote: 'with tests' }, after: [], items: ['s1'] },
+      { id: 'e1', kind: 'deliverable', text: 'A CSV parser library', provenance: { by: 'user', words: SEED_WORDS, quote: 'Build me a CSV parser' }, after: [], items: ['g1'] },
+      { id: 'e2', kind: 'behavior', text: 'Covered by unit tests', provenance: { by: 'user', words: SEED_WORDS, quote: 'with tests' }, after: [], items: ['s1'] },
     ],
     goalsBeyond: [],
     authorizations: ['a1'],

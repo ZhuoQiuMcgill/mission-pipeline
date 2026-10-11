@@ -1,24 +1,16 @@
-// Shared fixtures for the delivery tests (helpers only, no tests): an in-memory
-// DeliveryProofView (the evaluator will implement the real one), an in-memory
-// DeliveryAuthority (the ledger service will), a stub ClosingCheckRunner (the
-// exec run host will), and a helper that records a product version from a real
-// commit the way the program does.
+// Shared fixtures for the delivery candidate and manifest tests (helpers only,
+// no tests): an in-memory DeliveryProofView (the memory's is memoryView.ts) and
+// a helper that records a product version from a real commit the way the
+// program does.
 
 import { id, revision, type ContentHash, type EvidenceId, type GitOid, type MissionId, type ModuleId, type ObjectVersionId, type ProofUnitId } from '../src/common/ids.ts';
 import type { Label } from '../src/evaluator/semantics.ts';
-import type { ClosingCheckOutcome, ClosingCheckRunner, DeliveryAuthority, DeliveryDisk, DeliveryIntent, DeliveryKey, DeliveryNotice, DeliveryRecord, RebuildRecord } from '../src/delivery/deliver.ts';
 import { targetKey, type DecidingEvidence, type DeliveryObject, type DeliveryProofView, type DeliveryTarget } from '../src/delivery/proofView.ts';
 import { inWriteScope, writeScopeIdentityAt } from '../src/delivery/writeScope.ts';
 import { lsTree, type RepoLayout } from '../src/git/objects.ts';
-import type { ProcessIdentity, SafeGit } from '../src/git/safeGit.ts';
+import type { GitExec } from '../src/git/plainGit.ts';
 
 export const MISSION = id<MissionId>('m1');
-
-/** WI-05's quiet period off: tests that move the target rebuild at once. */
-export const NO_QUIET = { quietMs: 0, pollMs: 1 } as const;
-
-/** Disk admission with the real filesystem statistics and no ledger on these volumes (6.5). */
-export const TEST_DISK: DeliveryDisk = { reserve: { recoveryReserveBytes: 0, evaluatorPoolBytes: 0 }, sharesVolume: () => false };
 
 export class FakeProofView implements DeliveryProofView {
   readonly revision = revision(42);
@@ -91,7 +83,7 @@ export function fakeObject(
 
 /** A product version recorded from a generated commit, as the program records it (5.1, writeScope.ts). */
 export async function productVersion(
-  git: SafeGit,
+  git: GitExec,
   repo: RepoLayout,
   o: { id: string; module: string; writeScope: string[]; commit: GitOid; transform: ContentHash; prerequisites?: DeliveryTarget[] },
 ): Promise<DeliveryObject> {
@@ -106,57 +98,4 @@ export async function productVersion(
     paths: entries.filter((e) => inWriteScope(o.writeScope, e.path)).map((e) => e.path),
     tree: { commit: o.commit, writeScope: o.writeScope, transform: o.transform },
   };
-}
-
-export class MemoryAuthority implements DeliveryAuthority {
-  authorization: { readonly ok: true } | { readonly ok: false; readonly reason: string } = { ok: true };
-  readonly intents: DeliveryIntent[] = [];
-  readonly writers: ProcessIdentity[] = [];
-  readonly completed: DeliveryRecord[] = [];
-  readonly finished: string[] = [];
-  readonly signatures: string[] = [];
-  rebuildCount: number;
-  limit = 3;
-  constructor(rebuildsUsed = 0) {
-    this.rebuildCount = rebuildsUsed;
-  }
-  async rebuildBudget(_key: DeliveryKey): Promise<{ readonly used: number; readonly limit: number }> {
-    return { used: this.rebuildCount, limit: this.limit };
-  }
-  async finish(_key: DeliveryKey, outcome: 'failed'): Promise<void> {
-    this.finished.push(outcome);
-  }
-  async authorize(_key: DeliveryKey, intent: DeliveryIntent): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
-    this.intents.push(intent);
-    return this.authorization;
-  }
-  async recordRefWriter(_key: DeliveryKey, writer: ProcessIdentity): Promise<void> {
-    this.writers.push(writer);
-  }
-  /** The ledger's LOOP_EXHAUSTED refusal from this many recorded rebuilds on (null: never). */
-  refuseRebuildsFrom: number | null = null;
-  async recordRebuild(_key: DeliveryKey, signature: string): Promise<RebuildRecord> {
-    if (this.refuseRebuildsFrom !== null && this.rebuildCount >= this.refuseRebuildsFrom) return { kind: 'exhausted', detail: 'LOOP_EXHAUSTED (stand-in)' };
-    this.signatures.push(signature);
-    return { kind: 'recorded', total: ++this.rebuildCount };
-  }
-  async complete(_key: DeliveryKey, record: DeliveryRecord): Promise<void> {
-    this.completed.push(record);
-  }
-  readonly notices: DeliveryNotice[] = [];
-  async notify(_key: DeliveryKey, notice: DeliveryNotice): Promise<void> {
-    this.notices.push(notice);
-  }
-}
-
-/** A closing-check runner stub: every check passes unless listed in `failing`; `onRun` simulates the world moving meanwhile. */
-export class StubChecks implements ClosingCheckRunner {
-  readonly calls: { commit: GitOid; snapshotDir: string }[] = [];
-  failing = new Set<string>();
-  onRun: ((call: number) => void | Promise<void>) | null = null;
-  async run(request: Parameters<ClosingCheckRunner['run']>[0]): Promise<readonly ClosingCheckOutcome[]> {
-    this.calls.push({ commit: request.commit, snapshotDir: request.snapshotDir });
-    if (this.onRun !== null) await this.onRun(this.calls.length);
-    return request.checks.map((c) => ({ id: c.id, passed: !this.failing.has(c.id), evidence: null, detail: this.failing.has(c.id) ? 'failed' : 'passed' }));
-  }
 }

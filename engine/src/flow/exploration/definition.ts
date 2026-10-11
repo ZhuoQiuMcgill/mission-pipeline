@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { idPart } from '../../common/ids.ts';
 import { DEFAULT_ATTACK_SCOPE } from '../../seat/cards/crititor.ts';
+import { EXPLORATION_ROUNDS_DEFAULT } from '../plandoc.ts';
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -28,9 +29,9 @@ export const ExplorationDefinitionSchema = z.object({
   /** The decision served and its type (3.10): direction goes to the user, structure to the Secretary (8.2 验收). */
   decision: z.object({ type: z.enum(['direction', 'structure']), text: z.string().min(1), /** The decision's id in the PM plan (plandoc.ts), when it comes from one. */ id: z.string().min(1).optional() }),
   budget: z.object({
-    /** Exploration rounds (6.5: an exploration's rounds are capped by its budget): attacker turns. */
+    /** Attack rounds (6.5: an exploration's rounds are capped by its budget; 4.1 §6.3: default 3), each stabilized. */
     rounds: z.number().int().positive(),
-    /** Informational: the mission's spend limit applies (6.5); the flow does not meter. */
+    /** Informational: 4.1 meters nothing (spending is the harness's business, §13 Q1). */
     spendMicros: z.number().int().nonnegative().nullable(),
   }),
   /** Which blind executor runs an evidence request when the request does not say (4.3 证据执行). */
@@ -63,7 +64,7 @@ export const ExplorationDefinitionSchema = z.object({
 export type ExplorationDefinition = z.infer<typeof ExplorationDefinitionSchema>;
 
 /** A definition with the defaults of 4.3 filled in. */
-export function explorationDefinition(d: Omit<Partial<ExplorationDefinition>, 'budget'> & Pick<ExplorationDefinition, 'exploration' | 'mission' | 'product' | 'goal' | 'decision'> & { budget: { rounds: number; spendMicros?: number | null } }): ExplorationDefinition {
+export function explorationDefinition(d: Omit<Partial<ExplorationDefinition>, 'budget'> & Pick<ExplorationDefinition, 'exploration' | 'mission' | 'product' | 'goal' | 'decision'> & { budget?: { rounds?: number; spendMicros?: number | null } }): ExplorationDefinition {
   return ExplorationDefinitionSchema.parse({
     format: 'mp4.exploration-definition.v1',
     module: null,
@@ -82,7 +83,7 @@ export function explorationDefinition(d: Omit<Partial<ExplorationDefinition>, 'b
     priority: 0,
     mode: 'stable',
     ...d,
-    budget: { rounds: d.budget.rounds, spendMicros: d.budget.spendMicros ?? null },
+    budget: { rounds: d.budget?.rounds ?? EXPLORATION_ROUNDS_DEFAULT, spendMicros: d.budget?.spendMicros ?? null },
   });
 }
 
