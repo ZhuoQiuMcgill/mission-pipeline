@@ -493,7 +493,7 @@ const plan: Command = {
   group: 'pm',
   name: ['plan'],
   summary: 'submit a PM plan batch (results level; explorations are plan elements); Calibrator ① checks it next. `mp pm plan template <mission>` prints its format, prefilled',
-  usage: 'mp pm plan template <mission> [--file <plan.json>]   (an annotated, valid skeleton prefilled with the requirement items)\n       mp pm plan submit <mission> --file <plan.json> --words W-<n>[,W-<m>...] [--changed <item,...>] [--dependent <item,...>] [--mode stable|fast]',
+  usage: 'mp pm plan template <mission> [--file <plan.json>]   (an annotated, valid skeleton prefilled with the requirement items)\n       mp pm plan submit <mission> --file <plan.json> --words W-<n>[,W-<m>...] [--changed <item,...>] [--dependent <item,...>] [--mode stable|fast]\n       (the plan in effect submitted unchanged with new words or changed items re-checks that version: no new version, no Architect)',
   flags: { file: 'string', words: 'list', changed: 'list', dependent: 'list', mode: 'string' },
   identity: (a) => ({
     positionals: a.positionals,
@@ -536,7 +536,7 @@ const plan: Command = {
     for (const w of words) if (!WORDS.test(w) || p.ctx.memory.read((db) => wordsEntry(db, w)) === null) throw refused('NO_WORDS', `there is no words entry ${w}`);
     const mode = flagStr(args, 'mode');
     if (mode !== null && mode !== 'stable' && mode !== 'fast') throw usage('--mode is stable or fast');
-    let r: { readonly batch: string; readonly plan: string };
+    let r: { readonly batch: string; readonly plan: string; readonly recheck?: boolean };
     try {
       r = await pmPlan(p.ctx, { mission: m, plan: doc, words, changedItems: flagList(args, 'changed'), dependentItems: flagList(args, 'dependent'), ...(mode !== null ? { mode } : {}) });
     } catch (e) {
@@ -545,6 +545,9 @@ const plan: Command = {
       // the plan does not validate: say where, and where its format is
       const issues = name === 'ZodError' ? ((e as { issues?: Array<{ path: Array<string | number>; message: string }> }).issues ?? []).map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ') : (e as Error).message;
       throw refused('BAD_PLAN', `the PM plan does not validate: ${issues}. Its format, prefilled for this mission: mp pm plan template ${m}`);
+    }
+    if (r.recheck === true) {
+      return ok(`The plan document is the plan in effect, unchanged: batch ${r.batch} re-checks ${r.plan} (no new version, no Architect). Calibrator ① judges it again on the requirement items as they are now (mp pm next); a pass makes it, and what relies on it, current again.`, { mission: m, batch: r.batch, plan: r.plan, recheck: true });
     }
     return ok(`PM plan batch ${r.batch} recorded (plan ${r.plan}); Calibrator ① checks it next (mp pm next). The Architect starts only after it passes.`, { mission: m, batch: r.batch, plan: r.plan });
   },

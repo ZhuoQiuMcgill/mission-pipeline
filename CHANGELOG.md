@@ -9,6 +9,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ## [Unreleased]
 
 ### Fixed
+- A PM plan in effect can be checked again in place. The calibrator-1 contract of a PM plan version
+  binds the mission's whole requirement set (v51 §3.3, v31), so a requirement item added, revised
+  or withdrawn after the plan took effect makes its pass not current, and with it every detailed
+  plan of that version and every product accepted under them (stable mode then releases nothing
+  and takes in no result of work in flight). The design recovers this with a continuation
+  Calibrator ① judgment on the same plan version (§5.2 part 5: "M2 and the detailed plan
+  recover"), but the flow only ever judged a plan before it took effect, and every batch minted a
+  new version; a new version cannot restore the products accepted under the old one, whose
+  Reviewer contracts rely on the old detailed plan. Now `mp pm plan submit` of the plan document in
+  effect, unchanged, with the batch's words and changed items, records a re-check of that version
+  (`b<n>.c<m>`, no new version, no Architect attempt): Calibrator ① judges the same version again
+  as a continuation of its deciding pass, its card focused on the elements resting on the changed
+  items (every element when none does) and listing the items changed since the pass. A pass makes
+  the plan, its detailed plans and the products relying on them current again; a fail or an
+  undecided outcome goes back to the PM like any batch, the plan staying in effect without its
+  proof. A later version's continuation extends the deciding pass, a re-check's or a rerun's
+  included, instead of the batch's first one. A batch that changes the mode is still a new version.
 - A declared verification run executes once per candidate. While such a run was executing and not
   yet recorded, any other `mp` process that advanced the flow (a seat's hand-back, a PM write
   command, `mp pm next`) found no run to reuse and started another execution of the same run on

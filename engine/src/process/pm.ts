@@ -661,7 +661,7 @@ export async function pmConstraint(ctx: ProcessContext, req: { readonly mission:
 export async function pmPlan(
   ctx: ProcessContext,
   req: { readonly mission: string; readonly plan: unknown; readonly words: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' },
-): Promise<{ readonly batch: string; readonly plan: string }> {
+): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
   const out = await submitPmBatch(ctx.ports(), {
     mission: req.mission as MissionId,
     plan: req.plan,
