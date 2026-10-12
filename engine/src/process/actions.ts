@@ -7,7 +7,8 @@
 //   product     the product version of a Constructor's candidate commit (5.1): its content is the
 //               write-scope identity of the commit, its source the commit, the write scope and
 //               the transform description (A4's handoff)
-//   verify      the declared runs on a clean checkout of the candidate (§5.3; reused when §6.5 allows)
+//   verify      the declared runs on a clean checkout of the candidate (§5.3; reused when §6.5 allows;
+//               "pending", with nothing run or recorded, while another mp process executes them)
 //   findSymbol  3.5: a file of a commit names a symbol (read-only, no model)
 //   history     3.4: the git log and past run durations, for the Architect's card
 // Every action is idempotent: a product version is recorded once per object id, a snapshot of the
@@ -29,7 +30,7 @@ import { appendRecords, factById, LedgerError } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
 import type { ProductRequest, ProductVersion, VerificationRun, VerifyRequest } from '../flow/ports.ts';
 import type { GitActions, ProcessContext } from './context.ts';
-import { runOnCommit } from './runs.ts';
+import { RunInProgress, runOnCommit } from './runs.ts';
 
 /** A program action that cannot go on as it is: the flow keeps only this task waiting, with the WI for `code` (execution.ts actionRefused). */
 export class ActionError extends Error {
@@ -169,7 +170,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
       return pv;
     },
 
-    async verify(req: VerifyRequest): Promise<readonly VerificationRun[]> {
+    async verify(req: VerifyRequest): Promise<readonly VerificationRun[] | 'pending'> {
       const ids = req.commands.map((c) => c.id);
       const dup = [...new Set(ids.filter((x, i) => ids.indexOf(x) !== i))];
       if (dup.length > 0) throw new ActionError('conflict', `the verification commands of ${req.object} repeat ids (${dup.join(', ')}); nothing was run or recorded`, { object: req.object, duplicates: dup });
@@ -185,6 +186,9 @@ export function gitActions(ctx: ProcessContext): GitActions {
         });
         return r.runs.map((x) => ({ evidence: x.evidence, command: x.command.command, summary: x.summary, passed: x.passed }));
       } catch (e) {
+        // the same declared runs are executing in another mp process (their run lock is held):
+        // nothing was run or recorded; the step waits, and its next pass reuses the recorded runs
+        if (e instanceof RunInProgress) return 'pending';
         if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
         if (e instanceof LedgerError && e.code === 'GIT_WRITES_HELD') throw new ActionError('git-held', e.message, null);
         throw e;

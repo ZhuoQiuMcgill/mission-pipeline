@@ -124,7 +124,7 @@ Any harness that can run a shell command can be the PM or fill a seat. Some meet
 
 ## Platforms
 
-Linux, Windows and macOS with Node 22.12+ (the built-in `node:sqlite`) and git. Paths in the memory are relative to the project folder, so a copy reads the same on any of them. Declared commands run with the platform's shell. Process locks (a landing, the recovery after a move) are SQLite file locks the operating system releases when the holder exits.
+Linux, Windows and macOS with Node 22.12+ (the built-in `node:sqlite`) and git. Paths in the memory are relative to the project folder, so a copy reads the same on any of them. Declared commands run with the platform's shell. Process locks (a landing, the recovery after a move, a declared run while it executes) are SQLite file locks the operating system releases when the holder exits.
 
 ## Layout
 

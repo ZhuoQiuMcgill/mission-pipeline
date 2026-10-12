@@ -1,7 +1,8 @@
-// Process locks (design 4.1 §4.1): the two operations that need a lock that
-// outlives a transaction, a landing (§6.7) and the recovery after a move
-// (§3.3). Each is `.mission-pipeline/locks/<name>.lock`, an SQLite database
-// used only to hold an exclusive transaction for the life of its holder.
+// Process locks (design 4.1 §4.1): the operations that need a lock that
+// outlives a transaction, a landing (§6.7), the recovery after a move (§3.3)
+// and a declared run while it executes (process/runs.ts, under `locks/runs/`).
+// Each is `.mission-pipeline/locks/<name>.lock`, an SQLite database used only
+// to hold an exclusive transaction for the life of its holder.
 // SQLite's own file locking works the same on Linux, Windows and macOS, and the
 // operating system releases the lock when the holding process exits, however it
 // exits, so `mp` never watches a process to know whether the holder is alive

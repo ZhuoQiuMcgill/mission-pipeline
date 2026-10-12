@@ -408,7 +408,10 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const commands = ((v.card['verificationCommands'] as Array<{ id: string; command: string; cwd?: string }> | undefined) ?? []);
     try {
       const runs = await ctx.actions().verify({ mission: v.info.mission as MissionId, object: productObjectId(v.info.task), snapshot: candidate.commit, commands });
-      verification = runs === 'pending' ? null : [...runs];
+      // "pending": another mp process advancing the flow is running these very runs; the hand-back
+      // stays recorded once, nothing runs twice, and the result reaches the flow when they are recorded
+      if (runs === 'pending') notes.push('the verification runs of this candidate are executing in another mp process; their result reaches the process when they are recorded (mp pm next)');
+      else verification = [...runs];
     } catch (e) {
       notes.push(`the verification runs could not run now (${(e as Error).message}); mp runs them again on the next step`);
     }

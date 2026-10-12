@@ -317,7 +317,11 @@ export interface FlowSchedulerPort {
   history(mission: MissionId): Promise<{ readonly gitLog: string; readonly runs: ReadonlyArray<{ readonly task: string; readonly seat: string; readonly durationMs: number; readonly costMicros: number }> }>;
   /** 4.2: the product version of an accepted Constructor candidate (idempotent per dispatch). */
   product(req: ProductRequest): Promise<ProductVersion>;
-  /** 4.1 §5.3: the program's declared runs on a candidate's clean checkout (idempotent: reused; 'pending' never in 4.1). */
+  /**
+   * 4.1 §5.3: the program's declared runs on a candidate's clean checkout (idempotent: reused).
+   * 'pending': the same runs are executing in another `mp` process; nothing was run or recorded,
+   * and the step waits for a later pass, which reuses them once they are recorded.
+   */
   verify(req: VerifyRequest): Promise<readonly VerificationRun[] | 'pending'>;
 }
 

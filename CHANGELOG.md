@@ -6,6 +6,20 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- A declared verification run executes once per candidate. While such a run was executing and not
+  yet recorded, any other `mp` process that advanced the flow (a seat's hand-back, a PM write
+  command, `mp pm next`) found no run to reuse and started another execution of the same run on
+  the same candidate, each in its own checkout, and waited for it, so those commands hung for the
+  run's whole duration. A declared run now executes under a process lock per reuse key (candidate,
+  command, working directory, environment identity) in `.mission-pipeline/locks/runs/`, taken
+  without waiting and released by the operating system if its holder dies. Meanwhile the other
+  processes run and record nothing: the flow step waits and reuses the run once it is recorded,
+  a hand-back says that its runs are executing in another process, and `mp pm renew` lists the run
+  as skipped. Sampling runs (`mp seat <id> rerun`, experiments) still execute every time.
+
 ## [4.1.0] — 2026-10-11
 
 Mission Pipeline becomes three parts and nothing else: an objective project memory, role

@@ -69,4 +69,4 @@ export {
 } from './seat.ts';
 export { DISPATCH_LINE, MemoryFlowEvaluator, MemoryFlowLedger, MemoryFlowScheduler, REDISPATCH_LOOP, handbackDoc, memoryFlowPorts, noticeAlertId, raiseNotice, taskStatus, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
 export { CLOSE_MODES, allowedAfterClose, heldByClose, missionState, pmClose, pmMission, type CloseMode, type Closed } from './close.ts';
-export { CWD_FIELD, normalizeCwd, runCwd, closingRunner, newRunId, runLeaf, runOnCommit, shellRunner, tapResults, type CommandOutcome, type CommandRunner, type DeclaredCommand, type RecordedRun } from './runs.ts';
+export { CWD_FIELD, normalizeCwd, runCwd, closingRunner, newRunId, runLeaf, runOnCommit, RunInProgress, shellRunner, tapResults, type CommandOutcome, type CommandRunner, type DeclaredCommand, type RecordedRun } from './runs.ts';
