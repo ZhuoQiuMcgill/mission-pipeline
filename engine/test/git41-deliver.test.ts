@@ -74,7 +74,8 @@ test('a delivery: the candidate on main’s current commit, proven, its closing 
     await product(f);
     write(f.dir, 'untracked.txt', 'untracked in the main worktree\n');
     write(f.dir, 'main.log', 'ignored in the main worktree\n');
-    const checks = [{ id: 'clean', command: 'test -f src/c.txt && test ! -e untracked.txt && test ! -e main.log && test ! -e .git' }];
+    // The run directory is a repository of its own at the candidate (on B), never the project's worktree.
+    const checks = [{ id: 'clean', command: `test -f src/c.txt && test ! -e untracked.txt && test ! -e main.log && test "$(git rev-parse --show-toplevel)" = "$(pwd -P)" && test "$(git rev-parse HEAD^)" = ${B} && git diff-index --quiet HEAD --` }];
     const asked = words(f.m, 'deliver the feature');
     await assert.rejects(deliver(f.ctx, request('d1', { words: 'W-99' }), { labels: labels(f) }), /no words entry/);
     const r = delivered(await deliver(f.ctx, request('d1', { closingChecks: checks, words: asked }), { labels: labels(f) }));

@@ -1,7 +1,10 @@
 // The program's runs (design 4.1 §5.3, §6.5): `mp` checks a commit out clean into
 // `.mission-pipeline/tmp/<run>/` and runs commands the card (or config.json) declares there,
 // with the platform's shell, inside the `mp` command that needs them; the checkout is removed
-// afterwards. Each command becomes one evidence record:
+// afterwards. The checkout is a git repository of its own at the commit (checkoutRepository.ts),
+// and the commands get no variable that points git elsewhere (GIT_DIR, GIT_WORK_TREE,
+// GIT_INDEX_FILE, ...), so what they ask git is answered for the candidate. Each command becomes
+// one evidence record:
 //   - envLine ENV_LINE and the environment identity observed by this process (§6.5);
 //   - the run class fixed now, from the card (runClassOf): a declared run (`mp`, clean checkout,
 //     a declared command, no network, not sampled), or a sampling run (`mp seat <id> rerun`, an
@@ -39,6 +42,7 @@ import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord, RunClass } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import { ENV_LINE, findReusableRun, RUN_FIELD, runClassOf, sampleRunId, type RunDeclaration } from '../evaluator/index.ts';
+import { withoutRepositoryLocators } from '../git/plainGit.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir } from '../git/workspace.ts';
 import type { ClosingCheck, ClosingOutcome, ClosingRunner } from '../delivery/delivery.ts';
 import { appendRecords, LedgerError, tryLock, type ProcessLock, type WriteTx } from '../memory/index.ts';
@@ -62,10 +66,14 @@ export interface CommandOutcome {
 /** Runs one command line in `cwd`. */
 export type CommandRunner = (req: { readonly command: string; readonly cwd: string; readonly timeoutMs: number }) => CommandOutcome;
 
-/** The platform's shell (§9: verification commands are declared per project and run with the platform's shell). */
+/**
+ * The platform's shell (§9: verification commands are declared per project and run with the
+ * platform's shell), in an environment without the variables that would point git at another
+ * repository than the checkout's own.
+ */
 export const shellRunner: CommandRunner = ({ command, cwd, timeoutMs }) => {
   const t0 = performance.now();
-  const r = spawnSync(command, { cwd, shell: true, timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync(command, { cwd, shell: true, env: withoutRepositoryLocators(process.env), timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const output = Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)]);
   const timedOut = r.error !== undefined && (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
   return { exitCode: r.status, signal: r.signal ?? null, error: r.error !== undefined && !timedOut ? r.error.message : null, timedOut, output, durationMs: Math.round(performance.now() - t0) };
@@ -308,7 +316,7 @@ function reusableRuns(ctx: ProcessContext, commit: string, commands: readonly De
   return { run: runs[0]!.fields['run'] ?? runs[0]!.evidence, runs, reused: true, leaf: null };
 }
 
-/** Execute the commands on a clean checkout and record them in one write (runOnCommit, past reuse and the run locks). */
+/** Execute the commands on a clean checkout (a repository at the candidate) and record them in one write (runOnCommit, past reuse and the run locks). */
 async function executeRuns(
   ctx: ProcessContext,
   req: Parameters<typeof runOnCommit>[1],
@@ -319,7 +327,8 @@ async function executeRuns(
   const dir = runCheckoutDir(ctx.memory.paths, run);
   const executed: RecordedRun[] = [];
   const records: EvidenceRecord[] = [];
-  await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir });
+  // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
+  await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
   try {
     for (const c of req.commands) {
       const rel = normalizeCwd(c.cwd);
@@ -352,7 +361,8 @@ async function executeRuns(
 
 /**
  * The closing checks of a delivery (§6.7 step 5) as runs (A4's ClosingRunner): run by `mp` in the
- * candidate's clean checkout `deliver` made, each one recorded with its run summary leaf and a
+ * candidate's clean checkout `deliver` made (a repository at the delivery candidate, like a run's
+ * checkout: delivery.ts), each one recorded with its run summary leaf and a
  * flow event of the delivery (line `delivery:<d>`), never as an evidence record: a closing check
  * is no judgment's evidence, and a label input written while the delivery is built would move the
  * labels under it (A4 checks that none arrived since it read them).

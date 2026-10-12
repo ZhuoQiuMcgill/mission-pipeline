@@ -50,6 +50,21 @@ const LOCATOR_VARS: readonly string[] = [
   'GIT_PREFIX',
 ];
 
+/**
+ * `env` without the variables that would point git at another repository than the one found from
+ * the working directory (LOCATOR_VARS, except GIT_CEILING_DIRECTORIES, which only bounds the
+ * search): the environment of a declared command in a run checkout, whose own repository is the
+ * candidate's (checkoutRepository.ts). Windows variable names are case-insensitive.
+ */
+export function withoutRepositoryLocators(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const k of Object.keys(out)) {
+    const u = k.toUpperCase();
+    if (LOCATOR_VARS.includes(u) && u !== 'GIT_CEILING_DIRECTORIES') delete out[k];
+  }
+  return out;
+}
+
 /** Set on every run (see the header). */
 const FIXED_ENV: Readonly<Record<string, string>> = {
   GIT_TERMINAL_PROMPT: '0',

@@ -8,7 +8,10 @@
 //        clean checkout with nothing of any worktree in it;
 //   4    the proof check on the final candidate tree (candidate.ts);
 //   5    the closing checks: the declared commands, run in that clean checkout
-//        (ClosingRunner; plain shell by default), removed afterwards;
+//        (ClosingRunner; plain shell by default), which is first made a git
+//        repository at the candidate that borrows the repository's objects
+//        (checkoutRepository.ts; nothing is written to the repository itself),
+//        removed afterwards;
 //   6    the delivery ref `refs/mission-pipeline/delivered/<mission>/<op>`:
 //        authorized as an intent first (stops, git-writes hold, not withdrawn
 //        or superseded), then created with `git update-ref <ref> <D> ""` (only
@@ -34,7 +37,8 @@ import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { AlertId, ContentHash, GitOid, MissionId, ObjectVersionId, OpId } from '../common/ids.ts';
 import { EVALUATOR_INPUT_KINDS, type BaseRecord } from '../common/records.ts';
 import { discoverRepo, gitOid, type Ident } from '../git/objects.ts';
-import type { PlainGit } from '../git/plainGit.ts';
+import { attachCheckoutRepository } from '../git/checkoutRepository.ts';
+import { withoutRepositoryLocators, type PlainGit } from '../git/plainGit.ts';
 import { deliveryRef } from '../git/refs.ts';
 import { AttributeEvaluator, MissingObjectsError, readTransformDescription, RepresentationError } from '../git/representation.ts';
 import type { GitContext } from '../git/workspace.ts';
@@ -94,15 +98,19 @@ export interface ClosingRunner {
   run(req: { readonly mission: MissionId; readonly delivery: string; readonly commit: GitOid; readonly dir: string; readonly checks: readonly ClosingCheck[] }): Promise<readonly ClosingOutcome[]> | readonly ClosingOutcome[];
 }
 
-/** The default runner: each command in `dir`, one after another, with the platform's shell (§9). */
+/**
+ * The default runner: each command in `dir`, one after another, with the platform's shell (§9),
+ * without the variables that would point git at another repository than the checkout's own.
+ */
 export const shellClosingRunner: ClosingRunner = {
   run({ dir, checks }) {
+    const env = withoutRepositoryLocators(process.env);
     return checks.map((c) => {
       const argv = typeof c.command === 'string' ? null : c.command;
       const r =
         argv === null
-          ? spawnSync(c.command as string, { cwd: dir, shell: true, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
-          : spawnSync(argv[0]!, argv.slice(1), { cwd: dir, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
+          ? spawnSync(c.command as string, { cwd: dir, shell: true, env, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
+          : spawnSync(argv[0]!, argv.slice(1), { cwd: dir, env, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
       const out = Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)]);
       const passed = r.error === undefined && r.status === 0;
       const tail = passed ? '' : (r.error !== undefined ? String(r.error.message) + '\n' : '') + out.toString('utf8').split(/\r?\n/).slice(-20).join('\n');
@@ -533,6 +541,8 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
       const proof = await checkCandidateProofs({ git, repo, view, manifest, candidate });
       let outcomes: readonly ClosingOutcome[];
       try {
+        // The checks ask git about the candidate: the run directory is a repository at it, borrowing the objects.
+        if (req.closingChecks.length > 0) await attachCheckoutRepository(git, repo, { dir: runDir, commit: candidate.commit, description });
         outcomes = await (deps.closing ?? shellClosingRunner).run({ mission: req.mission, delivery: req.delivery, commit: candidate.commit, dir: runDir, checks: req.closingChecks });
       } finally {
         rmSync(runDir, { recursive: true, force: true });

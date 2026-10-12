@@ -19,6 +19,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
   processes run and record nothing: the flow step waits and reuses the run once it is recorded,
   a hand-back says that its runs are executing in another process, and `mp pm renew` lists the run
   as skipped. Sampling runs (`mp seat <id> rerun`, experiments) still execute every time.
+- A run's clean checkout is a git repository at the candidate. The checkout under
+  `.mission-pipeline/tmp/` had no `.git` of its own, so a declared command that asked git a
+  question was answered by the enclosing project, where the whole checkout is an excluded path:
+  `git ls-files` listed nothing, `git log` and `git diff <base>` showed the enclosing branch, and
+  linters that honour git's ignore rules found no files; such verifications, reruns and closing
+  checks failed for every candidate. Verification runs, `mp seat <id> rerun`, `mp pm renew` and the
+  closing checks of `mp pm deliver` now run in a checkout with its own `.git`: HEAD detached at the
+  candidate, an index of its tree refreshed against the files, the project's objects borrowed
+  through `objects/info/alternates` (and its shallow list), and the transform settings the files
+  were written under. Nothing is registered or written in the project's repository, no object is
+  fetched, and the `.git` is removed with the checkout. Variables such as `GIT_DIR` and
+  `GIT_INDEX_FILE` no longer reach the commands. `mp seat <id> checkout` is unchanged.
 
 ## [4.1.0] — 2026-10-11
 
