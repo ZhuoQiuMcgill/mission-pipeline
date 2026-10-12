@@ -162,6 +162,7 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
         if (!isObj(src) || typeof src.commit !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(src.commit)) fail('object.version', 'source.commit is not a git object id');
         strings(src, 'writeScope');
         hash(src, 'transform');
+        if (src.origin !== undefined && (typeof src.origin !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(src.origin))) fail('object.version', 'source.origin is not a git object id');
       }
       return;
     }

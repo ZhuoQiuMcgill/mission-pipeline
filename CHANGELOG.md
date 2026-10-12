@@ -31,6 +31,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
   were written under. Nothing is registered or written in the project's repository, no object is
   fetched, and the `.git` is removed with the checkout. Variables such as `GIT_DIR` and
   `GIT_INDEX_FILE` no longer reach the commands. `mp seat <id> checkout` is unchanged.
+- A product accepted after a rework brings every attempt's change. A rework continues in a
+  worktree at the previous attempt's candidate, but a dependent task's snapshot and a delivery took
+  a product version's change against its commit's parent, which after a rework is the previous
+  attempt: a dependent task's snapshot reported a conflict on every path the last attempt changed
+  after an earlier attempt had, so the dependent never got its card and the work after it waited,
+  and a path only an earlier attempt changed was left out. A product version now records its
+  origin, the snapshot its task's first attempt started from, and its change is taken against it.
+  Versions recorded by 4.1.0 derive their origin from their predecessors, so nothing is run again,
+  and a waiting dependent gets its card on the next pass. A path the target branch changed
+  differently since the work began is still a conflict. The Reviewer's changed paths list the
+  product's whole change.
 
 ## [4.1.0] — 2026-10-11
 

@@ -515,7 +515,9 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
       const runDir = join(scratch, `candidate-${attempt}`);
       let c: Awaited<ReturnType<typeof buildCandidate>>;
       try {
-        c = await buildCandidate({ git, repo, manifest, base, attributes, snapshotDir: runDir, message: describe(req, manifest), author: req.author, committer: req.committer });
+        // a version recorded without its origin finds it down its predecessors, as this view has them (Appendix H)
+        const v = view;
+        c = await buildCandidate({ git, repo, manifest, base, attributes, snapshotDir: runDir, message: describe(req, manifest), author: req.author, committer: req.committer, versionOf: (id) => v.object(id) });
       } catch (e) {
         const lfs = e instanceof RepresentationError && (e.code === 'lfs-object-missing' || e.code === 'lfs-object-corrupt');
         if (!(e instanceof MissingObjectsError) && !lfs) throw e;

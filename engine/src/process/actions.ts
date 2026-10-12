@@ -5,8 +5,10 @@
 //               prerequisites, 5.3) by the delivery's overlay (delivery/candidate.ts); the card
 //               names the commit, `mp seat <id> checkout` materializes it
 //   product     the product version of a Constructor's candidate commit (5.1): its content is the
-//               write-scope identity of the commit, its source the commit, the write scope and
-//               the transform description (A4's handoff)
+//               write-scope identity of the commit, its source the commit, the write scope, the
+//               transform description (A4's handoff) and its origin, the snapshot the task's
+//               first attempt started from (a rework continues from the previous attempt's
+//               candidate; its change is every attempt's, Appendix H)
 //   verify      the declared runs on a clean checkout of the candidate (§5.3; reused when §6.5 allows;
 //               "pending", with nothing run or recorded, while another mp process executes them)
 //   findSymbol  3.5: a file of a commit names a symbol (read-only, no model)
@@ -17,10 +19,10 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalJson } from '../common/hash.ts';
-import type { MissionId, ModuleId, ObjectVersionId } from '../common/ids.ts';
+import type { GitOid, MissionId, ModuleId, ObjectVersionId } from '../common/ids.ts';
 import type { ObjectVersionRecord } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
-import { buildCandidate } from '../delivery/candidate.ts';
+import { buildCandidate, versionOrigin } from '../delivery/candidate.ts';
 import type { DeliveryManifest } from '../delivery/manifest.ts';
 import type { DeliveryObject } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
@@ -75,16 +77,28 @@ export function gitActions(ctx: ProcessContext): GitActions {
     return c === null ? null : (c.record as ObjectVersionRecord);
   }
 
+  /** A recorded version that lives in the repository, as the delivery's overlay reads it. */
+  function placedVersion(r: ObjectVersionRecord & { source: NonNullable<ObjectVersionRecord['source']> }): DeliveryObject {
+    return { id: r.object, kind: r.objectKind, mission: r.mission, module: r.module, content: r.content, prerequisites: [], paths: [...r.scope.paths], tree: r.source, predecessor: r.predecessor ?? null };
+  }
+
+  /** The recorded versions by id, for the origin of one recorded without it (versionOrigin walks its predecessors). */
+  function versionOf(id: ObjectVersionId): DeliveryObject | null {
+    const r = productRecord(id);
+    return r === null || r.source === undefined ? null : placedVersion(r as ObjectVersionRecord & { source: NonNullable<ObjectVersionRecord['source']> });
+  }
+
   return {
     async snapshot(req) {
       const base = commitOf(req.commit ?? missionBase());
       const products = [...new Set(req.products ?? [])].sort();
       if (products.length === 0) return { path: base, commit: base, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
-      // a dependent task sees its prerequisites: their versions laid over the base (the delivery's overlay, 5.3)
+      // a dependent task sees its prerequisites: their versions laid over the base (the delivery's overlay, 5.3),
+      // each with its whole change since its task's first attempt began (Appendix H)
       const objects: DeliveryObject[] = products.map((id) => {
-        const r = productRecord(id);
-        if (r === null || r.source === undefined) throw new ActionError('unknown-product', `product version ${id} is not recorded with a commit`, { product: id });
-        return { id: r.object, kind: r.objectKind, mission: r.mission, module: r.module, content: r.content, prerequisites: [], paths: [...r.scope.paths], tree: r.source };
+        const v = versionOf(id as ObjectVersionId);
+        if (v === null) throw new ActionError('unknown-product', `product version ${id} is not recorded with a commit`, { product: id });
+        return v;
       });
       const manifest: DeliveryManifest = {
         revision: 0 as never,
@@ -108,6 +122,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
           message: `mission-pipeline: snapshot of ${req.mission} with ${products.join(', ')}`,
           author: ctx.ident(0),
           committer: ctx.ident(0),
+          versionOf,
         });
         if (r.kind === 'conflict') throw new ActionError('conflict', `the accepted products ${products.join(', ')} conflict on ${r.conflicts.map((c) => c.path).join(', ')}`, r.conflicts);
         if (r.kind === 'description-mismatch') throw new ActionError('conflict', `products ${r.versions.join(', ')} rest on another transform description`, r);
@@ -132,21 +147,35 @@ export function gitActions(ctx: ProcessContext): GitActions {
         if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
         throw new ActionError('missing-objects', `the candidate ${req.candidate} cannot be read: ${(e as Error).message}`, { candidate: req.candidate });
       }
-      const before = new Map((await lsTree(ctx.git, layout, req.base, { recursive: true })).filter((e) => e.type !== 'tree' && inWriteScope(req.writeScope, e.path)).map((e) => [e.path, `${e.mode} ${e.oid}`]));
+      if (known !== null && known.source?.commit !== req.candidate) throw new ActionError('conflict', `product version ${object} is recorded with another commit (${known.source?.commit ?? 'none'})`, { object });
+      // the version's own change is taken against its origin, the snapshot its task's first attempt
+      // started from: a rework's worktree starts at the previous attempt's candidate (its base here),
+      // so the change since the base is only the last attempt's (Appendix H)
+      let origin: GitOid | null;
+      let before: Map<string, string>;
+      try {
+        origin =
+          known?.source?.origin ??
+          (await versionOrigin(ctx.git, layout, { id: object, predecessor: req.predecessor, tree: { commit: gitOid(req.candidate) } }, versionOf));
+        before =
+          origin === null
+            ? new Map<string, string>()
+            : new Map((await lsTree(ctx.git, layout, origin, { recursive: true })).filter((e) => e.type !== 'tree' && inWriteScope(req.writeScope, e.path)).map((e) => [e.path, `${e.mode} ${e.oid}`]));
+      } catch (e) {
+        if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
+        throw e;
+      }
       const inScope = new Map(entries.filter((e) => e.type !== 'tree' && inWriteScope(req.writeScope, e.path)).map((e) => [e.path, `${e.mode} ${e.oid}`]));
       const changedPaths = [...new Set([...before.keys(), ...inScope.keys()])].filter((p) => before.get(p) !== inScope.get(p)).sort();
       // a task that only reads and runs (an empty write scope), or a first attempt that changed
       // nothing of its base (its dependencies' products and the mission base): its product claims
       // no path, so a delivery that selects it adds no path of its own and never meets its
-      // dependencies' paths as "another version". A later attempt keeps its claim: its base is the
-      // previous attempt, whose changes it carries.
+      // dependencies' paths as "another version". A later attempt keeps its claim: it carries the
+      // previous attempts' work.
       const writeScope = req.writeScope.length === 0 || (changedPaths.length === 0 && req.predecessor === null) ? [] : [...req.writeScope];
       const after = writeScope.length === 0 ? new Map<string, string>() : inScope;
       const pv: ProductVersion = { object, commit: req.candidate, snapshot: req.candidate, changedPaths };
-      if (known !== null) {
-        if (known.source?.commit !== req.candidate) throw new ActionError('conflict', `product version ${object} is recorded with another commit (${known.source?.commit ?? 'none'})`, { object });
-        return pv;
-      }
+      if (known !== null) return pv;
       const d = await description();
       const content = ctx.memory.data.put(writeScopeDocument(entries, writeScope));
       // the bound transform description itself, stored before the version that names it (the landing reads it back by this hash)
@@ -162,7 +191,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
         prerequisites: ctx.memory.data.putList([...req.prerequisites]),
         scope: { paths: [...after.keys()].sort(), taskType: req.taskType },
         reviews: [...req.reviews],
-        source: { commit: gitOid(req.candidate), writeScope, transform },
+        source: { commit: gitOid(req.candidate), writeScope, transform, ...(origin !== null ? { origin } : {}) },
         ...(req.predecessor !== null ? { predecessor: req.predecessor as ObjectVersionId } : {}),
       };
       validateRecord(rec);

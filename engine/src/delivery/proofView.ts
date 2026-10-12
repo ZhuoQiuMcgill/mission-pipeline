@@ -27,7 +27,12 @@ export function targetKey(t: DeliveryTarget): string {
  * Where an object version lives in the repository: exactly ObjectVersionRecord.source
  * (5.1: a product version is "a write scope's content hash and a commit").
  * - commit: the commit the program generated for the version (7.1); its first
- *   parent is the snapshot it was built from;
+ *   parent is the snapshot it was built from (for a rework: the previous
+ *   attempt's commit);
+ * - origin: the commit the version's own change is taken against, the snapshot
+ *   the first attempt of its task started from (design 4.1 Appendix H); absent
+ *   on versions recorded before it was recorded (candidate.ts versionOrigin
+ *   derives it);
  * - writeScope: the module's write scope, as path patterns with the meaning of
  *   constraint scopes (9.5): an exact path, "dir/**", or "**"; `content` is the
  *   identity of everything the commit's tree has inside it (writeScope.ts);
@@ -53,6 +58,8 @@ export interface DeliveryObject {
   readonly paths: readonly string[];
   /** Null for objects that are not files in the repository (plans, exploration interpretations). */
   readonly tree: TreePlacement | null;
+  /** ObjectVersionRecord.predecessor: the version it revises (a product: its task's previous attempt); absent or null: none. */
+  readonly predecessor?: ObjectVersionId | null;
 }
 
 /** 7.2 "输入文件哈希": a repository file a run read, hashed as the run saw it (worktree representation). */

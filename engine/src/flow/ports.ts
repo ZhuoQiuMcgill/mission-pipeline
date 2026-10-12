@@ -252,12 +252,13 @@ export interface ProductRequest {
   readonly dispatch: string;
   /** The candidate commit (§5.3). */
   readonly candidate: string;
-  /** The base commit the Constructor's worktree was created at. */
+  /** The base commit the Constructor's worktree was created at (the candidate's parent; a rework's: the previous attempt's candidate). */
   readonly base: string;
   readonly writeScope: readonly string[];
   readonly taskType: string;
   readonly prerequisites: readonly string[];
   readonly reviews: readonly ReviewContract[];
+  /** The product version of the task's previous attempt, whose candidate this attempt continued from; null for a first attempt. */
   readonly predecessor: string | null;
 }
 
@@ -267,6 +268,7 @@ export interface ProductVersion {
   readonly commit: string;
   /** What the Reviewer and the verification runs read: the candidate commit. */
   readonly snapshot: string;
+  /** The write-scope paths the version changes since its origin, the snapshot its task's first attempt started from: every attempt's change (design 4.1 Appendix H). */
   readonly changedPaths: readonly string[];
 }
 

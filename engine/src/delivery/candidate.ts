@@ -3,8 +3,13 @@
 // 3. Candidate: base = the target branch's current commit. Each version in the
 //    manifest that lives in the repository brings ITS OWN changes: inside its
 //    write scope, the difference between the commit the program generated for
-//    it and that commit's parent (the snapshot it was built from). They are
-//    overlaid onto the base path by path, three-way:
+//    it and its origin, the snapshot its work started from (versionOrigin; design
+//    4.1 Appendix H). For a first attempt that is the commit's parent. A rework
+//    continues in a worktree at the previous attempt's commit, so a version
+//    accepted at a later attempt has that commit as its parent; its origin is
+//    still the snapshot the task's first attempt started from, and its change is
+//    every attempt's, not only the last one's. They are overlaid onto the base
+//    path by path, three-way:
 //      the version did not change the path            -> the base keeps it
 //      the base still has what the version started from -> the version's entry
 //      the base already has the version's entry        -> nothing to do
@@ -70,7 +75,7 @@ export interface EntryState {
 export interface OverlayConflict {
   readonly path: string;
   readonly version: ObjectVersionId;
-  /** What the version started from, what it delivers, and what the base has now (null: absent). */
+  /** What the version started from (its origin's entry), what it delivers, and what the base has now (null: absent). */
   readonly original: EntryState | null;
   readonly delivered: EntryState | null;
   readonly base: EntryState | null;
@@ -107,6 +112,19 @@ export interface CandidateOptions {
   readonly message: string;
   readonly author: Ident;
   readonly committer: Ident;
+  /**
+   * The recorded object versions by id (the memory's), so the origin of a version
+   * recorded without one is derived down its predecessors (versionOrigin). Without
+   * it such a version's origin is its commit's parent.
+   */
+  readonly versionOf?: (id: ObjectVersionId) => VersionLine | null;
+}
+
+/** What versionOrigin reads of an object version: its id, the version it revises, and where it lives. */
+export interface VersionLine {
+  readonly id: string;
+  readonly predecessor?: string | null;
+  readonly tree: { readonly commit: GitOid; readonly origin?: GitOid } | null;
 }
 
 function sameEntry(a: EntryState | null | undefined, b: EntryState | null | undefined): boolean {
@@ -151,6 +169,43 @@ async function recordedParent(git: GitExec, repo: RepoLayout, commit: GitOid): P
   return parent;
 }
 
+/**
+ * The origin of a version that lives in the repository (design 4.1 Appendix H): the
+ * commit its own change is taken against, the snapshot the first attempt of its task
+ * started from. A rework's Constructor continues in a worktree at the previous
+ * attempt's commit, so the commit of a version accepted at attempt k has attempt k-1's
+ * commit as its parent; its change is everything since the first attempt's snapshot.
+ * - The recorded origin (ObjectVersionRecord.source.origin), when there is one.
+ * - Otherwise (a version recorded before the origin was recorded) it is derived from
+ *   the records and the commits alone: down the version's predecessors for as long as
+ *   each commit was built on its predecessor's commit (its recorded parent IS that
+ *   commit: the next attempt continued from it), then the parent of the last commit
+ *   reached; a predecessor's recorded origin ends the walk. A version with no
+ *   predecessor, or not built on its predecessor's commit, starts at its own parent.
+ * Null when the commit reached is a root commit (nothing to start from). An origin
+ * that is not in the repository is a missing object (WI-13), never fetched.
+ */
+export async function versionOrigin(git: GitExec, repo: RepoLayout, version: VersionLine, versionOf?: (id: ObjectVersionId) => VersionLine | null): Promise<GitOid | null> {
+  const seen = new Set<string>();
+  for (let v: VersionLine = version; ; ) {
+    const tree = v.tree;
+    if (tree === null) throw new Error(`${v.id} is not a version in the repository`);
+    if (tree.origin !== undefined) {
+      const info = (await batchCheck(git, repo, [tree.origin])).get(tree.origin);
+      if (info === null || info === undefined) {
+        throw new MissingObjectsError(`the commit ${tree.origin} that the work of ${v.id} started from is not in the repository (a shallow or partial clone?); it is never fetched`, [tree.origin]);
+      }
+      return tree.origin;
+    }
+    seen.add(v.id);
+    const parent = await recordedParent(git, repo, tree.commit);
+    const pred = parent === null || v.predecessor === undefined || v.predecessor === null || versionOf === undefined ? null : versionOf(v.predecessor as ObjectVersionId);
+    // the line goes on below only where this commit was built on the predecessor's commit
+    if (pred === null || pred.tree === null || pred.tree.commit !== parent || seen.has(pred.id)) return parent;
+    v = pred;
+  }
+}
+
 export async function buildCandidate(o: CandidateOptions): Promise<CandidateResult> {
   const { git, repo } = o;
   const placed = o.manifest.entries.filter((e) => e.object.tree !== null);
@@ -161,17 +216,23 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
   // Planning reads trees and commits only, and writes nothing; an object missing from the repository is reported
   // as MissingObjectsError (v49, WI-13) and never fetched.
   const commits = [o.base, ...placed.map((e) => (e.object.tree as NonNullable<DeliveryObject['tree']>).commit)];
-  const planned = await missingObjectsAsTyped(git, repo, commits, 'delivery candidate', async () => {
+  // where each version's own change starts (Appendix H)
+  const origins = await missingObjectsAsTyped(git, repo, commits, 'delivery candidate', async () => {
+    const out: (GitOid | null)[] = [];
+    for (const e of placed) out.push(await versionOrigin(git, repo, e.object, o.versionOf));
+    return out;
+  });
+  const planned = await missingObjectsAsTyped(git, repo, [...commits, ...origins.filter((x): x is GitOid => x !== null)], 'delivery candidate', async () => {
     const baseEntries = entryMap(await lsTree(git, repo, o.base, { recursive: true }));
     const overlay = new Map<string, EntryState | null>();
     const conflicts: OverlayConflict[] = [];
-    for (const e of placed) {
+    for (const [i, e] of placed.entries()) {
       const tree = e.object.tree as NonNullable<DeliveryObject['tree']>;
       const scope = tree.writeScope;
-      const parent = await recordedParent(git, repo, tree.commit);
+      const origin = origins[i] ?? null;
       const delivered = entryMap((await lsTree(git, repo, tree.commit, { recursive: true })).filter((x) => inWriteScope(scope, x.path)));
       const original =
-        parent === null ? new Map<string, EntryState>() : entryMap((await lsTree(git, repo, parent, { recursive: true })).filter((x) => inWriteScope(scope, x.path)));
+        origin === null ? new Map<string, EntryState>() : entryMap((await lsTree(git, repo, origin, { recursive: true })).filter((x) => inWriteScope(scope, x.path)));
       for (const path of new Set([...delivered.keys(), ...original.keys()])) {
         const d = delivered.get(path) ?? null;
         const before = original.get(path) ?? null;

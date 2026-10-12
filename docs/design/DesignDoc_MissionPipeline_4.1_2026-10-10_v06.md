@@ -1,6 +1,6 @@
 # Mission Pipeline 4.1 design: a neutral project memory, roles and process (v06)
 
-Status: v06, the implementation contract (v05 plus Appendix E, the batch-bound amendment from the code review; plus Appendix F, the run lock, and Appendix G, the run checkout's repository, after 4.1.0): after the 3 attack rounds and their Stabilizers (Appendices A–C), the maintainer’s ruling on what the memory holds (U-13, U-14), and a Stabilizer check of v04 (Appendix D).
+Status: v06, the implementation contract (v05 plus Appendix E, the batch-bound amendment from the code review; plus Appendix F, the run lock, Appendix G, the run checkout's repository, and Appendix H, the change a reworked product brings, after 4.1.0): after the 3 attack rounds and their Stabilizers (Appendices A–C), the maintainer’s ruling on what the memory holds (U-13, U-14), and a Stabilizer check of v04 (Appendix D).
 Replaces the runtime of the 4.0.x design (`DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md`, "v51"). The process and the memory model of v51 carry over where this document says so.
 
 ## 0. Calibration: where each element comes from
@@ -186,6 +186,7 @@ Changes:
 
 - Queueing, priorities, fast/stable mode **[v51-U]**, exclusive resources as leases in the memory **[v51]**.
 - Verification runs by `mp` on a clean checkout of the candidate commit (§5.3), on the machine where the PM runs; no sandbox **[U-3]**.
+- **A product version's change** **[amended after 4.1.0, Appendix H]**: a rework's Constructor continues in a worktree at the previous attempt's candidate. The product version records its origin, the snapshot its task's first attempt started from, and its change is everything since then, every attempt's: that is what a dependent task's snapshot and a delivery lay over their base, and what the Reviewer's card lists as the changed paths.
 
 ### 6.3 Exploration: author, attacker and Stabilizer [U-6, v51-U]
 
@@ -257,7 +258,7 @@ So a move between machines, or between a WSL and a Windows harness on the same f
 ### 6.7 Closing and delivery [v51-U, simplified]
 
 - Closing and delivery stay separate **[v51-U]**; the three closing tiers stay **[v51]**.
-- Delivery: the manifest, the one-version-per-path check, the candidate on the target branch's current commit, the proof check on the final candidate tree, the closing checks, the delivery ref `refs/mission-pipeline/delivered/<mission>/<op>` **[v51]**.
+- Delivery: the manifest, the one-version-per-path check, the candidate on the target branch's current commit (each version brings its change since its origin, §6.2, Appendix H), the proof check on the final candidate tree, the closing checks, the delivery ref `refs/mission-pipeline/delivered/<mission>/<op>` **[v51]**.
 - Landing: the maintainer's "deliver" is consent to land **[v51-U]**; the PM runs `mp pm land`, which links the landing to the words entry (W-n) that gave the consent.
 - **Fast-forward only, from the recorded base** **[v51, kept; r1 F3]**: the delivery commit was built and proven on base B. `mp pm land` moves the target branch from B to the delivery commit and nothing else. If the branch is no longer at B, it does not merge: it rebuilds the candidate on the new base (the full proof check and closing checks again, counted, WI-05), or leaves the delivery ref for the maintainer. A merge tree is never landed unless it was itself built, checked and proven as a candidate.
 - **The landing steps** **[v51, kept in short form; r1 F4, r2 F1, F4]**:
@@ -350,6 +351,7 @@ None. 4.1 does not read 4.0.x ledgers; as with 3.x, a field PM migrates missions
 9. With pathological inputs (for example tens of thousands of paths against a thousand constraint patterns) one propagation step can take a few seconds; a stop and seat writes then wait for that one step (v06, Appendix E).
 10. A verification whose commands are not all declared runs (one is marked sampled, or declares network access) takes no run lock (§4.1): while it executes, another process that advances the flow can run it again, as every sampling run executes (Appendix F).
 11. A run checkout's repository borrows the project's objects while the run executes (§5.3, Appendix G): an object pruned from the project meanwhile (a `git gc --prune=now` during the run) is missing for the commands' git, and a partial clone's checkout has only the objects the clone has locally, so a command that needs an older object fails there instead of fetching it.
+12. A rework continues from the previous attempt's candidate, also after a re-plan changed the task's card or a dependency was accepted again meanwhile (§6.2, Appendix H): its worktree and its runs hold the dependencies' products as its first attempt received them, while its product names the dependencies accepted now as its prerequisites.
 
 ## 13. The maintainer's answers to my direction-level additions (2026-10-10)
 
@@ -469,3 +471,16 @@ Change (§5.3, §12.11): after the checkout is materialized, `mp` makes it a rep
 - Line endings and other transforms: the files on disk are the materialization, not the blobs. `git status` is empty when every file's bytes convert back to its blob under the description, which holds for files materialized from normalized blobs. A blob stored in a form `git add` would not produce (a CRLF blob under a `text` attribute) shows as modified, which is git's own judgement of those bytes and the one it gives in the project's work tree. A file written raw because its filter is not one the program implements is its blob and reads clean; a Git LFS file holds the object's content and is judged by the user's LFS filter when a command first asks.
 - The commands of a run get no variable that would point git elsewhere (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE, GIT_PREFIX).
 - The `.git` is removed with the checkout, as before. A Reviewer's reading checkout (`mp seat <id> checkout`) is unchanged: it is kept until the next checkout replaces it, longer than the objects it would borrow are guaranteed to stay, and the reader can ask the project's repository about the commit on its card.
+
+## Appendix H: the change a reworked product brings (after 4.1.0)
+
+Defect: a rework's Constructor continues in a worktree at the previous attempt's candidate (§6.2), so the candidate commit of attempt k has attempt k−1's candidate as its parent. Every place that takes a product version's change (a dependent task's snapshot, a delivery candidate, an Auditor's snapshot of several products) took it as the difference between the version's commit and that commit's parent: for a version accepted at a later attempt, only the last attempt's change, measured against the previous attempt's files. A path the last attempt changed after an earlier attempt had changed it then differed on all three sides (the base still held the content the work started from), so every dependent task's snapshot reported a conflict on it; the dependent never got a card (the flow noted the refusal and tried again on every pass), and all work after it waited. A path that only an earlier attempt changed was not in the change at all, so a snapshot without a conflict silently left it out, and a delivery built without one found the write scope changed and delivered the version as not fully proven.
+
+Change (§6.2, §6.7):
+- A product version records its **origin** (`source.origin` on the version record): the snapshot the first attempt of its task started from. A first attempt's origin is its commit's parent; an attempt that continued from the previous attempt's candidate inherits that version's origin. The commits are unchanged: a candidate's only parent is still the commit its worktree started from, so what seats and run checkouts see of the history stays as it was.
+- A version's change is the difference between its commit and its origin, inside its write scope. A dependent's snapshot, a delivery candidate and an Auditor's snapshot overlay it three-way as before; only the side the version started from changes. A conflict is therefore reported where the base changed a path differently since the work began, a path only an earlier attempt changed included, and nowhere else.
+- Versions recorded before the origin was recorded are not run again: their origin is derived from the records and the commits, down the predecessors for as long as each commit's recorded parent is its predecessor's commit, then the parent of the last commit reached. A version whose commit was not built on its predecessor's starts at its own parent. A rework recorded on top of such a version records the derived origin.
+- A version's changed paths (on the Reviewer's card) are its whole change since its origin, not only the last attempt's.
+- A dependent task that was refused its snapshot needs no action: the flow tries the snapshot again on every pass, and the next pass gives it its card.
+
+Not chosen: building each attempt's candidate commit with the first attempt's snapshot as its parent, so that a commit against its parent is the whole change by construction. Versions already recorded would still need the derivation above, the parent would no longer be the commit the seat's worktree started from, and the collection at hand-back would need the origin passed to it.

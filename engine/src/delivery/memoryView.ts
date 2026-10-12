@@ -97,6 +97,7 @@ export function memoryProofView(m: Memory, labels: LabelView): DeliveryProofView
                 prerequisites: Object.freeze(m.data.getList(r.prerequisites).map((p): DeliveryTarget => (isUnit(p) ? { kind: 'unit', id: p as ProofUnitId } : { kind: 'object', id: p as ObjectVersionId }))),
                 paths: r.scope.paths,
                 tree: r.source ?? null,
+                predecessor: r.predecessor ?? null,
               }),
         );
       }

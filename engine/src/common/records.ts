@@ -263,8 +263,14 @@ export interface ObjectVersionRecord {
    * Product versions: where the content comes from (6.6, 7.1). `content` is the
    * write-scope identity computed by src/delivery/writeScope.ts over `commit`
    * and the `writeScope` patterns, under the transform description `transform`.
+   * `origin` is the commit the version's own change is taken against (design 4.1
+   * Appendix H): the snapshot the first attempt of its task started from. A
+   * rework continues in a worktree at the previous attempt's commit, so
+   * `commit`'s parent is where the last attempt started, not where the work
+   * began. Versions recorded before it was recorded have none; they derive it
+   * (src/delivery/candidate.ts versionOrigin).
    */
-  readonly source?: { readonly commit: GitOid; readonly writeScope: readonly string[]; readonly transform: ContentHash };
+  readonly source?: { readonly commit: GitOid; readonly writeScope: readonly string[]; readonly transform: ContentHash; readonly origin?: GitOid };
   /**
    * The previous version of the same object line, if any (a plan's earlier
    * version). A continuation judgment may continue a judgment on this object or
