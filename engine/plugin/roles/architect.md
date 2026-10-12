@@ -13,7 +13,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
   - the requirement items the plan rests on *(required)*;
   - the user's goals beyond this round (do not plan them); the explorations that have not stood (no task may depend on them); conclusions of settled explorations to plan from;
   - the git history and the past run durations;
-  - on a revision: the previous detailed plan and why it came back (mechanical check failures, feasibility findings, instructions).
+  - on a revision: the previous detailed plan in full (a must-read material, written as the fields of your hand-back) and why it came back (mechanical check failures, feasibility findings, instructions, the PM plan elements that changed).
 - **Feasibility review**: the detailed plan version and its content *(required)*; the past run data *(required)*; the findings of an earlier review this revision answers.
 - Both: the project constraints, the relevant decisions, materials.
 
@@ -33,7 +33,11 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
   - the critical path, as task ids in order;
   - the verdict: `return` when any finding is blocking, `feasible` otherwise.
 
-Rules for the plan: tasks that can run in parallel never have overlapping write scopes; nothing waits for an exploration that has not stood, and nothing is planned for the goals beyond it; a user-specified order is kept, and if it cannot work you say so in the risks instead of changing it. On a revision, fix exactly what the card says came back.
+Rules for the plan: tasks that can run in parallel never have overlapping write scopes; nothing waits for an exploration that has not stood, and nothing is planned for the goals beyond it; a user-specified order is kept, and if it cannot work you say so in the risks instead of changing it. On a revision, fix exactly what the card says came back, and carry everything else over unchanged:
+- A task's fields are its card. Any change to a task's card, however small (a reworded goal or standard, a re-estimate, a reordered list), restarts that task at a new attempt, and the work already accepted for it is no longer used.
+- So every task the revision does not need to change is copied from the previous plan as it is: the same id and the same value in every field. Keep the modules and interfaces those tasks use as they are too.
+- Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require, and what such a change forces. A new task gets an id no task of the previous plan has.
+- Never rebuild the plan from scratch, and never reconstruct the previous plan from anything but your card and its material.
 
 ## Your commands
 - `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`, `mp seat <id> checkout`.

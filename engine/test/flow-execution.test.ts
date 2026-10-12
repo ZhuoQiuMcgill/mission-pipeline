@@ -36,7 +36,7 @@ function withKinds(over: Record<string, Script>, plan?: () => DetailedPlanDoc): 
 
 const PROPOSED_WI = new Set(['WI-23', 'WI-24', 'WI-26']);
 function assertNoticesHaveWi(notices: ReadonlyArray<{ category: string; wi: string | null }>): void {
-  const normal = new Set(['calibrator-1-returned', 'secretary-decision', 'needs-user-decision']);
+  const normal = new Set(['calibrator-1-returned', 'secretary-decision', 'needs-user-decision', 'plan-revision-restarts-work']);
   for (const n of notices) {
     if (n.wi === null) assert.ok(normal.has(n.category), `notice ${n.category} has no WI but is not a normal branch`);
     else assert.ok(WI_CATALOG.has(n.wi) || PROPOSED_WI.has(n.wi), `notice ${n.category} names unknown WI ${n.wi}`);

@@ -40,7 +40,7 @@
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId, ObjectVersionId } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
 import type { BaseRecord, JudgmentRecord, ObjectVersionRecord, UserWordsRecord } from '../common/records.ts';
-import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectFeasibilityResult } from '../seat/cards/architect.ts';
+import { PREVIOUS_PLAN_MATERIAL, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult } from '../seat/cards/architect.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
 import {
@@ -71,6 +71,7 @@ import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
 import {
   DetailedPlanDoc,
+  DetailedTask,
   PLAN_LINE,
   PM_PLAN_EFFECTIVE,
   PmPlanDoc,
@@ -80,6 +81,7 @@ import {
   type ExplorationSettledBody,
   type PmPlanEffectiveBody,
   type StoredDetailedPlan,
+  taskLine,
 } from './plandoc.ts';
 import type { FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
@@ -778,7 +780,8 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
         if ((await escalation(ctx, esc)) !== null && !(await isApplied(ctx, esc))) carries.push(await carryOut(ctx, esc, { option: 'accept' }));
       }
     }
-    await newAttempt(ctx, b, { reason: 'initial', previous: prev?.dplan ?? null, mechanicalFailures: [], feasibilityFindings: [], instructions: prev !== null ? [`The PM plan changed to version ${b.plan}; revise the previous detailed plan to it.`] : [], conclusions: [] }, 1, routedNow, carries);
+    const instructions = prev !== null ? [`The PM plan changed to version ${b.plan}; revise the previous detailed plan to it.${await changedElements(ctx, prev.pmPlan, doc)}`] : [];
+    await newAttempt(ctx, b, { reason: 'initial', previous: prev?.dplan ?? null, mechanicalFailures: [], feasibilityFindings: [], instructions, conclusions: [] }, 1, routedNow, carries);
     return;
   }
   const a = list.at(-1) as AttemptBody;
@@ -809,6 +812,8 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
     mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }) });
     await commit(ctx, `flow:mechanical:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'mechanical-check', dplan, mc)] });
+    // before its reviews, the PM learns which work the plan would restart once in effect (told once, with the check)
+    if (mc.ok) await restartNotice(ctx, dplan, plan);
   }
   if (!mc.ok) {
     await planReturn(ctx, b, a, dplan, 'mechanical', { mechanicalFailures: mc.failures }, `mech:${shortHash([...mc.failures].sort())}`, 'mechanical');
@@ -1116,8 +1121,13 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const previous = a.previous === null ? null : await detailedPlanOf(ctx, a.previous);
   const conclusions = [...a.conclusions];
   for (const [id, s] of ex.settled) if (!ex.unsettled.has(id) && !conclusions.some((c) => c.exploration === id)) conclusions.push({ exploration: id, summary: s.body.summary });
+  const revision = !(a.k === 1 && a.previous === null);
   const card: ArchitectDecomposeCard = {
-    ...cardBase(ctx, task, { duties: 'Decompose the approved PM plan into a detailed plan for this round; trace every element; fix exactly what a revision asks.' }),
+    ...cardBase(ctx, task, {
+      duties: revision
+        ? 'Revise the previous detailed plan for this round: change exactly what this revision asks, and carry every other task over unchanged (the same id, every field the same), since a changed task card restarts that task and its accepted work is no longer used; trace every element.'
+        : 'Decompose the approved PM plan into a detailed plan for this round; trace every element; fix exactly what a revision asks.',
+    }),
     seat: 'architect-decompose',
     workspace: { snapshot: snap.path, writablePaths: [] },
     pmPlan: {
@@ -1131,10 +1141,9 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
     unsettledExplorations: [...ex.unsettled],
     explorationConclusions: conclusions,
     history: { gitLog: history.gitLog, runs: [...history.runs] },
-    revision:
-      a.k === 1 && a.previous === null
-        ? null
-        : { previous: a.previous, previousPlan: previous?.plan ?? null, mechanicalFailures: [...a.mechanicalFailures], feasibilityFindings: [...a.feasibilityFindings], instructions: [...a.instructions] },
+    revision: !revision ? null : { previous: a.previous, previousPlan: previous?.plan ?? null, mechanicalFailures: [...a.mechanicalFailures], feasibilityFindings: [...a.feasibilityFindings], instructions: [...a.instructions] },
+    // the previous plan in full, read page by page (a long plan would not fit in the card's body)
+    ...(revision && previous !== null ? { materials: [material(ctx, PREVIOUS_PLAN_MATERIAL, `Detailed plan ${a.previous} (the plan this revision revises, in full)`, previousPlanText(a.previous, previous.plan), true, 'plan')] } : {}),
     output: {
       object: dplan,
       predecessor: a.previous,
@@ -1208,6 +1217,63 @@ async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a
   };
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });
   ctx.progressed = true;
+}
+
+/**
+ * The elements a new PM plan version added, changed and removed against the version of the plan
+ * in effect, for the Architect's instruction (" Elements against <version>: …", or "" when that
+ * version cannot be read): the revision changes the tasks these elements need, and only those.
+ */
+async function changedElements(ctx: FlowCtx, oldPlan: string, doc: PmPlanDoc): Promise<string> {
+  const old = await pmPlanDoc(ctx, oldPlan).catch(() => null);
+  if (old === null) return '';
+  const before = new Map(old.elements.map((e) => [e.id, canonicalJson(e)]));
+  const now = new Set(doc.elements.map((e) => e.id));
+  const added = doc.elements.filter((e) => !before.has(e.id)).map((e) => e.id);
+  const changed = doc.elements.filter((e) => before.has(e.id) && before.get(e.id) !== canonicalJson(e)).map((e) => e.id);
+  const removed = old.elements.filter((e) => !now.has(e.id)).map((e) => e.id);
+  const parts = [added.length > 0 ? `added ${added.join(', ')}` : '', changed.length > 0 ? `changed ${changed.join(', ')}` : '', removed.length > 0 ? `removed ${removed.join(', ')}` : ''].filter((x) => x !== '');
+  return ` Elements against ${oldPlan}: ${parts.length > 0 ? `${parts.join('; ')}; every other element is unchanged` : 'none changed'}.`;
+}
+
+/**
+ * What a detailed plan would restart once in effect (§6.2: a task whose card changes is re-specced
+ * and restarts at a new attempt; a task the plan drops leaves it): the tasks of the plan in effect
+ * whose card it changes or drops, with those that have accepted work or work under way (read from
+ * the task lines as the execution flow keeps them). Told to the PM as a notice before the plan's
+ * reviews; nothing is held.
+ */
+async function restartNotice(ctx: FlowCtx, dplan: string, plan: DetailedPlanDoc): Promise<void> {
+  const eff = await latestEffective(ctx);
+  if (eff === null || eff.dplan === dplan) return;
+  const stored = await detailedPlanOf(ctx, eff.dplan);
+  if (stored === null) return;
+  const next = new Map(plan.tasks.map((t) => [t.id, shortHash(DetailedTask.parse(t))]));
+  const changed: string[] = [];
+  const dropped: string[] = [];
+  const accepted: string[] = [];
+  const underWay: string[] = [];
+  for (const t of stored.plan.tasks) {
+    const h = next.get(t.id);
+    if (h === shortHash(DetailedTask.parse(t))) continue;
+    (h === undefined ? dropped : changed).push(t.id);
+    const events = await eventsOf(ctx, taskLine(t.id));
+    const specAt = events.filter((e) => e.event === 'spec').at(-1)?.revision ?? 0;
+    if (events.some((e) => e.event === 'abandoned' && e.revision > specAt)) continue;
+    const k = 1 + events.filter((e) => e.event === 'rework').length;
+    if (events.some((e) => e.event === 'accepted' && e.key === String(k))) accepted.push(t.id);
+    else if (events.some((e) => e.event === 'dispatched' && e.revision > specAt)) underWay.push(t.id);
+  }
+  if (accepted.length === 0 && underWay.length === 0) return;
+  const kept = stored.plan.tasks.length - changed.length - dropped.length;
+  await notify(ctx, {
+    category: 'plan-revision-restarts-work',
+    wi: null,
+    key: dplan,
+    trigger: `detailed plan ${dplan} changes the card of ${changed.length} and drops ${dropped.length} of the ${stored.plan.tasks.length} tasks of the plan in effect (${eff.dplan}), keeping ${kept}; accepted work it would restart or drop: ${accepted.join(', ') || 'none'}; work under way: ${underWay.join(', ') || 'none'}`,
+    defaultAction: `nothing is held: the plan goes on to its reviews; once it takes effect, each task whose card changed restarts at a new attempt (its accepted product is no longer used, work under way is cancelled) and each dropped task leaves the plan. Expected when the revision had to change those tasks; otherwise the Architect rewrote cards it should have carried over unchanged`,
+    detail: { dplan, inEffect: eff.dplan, tasks: stored.plan.tasks.length, kept, changed, dropped, accepted, underWay },
+  });
 }
 
 /** What a review position's contract on the plan relies on (fixed with the object, 10.1): the judgment binds at least that. */

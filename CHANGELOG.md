@@ -9,6 +9,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ## [Unreleased]
 
 ### Fixed
+- An Architect revision sees the detailed plan it revises. A revision card (a new PM plan version
+  revising the plan in effect, a mechanical or feasibility return, a Secretary's send-back or
+  re-plan, a settled exploration) carried the previous detailed plan in its data, but its body
+  showed only the task ids and the seat had no command that read the plan, while it was told to
+  revise it. It could not carry a task over unchanged: it rebuilt the plan from the PM plan and the
+  project, or from files it should not rely on, and rewrote cards. A task whose card changes is
+  re-specced and restarts at a new attempt, so such a plan, once in effect, restarted every accepted
+  task and left nothing for the re-bind of kept products. Now the card gives the previous plan in
+  full as a must-read material (`plan-old`): every interface, module, task and risk, written as the
+  hand-back's own fields with one task per line, so a kept task is copied, not retyped (a card
+  queued before the change shows it inline). The card and the Architect's role page state the carry
+  rule: every task the revision does not need to change is carried over exactly (same id, same
+  value in every field), since a changed card restarts the task and its accepted work is no longer
+  used; only what the instructions, the changed PM plan elements, the feasibility findings or the
+  mechanical failures require is changed; a new task gets a new id. A new PM plan version's
+  instruction names the elements added, changed and removed against the version in effect. The PM
+  is told before the plan's reviews when a revision changes or drops tasks of the plan in effect
+  that have accepted work or work under way (`plan-revision-restarts-work`, with the counts and
+  lists); nothing is held.
 - Products accepted under a PM plan version that no longer holds are re-bound to the plan in effect.
   A product's Reviewer contract relies on the detailed plan in effect when the product was recorded,
   fixed with the version (v51 §5.2), so once that plan's PM plan lost its Calibrator ① pass (a
