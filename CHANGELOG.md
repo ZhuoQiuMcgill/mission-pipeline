@@ -9,6 +9,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ## [Unreleased]
 
 ### Fixed
+- Products accepted under a PM plan version that no longer holds are re-bound to the plan in effect.
+  A product's Reviewer contract relies on the detailed plan in effect when the product was recorded,
+  fixed with the version (v51 §5.2), so once that plan's PM plan lost its Calibrator ① pass (a
+  requirement item made it stale, or a re-check negated it) no judgment of the product could make
+  it proven again. A new PM plan version did not help: a task whose card its detailed plan keeps
+  got no new spec, stayed accepted and was never judged again, so its product stayed "not fully
+  proven" for good, and stable mode held everything depending on it without a word. Now, once the
+  new detailed plan is in effect and proven, such a product is re-bound: a new version of the same
+  candidate (same content, commit and origin) whose contract relies on the plan in effect and whose
+  prerequisites are its dependencies' current, re-bound versions. When nothing its deciding
+  Reviewer judgment judged has changed (the task's card and the definitions of its interfaces in
+  every plan since, its bases and contract lines, the object constraints, its runs), the program
+  carries that judgment over without a seat, as `mp pm renew` does for equal runs; otherwise, in
+  stable mode, a Reviewer judges the new version with the current card and the recorded runs (a
+  rework sends the task back to its Constructor as before), and fast mode goes on with a notice. A
+  task whose card changed is re-specced and rebuilt exactly as before. The PM is told
+  (`kept-products-rebound`, `kept-products-rebind-review`, `kept-product-not-rebound` when the
+  product was built on a dependency version the new plan replaced). Nothing is re-bound while the
+  new plan is not proven, and the re-bind is found on any later pass, so an installation after the
+  new plan took effect recovers on the next `mp pm next`. A Reviewer's judgment now relies on the
+  plan its product's contract names (it relied on the plan in effect, and did not conform to the
+  contract of a product recorded under an earlier plan).
 - A PM plan in effect can be checked again in place. The calibrator-1 contract of a PM plan version
   binds the mission's whole requirement set (v51 §3.3, v31), so a requirement item added, revised
   or withdrawn after the plan took effect makes its pass not current, and with it every detailed

@@ -530,6 +530,10 @@ export class MemoryFlowScheduler implements FlowSchedulerPort {
     return this.ctx.actions().product(req);
   }
 
+  rebind(req: Parameters<FlowSchedulerPort['rebind']>[0]): ReturnType<FlowSchedulerPort['rebind']> {
+    return this.ctx.actions().rebind(req);
+  }
+
   verify(req: Parameters<FlowSchedulerPort['verify']>[0]): ReturnType<FlowSchedulerPort['verify']> {
     return this.ctx.actions().verify(req);
   }

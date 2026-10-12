@@ -272,6 +272,21 @@ export interface ProductVersion {
   readonly changedPaths: readonly string[];
 }
 
+/**
+ * A kept product version re-bound under the plan in effect (design 4.1 Appendix J): a successor of
+ * `of` with the same content and source (commit, write scope, transform description and origin),
+ * so it brings exactly the change `of` brings, and its own prerequisites and review contracts.
+ */
+export interface RebindRequest {
+  readonly mission: MissionId;
+  /** The recorded product version it re-binds (its predecessor). */
+  readonly of: string;
+  /** The new version's id. */
+  readonly object: string;
+  readonly prerequisites: readonly string[];
+  readonly reviews: readonly ReviewContract[];
+}
+
 export interface VerifyRequest {
   readonly mission: MissionId;
   readonly object: string;
@@ -319,6 +334,8 @@ export interface FlowSchedulerPort {
   history(mission: MissionId): Promise<{ readonly gitLog: string; readonly runs: ReadonlyArray<{ readonly task: string; readonly seat: string; readonly durationMs: number; readonly costMicros: number }> }>;
   /** 4.2: the product version of an accepted Constructor candidate (idempotent per dispatch). */
   product(req: ProductRequest): Promise<ProductVersion>;
+  /** Appendix J: the re-bound version of a kept product (idempotent per object id). */
+  rebind(req: RebindRequest): Promise<{ readonly object: string; readonly commit: string }>;
   /**
    * 4.1 §5.3: the program's declared runs on a candidate's clean checkout (idempotent: reused).
    * 'pending': the same runs are executing in another `mp` process; nothing was run or recorded,

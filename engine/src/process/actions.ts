@@ -9,6 +9,9 @@
 //               transform description (A4's handoff) and its origin, the snapshot the task's
 //               first attempt started from (a rework continues from the previous attempt's
 //               candidate; its change is every attempt's, Appendix H)
+//   rebind      a kept product re-bound under the plan in effect (Appendix J): a successor version
+//               with the same content and source, its origin recorded, its own prerequisites and
+//               review contracts
 //   verify      the declared runs on a clean checkout of the candidate (§5.3; reused when §6.5 allows;
 //               "pending", with nothing run or recorded, while another mp process executes them)
 //   findSymbol  3.5: a file of a commit names a symbol (read-only, no model)
@@ -30,7 +33,7 @@ import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts
 import { AttributeEvaluator, MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
 import { appendRecords, factById, LedgerError } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
-import type { ProductRequest, ProductVersion, VerificationRun, VerifyRequest } from '../flow/ports.ts';
+import type { ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../flow/ports.ts';
 import type { GitActions, ProcessContext } from './context.ts';
 import { RunInProgress, runOnCommit } from './runs.ts';
 
@@ -197,6 +200,42 @@ export function gitActions(ctx: ProcessContext): GitActions {
       validateRecord(rec);
       ctx.memory.write({ op: `flow:product-version:${req.mission}:${object}`, payload: { object, commit: req.candidate } }, (tx) => appendRecords(tx, [rec]));
       return pv;
+    },
+
+    async rebind(req: RebindRequest): Promise<{ readonly object: string; readonly commit: string }> {
+      const from = productRecord(req.of);
+      if (from === null || from.source === undefined) throw new ActionError('unknown-product', `product version ${req.of} is not recorded with a commit`, { product: req.of });
+      const source = from.source;
+      const known = productRecord(req.object);
+      if (known !== null) {
+        if (known.predecessor !== req.of || known.source?.commit !== source.commit) throw new ActionError('conflict', `product version ${req.object} is recorded as another version`, { object: req.object });
+        return { object: req.object, commit: source.commit };
+      }
+      // the same change as its predecessor: the same commit, taken against the same origin (Appendix H);
+      // a predecessor recorded before origins were recorded has it derived now, and the new version records it
+      let origin: GitOid | null;
+      try {
+        origin = source.origin ?? (await versionOrigin(ctx.git, await repo(), placedVersion(from as ObjectVersionRecord & { source: NonNullable<ObjectVersionRecord['source']> }), versionOf));
+      } catch (e) {
+        if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
+        throw e;
+      }
+      const rec: ObjectVersionRecord = {
+        kind: 'object.version',
+        object: req.object as ObjectVersionId,
+        objectKind: from.objectKind,
+        mission: from.mission,
+        module: from.module,
+        content: from.content,
+        prerequisites: ctx.memory.data.putList([...req.prerequisites]),
+        scope: from.scope,
+        reviews: [...req.reviews],
+        source: { commit: source.commit, writeScope: [...source.writeScope], transform: source.transform, ...(origin !== null ? { origin } : {}) },
+        predecessor: req.of as ObjectVersionId,
+      };
+      validateRecord(rec);
+      ctx.memory.write({ op: `flow:product-rebind:${req.mission}:${req.object}`, payload: { object: req.object, of: req.of } }, (tx) => appendRecords(tx, [rec]));
+      return { object: req.object, commit: source.commit };
     },
 
     async verify(req: VerifyRequest): Promise<readonly VerificationRun[] | 'pending'> {

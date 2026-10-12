@@ -25,8 +25,8 @@ export interface WorkspaceOps {
   collect(req: CollectRequest): Promise<Collection>;
 }
 
-/** The program actions the flows need beyond the memory (snapshot, product, verify, findSymbol, history): actions.ts gitActions. */
-export type GitActions = Pick<FlowSchedulerPort, 'snapshot' | 'product' | 'verify' | 'findSymbol' | 'history'>;
+/** The program actions the flows need beyond the memory (snapshot, product, rebind, verify, findSymbol, history): actions.ts gitActions. */
+export type GitActions = Pick<FlowSchedulerPort, 'snapshot' | 'product' | 'rebind' | 'verify' | 'findSymbol' | 'history'>;
 
 export interface ProcessOptions {
   /** How git runs (default: plain `git` from PATH). */

@@ -115,8 +115,13 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
     }
     const reworks = ev(line, 'rework').length;
     const acc = ev(line, 'accepted').find((e) => e.key === String(1 + reworks));
+    // the accepted version now: its latest re-bound version when a later plan kept the task (design 4.1 Appendix J)
+    const rebound = ev(line, 'rebound')
+      .map((e) => body<{ k: number; product: string }>(tx, e.body))
+      .filter((b) => b.k === 1 + reworks)
+      .at(-1);
     if (acc === undefined) unfinishedTasks.push(t);
-    else outputs.push({ object: body<{ product: string }>(tx, acc.body).product, kind: 'product', of: `task ${t}` });
+    else outputs.push({ object: rebound?.product ?? body<{ product: string }>(tx, acc.body).product, kind: 'product', of: `task ${t}` });
   }
   const lastPlan = effective.at(-1);
   if (lastPlan !== undefined) outputs.push({ object: lastPlan.dplan, kind: 'plan', of: 'the effective detailed plan' });

@@ -379,6 +379,43 @@ describe('a product version accepted after a rework brings every attempt’s cha
     assert.equal(p.git('diff', '--name-only', main, snap.commit), 'lib/a.txt');
   });
 
+  it("a kept product re-bound to a later plan (Appendix J) brings its predecessor's whole change: the same source, the origin recorded or derived", async () => {
+    const w = await reworkedTwice();
+    p = w.pp;
+    const ctx = p.ctx;
+    const impl3 = record(p, prod('impl', 3));
+    const reviews = [{ ...impl3.reviews[0]!, reliesOn: ['dplan.later' as ObjectVersionId] }];
+    const r = await ctx.actions().rebind({ mission: M, of: prod('impl', 3), object: 'rebound.impl.3', prerequisites: [prod('base', 1)], reviews });
+    assert.deepEqual(r, { object: 'rebound.impl.3', commit: w.candidates[2] });
+    const rec = record(p, 'rebound.impl.3');
+    assert.equal(rec.predecessor, prod('impl', 3));
+    assert.equal(rec.content, impl3.content);
+    assert.deepEqual(rec.scope, impl3.scope);
+    assert.deepEqual(rec.source, impl3.source, 'the same commit, write scope, transform description and origin');
+    assert.deepEqual(rec.reviews, reviews);
+    // idempotent; another version under the same id is refused
+    assert.deepEqual(await ctx.actions().rebind({ mission: M, of: prod('impl', 3), object: 'rebound.impl.3', prerequisites: [prod('base', 1)], reviews }), r);
+    await assert.rejects(ctx.actions().rebind({ mission: M, of: prod('impl', 2), object: 'rebound.impl.3', prerequisites: [], reviews }), (e: { code?: string }) => e.code === 'conflict');
+    const snap = await ctx.actions().snapshot({ mission: M, purpose: 'test', products: ['rebound.impl.3'] });
+    assert.deepEqual(filesOf(p, snap.commit, ALL_PATHS), expectedFiles());
+
+    // a predecessor recorded without an origin (an older engine): the re-bound version records the derived one
+    const legacy = (k: number) => `legacy.impl.${k}`;
+    const recs = [1, 2, 3].map((k): ObjectVersionRecord => {
+      const { predecessor: _p, source, ...rest } = record(p!, prod('impl', k));
+      const { origin: _o, ...oldSource } = source!;
+      return { ...rest, object: legacy(k) as ObjectVersionId, source: oldSource, ...(k > 1 ? { predecessor: legacy(k - 1) as ObjectVersionId } : {}) };
+    });
+    ctx.memory.write({ op: 'test:versions-without-origin', payload: {} }, (tx) => appendRecords(tx, recs));
+    await ctx.actions().rebind({ mission: M, of: legacy(3), object: 'rebound.legacy.3', prerequisites: [], reviews });
+    assert.equal(record(p, 'rebound.legacy.3').source?.origin, w.origin);
+    // and a version on its predecessor's very commit, recorded without an origin, walks on through it
+    const { source: s3, ...rest3 } = recs[2]!;
+    ctx.memory.write({ op: 'test:same-commit-without-origin', payload: {} }, (tx) => appendRecords(tx, [{ ...rest3, object: 'same.legacy.3' as ObjectVersionId, source: s3, predecessor: legacy(3) as ObjectVersionId }]));
+    const snap2 = await ctx.actions().snapshot({ mission: M, purpose: 'test', products: ['same.legacy.3'] });
+    assert.deepEqual(filesOf(p, snap2.commit, ALL_PATHS), expectedFiles());
+  });
+
   it("a re-plan that changes the card continues from the previous attempt's candidate: the version accepted under the new card still brings every attempt's change", async () => {
     const start = await planned();
     p = start.pp;

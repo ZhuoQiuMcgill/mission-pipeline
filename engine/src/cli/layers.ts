@@ -134,6 +134,8 @@ const TASK_LABEL: Readonly<Record<string, (b: Json) => string>> = {
   'loop-verdict': (b) => (b['proceed'] === false ? `reworks used up (${String(b['attempts'] ?? '?')} of ${String(b['allowed'] ?? '?')}${b['reason'] === 'no-progress' ? ', the same issues twice in a row' : ''})` : `rework allowed (${String(b['attempts'] ?? '?')} of ${String(b['allowed'] ?? '?')})`),
   rereview: (b) => `accepted, in re-review ${String(b['n'] ?? '?')} (its runs recorded again)`,
   'basis-revised': () => 'accepted, a basis has a new version: re-review pending',
+  rebind: (b) => `accepted, re-bound to the plan in effect ${String(b['dplan'] ?? '')}: in review`,
+  rebound: (b) => (b['how'] === 'carried' ? 'accepted, re-bound to the plan in effect (its judgment carried over)' : 'accepted, re-bound to the plan in effect (judged again)'),
   abandoned: () => 'abandoned',
   dropped: () => 'dropped by a re-plan',
   'waiting-replan': () => 'waiting for a re-plan',
@@ -278,16 +280,17 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       // an attempt that a rework started says so (a Reviewer's rejection is a change of state)
       const attempt = Math.max(0, ...fs.map((f) => Number(f.body['k'] ?? 0)).filter((n) => Number.isFinite(n)));
       const rw = fs.filter((f) => f.event === 'rework' && Number(f.body['k']) === attempt).at(-1);
-      if (last !== undefined && rw !== undefined && !['rework', 'loop-verdict', 'accepted', 'reaccepted', 'rereview', 'basis-revised', 'abandoned', 'dropped'].includes(last.event)) label = `${label}, after a rework (${String(rw.body['reason'] ?? '')})`;
+      if (last !== undefined && rw !== undefined && !['rework', 'loop-verdict', 'accepted', 'reaccepted', 'rereview', 'basis-revised', 'rebind', 'rebound', 'abandoned', 'dropped'].includes(last.event)) label = `${label}, after a rework (${String(rw.body['reason'] ?? '')})`;
       // the current product's stored proof label: a refutation or a withdrawn basis after acceptance is a change of the task
-      const latest = fs.filter((f) => f.event === 'product' && typeof f.body['object'] === 'string').at(-1);
-      const product = latest?.body['object'] as string | undefined;
+      // (the attempt's product, or the version it was re-bound to under a later plan)
+      const latest = fs.filter((f) => (f.event === 'product' && typeof f.body['object'] === 'string') || (f.event === 'rebound' && typeof f.body['product'] === 'string')).at(-1);
+      const product = (latest?.event === 'rebound' ? latest.body['product'] : latest?.body['object']) as string | undefined;
       const pl = product === undefined ? undefined : raw.labels.get(product);
       if (pl !== undefined) {
         rev = Math.max(rev, pl.rev);
         // the label of the current attempt's product (a rework's earlier product is history)
         const current = Number(latest!.body['k'] ?? attempt) === attempt;
-        const settled = last !== undefined && ['accepted', 'reaccepted', 'rereview', 'basis-revised'].includes(last.event);
+        const settled = last !== undefined && ['accepted', 'reaccepted', 'rereview', 'basis-revised', 'rebind', 'rebound'].includes(last.event);
         if (current && (settled || pl.label === 'negated' || pl.label === 'basis-withdrawn')) label = `${label}, product ${pl.label}${recomputingNote}`;
       }
       const ds = dispatchesOf(steps);

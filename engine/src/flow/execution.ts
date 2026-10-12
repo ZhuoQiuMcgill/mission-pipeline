@@ -21,7 +21,11 @@
 //   Constructor's "questions that need a decision" → the Secretary, without stopping the task
 //   seat failures → the Secretary (failures.ts); re-plan → the decision layer; abandon → risk list
 // A re-plan that changes a task's card restarts it at the next attempt; a task the new plan drops
-// stops (queued attempts cancelled; work in flight finishes and is kept, proposed WI-23).
+// stops (queued attempts cancelled; work in flight finishes and is kept, proposed WI-23). A task
+// whose card the new plan keeps stays accepted; once the new plan is proven, its accepted product,
+// if it lost its proof with the plan it was recorded under, is re-bound to the new plan (a new
+// version of the same content: the judgment carried over when nothing it judged changed, else a
+// Reviewer; design 4.1 Appendix J).
 //
 // Decisions belong to the card they were made under (the task's spec): a new spec (a re-plan that
 // changes the card, or brings back a task a re-plan dropped) starts from the user's newer words, so
@@ -30,7 +34,9 @@
 // later, are not carried out on the new card). An acceptance is per attempt, and a new spec of a
 // started task starts the next attempt, so nothing accepted under the old card counts for the new.
 
-import { encodeConstraintCheck, type IssueRecord } from '../common/records.ts';
+import type { JudgmentId, ObjectVersionId } from '../common/ids.ts';
+import { encodeConstraintCheck, type IssueRecord, type JudgmentRecord, type ObjectScope, type ObjectVersionRecord, type ReviewContract } from '../common/records.ts';
+import { validateRecord } from '../common/validate.ts';
 import { requiredRange } from '../evaluator/semantics.ts';
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import type { ConstructorResult, ReviewerResult } from '../seat/results.ts';
@@ -136,11 +142,11 @@ async function readLine(ctx: FlowCtx, task: string): Promise<Line> {
   return new Line(await eventsOf(ctx, taskLine(task)));
 }
 
-/** The accepted product of a plan task at its current attempt, or null. */
+/** The accepted product of a plan task at its current attempt (its latest re-bound version, Appendix J), or null. */
 export async function acceptedProduct(ctx: FlowCtx, task: string): Promise<string | null> {
   const l = await readLine(ctx, task);
   if (l.abandoned) return null;
-  return l.one<{ product: string }>('accepted', String(l.k))?.product ?? null;
+  return currentAcceptance(l, l.k)?.product ?? null;
 }
 
 export async function executionStep(ctx: FlowCtx): Promise<void> {
@@ -157,7 +163,13 @@ export async function executionStep(ctx: FlowCtx): Promise<void> {
     }
     return;
   }
-  for (const t of stored.plan.tasks) await taskStep(ctx, eff, stored.plan, t);
+  const kept: KeptReport = { carried: [], review: [], successors: null };
+  try {
+    for (const t of stored.plan.tasks) await taskStep(ctx, eff, stored.plan, t, kept);
+  } finally {
+    // what this pass re-bound is told even when a later task's step failed
+    await keptNotices(ctx, eff, kept);
+  }
   await droppedStep(ctx, eff, stored.plan);
   await withdrawnStep(ctx, stored.plan);
 }
@@ -171,6 +183,8 @@ interface RereviewBody {
   readonly request: string;
   readonly rev: string;
   readonly runs: readonly VerificationRun[];
+  /** The version it judges again (absent: the attempt's accepted product, as before re-bound versions existed). */
+  readonly product?: string;
 }
 
 /**
@@ -182,21 +196,26 @@ interface RereviewBody {
  * attempt); a needs-decision goes to the Secretary, and its answer starts another re-review. No WI.
  */
 async function rereviewStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number): Promise<void> {
-  const accepted = line.one<{ product: string; judgment: string }>('accepted', String(k));
-  const product = line.one<ProductBody>('product', String(k));
-  if (accepted === null || product === null) return;
+  // the version accepted now: the attempt's product, or its latest re-bound version (Appendix J)
+  const cur = currentAcceptance(line, k);
+  if (cur === null || cur.body === null) return;
+  const product = cur.body;
+  const original = cur.original;
   const lineName = taskLine(t.id);
   const lineage = taskLineage(ctx.mission, t.id);
   // 4.1 §6.2 (v51 §4.1, the maintainer's fast/stable modes): a basis of the accepted result got a new
   // version after it was judged (an ordinary revision, never a rejection). Stable mode re-accepts it
   // on the new basis (a request below); fast mode goes on, the product "not fully proven" (a notice)
-  const judged = line.all<{ k: number; judgment: string }>('reaccepted').filter((r) => r.body.k === k).at(-1)?.body.judgment ?? accepted.judgment;
+  const judged = cur.judgment;
   const revised = await revisedBases(ctx, judged);
   if (revised.length > 0) {
-    const key = `${k}:${shortHash(revised)}`;
+    // a re-bound version's request names it (the attempt's own product keeps the key it always had)
+    const key = `${k}:${shortHash(revised)}${cur.product === original ? '' : `@${shortHash(cur.product)}`}`;
     if (eff.mode === 'stable') {
       if (line.one('basis-revised', key) === null) {
-        await commit(ctx, `flow:basis-revised:${ctx.mission}:task:${idPart(t.id)}:${key}`, { events: [ev(ctx, lineName, 'basis-revised', key, { k, judgment: judged, revised, reason: `a basis has a new version (${revised.map((r) => `${r.from} → ${r.to}`).join(', ')}): re-accept on it` })] });
+        await commit(ctx, `flow:basis-revised:${ctx.mission}:task:${idPart(t.id)}:${key}`, {
+          events: [ev(ctx, lineName, 'basis-revised', key, { k, judgment: judged, revised, ...(cur.product === original ? {} : { product: cur.product }), reason: `a basis has a new version (${revised.map((r) => `${r.from} → ${r.to}`).join(', ')}): re-accept on it` })],
+        });
         return;
       }
     } else {
@@ -204,20 +223,21 @@ async function rereviewStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlan
         category: 'result-not-fully-proven',
         wi: null,
         key: `${t.id}:${key}`,
-        trigger: `a basis of task ${t.id}'s accepted product ${accepted.product} got a new version after it was judged (${revised.map((r) => `${r.from} → ${r.to}`).join(', ')})`,
+        trigger: `a basis of task ${t.id}'s accepted product ${cur.product} got a new version after it was judged (${revised.map((r) => `${r.from} → ${r.to}`).join(', ')})`,
         defaultAction: 'fast mode: the task stays accepted and the work that depends on it goes on; the product is "not fully proven" until it is judged on the new basis (a re-plan, or stable mode)',
-        detail: { task: t.id, product: accepted.product, judgment: judged, revised },
+        detail: { task: t.id, product: cur.product, judgment: judged, revised },
       });
     }
   }
   const requests: Array<{ readonly key: string; readonly revision: number; readonly body: { readonly reason: string } }> = [
     ...(await eventsOf<ReviewNeededBody>(ctx, RENEW_LINE, REVIEW_NEEDED))
-      .filter((e) => e.body.target === accepted.product && e.body.review === 'reviewer')
+      .filter((e) => e.body.target === cur.product && e.body.review === 'reviewer')
       .map((e) => ({ key: e.key, revision: e.revision, body: { reason: `the environment changed (${e.body.reason}), so the runs were recorded again under the current environment` } })),
-    ...line.all<{ k: number; reason: string }>('basis-revised').filter((e) => e.body.k === k),
+    ...line.all<{ k: number; reason: string; product?: string }>('basis-revised').filter((e) => e.body.k === k && (e.body.product ?? original) === cur.product),
   ].sort((a, b) => a.revision - b.revision);
   if (requests.length === 0) return;
-  const rounds = line.all<RereviewBody>('rereview').filter((r) => r.body.k === k);
+  const all = line.all<RereviewBody>('rereview').filter((r) => r.body.k === k);
+  const rounds = all.filter((r) => (r.body.product ?? original) === cur.product);
   const last = rounds.at(-1);
   let request = requests.at(-1)!;
   if (last !== undefined) {
@@ -241,7 +261,8 @@ async function rereviewStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlan
       request = newer;
     }
   }
-  const n = rounds.length + 1;
+  // numbered across the attempt's versions (a re-bound version's rounds follow its predecessor's)
+  const n = all.length + 1;
   // the declared commands on the same candidate under the current identity
   let runs: VerificationRun[];
   try {
@@ -252,7 +273,9 @@ async function rereviewStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlan
     return actionRefused(ctx, `${product.object}:reverify`, e);
   }
   const rev = safeId(`rev.${ctx.mission}.${idPart(t.id)}.${k}.e${n}`);
-  await commit(ctx, `flow:rereview:${ctx.mission}:task:${idPart(t.id)}:${k}:${n}`, { events: [ev(ctx, lineName, 'rereview', `${k}:${n}`, { k, n, request: request.key, rev, runs } satisfies RereviewBody)] });
+  await commit(ctx, `flow:rereview:${ctx.mission}:task:${idPart(t.id)}:${k}:${n}`, {
+    events: [ev(ctx, lineName, 'rereview', `${k}:${n}`, { k, n, request: request.key, rev, runs, ...(cur.product === original ? {} : { product: cur.product }) } satisfies RereviewBody)],
+  });
   await submitReviewer(ctx, eff, plan, t, line, k, rev, product, runs, { duties: rereviewDuties(t, k, request.body.reason), afterClose: 'audit' });
 }
 
@@ -350,7 +373,7 @@ async function withdrawnStep(ctx: FlowCtx, plan: DetailedPlanDoc): Promise<void>
 
 // ---------------------------------------------------------------- one plan task
 
-async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask): Promise<void> {
+async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, kept: KeptReport): Promise<void> {
   const lineName = taskLine(t.id);
   const lineage = taskLineage(ctx.mission, t.id);
   let line = await readLine(ctx, t.id);
@@ -410,7 +433,11 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   }
 
   const k = line.k;
-  if (line.one('accepted', String(k)) !== null) return rereviewStep(ctx, eff, plan, t, line, k);
+  if (line.one('accepted', String(k)) !== null) {
+    // a card the plan in effect kept: its product re-bound to that plan first (Appendix J), then re-reviews
+    if ((await keptStep(ctx, eff, plan, t, line, k, kept)) === 'held') return;
+    return rereviewStep(ctx, eff, plan, t, line, k);
+  }
 
   // ids that repeat within the task would write conflicting facts (one judgment per standard, one
   // evidence per command): nothing is dispatched or verified; the Secretary re-plans it (release review r4)
@@ -524,15 +551,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     if (view.kind === 'absent') return submitReviewer(ctx, eff, plan, t, line, k, rev, product, runs);
     if (view.kind === 'pending' || view.kind === 'evidence') return;
     if (view.kind === 'failed') return failed(ctx, t, rev, lineage, view);
-    const r = view.result as ReviewerResult;
-    if (!view.status.handBack?.records.some((x) => x.kind === 'judgment' && x.judgment === `j.${rev}`)) return internalError(ctx, rev, `the accepted Reviewer hand-back of ${rev} has no judgment j.${rev}`);
-    const issues = [
-      ...r.judgments.filter((j) => j.met !== 'yes').map((j) => `[${j.standard}] ${j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}`),
-      ...r.findings.map((f) => `finding: ${f}`),
-      ...r.issue_responses.filter((i) => i.response === 'not-fixed').map((i) => `issue ${i.issue} not fixed: ${i.reason}`),
-    ];
-    review = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues };
-    await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, lineName, 'review', rev, review)] });
+    review = await takeReview(ctx, t, k, rev, view);
+    if (review === null) return;
   }
   switch (review.verdict) {
     case 'pass':
@@ -554,6 +574,415 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
         handover: { from: rev, objects: [product.object] },
       });
       return;
+  }
+}
+
+/** A Reviewer's accepted hand-back as the task line's "review" event (null: it carries no judgment, a defect told to the PM). */
+async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string, view: Extract<Awaited<ReturnType<typeof taskView>>, { kind: 'done' }>): Promise<ReviewBody | null> {
+  const r = view.result as ReviewerResult;
+  if (!view.status.handBack?.records.some((x) => x.kind === 'judgment' && x.judgment === `j.${rev}`)) {
+    await internalError(ctx, rev, `the accepted Reviewer hand-back of ${rev} has no judgment j.${rev}`);
+    return null;
+  }
+  const issues = [
+    ...r.judgments.filter((j) => j.met !== 'yes').map((j) => `[${j.standard}] ${j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}`),
+    ...r.findings.map((f) => `finding: ${f}`),
+    ...r.issue_responses.filter((i) => i.response === 'not-fixed').map((i) => `issue ${i.issue} not fixed: ${i.reason}`),
+  ];
+  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues };
+  await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, taskLine(t.id), 'review', rev, review)] });
+  return review;
+}
+
+// ---------------------------------------------------------------- kept products under a new plan (Appendix J)
+
+/** A kept product re-bound to the plan in effect (task line event "rebind", key "<k>:b<n>"). */
+interface RebindBody {
+  readonly k: number;
+  readonly n: number;
+  /** The version re-bound: the attempt's accepted version then. */
+  readonly from: string;
+  /** The new version: the same content and source; its Reviewer contract relies on `dplan`, its prerequisites are `prerequisites`. */
+  readonly product: string;
+  readonly dplan: string;
+  readonly prerequisites: readonly string[];
+  /** carried: the program carried the deciding Reviewer judgment of `from` over (nothing it judged changed); review: a Reviewer judges `product`. */
+  readonly how: 'carried' | 'review';
+  /** carried: the judgment carried over. */
+  readonly carries: string | null;
+  /** review: what changed since `from` was judged. */
+  readonly why: readonly string[];
+}
+
+/** The re-bound version accepted (event "rebound", the rebind's key): by the judgment carried over, or by its Reviewer's pass. */
+interface ReboundBody {
+  readonly k: number;
+  readonly n: number;
+  readonly product: string;
+  readonly judgment: string;
+  readonly how: 'carried' | 'review';
+}
+
+/** What one pass re-bound, for the PM's notices. */
+interface KeptReport {
+  readonly carried: Array<{ readonly task: string; readonly from: string; readonly product: string; readonly carries: string }>;
+  readonly review: Array<{ readonly task: string; readonly from: string; readonly product: string; readonly why: readonly string[] }>;
+  /** The re-bound versions' successors, read once per pass (dropped when this pass accepts a re-bound version). */
+  successors: Map<string, string> | null;
+}
+
+/** Attempt k's accepted version now, and the judgment that accepted it last. */
+interface Acceptance {
+  /** The product the attempt was accepted with. */
+  readonly original: string;
+  /** The accepted version now: `original`, or its latest re-bound version. */
+  readonly product: string;
+  readonly judgment: string;
+  /** The attempt's product event with `object` the accepted version now (null: an older memory without one). */
+  readonly body: ProductBody | null;
+}
+
+function currentAcceptance(line: Line, k: number): Acceptance | null {
+  const acc = line.one<{ product: string; judgment: string }>('accepted', String(k));
+  if (acc === null) return null;
+  const rb = line.all<ReboundBody>('rebound').filter((r) => r.body.k === k).at(-1);
+  const product = rb?.body.product ?? acc.product;
+  const since = rb?.revision ?? 0;
+  const again = line.all<{ k: number; product?: string; judgment: string }>('reaccepted').filter((r) => r.body.k === k && r.revision > since && (r.body.product ?? acc.product) === product).at(-1);
+  const body = line.one<ProductBody>('product', String(k));
+  return { original: acc.product, product, judgment: again?.body.judgment ?? rb?.body.judgment ?? acc.judgment, body: body === null ? null : { ...body, object: product } };
+}
+
+/** Each re-bound version's successor, over the mission's task lines (accepted re-binds only). */
+async function reboundSuccessors(ctx: FlowCtx): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const rebinds = new Map<string, RebindBody>();
+  for (const e of await ctx.ports.ledger.events<RebindBody>({ mission: ctx.mission, event: 'rebind' })) if (e.line.startsWith('task:')) rebinds.set(`${e.line}\n${e.key}`, e.body);
+  for (const e of await ctx.ports.ledger.events<ReboundBody>({ mission: ctx.mission, event: 'rebound' })) {
+    const r = rebinds.get(`${e.line}\n${e.key}`);
+    if (r !== undefined) out.set(r.from, r.product);
+  }
+  return out;
+}
+
+function latestOf(successor: ReadonlyMap<string, string>, x: string): string {
+  const seen = new Set<string>();
+  let v = x;
+  while (successor.has(v) && !seen.has(v)) {
+    seen.add(v);
+    v = successor.get(v)!;
+  }
+  return v;
+}
+
+/**
+ * Appendix J: the accepted product of a task whose card the plan in effect keeps. Its Reviewer
+ * contract relies on the detailed plan in effect when it was recorded, and its prerequisites are
+ * its dependencies' versions then; both are fixed with the object (v51 §5.2). When that plan no
+ * longer holds (the pass of its PM plan went stale, or was negated) and the product lost its proof
+ * with it, or a prerequisite was re-bound, no judgment of this version can make it proven again: it
+ * is re-bound, a new version of the same content whose contract relies on the plan in effect and
+ * whose prerequisites are the dependencies' current versions, once that plan is proven. When
+ * nothing its deciding Reviewer judgment judged has changed (the task's card and the interface
+ * definitions in every plan since, the bases, the contract's lines, the object constraints, the
+ * runs), the program carries that judgment over to the new version without a seat (as `mp pm
+ * renew` does for equal runs); otherwise a Reviewer judges the new version in stable mode, and fast
+ * mode goes on with a notice (as for a revised basis). "held": the task waits this pass.
+ */
+async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number, kept: KeptReport): Promise<'held' | 'none'> {
+  const cur = currentAcceptance(line, k);
+  if (cur === null || cur.body === null) return 'none';
+  const c = ctx.ports.ledger.content;
+  const rebinds = line.all<RebindBody>('rebind').filter((r) => r.body.k === k);
+  const open = rebinds.at(-1);
+  const pending = open !== undefined && line.one('rebound', open.key) === null ? open : undefined;
+  // a re-bind under review: the plan in effect is still the one it re-binds to
+  if (pending !== undefined && pending.body.dplan === eff.dplan && pending.body.from === cur.product) return rebindReview(ctx, eff, plan, t, line, k, pending, cur.body, kept);
+  const obj = await objectRecord(ctx, cur.product);
+  if (obj === null) return 'none';
+  const relied: readonly string[] = obj.reviews.find((r) => r.review === 'reviewer')?.reliesOn ?? [];
+  const prerequisites = c.getList(obj.prerequisites);
+  const successor = prerequisites.length === 0 ? new Map<string, string>() : (kept.successors ??= await reboundSuccessors(ctx));
+  const mapped = prerequisites.map((x) => latestOf(successor, x));
+  const prereqMoved = mapped.some((x, i) => x !== prerequisites[i]);
+  if (relied.includes(eff.dplan) && !prereqMoved) return 'none';
+  const others = relied.filter((r) => r !== eff.dplan);
+  const ids = [...new Set([cur.product, eff.dplan, ...others, ...mapped])];
+  const labels = (await ctx.ports.evaluator.labels(ids)).labels;
+  if (ids.some((x) => labels[x] === 'recomputing')) return 'held';
+  // proven, or unproven for a reason of its own (refuted, a withdrawn basis, a review undecided): the review paths handle it
+  if (labels[cur.product] !== 'not-fully-proven') return 'none';
+  // the plan it was recorded under still holds and no prerequisite moved: its proof is missing for another reason
+  if (!prereqMoved && others.every((x) => labels[x] === 'proven')) return 'none';
+  // nothing is re-bound onto a plan that is not proven (it waits, and nothing re-reviews the version that cannot be proven)
+  if (labels[eff.dplan] !== 'proven') return 'held';
+  // the prerequisites: each must be its dependency's accepted version now, re-bound or proven itself first
+  const deps = new Set<string>();
+  for (const d of t.dependsOn) {
+    const p = await acceptedProduct(ctx, d);
+    if (p !== null) deps.add(p);
+  }
+  const stale = mapped.filter((x) => !deps.has(x));
+  if (stale.length > 0) {
+    await notify(ctx, {
+      category: 'kept-product-not-rebound',
+      wi: null,
+      key: `${t.id}:${cur.product}:${eff.dplan}:prerequisites`,
+      trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} was built on ${stale.join(', ')}, which its dependencies no longer have accepted (their work was redone): it cannot be re-bound to the plan`,
+      defaultAction: `task ${t.id} stays accepted with a product that is not fully proven (stable mode holds the work that depends on it); a re-plan that changes its card rebuilds it on its dependencies' current work`,
+      detail: { task: t.id, product: cur.product, dplan: eff.dplan, stale },
+    });
+    return 'none';
+  }
+  for (const x of mapped) {
+    if (labels[x] === 'proven') continue;
+    const reliedX: readonly string[] = (await objectRecord(ctx, x))?.reviews.find((r) => r.review === 'reviewer')?.reliesOn ?? [];
+    if (!reliedX.includes(eff.dplan)) return 'held';
+  }
+  const judged = await changedSinceJudged(ctx, eff, plan, t, cur, obj, relied);
+  if (judged === null) return 'none';
+  if (judged.why.length > 0 && eff.mode !== 'stable') {
+    await notify(ctx, {
+      category: 'kept-product-not-rebound',
+      wi: null,
+      key: `${t.id}:${cur.product}:${eff.dplan}:fast`,
+      trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} lost its proof with the plan it was recorded under, and what its Reviewer judged changed since: ${judged.why.join('; ')}`,
+      defaultAction: 'fast mode: the task stays accepted and the work that depends on it goes on; the product is "not fully proven" until a Reviewer judges it under the plan in effect (stable mode, or a re-plan that changes its card)',
+      detail: { task: t.id, product: cur.product, dplan: eff.dplan, why: judged.why },
+    });
+    return 'none';
+  }
+  // a re-review of this version that a Reviewer is judging now ends first (its pass may be what carries over)
+  const rounds = openRounds(line, k, cur);
+  for (const r of rounds) if (['running', 'waiting-evidence'].includes((await ctx.ports.scheduler.status(r))?.state ?? '')) return 'held';
+  // a re-bind to an earlier plan, still under review, is superseded: its queued Reviewer leaves the queue
+  if (pending !== undefined) for (const rev of rebindReviewers(ctx, t, line, k, pending)) await ctx.ports.scheduler.cancel(rev);
+  const n = rebinds.length + 1;
+  const key = `${k}:b${n}`;
+  const object = safeId(`${cur.original}.b${n}`);
+  const contract: ReviewContract = { review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx)) as never, reliesOn: [eff.dplan] as never };
+  try {
+    await ctx.ports.scheduler.rebind({ mission: ctx.mission, of: cur.product, object, prerequisites: mapped, reviews: [contract] });
+  } catch (e) {
+    await actionRefused(ctx, `${cur.product}:rebind`, e);
+    return 'held';
+  }
+  const carried = judged.why.length === 0;
+  const body: RebindBody = { k, n, from: cur.product, product: object, dplan: eff.dplan, prerequisites: mapped, how: carried ? 'carried' : 'review', carries: carried ? judged.j0.judgment : null, why: judged.why };
+  const op = `flow:rebind:${ctx.mission}:task:${idPart(t.id)}:${key}`;
+  const lineName = taskLine(t.id);
+  if (!carried) {
+    // a Reviewer judges the new version (the next pass queues it); a queued re-review of the old one is moot
+    await commit(ctx, op, { events: [ev(ctx, lineName, 'rebind', key, body)] });
+    for (const r of rounds) await ctx.ports.scheduler.cancel(r);
+    kept.review.push({ task: t.id, from: cur.product, product: object, why: judged.why });
+    return 'held';
+  }
+  // the deciding judgment carried over: every input of its own (the runs in force, the bases, the
+  // constraint checks, its issue responses), the plan in effect instead of the plans it relied on
+  const plans = new Set((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body.dplan));
+  const j0 = judged.j0;
+  const jid = safeId(`j.${object}`);
+  const rec: JudgmentRecord = {
+    kind: 'judgment',
+    judgment: jid as JudgmentId,
+    review: 'reviewer',
+    executor: 'program',
+    target: object as ObjectVersionId,
+    verdict: 'pass',
+    evidence: c.putList(judged.evidence),
+    bases: j0.bases,
+    constraints: j0.constraints,
+    reliesOn: c.putList([...new Set([eff.dplan, ...c.getList(j0.reliesOn).filter((o) => !plans.has(o))])].sort()),
+    issues: [...j0.issues],
+    revokes: null,
+    evidenceUse: j0.evidenceUse,
+    superseded: [],
+    extends: null,
+  };
+  validateRecord(rec);
+  await commit(ctx, op, { events: [ev(ctx, lineName, 'rebind', key, body), ev(ctx, lineName, 'rebound', key, { k, n, product: object, judgment: jid, how: 'carried' } satisfies ReboundBody)], records: [rec] });
+  for (const r of rounds) await ctx.ports.scheduler.cancel(r);
+  kept.carried.push({ task: t.id, from: cur.product, product: object, carries: j0.judgment });
+  kept.successors = null;
+  return 'held';
+}
+
+/** The Reviewer tasks of re-review rounds of the accepted version that have not handed back. */
+function openRounds(line: Line, k: number, cur: Acceptance): string[] {
+  return line
+    .all<RereviewBody>('rereview')
+    .filter((r) => r.body.k === k && (r.body.product ?? cur.original) === cur.product && line.one('review', r.body.rev) === null)
+    .map((r) => r.body.rev);
+}
+
+/**
+ * The deciding Reviewer judgment of the accepted version, the runs in force under it, and what it
+ * judged that is not the same now (empty: it carries over to the re-bound version unchanged).
+ * Null when the version has no deciding pass.
+ */
+async function changedSinceJudged(
+  ctx: FlowCtx,
+  eff: EffectiveBody,
+  plan: DetailedPlanDoc,
+  t: DetailedTask,
+  cur: Acceptance,
+  obj: ObjectVersionRecord,
+  relied: readonly string[],
+): Promise<{ readonly j0: JudgmentRecord; readonly evidence: readonly string[]; readonly why: readonly string[] } | null> {
+  const view = (await ctx.ports.evaluator.deciding([cur.product])).views[cur.product];
+  const pos = view?.positions.find((p) => p.review === 'reviewer');
+  if (view === null || view === undefined || pos === undefined || pos.state !== 'pass' || pos.by === null) return null;
+  const decided = view.deciding.find((d) => d.judgment === pos.by);
+  const j0 = await judgmentRecordOf(ctx, pos.by);
+  if (decided === undefined || j0 === null) return null;
+  const c = ctx.ports.ledger.content;
+  const why: string[] = [];
+  if (decided.evidence.some((e) => !e.applicable)) why.push('a run it rests on needs a rerun (the environment changed, or the run was revoked)');
+  const ix = await basisIndex(ctx);
+  const bases = c.getList(j0.bases);
+  const moved = bases.filter((b) => {
+    const l = ix.lineOf.get(b);
+    return l === undefined || ix.withdrawn.has(l) || ix.current.get(l) !== b;
+  });
+  if (moved.length > 0) why.push(`bases it was judged on have a new version (${moved.join(', ')})`);
+  const bound = new Set(bases.map((b) => ix.lineOf.get(b)));
+  const unbound = contractLines(ctx, t, ix).filter((l) => !bound.has(l));
+  if (unbound.length > 0) why.push(`its contract now names ${unbound.join(', ')}, which it was not judged on`);
+  const judgedChecks = new Set(c.getList(j0.constraints));
+  if ((await objectConstraints(ctx, obj.scope)).checks.some((x) => !judgedChecks.has(x))) why.push('the object constraints that apply to it are not the ones it was judged against');
+  why.push(...(await planInputsChanged(ctx, eff, plan, t, relied)));
+  return { j0, evidence: [...new Set(decided.evidence.map((e) => e.effective as string))].sort(), why };
+}
+
+/**
+ * Where the card a Reviewer judged the version under can differ from its card under the plan in
+ * effect: the task itself and the definitions of the interfaces it implements or calls, in every
+ * plan that took effect since the one the version relies on (empty: the same everywhere).
+ */
+async function planInputsChanged(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, relied: readonly string[]): Promise<string[]> {
+  const plans = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body.dplan);
+  const at = relied.map((r) => plans.indexOf(r)).filter((i) => i >= 0);
+  if (at.length === 0) return [`the plan it was recorded under (${relied.join(', ') || 'none'}) is not a plan that took effect`];
+  const card = shortHash(DetailedTask.parse(t));
+  const names = [...new Set([...t.implements, ...t.calls])];
+  const out: string[] = [];
+  for (const d of plans.slice(Math.min(...at))) {
+    if (d === eff.dplan) continue;
+    const stored = await detailedPlanOf(ctx, d);
+    const was = stored?.plan.tasks.find((x) => x.id === t.id);
+    if (stored === null || was === undefined || shortHash(DetailedTask.parse(was)) !== card) {
+      out.push(`its card under ${d} is not its card under ${eff.dplan}`);
+      continue;
+    }
+    const changed = names.filter((nm) => shortHash(interfaceDefs(stored.plan, [nm])) !== shortHash(interfaceDefs(plan, [nm])));
+    if (changed.length > 0) out.push(`the definitions of ${changed.join(', ')} under ${d} are not those under ${eff.dplan}`);
+  }
+  return [...new Set(out)];
+}
+
+/** The Reviewer tasks of a re-bind review: one per answered "needs decision" since it was recorded. */
+function rebindReviewers(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, rb: { readonly revision: number; readonly body: RebindBody }): string[] {
+  const answers = line.all('reanswer').filter((x) => x.key.startsWith(`${k}:`) && x.revision > rb.revision).length;
+  return Array.from({ length: answers + 1 }, (_, j) => safeId(`rev.${ctx.mission}.${idPart(t.id)}.${k}.b${rb.body.n}${j > 0 ? `.r${j}` : ''}`));
+}
+
+/**
+ * A re-bound version a Reviewer judges (stable mode): the same candidate, the declared runs on it
+ * under the current identity (reused when they are recorded), the card under the plan in effect.
+ * A pass accepts the new version; a rework sends the task back to its Constructor (the next
+ * attempt); needs-decision goes to the Secretary, and its answer starts another review.
+ */
+async function rebindReview(
+  ctx: FlowCtx,
+  eff: EffectiveBody,
+  plan: DetailedPlanDoc,
+  t: DetailedTask,
+  line: Line,
+  k: number,
+  rb: { readonly key: string; readonly revision: number; readonly body: RebindBody },
+  body: ProductBody,
+  kept: KeptReport,
+): Promise<'held'> {
+  const b = rb.body;
+  const lineage = taskLineage(ctx.mission, t.id);
+  const rev = rebindReviewers(ctx, t, line, k, rb).at(-1)!;
+  const product: ProductBody = { ...body, object: b.product };
+  let review = line.one<ReviewBody>('review', rev);
+  if (review === null) {
+    const view = await taskView(ctx, rev);
+    if (view.kind === 'absent') {
+      let runs: VerificationRun[];
+      try {
+        const v = await ctx.ports.scheduler.verify({ mission: ctx.mission, object: b.product, snapshot: product.snapshot, commands: t.verificationCommands });
+        if (v === 'pending') return 'held';
+        runs = [...v];
+      } catch (e) {
+        await actionRefused(ctx, `${b.product}:verify`, e);
+        return 'held';
+      }
+      await submitReviewer(ctx, eff, plan, t, line, k, rev, product, runs, {
+        duties: `Judge the candidate of task ${t.id} (attempt ${k}) against each standard: the plan in effect (${b.dplan}) keeps the task, and what was judged when it was accepted changed since (${b.why.join('; ').slice(0, 400)}). The candidate is the same; the card and the runs are the current ones.`,
+        observedOn: [b.from],
+        handover: { from: null, objects: [b.product], step: `task ${t.id}'s accepted product re-bound to ${b.dplan}` },
+      });
+      return 'held';
+    }
+    if (view.kind === 'pending' || view.kind === 'evidence') return 'held';
+    if (view.kind === 'failed') {
+      await failed(ctx, t, rev, lineage, view);
+      return 'held';
+    }
+    review = await takeReview(ctx, t, k, rev, view);
+    if (review === null) return 'held';
+  }
+  switch (review.verdict) {
+    case 'pass':
+      await commit(ctx, `flow:rebound:${ctx.mission}:task:${idPart(t.id)}:${rb.key}`, { events: [ev(ctx, taskLine(t.id), 'rebound', rb.key, { k, n: b.n, product: b.product, judgment: review.judgment, how: 'review' } satisfies ReboundBody)] });
+      kept.successors = null;
+      break;
+    case 'rework':
+      await rework(ctx, t, k, review.issues, [], `rework:${k}:${rev}`);
+      break;
+    case 'needs-decision':
+      await raiseEscalation(ctx, {
+        id: `rnd.${rev}`,
+        source: 'reviewer-needs-decision',
+        lineage,
+        subject: `task:${t.id}`,
+        summary: `The Reviewer of task ${t.id} (attempt ${k}, its product re-bound to ${b.dplan}) needs a decision: the standards are unclear or in conflict.`,
+        reasons: [...review.issues],
+        options: ['answer', 'rework', 'replan', 'ask-user'],
+        items: t.requirementItems,
+        facts: { task: t.id, attempt: k, product: b.product, issues: review.issues, rebind: b.n },
+        handover: { from: rev, objects: [b.product] },
+      });
+      break;
+  }
+  return 'held';
+}
+
+/** The PM's notices of one pass's re-binds (3.9; normal branch: nothing for the PM to decide). */
+async function keptNotices(ctx: FlowCtx, eff: EffectiveBody, kept: KeptReport): Promise<void> {
+  if (kept.carried.length > 0) {
+    await notify(ctx, {
+      category: 'kept-products-rebound',
+      wi: null,
+      key: `${eff.dplan}:${shortHash(kept.carried.map((x) => x.product))}`,
+      trigger: `the plan in effect (${eff.dplan}) keeps the cards of tasks ${kept.carried.map((x) => x.task).join(', ')}; their accepted products had lost their proof with the plan they were recorded under`,
+      defaultAction: `re-bound to ${eff.dplan} without a seat (nothing their Reviewer judged changed: the same candidates, cards, interface definitions, bases, constraints and runs; the judgment carried over): ${kept.carried.map((x) => `${x.from} → ${x.product}`).join(', ')}`,
+      detail: { dplan: eff.dplan, rebound: kept.carried },
+    });
+  }
+  if (kept.review.length > 0) {
+    await notify(ctx, {
+      category: 'kept-products-rebind-review',
+      wi: null,
+      key: `${eff.dplan}:${shortHash(kept.review.map((x) => x.product))}`,
+      trigger: `the plan in effect (${eff.dplan}) keeps the cards of tasks ${kept.review.map((x) => x.task).join(', ')}; their accepted products had lost their proof with the plan they were recorded under, and what their Reviewer judged changed since (${kept.review.map((x) => `${x.task}: ${x.why.join('; ')}`).join(' | ')})`,
+      defaultAction: `each is re-bound to ${eff.dplan} as a new version of the same candidate and queued for a Reviewer under the current card: a pass accepts it, a rework sends the task back to its Constructor; the work that depends on them waits in stable mode`,
+      detail: { dplan: eff.dplan, review: kept.review },
+    });
   }
 }
 
@@ -875,21 +1304,19 @@ async function submitReviewer(
   task: string,
   product: ProductBody,
   runs: readonly VerificationRun[],
-  o: { readonly duties?: string; readonly afterClose?: 'audit' } = {},
+  o: {
+    readonly duties?: string;
+    readonly afterClose?: 'audit';
+    /** Versions of this attempt whose open issues the Reviewer also answers (a re-bound version's predecessors). */
+    readonly observedOn?: readonly string[];
+    readonly handover?: { readonly from: string | null; readonly objects: readonly string[]; readonly step: string };
+  } = {},
 ): Promise<void> {
   const ix = await basisIndex(ctx);
   const c = ctx.ports.ledger.content;
   const obj = await objectRecord(ctx, product.object);
   const scope = obj?.scope ?? { paths: [...product.changedPaths], taskType: t.kind };
-  const objectConstraints = (await currentConstraints(ctx)).filter((x) => x.kind === 'object');
-  const checks: string[] = [];
-  const cardConstraintsList: Array<{ id: string; text: string; kind: 'object' | 'instruction' }> = [];
-  for (const x of objectConstraints) {
-    const range = requiredRange(x.scope, scope);
-    if (range.length === 0) continue;
-    checks.push(encodeConstraintCheck({ version: x.version, paths: range }));
-    cardConstraintsList.push({ id: x.line, text: `${x.text} (applies to: ${range.join(', ')})`, kind: 'object' });
-  }
+  const { checks, list: cardConstraintsList } = await objectConstraints(ctx, scope);
   // the Constructor's gaps (8.1: answer every one)
   const conView = await ctx.ports.scheduler.status(product.task);
   const cr = (conView?.handBack?.result ?? null) as ConstructorResult | null;
@@ -898,7 +1325,7 @@ async function submitReviewer(
     ...(cr?.unfixed_problems ?? []).map((p, i) => ({ id: `problem-${i + 1}`, text: p })),
   ];
   // open issues observed on this task's earlier versions (5.6: the Reviewer answers each on this version)
-  const earlier = new Set(line.all<ProductBody>('product').filter((p) => p.body.k < k).map((p) => p.body.object));
+  const earlier = new Set([...line.all<ProductBody>('product').filter((p) => p.body.k < k).map((p) => p.body.object), ...(o.observedOn ?? [])]);
   const openIssues: Array<{ issue: string; text: string }> = [];
   if (earlier.size > 0) {
     for (const rec of await ctx.ports.ledger.records(['issue'])) {
@@ -937,7 +1364,9 @@ async function submitReviewer(
       judgment: `j.${task}`,
       bases: c.putList(currentVersions(ix, contractLines(ctx, t, ix))),
       constraints: c.putList([...new Set(checks)].sort()),
-      reliesOn: c.putList([eff.dplan]),
+      // the objects the version's contract relies on (v51 §5.2: a judgment conforms to the contract fixed with
+      // its target), which for a version recorded under an earlier plan is that plan, not the one in effect
+      reliesOn: c.putList(reliedPlans(obj, eff)),
       revokes: null,
       extends: null,
       evidenceUse: { fields: ['exit'], statisticalOrExternal: false },
@@ -955,8 +1384,32 @@ async function submitReviewer(
     estimateMicros: Math.max(200_000, Math.round(t.estimate.costMicros / 2)),
     binds: [product.object],
     ...(o.afterClose !== undefined ? { afterClose: o.afterClose } : {}),
-    // who hands it over (§3.2, U-13): the Constructor whose candidate it judges (a re-review: the renewal)
-    handover: o.afterClose !== undefined ? { from: null, objects: [product.object], step: `a re-review of ${product.object} after an environment change (mp pm renew)` } : { from: product.task, objects: [product.object], step: `the candidate of task ${t.id}, attempt ${k}` },
+    // who hands it over (§3.2, U-13): the Constructor whose candidate it judges (a re-review: the renewal; a re-bind: the program)
+    handover:
+      o.handover !== undefined
+        ? { from: o.handover.from, objects: [...o.handover.objects], step: o.handover.step }
+        : o.afterClose !== undefined
+          ? { from: null, objects: [product.object], step: `a re-review of ${product.object} after an environment change (mp pm renew)` }
+          : { from: product.task, objects: [product.object], step: `the candidate of task ${t.id}, attempt ${k}` },
   });
   ctx.progressed = true;
+}
+
+/** The objects a product version's Reviewer contract relies on (the plan in effect for a version without a contract). */
+function reliedPlans(obj: ObjectVersionRecord | null, eff: EffectiveBody): string[] {
+  const relied = obj?.reviews.find((r) => r.review === 'reviewer')?.reliesOn ?? [];
+  return relied.length > 0 ? [...relied] : [eff.dplan];
+}
+
+/** The object constraints that apply to a version's scope now (v51 §5.2, 9.5): the checks a judgment binds, and the card's list. */
+async function objectConstraints(ctx: FlowCtx, scope: ObjectScope): Promise<{ readonly checks: string[]; readonly list: Array<{ id: string; text: string; kind: 'object' | 'instruction' }> }> {
+  const checks: string[] = [];
+  const list: Array<{ id: string; text: string; kind: 'object' | 'instruction' }> = [];
+  for (const x of (await currentConstraints(ctx)).filter((y) => y.kind === 'object')) {
+    const range = requiredRange(x.scope, scope);
+    if (range.length === 0) continue;
+    checks.push(encodeConstraintCheck({ version: x.version, paths: range }));
+    list.push({ id: x.line, text: `${x.text} (applies to: ${range.join(', ')})`, kind: 'object' });
+  }
+  return { checks: [...new Set(checks)].sort(), list };
 }

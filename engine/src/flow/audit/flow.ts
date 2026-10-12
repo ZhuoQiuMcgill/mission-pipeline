@@ -609,9 +609,13 @@ async function basisTexts(ctx: FlowCtx): Promise<Map<string, string>> {
   return out;
 }
 
-/** The plan task whose accepted product is this object (execution's "accepted" events), with its verification commands. */
+/** The plan task whose accepted product is this object (execution's "accepted" events, and "rebound" ones for a version re-bound to a later plan), with its verification commands. */
 async function taskOfProduct(ctx: FlowCtx, object: string): Promise<{ readonly task: string; readonly commands: ReadonlyArray<{ id: string; command: string; cwd?: string }> } | null> {
-  for (const e of await ctx.ports.ledger.events<{ product?: string }>({ mission: ctx.mission, event: 'accepted' })) {
+  const accepted = [
+    ...(await ctx.ports.ledger.events<{ product?: string }>({ mission: ctx.mission, event: 'accepted' })),
+    ...(await ctx.ports.ledger.events<{ product?: string }>({ mission: ctx.mission, event: 'rebound' })),
+  ];
+  for (const e of accepted) {
     if (e.body.product !== object || !e.line.startsWith('task:')) continue;
     const task = e.line.slice('task:'.length);
     let commands: Array<{ id: string; command: string; cwd?: string }> = [];

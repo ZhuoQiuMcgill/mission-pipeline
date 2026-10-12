@@ -182,6 +182,8 @@ async function recordedParent(git: GitExec, repo: RepoLayout, commit: GitOid): P
  *   commit: the next attempt continued from it), then the parent of the last commit
  *   reached; a predecessor's recorded origin ends the walk. A version with no
  *   predecessor, or not built on its predecessor's commit, starts at its own parent.
+ *   A version on the very commit of its predecessor (a kept product re-bound under a
+ *   new plan, Appendix J) brings its predecessor's change: the walk goes on there.
  * Null when the commit reached is a root commit (nothing to start from). An origin
  * that is not in the repository is a missing object (WI-13), never fetched.
  */
@@ -198,6 +200,11 @@ export async function versionOrigin(git: GitExec, repo: RepoLayout, version: Ver
       return tree.origin;
     }
     seen.add(v.id);
+    const same = v.predecessor === undefined || v.predecessor === null || versionOf === undefined ? null : versionOf(v.predecessor as ObjectVersionId);
+    if (same !== null && same.tree !== null && same.tree.commit === tree.commit && !seen.has(same.id)) {
+      v = same;
+      continue;
+    }
     const parent = await recordedParent(git, repo, tree.commit);
     const pred = parent === null || v.predecessor === undefined || v.predecessor === null || versionOf === undefined ? null : versionOf(v.predecessor as ObjectVersionId);
     // the line goes on below only where this commit was built on the predecessor's commit

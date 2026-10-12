@@ -15,9 +15,9 @@ import type { BaseRecord, LoopKind, ObjectVersionRecord } from '../src/common/re
 import { validateRecord } from '../src/common/validate.ts';
 import '../src/evaluator/index.ts';
 import { ENV_LINE, forgetObservedEnvironment, runClassOf, type EnvironmentParts } from '../src/evaluator/index.ts';
-import type { FlowNotice, FlowTask, ProductRequest, ProductVersion, VerificationRun, VerifyRequest } from '../src/flow/ports.ts';
+import type { FlowNotice, FlowTask, ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../src/flow/ports.ts';
 import type { ScriptedOutcome, ScriptedScheduler } from '../src/flow/scripted.ts';
-import { appendRecords, initMemory, LedgerError, listDispatches, openMemory, recordWords, type Memory } from '../src/memory/index.ts';
+import { appendRecords, factById, initMemory, LedgerError, listDispatches, openMemory, recordWords, type Memory } from '../src/memory/index.ts';
 import {
   DISPATCH_LINE,
   MemoryFlowEvaluator,
@@ -95,6 +95,30 @@ function fakeActions(ctx: ProcessContext, k: FakeKnobs): GitActions {
       validateRecord(rec);
       ctx.memory.write({ op: `flow:product-version:${req.mission}:${object}`, payload: { object, candidate: req.candidate } }, (tx) => appendRecords(tx, [rec]));
       return pv;
+    },
+    async rebind(req: RebindRequest) {
+      // the same content as its predecessor, its own prerequisites and contracts (Appendix J)
+      const from = ctx.memory.read((db) => factById(db, 'object.version', req.of))?.record as ObjectVersionRecord | undefined;
+      if (from === undefined) throw Object.assign(new Error(`product version ${req.of} is not recorded`), { code: 'unknown-product' });
+      const commit = from.source?.commit ?? fakeCommit('candidate-of', req.of);
+      const exists = ctx.memory.read((db) => Boolean(db.stmt("SELECT 1 FROM facts WHERE kind = 'object.version' AND id = ?").get(req.object)));
+      if (exists) return { object: req.object, commit };
+      const rec: ObjectVersionRecord = {
+        kind: 'object.version',
+        object: req.object as never,
+        objectKind: from.objectKind,
+        mission: from.mission,
+        module: from.module,
+        content: from.content,
+        prerequisites: ctx.memory.data.putList(req.prerequisites),
+        scope: from.scope,
+        reviews: [...req.reviews],
+        ...(from.source !== undefined ? { source: from.source } : {}),
+        predecessor: req.of as never,
+      };
+      validateRecord(rec);
+      ctx.memory.write({ op: `flow:product-rebind:${req.mission}:${req.object}`, payload: { object: req.object, of: req.of } }, (tx) => appendRecords(tx, [rec]));
+      return { object: req.object, commit };
     },
     async verify(req: VerifyRequest) {
       if (k.actions.verify !== undefined) return k.actions.verify(req);
