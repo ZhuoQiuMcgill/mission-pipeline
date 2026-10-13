@@ -9,6 +9,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ## [Unreleased]
 
 ### Fixed
+- A later attempt of a task starts from its dependencies' current work. A rework, or a respec after
+  a re-plan, started its Constructor worktree from the previous attempt's candidate, so when a
+  re-plan had added a dependency, or a dependency had been accepted again at a newer version, the
+  worktree and the declared runs never held the new dependency products and the task could not
+  pass review on its own runs. Now, when the snapshot a first attempt would get now (the mission
+  base with the dependencies' current accepted products) is not the one the previous version's
+  work started from, the attempt starts from that snapshot with the previous version's whole
+  change laid over it (three-way), and its product records that snapshot as its origin, so its
+  change is the task's own work. With no change of the dependencies nothing changes. A carried
+  change that conflicts with the new snapshot builds nothing: the attempt waits with a
+  `rework-start-conflict` notice naming the paths (design 4.1 Appendix M).
 - Product versions stacked on each other compose. A dependent task's work starts from a snapshot
   that holds its dependencies' products, and the plan lets it write what a task it depends on
   writes; but a snapshot of several products (a later task's, an Auditor's) and a delivery

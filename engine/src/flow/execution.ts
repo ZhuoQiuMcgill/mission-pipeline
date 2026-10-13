@@ -84,6 +84,8 @@ interface DispatchedBody {
   readonly snapshot: string;
   readonly commit: string;
   readonly dplan: string;
+  /** A later attempt whose start was laid anew over its dependencies' current products: that snapshot, its product's origin (Appendix M). */
+  readonly origin?: string;
 }
 interface ProductBody extends ProductVersion {
   readonly k: number;
@@ -499,6 +501,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       prerequisites: deps,
       reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, ix) as never, reliesOn: [eff.dplan] as never }],
       predecessor: prev?.object ?? null,
+      ...(dispatched.origin !== undefined ? { origin: dispatched.origin } : {}),
       });
     } catch (e) {
       const code = (e as { code?: string }).code;
@@ -1234,13 +1237,33 @@ async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet
 
 async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number, task: string, deps: readonly string[]): Promise<void> {
   const prev = line.one<ProductBody>('product', String(k - 1));
-  // a rework starts from the previous product; a first attempt from the base with its dependencies' products
+  // A first attempt starts from the base with its dependencies' products. A later attempt (a rework,
+  // or a respec after a re-plan) continues from the previous product's candidate while the snapshot
+  // a first attempt would get now is the one that version's work started from (its origin). When
+  // its dependencies changed since (a re-plan added one, or one was accepted again at a newer
+  // version) it starts from that new snapshot with the previous version's whole change laid over it
+  // (three-way, as a delivery lays it), so its worktree and its declared runs see the dependencies'
+  // current work; the new snapshot is recorded as the attempt's origin, so its product's change is
+  // the task's own work only. A carried change that conflicts with the new snapshot builds nothing:
+  // the attempt waits with a notice (Appendix M).
   let snap: Awaited<ReturnType<typeof ctx.ports.scheduler.snapshot>>;
   try {
     snap = await ctx.ports.scheduler.snapshot(
-      prev !== null ? { mission: ctx.mission, purpose: `constructor-${t.id}`, commit: prev.commit, writable: t.writeScope } : { mission: ctx.mission, purpose: `constructor-${t.id}`, products: deps, writable: t.writeScope },
+      prev !== null
+        ? { mission: ctx.mission, purpose: `constructor-${t.id}`, commit: prev.commit, carry: { version: prev.object, products: deps }, writable: t.writeScope }
+        : { mission: ctx.mission, purpose: `constructor-${t.id}`, products: deps, writable: t.writeScope },
     );
   } catch (e) {
+    if (prev !== null && (e as { code?: string }).code === 'conflict' && (e as { detail?: { carried?: unknown } }).detail?.carried === true) {
+      return notify(ctx, {
+        category: 'rework-start-conflict',
+        wi: null,
+        key: `${task}:carry`,
+        trigger: `attempt ${k} of task ${t.id} cannot start: ${(e as Error).message}`,
+        defaultAction: `only task ${t.id} waits (tried again on every pass, so its dependencies' work accepted again can clear it); nothing is built on part of the earlier work. A re-plan that changes its card starts its next attempt from its dependencies' current work without the earlier attempts' change (it stays readable at ${prev.commit})`,
+        detail: { task: t.id, attempt: k, previous: prev.object, commit: prev.commit, dependencies: deps, conflicts: (e as { detail?: { conflicts?: unknown } }).detail?.conflicts ?? null },
+      });
+    }
     return actionRefused(ctx, task, e);
   }
   const items = await currentItems(ctx);
@@ -1265,7 +1288,9 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     interfaces: { implements: interfaceDefs(plan, t.implements), calls: interfaceDefs(plan, t.calls) },
     ...(t.exclusive.length > 0 ? { exclusive: [...t.exclusive] } : {}),
   };
-  await commit(ctx, `flow:dispatched:${ctx.mission}:${task}`, { events: [ev(ctx, taskLine(t.id), 'dispatched', task, { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan } satisfies DispatchedBody)] });
+  await commit(ctx, `flow:dispatched:${ctx.mission}:${task}`, {
+    events: [ev(ctx, taskLine(t.id), 'dispatched', task, { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, ...(snap.origin !== undefined ? { origin: snap.origin } : {}) } satisfies DispatchedBody)],
+  });
   await ctx.ports.scheduler.submit({
     task,
     lineage: taskLineage(ctx.mission, t.id),

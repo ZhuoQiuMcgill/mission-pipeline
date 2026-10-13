@@ -252,7 +252,7 @@ export interface ProductRequest {
   readonly dispatch: string;
   /** The candidate commit (§5.3). */
   readonly candidate: string;
-  /** The base commit the Constructor's worktree was created at (the candidate's parent; a rework's: the previous attempt's candidate). */
+  /** The base commit the Constructor's worktree was created at (the candidate's parent; a rework's: the previous attempt's candidate, or its change laid over its dependencies' current products, Appendix M). */
   readonly base: string;
   readonly writeScope: readonly string[];
   readonly taskType: string;
@@ -260,6 +260,8 @@ export interface ProductRequest {
   readonly reviews: readonly ReviewContract[];
   /** The product version of the task's previous attempt, whose candidate this attempt continued from; null for a first attempt. */
   readonly predecessor: string | null;
+  /** The snapshot the attempt's work started from when its start was laid anew (the snapshot's `origin`, Appendix M); otherwise derived (versionOrigin). */
+  readonly origin?: string;
 }
 
 export interface ProductVersion {
@@ -327,7 +329,22 @@ export interface FlowSchedulerPort {
     readonly products?: readonly string[];
     /** The seat's write paths (kept on the card as they are; nothing is prepared in 4.1). */
     readonly writable?: readonly string[];
-  }): Promise<{ readonly path: string; readonly commit: string; readonly writable?: readonly string[] }>;
+    /**
+     * A later attempt's start (design 4.1 Appendix M): `commit` is the previous attempt's candidate,
+     * of product version `version`, and `products` are the task's dependencies' accepted products
+     * now. When the snapshot of those products over the mission base is not what that version's
+     * work started from (its origin), the version's whole change since its origin is laid over that
+     * snapshot instead (three-way; a conflict is an ActionError 'conflict' with `carried: true` in
+     * its detail) and `origin` names that snapshot; otherwise the result is `commit` itself.
+     */
+    readonly carry?: { readonly version: string; readonly products: readonly string[] };
+  }): Promise<{
+    readonly path: string;
+    readonly commit: string;
+    readonly writable?: readonly string[];
+    /** Set when a carried change was laid over a new start: the snapshot the attempt's work now starts from (its product's origin). */
+    readonly origin?: string;
+  }>;
   /** 3.5: whether a file of a snapshot exists and contains a symbol (the interface check; read-only, no model). */
   findSymbol(req: { readonly snapshot: string; readonly file: string; readonly symbol: string }): Promise<boolean>;
   /** 3.4: git history and run durations, exported into the Architect's card. */

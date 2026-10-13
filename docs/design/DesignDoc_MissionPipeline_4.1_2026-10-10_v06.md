@@ -1,6 +1,6 @@
 # Mission Pipeline 4.1 design: a neutral project memory, roles and process (v06)
 
-Status: v06, the implementation contract (v05 plus Appendix E, the batch-bound amendment from the code review; plus Appendix F, the run lock, Appendix G, the run checkout's repository, Appendix H, the change a reworked product brings, and Appendix L, products stacked on each other, after 4.1.0): after the 3 attack rounds and their Stabilizers (Appendices A–C), the maintainer’s ruling on what the memory holds (U-13, U-14), and a Stabilizer check of v04 (Appendix D).
+Status: v06, the implementation contract (v05 plus Appendix E, the batch-bound amendment from the code review; plus Appendix F, the run lock, Appendix G, the run checkout's repository, Appendix H, the change a reworked product brings, Appendix L, products stacked on each other, and Appendix M, a later attempt on its dependencies' current work, after 4.1.0): after the 3 attack rounds and their Stabilizers (Appendices A–C), the maintainer’s ruling on what the memory holds (U-13, U-14), and a Stabilizer check of v04 (Appendix D).
 Replaces the runtime of the 4.0.x design (`DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md`, "v51"). The process and the memory model of v51 carry over where this document says so.
 
 ## 0. Calibration: where each element comes from
@@ -352,7 +352,7 @@ None. 4.1 does not read 4.0.x ledgers; as with 3.x, a field PM migrates missions
 9. With pathological inputs (for example tens of thousands of paths against a thousand constraint patterns) one propagation step can take a few seconds; a stop and seat writes then wait for that one step (v06, Appendix E).
 10. A verification whose commands are not all declared runs (one is marked sampled, or declares network access) takes no run lock (§4.1): while it executes, another process that advances the flow can run it again, as every sampling run executes (Appendix F).
 11. A run checkout's repository borrows the project's objects while the run executes (§5.3, Appendix G): an object pruned from the project meanwhile (a `git gc --prune=now` during the run) is missing for the commands' git, and a partial clone's checkout has only the objects the clone has locally, so a command that needs an older object fails there instead of fetching it.
-12. A rework continues from the previous attempt's candidate, also after a re-plan changed the task's card or a dependency was accepted again meanwhile (§6.2, Appendix H): its worktree and its runs hold the dependencies' products as its first attempt received them, while its product names the dependencies accepted now as its prerequisites.
+12. A later attempt starts from its dependencies' products as they are accepted when the attempt is submitted (Appendix M); a dependency accepted again while the attempt is queued or under way is not in its worktree. A target branch that moved since the task's work began also gives a new start (the snapshot a first attempt would get now), so a change of the branch that conflicts with the task's carried change holds the attempt until a re-plan.
 
 ## 13. The maintainer's answers to my direction-level additions (2026-10-10)
 
@@ -547,3 +547,16 @@ Change (§6.2, §6.6 steps 2–4):
 Not chosen:
 - Taking a dependent's change against the base, as if it brought its prerequisites' change too: its prerequisites are delivered as their own versions, and a delivery of the dependent alone would then carry unproven content under the dependent's name.
 - Chaining per path by content (laying whichever version starts from what is there), without the prerequisites: an order the records already give is not guessed from file contents, and two versions starting from the same content would be ambiguous.
+
+## Appendix M: a later attempt on its dependencies' current work (after 4.1.0)
+
+Defect: a later attempt of a task (a rework, or a respec after a re-plan) started its Constructor worktree from the previous attempt's candidate. When the task's dependencies changed since its work began (a re-plan added a dependency, or a dependency was accepted again at a newer version), the worktree and the declared runs never held the new dependency products: a run that passes only with a dependency's change failed on every attempt, and a call of a dependency's new interface could only be built against a stand-in, so the task could never pass its review on its own runs.
+
+Change (§5.3, §6.2):
+- When a later attempt is submitted, the program takes the snapshot a first attempt would get now (the mission base with the current accepted products of the task's current dependencies, laid as in Appendix L). When its tree is the tree of the previous version's origin (Appendix H), nothing changed: the attempt continues from the previous candidate exactly as before.
+- Otherwise the worktree starts from that snapshot with the previous version's whole change since its origin laid over it, three-way, as a delivery lays a version (§6.7): a commit whose only parent is the new snapshot. The attempt's dispatch record names the new snapshot, and its product version records it as its origin, so the version's change is the task's own work since that snapshot, the earlier attempts' included, and none of the new dependency's. Later attempts on top of it continue from it as before (their origin is inherited, Appendix H).
+- A carried change that conflicts with the new snapshot (a path the new dependency work changed differently from what the task's work started from) builds nothing: the attempt waits, a notice (`rework-start-conflict`) names the paths, and the step is tried again on every pass. A re-plan that changes the task's card starts its next attempt from the dependencies' current work without the earlier attempts' change (the previous candidate stays readable by its commit).
+
+Not chosen:
+- Starting from the new snapshot with only the conflict-free part of the carried change: the Constructor of a rework is told to fix the review's issues, not to redo earlier work that silently went missing from its worktree, and its Reviewer's changed paths would no longer show it.
+- Comparing the dependency lists instead of the snapshot trees: a list does not show a dependency accepted again, and a kept product re-bound under a new plan (Appendix J) has a new id with the same content.

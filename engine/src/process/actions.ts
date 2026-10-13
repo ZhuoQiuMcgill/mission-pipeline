@@ -3,7 +3,9 @@
 //   snapshot    the commit a seat reads: the mission's base (the target branch's head) or a given
 //               commit, with accepted product versions laid over it (a dependent task sees its
 //               prerequisites, 5.3) by the delivery's overlay (delivery/candidate.ts); the card
-//               names the commit, `mp seat <id> checkout` materializes it
+//               names the commit, `mp seat <id> checkout` materializes it. A later attempt's start
+//               (carry): the previous candidate, or, when its dependencies' products changed, the
+//               previous version's whole change laid over their current snapshot (Appendix M)
 //   product     the product version of a Constructor's candidate commit (5.1): its content is the
 //               write-scope identity of the commit, its source the commit, the write scope, the
 //               transform description (A4's handoff) and its origin, the snapshot the task's
@@ -91,54 +93,93 @@ export function gitActions(ctx: ProcessContext): GitActions {
     return r === null || r.source === undefined ? null : placedVersion(r as ObjectVersionRecord & { source: NonNullable<ObjectVersionRecord['source']> });
   }
 
+  function treeOf(commit: string): string {
+    const r = ctx.git.runSync(['rev-parse', '--verify', '--quiet', '--end-of-options', `${commit}^{tree}`], { cwd: ctx.projectDir });
+    if (r.code !== 0) throw new ActionError('missing-objects', `${commit} is not a commit of the project repository (a missing object is never fetched)`, { rev: commit });
+    return r.stdout.toString('utf8').trim();
+  }
+
+  /**
+   * A later attempt's start (Appendix M): the previous attempt's candidate as it is while the
+   * snapshot a first attempt would get now is the one its version's work started from (the same
+   * tree); otherwise that snapshot with the version's whole change since its origin laid over it.
+   */
+  async function carried(req: Parameters<GitActions['snapshot']>[0], carry: NonNullable<Parameters<GitActions['snapshot']>[0]['carry']>) {
+    const writable = req.writable !== undefined ? { writable: [...req.writable] } : {};
+    const prev = commitOf(req.commit ?? missionBase());
+    const v = versionOf(carry.version as ObjectVersionId);
+    if (v === null || v.tree === null) throw new ActionError('unknown-product', `product version ${carry.version} is not recorded with a commit`, { product: carry.version });
+    let from: GitOid | null;
+    try {
+      from = await versionOrigin(ctx.git, await repo(), v, versionOf);
+    } catch (e) {
+      if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
+      throw e;
+    }
+    const start = (await laid(req.mission, missionBase(), carry.products)).commit;
+    if (from !== null && treeOf(from) === treeOf(start)) return { path: prev, commit: prev, ...writable };
+    const r = await laid(req.mission, start, [carry.version], `mission-pipeline: ${carry.version} laid over a new start of ${req.mission}`, true);
+    return { path: r.commit, commit: r.commit, origin: start, ...writable };
+  }
+
+  /** The products laid over `at` (the delivery's overlay); a conflict is an ActionError ('conflict'). */
+  async function laid(mission: string, at: string, given: readonly string[], message?: string, carry = false): Promise<{ readonly commit: string }> {
+    const base = commitOf(at);
+    const products = [...new Set(given)].sort();
+    if (products.length === 0) return { commit: base };
+    // a dependent task sees its prerequisites: their versions laid over the base (the delivery's overlay, 5.3),
+    // each with its whole change since its task's first attempt began (Appendix H), each after the versions it
+    // rests on (its recorded prerequisites: a version built on another is laid over it, Appendix L)
+    const objects: DeliveryObject[] = products.map((id) => {
+      const v = versionOf(id as ObjectVersionId);
+      if (v === null) throw new ActionError('unknown-product', `product version ${id} is not recorded with a commit`, { product: id });
+      const r = productRecord(id) as ObjectVersionRecord;
+      return { ...v, prerequisites: ctx.memory.data.getList(r.prerequisites).map((x) => ({ kind: 'object' as const, id: x as ObjectVersionId })) };
+    });
+    const manifest: DeliveryManifest = {
+      revision: 0 as never,
+      selected: [],
+      entries: objects.map((object) => ({ object, unit: null, label: 'proven', requiredBy: [], chain: [] })),
+      units: [],
+      paths: new Map(),
+    };
+    const scratch = mkdtempSync(join(ctx.memory.paths.tmp, 'snapshot-'));
+    let attributes: AttributeEvaluator | null = null;
+    try {
+      const layout = await repo();
+      attributes = await AttributeEvaluator.create(ctx.git, layout, await description(), scratch);
+      const r = await buildCandidate({
+        git: ctx.git,
+        repo: layout,
+        manifest,
+        base: gitOid(base),
+        attributes,
+        snapshotDir: join(scratch, 'overlay'),
+        message: message ?? `mission-pipeline: snapshot of ${mission} with ${products.join(', ')}`,
+        author: ctx.ident(0),
+        committer: ctx.ident(0),
+        versionOf,
+      });
+      if (r.kind === 'conflict' && carry) {
+        throw new ActionError('conflict', `the change of ${products.join(', ')} since its task's work began conflicts with its dependencies' current products on ${r.conflicts.map((c) => c.path).join(', ')}`, { carried: true, conflicts: r.conflicts });
+      }
+      if (r.kind === 'conflict') throw new ActionError('conflict', `the accepted products ${products.join(', ')} conflict on ${r.conflicts.map((c) => c.path).join(', ')}`, r.conflicts);
+      if (r.kind === 'description-mismatch') throw new ActionError('conflict', `products ${r.versions.join(', ')} rest on another transform description`, r);
+      return { commit: r.candidate.commit };
+    } catch (e) {
+      if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
+      throw e;
+    } finally {
+      attributes?.dispose();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
   return {
     async snapshot(req) {
-      const base = commitOf(req.commit ?? missionBase());
-      const products = [...new Set(req.products ?? [])].sort();
-      if (products.length === 0) return { path: base, commit: base, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
-      // a dependent task sees its prerequisites: their versions laid over the base (the delivery's overlay, 5.3),
-      // each with its whole change since its task's first attempt began (Appendix H), each after the versions it
-      // rests on (its recorded prerequisites: a version built on another is laid over it, Appendix L)
-      const objects: DeliveryObject[] = products.map((id) => {
-        const v = versionOf(id as ObjectVersionId);
-        if (v === null) throw new ActionError('unknown-product', `product version ${id} is not recorded with a commit`, { product: id });
-        const r = productRecord(id) as ObjectVersionRecord;
-        return { ...v, prerequisites: ctx.memory.data.getList(r.prerequisites).map((x) => ({ kind: 'object' as const, id: x as ObjectVersionId })) };
-      });
-      const manifest: DeliveryManifest = {
-        revision: 0 as never,
-        selected: [],
-        entries: objects.map((object) => ({ object, unit: null, label: 'proven', requiredBy: [], chain: [] })),
-        units: [],
-        paths: new Map(),
-      };
-      const scratch = mkdtempSync(join(ctx.memory.paths.tmp, 'snapshot-'));
-      let attributes: AttributeEvaluator | null = null;
-      try {
-        const layout = await repo();
-        attributes = await AttributeEvaluator.create(ctx.git, layout, await description(), scratch);
-        const r = await buildCandidate({
-          git: ctx.git,
-          repo: layout,
-          manifest,
-          base: gitOid(base),
-          attributes,
-          snapshotDir: join(scratch, 'overlay'),
-          message: `mission-pipeline: snapshot of ${req.mission} with ${products.join(', ')}`,
-          author: ctx.ident(0),
-          committer: ctx.ident(0),
-          versionOf,
-        });
-        if (r.kind === 'conflict') throw new ActionError('conflict', `the accepted products ${products.join(', ')} conflict on ${r.conflicts.map((c) => c.path).join(', ')}`, r.conflicts);
-        if (r.kind === 'description-mismatch') throw new ActionError('conflict', `products ${r.versions.join(', ')} rest on another transform description`, r);
-        return { path: r.candidate.commit, commit: r.candidate.commit, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
-      } catch (e) {
-        if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
-        throw e;
-      } finally {
-        attributes?.dispose();
-        rmSync(scratch, { recursive: true, force: true });
-      }
+      if (req.carry !== undefined) return carried(req, req.carry);
+      const r = await laid(req.mission, req.commit ?? missionBase(), req.products ?? []);
+      return { path: r.commit, commit: r.commit, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
     },
 
     async product(req: ProductRequest): Promise<ProductVersion> {
@@ -155,13 +196,14 @@ export function gitActions(ctx: ProcessContext): GitActions {
       if (known !== null && known.source?.commit !== req.candidate) throw new ActionError('conflict', `product version ${object} is recorded with another commit (${known.source?.commit ?? 'none'})`, { object });
       // the version's own change is taken against its origin, the snapshot its task's first attempt
       // started from: a rework's worktree starts at the previous attempt's candidate (its base here),
-      // so the change since the base is only the last attempt's (Appendix H)
+      // so the change since the base is only the last attempt's (Appendix H); an attempt whose start
+      // was laid anew over its dependencies' current products has that snapshot as its origin (Appendix M)
       let origin: GitOid | null;
       let before: Map<string, string>;
       try {
         origin =
           known?.source?.origin ??
-          (await versionOrigin(ctx.git, layout, { id: object, predecessor: req.predecessor, tree: { commit: gitOid(req.candidate) } }, versionOf));
+          (await versionOrigin(ctx.git, layout, { id: object, predecessor: req.predecessor, tree: { commit: gitOid(req.candidate), ...(req.origin !== undefined ? { origin: gitOid(req.origin) } : {}) } }, versionOf));
         before =
           origin === null
             ? new Map<string, string>()
