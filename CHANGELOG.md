@@ -9,6 +9,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ## [Unreleased]
 
 ### Fixed
+- Product versions stacked on each other compose. A dependent task's work starts from a snapshot
+  that holds its dependencies' products, and the plan lets it write what a task it depends on
+  writes; but a snapshot of several products (a later task's, an Auditor's) and a delivery
+  candidate laid the versions in id order and compared each one's "started from" side with the
+  base itself. Where a dependent and the version it rests on changed one file, every such path was
+  reported as a conflict: a task depending on both never got its card, and an integration task or
+  a delivery of the chain could not be built. Now the versions are laid each after the versions it
+  rests on (its recorded prerequisites; unrelated ones by id), and each is compared with the base
+  as the versions before it left it; a conflict names the earlier version that put the other entry
+  there (`by`). The delivery manifest takes versions sharing a path or a module as one line of work
+  when one rests on the other (the one on top delivers the path), and the proof check reads a
+  version as it stands under the versions resting on it. A path the base or an unrelated version
+  changed differently from what a version started from is still a conflict, now also between two
+  unrelated versions in a snapshot, where the later used to replace the earlier silently (design
+  4.1 Appendix L).
 - An Architect revision sees the detailed plan it revises. A revision card (a new PM plan version
   revising the plan in effect, a mechanical or feasibility return, a Secretary's send-back or
   re-plan, a settled exploration) carried the previous detailed plan in its data, but its body

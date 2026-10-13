@@ -7,7 +7,13 @@
 // 2. Consistency: every path may have one version only, and so may every
 //    module. Two selected outputs depending on different versions of the same
 //    path or module make the manifest incompatible; the result names both
-//    sides, so an integration task can be planned (6.6 step 2).
+//    sides, so an integration task can be planned (6.6 step 2). Versions
+//    stacked on each other are one line of work, not two sides (design 4.1
+//    Appendix L): when one rests on the other (the other is in its
+//    prerequisite closure), its task started from a snapshot that already held
+//    the other, so both may cover a path or a module; the one on top delivers
+//    the path, and the candidate's overlay (candidate.ts) still checks, path
+//    by path, that it really started from what the one below delivered.
 
 import type { ModuleId, ObjectVersionId, ProofUnitId, Revision } from '../common/ids.ts';
 import type { Label } from '../evaluator/semantics.ts';
@@ -37,7 +43,7 @@ export interface DeliveryManifest {
   /** Every object version in the manifest, sorted by id. */
   readonly entries: readonly ManifestEntry[];
   readonly units: readonly ManifestUnit[];
-  /** Every repository path of the manifest and the one version that delivers it. */
+  /** Every repository path of the manifest and the one version that delivers it (of stacked versions, the one on top). */
   readonly paths: ReadonlyMap<string, ObjectVersionId>;
 }
 
@@ -70,6 +76,74 @@ export type ManifestResult =
 
 function byId(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * For each of `objects`, the ids of the others it rests on (Appendix L): its
+ * prerequisites, a prerequisite unit by its members, followed down through the
+ * objects given, transitively; never itself.
+ */
+export function prerequisiteClosure(
+  objects: readonly Pick<DeliveryObject, 'id' | 'prerequisites'>[],
+  unitMembers: (unit: ProofUnitId) => readonly ObjectVersionId[] | null,
+): Map<ObjectVersionId, Set<ObjectVersionId>> {
+  const byKey = new Map(objects.map((x) => [x.id, x]));
+  const out = new Map<ObjectVersionId, Set<ObjectVersionId>>();
+  for (const x of objects) {
+    const seen = new Set<ObjectVersionId>();
+    const queue = [...x.prerequisites];
+    while (queue.length > 0) {
+      const t = queue.shift() as DeliveryTarget;
+      const ids = t.kind === 'unit' ? (unitMembers(t.id) ?? []) : [t.id];
+      for (const id of ids) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const next = byKey.get(id);
+        if (next !== undefined) queue.push(...next.prerequisites);
+      }
+    }
+    seen.delete(x.id);
+    out.set(x.id, new Set([...seen].filter((id) => byKey.has(id))));
+  }
+  return out;
+}
+
+/**
+ * The order in which versions are laid over a base (Appendix L): every version
+ * after the versions it rests on, unrelated versions by id. Prerequisites that
+ * form a cycle (members of one proof unit) are broken by taking the version with
+ * the fewest of them still to place, then by id.
+ */
+export function stackOrder(ids: readonly ObjectVersionId[], closure: ReadonlyMap<ObjectVersionId, ReadonlySet<ObjectVersionId>>): ObjectVersionId[] {
+  const remaining = [...new Set(ids)].sort(byId);
+  const order: ObjectVersionId[] = [];
+  while (remaining.length > 0) {
+    let pick = 0;
+    let fewest = Infinity;
+    for (const [i, id] of remaining.entries()) {
+      const below = closure.get(id);
+      const open = below === undefined ? 0 : remaining.filter((r) => r !== id && below.has(r)).length;
+      if (open < fewest) {
+        fewest = open;
+        pick = i;
+        if (open === 0) break;
+      }
+    }
+    order.push(...remaining.splice(pick, 1));
+  }
+  return order;
+}
+
+/** Whether every two of `ids` are stacked: one rests on the other. */
+function stacked(ids: readonly ObjectVersionId[], closure: ReadonlyMap<ObjectVersionId, ReadonlySet<ObjectVersionId>>): boolean {
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const a = ids[i] as ObjectVersionId;
+      const b = ids[j] as ObjectVersionId;
+      if (!(closure.get(a)?.has(b) ?? false) && !(closure.get(b)?.has(a) ?? false)) return false;
+    }
+  }
+  return true;
 }
 
 export function buildManifest(view: DeliveryProofView, selected: readonly DeliveryTarget[]): ManifestResult {
@@ -146,17 +220,27 @@ export function buildManifest(view: DeliveryProofView, selected: readonly Delive
       else l.push(e);
     }
   }
+  // Versions stacked on each other share paths and modules as one line of work (Appendix L).
+  const closure = prerequisiteClosure(
+    list.map((e) => e.object),
+    (u) => units.get(u) ?? null,
+  );
+  const apart = (es: readonly ManifestEntry[]): boolean => es.length > 1 && !stacked(es.map((e) => e.object.id), closure);
   const conflicts: ManifestConflict[] = [];
   for (const [path, es] of [...byPath.entries()].sort(([a], [b]) => byId(a, b))) {
-    if (es.length > 1) conflicts.push({ kind: 'same-path', path, module: null, sides: es.map(side) });
+    if (apart(es)) conflicts.push({ kind: 'same-path', path, module: null, sides: es.map(side) });
   }
   for (const [module, es] of [...byModule.entries()].sort(([a], [b]) => byId(a, b))) {
-    if (es.length > 1) conflicts.push({ kind: 'same-module', path: null, module, sides: es.map(side) });
+    if (apart(es)) conflicts.push({ kind: 'same-module', path: null, module, sides: es.map(side) });
   }
   if (conflicts.length > 0) return { kind: 'incompatible', conflicts, entries: list };
 
+  const rank = new Map(stackOrder(list.map((e) => e.object.id), closure).map((id, i) => [id, i]));
   const paths = new Map<string, ObjectVersionId>();
-  for (const [p, es] of byPath) paths.set(p, (es[0] as ManifestEntry).object.id);
+  for (const [p, es] of byPath) {
+    const top = es.reduce((a, b) => ((rank.get(b.object.id) ?? 0) > (rank.get(a.object.id) ?? 0) ? b : a));
+    paths.set(p, top.object.id);
+  }
   return {
     kind: 'manifest',
     manifest: {

@@ -97,11 +97,13 @@ export function gitActions(ctx: ProcessContext): GitActions {
       const products = [...new Set(req.products ?? [])].sort();
       if (products.length === 0) return { path: base, commit: base, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
       // a dependent task sees its prerequisites: their versions laid over the base (the delivery's overlay, 5.3),
-      // each with its whole change since its task's first attempt began (Appendix H)
+      // each with its whole change since its task's first attempt began (Appendix H), each after the versions it
+      // rests on (its recorded prerequisites: a version built on another is laid over it, Appendix L)
       const objects: DeliveryObject[] = products.map((id) => {
         const v = versionOf(id as ObjectVersionId);
         if (v === null) throw new ActionError('unknown-product', `product version ${id} is not recorded with a commit`, { product: id });
-        return v;
+        const r = productRecord(id) as ObjectVersionRecord;
+        return { ...v, prerequisites: ctx.memory.data.getList(r.prerequisites).map((x) => ({ kind: 'object' as const, id: x as ObjectVersionId })) };
       });
       const manifest: DeliveryManifest = {
         revision: 0 as never,

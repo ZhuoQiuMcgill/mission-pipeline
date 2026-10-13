@@ -9,12 +9,16 @@
 //    accepted at a later attempt has that commit as its parent; its origin is
 //    still the snapshot the task's first attempt started from, and its change is
 //    every attempt's, not only the last one's. They are overlaid onto the base
-//    path by path, three-way:
-//      the version did not change the path            -> the base keeps it
-//      the base still has what the version started from -> the version's entry
-//      the base already has the version's entry        -> nothing to do
-//      otherwise (both sides changed it differently)   -> conflict, typed, for
-//                                                         an integration task
+//    one after the other, each after the versions it rests on (its
+//    prerequisites, transitively; unrelated versions by id: Appendix L), since
+//    a dependent's work started from a snapshot that already held them. Each is
+//    laid path by path, three-way, against the base AS CHANGED by the versions
+//    laid before it (the running overlay):
+//      the version did not change the path               -> it stays as it is
+//      it still has what the version started from         -> the version's entry
+//      it already has the version's entry                 -> nothing to do
+//      otherwise (the base or an earlier version changed  -> conflict, typed, for
+//      it differently from what the version started from)    an integration task
 //    The result is a commit whose only parent is the base (landing is a
 //    fast-forward, 6.6 step 7), written with plumbing that never runs a filter,
 //    and the canonical candidate snapshot materialized from it (7.1: checks and
@@ -25,6 +29,10 @@
 //      any other file in the scope makes it a new version, 6.6 step 4);
 //    - its prerequisites: the versions actually in the candidate must be the
 //      ones it was proven against;
+//    a version that versions resting on it were laid over is read as it stands
+//    under them (Appendix L): the candidate with the paths they changed put back
+//    to what the first of them found there, so their own changes do not count
+//    against it (they are checked as theirs), and anything else still does;
 //    - its evidence: the input hashes of the runs its deciding judgments used
 //      must match the candidate's content.
 //    A version failing any of these, or not proven at the view's revision, can
@@ -63,7 +71,7 @@ import {
   type SnapshotManifest,
 } from '../git/representation.ts';
 import type { GitExec } from '../git/plainGit.ts';
-import type { DeliveryManifest, ManifestEntry } from './manifest.ts';
+import { prerequisiteClosure, stackOrder, type DeliveryManifest, type ManifestEntry } from './manifest.ts';
 import type { DeliveryObject, DeliveryProofView, DeliveryTarget } from './proofView.ts';
 import { inWriteScope, writeScopeIdentity } from './writeScope.ts';
 
@@ -75,10 +83,21 @@ export interface EntryState {
 export interface OverlayConflict {
   readonly path: string;
   readonly version: ObjectVersionId;
-  /** What the version started from (its origin's entry), what it delivers, and what the base has now (null: absent). */
+  /**
+   * What the version started from (its origin's entry), what it delivers, and what the candidate has there when it
+   * is laid (null: absent): the base's entry, or that of the version laid before it named by `by`.
+   */
   readonly original: EntryState | null;
   readonly delivered: EntryState | null;
   readonly base: EntryState | null;
+  /** The version laid before it that put `base` there; null: the base's own entry. */
+  readonly by: ObjectVersionId | null;
+}
+
+/** One version as the overlay laid it (Appendix L): the entry it found on each path it changed (null: absent). */
+export interface OverlayLayer {
+  readonly version: ObjectVersionId;
+  readonly found: ReadonlyMap<string, EntryState | null>;
 }
 
 export interface Candidate {
@@ -90,6 +109,8 @@ export interface Candidate {
   readonly snapshot: SnapshotManifest;
   /** Paths the overlay changed relative to the base. */
   readonly changedPaths: readonly string[];
+  /** The versions in the order they were laid, each with what it found on the paths it changed (Appendix L). */
+  readonly layers: readonly OverlayLayer[];
 }
 
 export type CandidateResult =
@@ -213,9 +234,20 @@ export async function versionOrigin(git: GitExec, repo: RepoLayout, version: Ver
   }
 }
 
+/** The unit members of a manifest, as prerequisiteClosure reads them. */
+function membersIn(manifest: DeliveryManifest): (unit: ProofUnitId) => readonly ObjectVersionId[] | null {
+  return (unit) => manifest.units.find((u) => u.unit === unit)?.members ?? null;
+}
+
 export async function buildCandidate(o: CandidateOptions): Promise<CandidateResult> {
   const { git, repo } = o;
-  const placed = o.manifest.entries.filter((e) => e.object.tree !== null);
+  // each version after the versions it rests on (Appendix L)
+  const closure = prerequisiteClosure(
+    o.manifest.entries.map((e) => e.object),
+    membersIn(o.manifest),
+  );
+  const byVersion = new Map(o.manifest.entries.filter((e) => e.object.tree !== null).map((e) => [e.object.id, e]));
+  const placed = stackOrder([...byVersion.keys()], closure).map((id) => byVersion.get(id) as ManifestEntry);
   const expected = transformDescriptionHash(o.attributes.description);
   const wrongDescription = placed.filter((e) => e.object.tree?.transform !== expected).map((e) => e.object.id);
   if (wrongDescription.length > 0) return { kind: 'description-mismatch', expected, versions: wrongDescription };
@@ -232,8 +264,12 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
   const planned = await missingObjectsAsTyped(git, repo, [...commits, ...origins.filter((x): x is GitOid => x !== null)], 'delivery candidate', async () => {
     const baseEntries = entryMap(await lsTree(git, repo, o.base, { recursive: true }));
     const overlay = new Map<string, EntryState | null>();
+    const setBy = new Map<string, ObjectVersionId>();
+    const layers: OverlayLayer[] = [];
     const conflicts: OverlayConflict[] = [];
     for (const [i, e] of placed.entries()) {
+      const found = new Map<string, EntryState | null>();
+      layers.push({ version: e.object.id, found });
       const tree = e.object.tree as NonNullable<DeliveryObject['tree']>;
       const scope = tree.writeScope;
       const origin = origins[i] ?? null;
@@ -243,16 +279,20 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
       for (const path of new Set([...delivered.keys(), ...original.keys()])) {
         const d = delivered.get(path) ?? null;
         const before = original.get(path) ?? null;
-        if (sameEntry(d, before)) continue; // the version did not change it: the base keeps whatever it has
-        const b = baseEntries.get(path) ?? null;
-        if (sameEntry(b, before)) overlay.set(path, d);
-        else if (sameEntry(b, d)) continue;
-        else conflicts.push({ path, version: e.object.id, original: before, delivered: d, base: b });
+        if (sameEntry(d, before)) continue; // the version did not change it: it stays as it is
+        // the base as the versions laid before this one left it
+        const now = overlay.has(path) ? (overlay.get(path) ?? null) : (baseEntries.get(path) ?? null);
+        if (sameEntry(now, before)) {
+          overlay.set(path, d);
+          setBy.set(path, e.object.id);
+          found.set(path, now);
+        } else if (sameEntry(now, d)) continue;
+        else conflicts.push({ path, version: e.object.id, original: before, delivered: d, base: now, by: setBy.get(path) ?? null });
       }
     }
-    return { baseEntries, overlay, conflicts };
+    return { baseEntries, overlay, conflicts, layers };
   });
-  const { baseEntries, overlay, conflicts } = planned;
+  const { baseEntries, overlay, conflicts, layers } = planned;
   if (conflicts.length > 0) return { kind: 'conflict', base: o.base, conflicts };
 
   const files = new Map(baseEntries);
@@ -289,7 +329,16 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
   const snapshot = await materializeSnapshot({ git, repo, commit, attributes: o.attributes, dest: o.snapshotDir });
   return {
     kind: 'candidate',
-    candidate: { base: o.base, commit, tree: root, snapshotDir: o.snapshotDir, snapshot, changedPaths: [...overlay.keys()].sort() },
+    candidate: {
+      base: o.base,
+      commit,
+      tree: root,
+      snapshotDir: o.snapshotDir,
+      snapshot,
+      // a path a later version put back as the base had it is not changed
+      changedPaths: [...overlay.entries()].filter(([path, entry]) => !sameEntry(entry, baseEntries.get(path))).map(([path]) => path).sort(),
+      layers,
+    },
   };
 }
 
@@ -351,12 +400,40 @@ export async function checkCandidateProofs(o: {
   readonly candidate: Candidate;
 }): Promise<ProofCheck> {
   const entries = await lsTree(o.git, o.repo, o.candidate.commit, { recursive: true });
+  // A version as it stands under the versions laid over it that rest on it (Appendix L): each path they
+  // changed back to what the first of them found there.
+  const closure = prerequisiteClosure(
+    o.manifest.entries.map((e) => e.object),
+    membersIn(o.manifest),
+  );
+  const layers = o.candidate.layers;
+  const under = new Map<ObjectVersionId, TreeEntry[]>();
+  const entriesOf = (version: ObjectVersionId): readonly TreeEntry[] => {
+    let es = under.get(version);
+    if (es !== undefined) return es;
+    const at = layers.findIndex((l) => l.version === version);
+    const back = new Map<string, EntryState | null>();
+    if (at >= 0) {
+      for (const l of layers.slice(at + 1)) {
+        if (!(closure.get(l.version)?.has(version) ?? false)) continue;
+        for (const [path, entry] of l.found) if (!back.has(path)) back.set(path, entry);
+      }
+    }
+    if (back.size === 0) es = entries as TreeEntry[];
+    else {
+      es = entries.filter((x) => x.type === 'tree' || !back.has(x.path));
+      for (const [path, entry] of back) if (entry !== null) es.push({ path, mode: entry.mode, oid: entry.oid, type: entry.mode === '160000' ? 'commit' : 'blob' });
+    }
+    under.set(version, es);
+    return es;
+  };
   const identities = new Map<string, ContentHash>();
-  const identity = (scope: readonly string[]): ContentHash => {
-    const key = JSON.stringify(scope);
+  const identity = (version: ObjectVersionId, scope: readonly string[]): ContentHash => {
+    const es = entriesOf(version);
+    const key = `${es === entries ? '' : version}\n${JSON.stringify(scope)}`;
     let id = identities.get(key);
     if (id === undefined) {
-      id = writeScopeIdentity(entries, scope);
+      id = writeScopeIdentity(es, scope);
       identities.set(key, id);
     }
     return id;
@@ -378,7 +455,7 @@ export async function checkCandidateProofs(o: {
     if (e.label !== 'proven') reasons.push({ kind: 'not-proven', label: e.label });
     // The object itself.
     if (obj.tree !== null) {
-      const actual = identity(obj.tree.writeScope);
+      const actual = identity(obj.id, obj.tree.writeScope);
       if (actual !== obj.content) {
         reasons.push({ kind: 'content-changed', expected: obj.content, actual });
         needsReverification.push({
@@ -394,7 +471,7 @@ export async function checkCandidateProofs(o: {
       for (const pre of objectsOf(p)) {
         if (pre.tree === null || pre.id === obj.id) continue;
         if (e.unit !== null && o.view.unitOf(pre.id) === e.unit) continue;
-        const actual = identity(pre.tree.writeScope);
+        const actual = identity(pre.id, pre.tree.writeScope);
         if (actual !== pre.content) reasons.push({ kind: 'prerequisite-mismatch', prerequisite: pre.id, expected: pre.content, actual });
       }
     }
