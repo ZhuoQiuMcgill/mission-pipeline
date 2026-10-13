@@ -46,4 +46,12 @@ Then open your project with any agent harness (Claude Code, Codex, …) and tell
 
 4.0 (a Claude Code plugin with a ledger service and sandboxed seats) is at tag [v4.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v4.0.0); 3.x at [v3.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v3.0.0). 4.1 does not read 4.0 ledgers.
 
+### The 3.0 workflow (historical)
+
+This page and image show the 3.0 process. 4.1 changed the seats and the process (see the design contract). An updated workflow page for 4.1 is planned.
+
+[![Mission Pipeline 3.0 pipeline: the principal's touchpoints, the PM's charter and plan, the task loop with execution and exploration tracks and its numbered loops, and closure](docs/workflow-3.0-light.png)](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-3.0.html)
+
+[Interactive 3.0 workflow](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-3.0.html): select tasks, walk one task's cycle seat by seat and replay recovery scenarios. The page is [docs/workflow-3.0.html](docs/workflow-3.0.html); after editing it, regenerate the image with `python tools/render_workflow.py`.
+
 [MIT](LICENSE) © 2026 Zhuo Qiu
