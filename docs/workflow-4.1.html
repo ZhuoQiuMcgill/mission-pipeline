@@ -1,0 +1,936 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Mission Pipeline 4.1.0: principal and PM, decision layer, execution and exploration loops, proof, delivery, landing and legalization.">
+  <title>Mission Pipeline 4.1.0 — Workflow</title>
+  <style>
+    @font-face { font-family: "MiSans Latin"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/npm/misans-webfont@4.3.1/misans-latin/misanslatin-regular/0.woff2") format("woff2"); unicode-range: U+0-FF, U+131, U+152-153, U+2C6, U+2DA, U+2DC, U+2013-2014, U+2018-201E, U+2022, U+2026; }
+    @font-face { font-family: "MiSans Latin"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/npm/misans-webfont@4.3.1/misans-latin/misanslatin-demibold/0.woff2") format("woff2"); unicode-range: U+0-FF, U+131, U+152-153, U+2C6, U+2DA, U+2DC, U+2013-2014, U+2018-201E, U+2022, U+2026; }
+    @font-face { font-family: "MiSans Latin"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/npm/misans-webfont@4.3.1/misans-latin/misanslatin-bold/0.woff2") format("woff2"); unicode-range: U+0-FF, U+131, U+152-153, U+2C6, U+2DA, U+2DC, U+2013-2014, U+2018-201E, U+2022, U+2026; }
+    /* Warm lab paper, near-black ink, hairline rules; amber marks only what is selected or highlighted. */
+    :root {
+      --bg: #e9e6e1; --paper: #f3f1ed; --ink: #0d0f0d; --ink-2: #3a3c37; --muted: #646259;
+      --line: #a9a497; --hair: #d2cdc3; --grid: rgba(40, 36, 20, .05);
+      --accent: #b97a33; --accent-soft: rgba(185, 122, 51, .14); --accent-ink: #8a5821; --on-accent: #17130e;
+      --ok: #55613f; --edge: #77746b; --on-ink: #f3f1ed; --shadow: rgba(30, 26, 14, .10);
+      --font: "MiSans Latin", "MiSans", "HarmonyOS Sans", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #11181b; --paper: #162024; --ink: #e0e3dc; --ink-2: #c4cac3; --muted: #a6b0b1;
+        --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
+        --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e; --on-accent: #11181b;
+        --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+        color-scheme: dark;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #11181b; --paper: #162024; --ink: #e0e3dc; --ink-2: #c4cac3; --muted: #a6b0b1;
+      --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
+      --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e; --on-accent: #11181b;
+      --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      color-scheme: dark;
+    }
+    /* The page's own Theme button wins over the system and any host setting */
+    html:root[data-look="light"] {
+      --bg: #e9e6e1; --paper: #f3f1ed; --ink: #0d0f0d; --ink-2: #3a3c37; --muted: #646259;
+      --line: #a9a497; --hair: #d2cdc3; --grid: rgba(40, 36, 20, .05);
+      --accent: #b97a33; --accent-soft: rgba(185, 122, 51, .14); --accent-ink: #8a5821; --on-accent: #17130e;
+      --ok: #55613f; --edge: #77746b; --on-ink: #f3f1ed; --shadow: rgba(30, 26, 14, .10);
+      color-scheme: light;
+    }
+    html:root[data-look="dark"] {
+      --bg: #11181b; --paper: #162024; --ink: #e0e3dc; --ink-2: #c4cac3; --muted: #a6b0b1;
+      --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
+      --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e; --on-accent: #11181b;
+      --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.55 var(--font); -webkit-font-smoothing: antialiased; }
+    button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; text-align: inherit; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
+    a:hover { color: var(--accent-ink); }
+    code { font: 12px var(--mono); }
+    .label { font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+    [hidden] { display: none !important; }
+
+    .shell { max-width: 1560px; margin: 0 auto; padding: 36px 40px 40px; }
+
+    /* Masthead */
+    .mast { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; padding-bottom: 26px; border-bottom: 1px solid var(--ink); }
+    .brand { display: grid; line-height: 1; }
+    .brand .b1 { font-size: 34px; font-weight: 700; letter-spacing: .01em; }
+    .brand .b2 { margin-top: 6px; font-size: 14px; font-weight: 600; letter-spacing: .04em; }
+    .brand .b3 { margin-top: 6px; font-size: 26px; font-weight: 400; letter-spacing: .12em; }
+    .brand .b3 b { font-weight: 700; letter-spacing: .02em; margin-left: .3em; }
+    .mast-side { display: grid; justify-items: end; gap: 14px; }
+    .mast-note { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); text-align: right; max-width: 40ch; line-height: 1.6; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: flex-end; }
+    .tab { position: relative; white-space: nowrap; padding: 4px 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+    .tab small { font-size: 10px; margin-right: 6px; color: var(--muted); letter-spacing: .04em; }
+    .tab[aria-pressed="true"] { color: var(--ink); }
+    .tab[aria-pressed="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--ink); }
+    .tab:hover { color: var(--ink); }
+    .theme-btn { white-space: nowrap; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--hair); padding: 5px 9px; }
+    .theme-btn:hover { color: var(--ink); border-color: var(--line); }
+
+    /* Mission timeline */
+    .mission { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--hair); }
+    .seg { position: relative; display: grid; gap: 4px; padding: 16px 18px 16px 0; border-right: 1px solid var(--hair); }
+    .seg + .seg { padding-left: 18px; }
+    .seg:last-child { border-right: 0; }
+    .seg-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+    .seg-name { font-size: 15px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .seg-mult { font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); }
+    .seg-steps { font-size: 12px; color: var(--muted); }
+    .seg-state { display: flex; align-items: center; gap: 6px; font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+    .seg-state::before { content: ""; width: 7px; height: 7px; border: 1px solid var(--ink); }
+    .seg[data-state="done"] .seg-state::before { background: var(--ink); }
+    .seg[data-state="active"] .seg-state::before { background: var(--accent); border-color: var(--accent); }
+    .seg:hover .seg-name, .seg[aria-pressed="true"] .seg-name { color: var(--accent-ink); }
+    .seg[aria-pressed="true"]::after { content: ""; position: absolute; left: 0; right: 18px; bottom: -1px; height: 2px; background: var(--accent); }
+    .seg + .seg[aria-pressed="true"]::after { left: 18px; }
+
+    /* Workspace */
+    .work { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 28px; margin-top: 26px; align-items: start; }
+    .view { min-width: 0; }
+    .view-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 10px 20px; margin-bottom: 12px; }
+    .view-title { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; line-height: 1.1; }
+    .view-sub { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); max-width: 70ch; }
+    .scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+    .board { position: relative; isolation: isolate; border: 1px solid var(--line); background-color: var(--paper);
+      background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size: 24px 24px; }
+    .wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; overflow: visible; }
+    .wire { fill: none; stroke: var(--edge); stroke-width: 1.2; stroke-linejoin: round; transition: opacity .2s, stroke .2s; }
+    .wire.cond { stroke-dasharray: 4 4; }
+    .wire.hot { stroke: var(--accent); stroke-width: 2; }
+    .wire.dim { opacity: .16; }
+    .ah { fill: var(--edge); } .ah-hot { fill: var(--accent); }
+
+    /* Task graph */
+    .graph { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); grid-auto-rows: minmax(70px, auto); gap: 34px 46px; padding: 38px 30px 30px; min-width: 900px; }
+    .task { position: relative; z-index: 3; display: grid; align-content: center; gap: 6px; min-height: 70px; padding: 11px 12px 12px 14px; background: var(--paper); border: 1px solid var(--ink); transition: opacity .2s, border-color .2s, background .2s; }
+    .task:hover { background: var(--bg); }
+    .task .t-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 2px 8px; }
+    .task .t-meta { font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+    .task .t-title { font-size: 15px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+    .task .t-state { display: flex; white-space: nowrap; align-items: center; gap: 5px; font-size: 9.5px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+    .task .t-state::before { content: ""; width: 6px; height: 6px; border: 1px solid currentColor; }
+    .task[data-state="ACCEPTED"] .t-state, .task[data-state="RECORDED"] .t-state { color: var(--ok); }
+    .task[data-state="ACCEPTED"] .t-state::before, .task[data-state="RECORDED"] .t-state::before { background: currentColor; }
+    .task[data-state="RUNNING"] .t-state { color: var(--accent-ink); }
+    .task[data-state="RUNNING"] .t-state::before { background: var(--accent); border-color: var(--accent); }
+    .task.exploration { border-style: solid; border-left-width: 4px; }
+    .task.milestone { border-style: dotted; border-width: 1.5px; background: transparent; }
+    .task.decision { border-radius: 999px; padding-left: 20px; border-color: var(--ink-2); }
+    .task.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 8px 24px var(--shadow); }
+    .task.sel::before { content: ""; position: absolute; left: -1px; top: -1px; width: 10px; height: 10px; background: var(--accent); }
+    .task.decision.sel::before { display: none; }
+    .task.dim { border-color: var(--line); background: color-mix(in srgb, var(--bg) 40%, var(--paper)); }
+    .graph-tags { position: absolute; z-index: 3; font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); pointer-events: none; }
+
+    /* Swimlanes */
+    .lanes { display: grid; grid-template-columns: repeat(var(--cols), minmax(86px, 1fr)); grid-template-rows: repeat(7, auto); column-gap: 10px; padding: 0 12px 46px; min-width: calc(var(--cols) * 96px + 14px); }
+    .band { position: relative; grid-column: 1 / -1; margin: 0 -12px; border-bottom: 1px solid var(--hair); }
+    .band:nth-of-type(odd) { background: color-mix(in srgb, var(--bg) 45%, transparent); }
+    .band-name { position: absolute; z-index: 4; margin: 7px 0 0 10px; padding: 1px 5px; background: var(--paper); font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-2); }
+    .band-name small { margin-left: 8px; font-weight: 400; letter-spacing: .04em; text-transform: none; color: var(--muted); }
+    .rail { z-index: 1; grid-row: 1 / -1; margin: 28px -6px 8px; border: 1px dashed var(--line); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    .rail-name { position: absolute; margin: -22px 0 0 0; font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); white-space: nowrap; }
+    .step { position: relative; z-index: 3; align-self: center; display: grid; align-content: start; gap: 3px; margin: 30px 0 12px; padding: 8px 9px 9px; min-height: 0; background: var(--paper); border: 1px solid var(--ink); transition: opacity .2s, border-color .2s, box-shadow .2s; }
+    .step:hover { background: var(--bg); }
+    .step .s-title { font-size: 12.5px; font-weight: 700; letter-spacing: .01em; line-height: 1.2; }
+    .step .s-plain { font-size: 11px; line-height: 1.35; color: var(--ink-2); }
+    .step .s-act { font: 9.5px/1.4 var(--mono); color: var(--muted); }
+    .step.cond { border-style: dashed; background: color-mix(in srgb, var(--paper) 70%, transparent); }
+    .step.gate { border: 3px double var(--ink); padding: 7px 8px 8px; }
+    .step.stack { box-shadow: 4px 4px 0 -1px var(--paper), 4px 4px 0 0 var(--ink), 8px 8px 0 -1px var(--paper), 8px 8px 0 0 var(--ink); }
+    .step.ghost { display: none; }
+    .step.ghost.show { display: grid; }
+    .step.dim { border-color: var(--line); background: color-mix(in srgb, var(--bg) 40%, var(--paper)); }
+    .step.on { border-color: var(--accent); }
+    .step.stack.on { box-shadow: 4px 4px 0 -1px var(--paper), 4px 4px 0 0 var(--accent), 8px 8px 0 -1px var(--paper), 8px 8px 0 0 var(--accent); }
+    .step.sel { box-shadow: 0 0 0 1px var(--accent), 0 8px 24px var(--shadow); border-color: var(--accent); }
+    .step.stack.sel { box-shadow: 0 0 0 1px var(--accent), 4px 4px 0 0 var(--paper), 4px 4px 0 1px var(--accent), 0 8px 24px var(--shadow); }
+    .step .num { position: absolute; top: -10px; left: -1px; display: none; min-width: 19px; height: 19px; padding: 0 5px; font: 600 10.5px/19px var(--font); text-align: center; color: var(--on-accent); background: var(--accent); }
+    .step.on .num { display: block; }
+    .step .now { position: absolute; top: -9px; right: -1px; padding: 0 5px; font-size: 9px; font-weight: 600; line-height: 17px; letter-spacing: .12em; text-transform: uppercase; color: var(--on-ink); background: var(--ink); }
+
+    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 6px; margin: 2px 0 12px; }
+    .bar .label { margin-right: 8px; min-width: 78px; }
+    .chip { font-size: 11.5px; font-weight: 600; letter-spacing: .04em; padding: 5px 10px; border: 1px solid var(--hair); background: var(--paper); color: var(--ink-2); }
+    .chip:hover { border-color: var(--line); color: var(--ink); }
+    .chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+    .chip small { font-weight: 400; color: inherit; opacity: .75; margin-left: 4px; }
+    .scenario-steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px 26px; margin: 16px 0 0; padding: 14px 0 0; border-top: 1px solid var(--hair); list-style: none; }
+    .scenario-steps li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; font-size: 12.5px; line-height: 1.5; color: var(--ink-2); }
+    .scenario-steps b { font-weight: 700; color: var(--accent-ink); }
+    .no-cycle { padding: 60px 30px; font-size: 14px; color: var(--muted); }
+
+    /* Inspector */
+    .inspector { position: sticky; top: 20px; border-top: 2px solid var(--ink); padding-top: 14px; }
+    .work.wide { grid-template-columns: minmax(0, 1fr); }
+    .work.wide .inspector { position: static; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr); gap: 0 34px; }
+    .work.wide .ins-copy { border-bottom: 0; }
+    .ins-kicker { display: flex; justify-content: space-between; gap: 10px; }
+    .ins-title { margin: 8px 0 2px; font-size: 24px; font-weight: 700; line-height: 1.1; letter-spacing: .01em; }
+    .ins-sub { margin: 0 0 14px; font-size: 12px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+    .ins-copy { margin: 0 0 14px; font-size: 13.5px; line-height: 1.65; color: var(--ink-2); padding-bottom: 14px; border-bottom: 1px solid var(--ink); }
+    .ins-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; margin: 0 0 14px; }
+    .ins-grid div { display: grid; gap: 2px; min-width: 0; }
+    .ins-grid dt { font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+    .ins-grid dd { margin: 0; font-size: 13px; }
+    .ins-list { margin: 0 0 14px; padding: 0; list-style: none; display: grid; gap: 6px; }
+    .ins-list li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+    .ins-list li::before { content: "—"; color: var(--muted); }
+    .ins-act { margin: 0 0 10px; padding: 10px 0; border-top: 1px solid var(--hair); border-bottom: 1px solid var(--hair); font: 11.5px/1.6 var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
+    .ins-src { margin: 0; font-size: 11.5px; color: var(--muted); }
+    .ins-src a { margin-right: 10px; }
+    .cta { display: flex; justify-content: space-between; align-items: center; width: 100%; margin: 4px 0 14px; padding: 11px 14px; background: var(--ink); color: var(--on-ink); font-size: 11.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+    .cta:hover { background: var(--ink-2); }
+
+    /* Legend and footer */
+    .legend { display: flex; flex-wrap: wrap; gap: 10px 26px; margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--ink); }
+    .key { display: flex; align-items: center; gap: 9px; font-size: 11.5px; color: var(--ink-2); }
+    .key i { display: inline-block; width: 26px; height: 16px; border: 1px solid var(--ink); background: var(--paper); }
+    .key .k-cond { border-style: dashed; }
+    .key .k-gate { border: 3px double var(--ink); }
+    .key .k-term { background: var(--ink); }
+    .key .k-sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .key .k-stack { box-shadow: 3px 3px 0 -1px var(--paper), 3px 3px 0 0 var(--ink); }
+    .key .k-pill { border-radius: 999px; }
+    .key .k-ms { border-style: dotted; border-width: 1.5px; background: transparent; }
+    .key .k-expl { border-left-width: 4px; }
+    .key .k-line { height: 0; border: 0; border-top: 1.5px solid var(--edge); background: none; }
+    .key .k-dash { height: 0; border: 0; border-top: 1.5px dashed var(--edge); background: none; }
+    .key .k-hot { height: 0; border: 0; border-top: 2px solid var(--accent); background: none; }
+    .key .k-pr { background: var(--ink); }
+    .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; margin-top: 18px; font-size: 11.5px; color: var(--muted); }
+    .foot nav { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+    /* Pipeline map: one fixed canvas, scaled to fit */
+    .pipe-wrap { margin: 0; overflow: hidden; }
+    .pipe { position: absolute; left: 0; top: 0; width: 1400px; height: 650px; transform-origin: 0 0; }
+    .pipe .wire.dim { opacity: .28; }
+    .p-band { position: absolute; left: 0; top: 0; width: 1400px; height: 100px; background: color-mix(in srgb, var(--accent) 8%, transparent); border-bottom: 1px solid var(--hair); }
+    .p-band-name { position: absolute; left: 20px; top: 2px; font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); }
+    .p-band-name small { margin-left: 8px; font-weight: 400; letter-spacing: .04em; text-transform: none; color: var(--muted); }
+    .loopbox { position: absolute; z-index: 1; border: 1.5px solid var(--ink); background: var(--paper);
+      box-shadow: 6px 6px 0 -1.5px var(--paper), 6px 6px 0 0 var(--line), 12px 12px 0 -1.5px var(--paper), 12px 12px 0 0 var(--hair); }
+    .loop-title { position: absolute; z-index: 3; display: flex; align-items: baseline; gap: 10px; }
+    .loop-title b { font-size: 15px; font-weight: 700; letter-spacing: .08em; }
+    .loop-title span { font-size: 11.5px; color: var(--muted); }
+    .track { position: absolute; z-index: 3; display: grid; gap: 2px; }
+    .track b { font-size: 12px; font-weight: 700; letter-spacing: .12em; }
+    .track span { font-size: 11px; color: var(--muted); line-height: 1.35; }
+    .pnode { position: absolute; z-index: 3; display: grid; align-content: center; gap: 2px; padding: 6px 9px; background: var(--paper); border: 1px solid var(--ink); transition: border-color .2s, box-shadow .2s, opacity .2s; }
+    .pnode:hover { background: var(--bg); }
+    .pnode .p-role { font-size: 9px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+    .pnode .p-title { font-size: 12.5px; font-weight: 700; line-height: 1.2; }
+    .pnode .p-note { font: 9.5px/1.35 var(--mono); color: var(--muted); }
+    .pnode.major { border-width: 1.5px; padding: 10px 12px; }
+    .pnode.major .p-title { font-size: 17px; }
+    .pnode.cond { border-style: dashed; }
+    .pnode.gate { border: 3px double var(--ink); }
+    .pnode.stack { box-shadow: 4px 4px 0 -1px var(--paper), 4px 4px 0 0 var(--ink), 8px 8px 0 -1px var(--paper), 8px 8px 0 0 var(--ink); }
+    .pnode.principal { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+    .pnode.principal:hover { background: var(--ink-2); }
+    .pnode.principal .p-role, .pnode.principal .p-note { color: color-mix(in srgb, var(--on-ink) 72%, transparent); }
+    .pnode.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .pnode.stack.on { box-shadow: 0 0 0 1px var(--accent), 4px 4px 0 0 var(--paper), 4px 4px 0 1px var(--accent); }
+    .pnode.principal.on { box-shadow: 0 0 0 2px var(--accent); }
+    .ppill { position: absolute; z-index: 4; transform: translate(-50%, -50%); white-space: nowrap; padding: 2px 8px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; background: var(--paper); border: 1px solid var(--line); color: var(--ink-2); }
+    .ppill b { color: var(--accent-ink); margin-right: 5px; }
+    .ppill:hover { border-color: var(--accent); }
+    .ppill[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .ppill[aria-pressed="true"] b { color: inherit; }
+    .loops { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 0 28px; margin-top: 18px; }
+    .loop-key { display: grid; align-content: start; grid-template-columns: 26px minmax(0, 1fr); gap: 2px 8px; padding: 10px 0; border-top: 1px solid var(--hair); text-align: left; }
+    .loop-key .n { grid-row: span 2; font-size: 15px; font-weight: 700; color: var(--accent-ink); }
+    .loop-key strong { font-size: 13px; font-weight: 700; }
+    .loop-key span { font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+    .loop-key[aria-pressed="true"] strong { color: var(--accent-ink); }
+    .loop-key.note { cursor: default; }
+    .loop-key.note .n { color: var(--muted); }
+    .sub-title { margin: 34px 0 4px; font-size: 18px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .compare { width: 100%; min-width: 760px; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+    .compare th, .compare td { text-align: left; vertical-align: top; padding: 9px 14px 9px 0; border-top: 1px solid var(--hair); }
+    .compare thead th { font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); border-top: 2px solid var(--ink); }
+    .compare thead th:nth-child(2), .compare thead th:nth-child(3) { color: var(--ink); }
+    .compare tbody th { width: 15%; font-size: 10.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2); }
+    .compare td { width: 30%; line-height: 1.55; color: var(--ink-2); }
+    .compare td:last-child { width: 25%; color: var(--muted); }
+
+    /* Capture mode renders the pipeline for the README screenshots */
+    body.capture .shell { max-width: none; padding: 32px 40px; }
+    body.capture .work { grid-template-columns: minmax(0, 1fr); }
+    body.capture .inspector, body.capture .tabs, body.capture .theme-btn, body.capture .bar, body.capture .scenario-steps { display: none !important; }
+    body.capture #view-pipeline { display: block !important; }
+    body.capture #view-overview, body.capture #view-detail, body.capture .legend { display: none !important; }
+
+    @media (max-width: 1180px) {
+      .work { grid-template-columns: minmax(0, 1fr); }
+      .inspector { position: static; }
+    }
+    @media (max-width: 760px) {
+      .shell { padding: 22px 16px 32px; }
+      .mast { flex-direction: column; gap: 18px; }
+      .mast-side { justify-items: start; }
+      .mast-note { text-align: left; }
+      .brand .b1 { font-size: 27px; } .brand .b3 { font-size: 21px; }
+      .mission { grid-template-columns: 1fr 1fr; }
+      .seg, .seg + .seg { padding: 12px 12px 12px 0; border-right: 0; border-bottom: 1px solid var(--hair); }
+      .seg:nth-child(even) { padding-left: 12px; border-left: 1px solid var(--hair); }
+      .ins-grid { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
+    @media print { .tabs, .theme-btn, .inspector, .bar { display: none !important; } .view[hidden] { display: block !important; } }
+
+    /* 4.1 extends the same atlas style and grid/wire engine. */
+    .pipe { height: 1400px; }
+    .pnode { overflow-wrap: anywhere; padding: 5px 9px; }
+    .pnode .p-note { font-family: var(--font); line-height: 1.3; }
+    .pnode .p-role { font-size: 9px; line-height: 1.2; text-transform: none; letter-spacing: 0; }
+    .pnode .p-title { font-size: 12.5px; }
+    .ppill { padding: 1px 6px; font-size: 12px; }
+    .track { font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+    .loop-title { font-size: 13px; font-weight: 700; letter-spacing: .06em; }
+    .exception-rail { position: absolute; z-index: 3; padding: 12px; border: 1px dashed var(--line); background: var(--paper); }
+    .exception-rail h3 { margin: 0 0 12px; font-size: 11px; letter-spacing: .12em; }
+    .exception { display: block; width: 100%; text-align: left; padding: 9px 0; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
+    .exception strong { display: block; font-size: 11.5px; line-height: 1.3; }
+    .exception span { display: block; font-size: 10px; color: var(--muted); line-height: 1.35; margin-top: 3px; }
+    .exception:hover strong { color: var(--accent-ink); }
+    .lanes { grid-template-rows: repeat(12, minmax(56px, auto)); }
+    .lanes .exception-rail { position: relative; margin: 12px 0; align-self: stretch; }
+    .lane-cell { min-width: 0; display: grid; align-content: center; gap: 8px; padding: 40px 0 12px; }
+    .lane-cell .step { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .band-name { max-width: 82%; }
+    .p-band-name, .band-name, .loop-title, .track, .graph-tags { z-index: 5; background: var(--paper); padding: 1px 5px; line-height: 1.4; }
+    .ppill { min-width: 22px; padding: 1px 2px; text-align: center; }
+    .fillers-note { margin: 8px 0 16px; font-size: 12.5px; color: var(--ink-2); }
+    .lane-rule { font-size: 12.5px; color: var(--ink-2); max-width: 100ch; }
+    .band-name small { display: inline; }
+    .inactive-lane { display: block; padding: 30px 12px 7px; color: var(--muted); font-size: 10px; }
+    .scenario-wis { grid-column: 1 / -1; }
+    .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+    .notes article { min-width: 0; font-size: 13px; color: var(--ink-2); }
+    .reads { display: grid; grid-template-columns: 150px minmax(0,1fr); gap: 8px 12px; margin-top: 16px; }
+    .reads dt { font-weight: 600; } .reads dd { margin: 0; }
+    .compare td { width: 28%; } .compare td:last-child { color: var(--ink-2); width: 28%; }
+    .ins-src { overflow-wrap: anywhere; }
+    .inspector.open { display: block !important; position: fixed !important; right: 24px; top: 100px; bottom: 24px; width: min(480px, calc(100vw - 32px)); z-index: 10; background: var(--paper); border: 1px solid var(--line); border-top: 3px solid var(--accent); padding: 18px 22px; overflow: auto; box-shadow: 0 10px 40px var(--shadow); }
+    .ins-close { display: none; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent-ink); }
+    .inspector.open .ins-close { display: block; margin-bottom: 16px; }
+    .wires .wire { pointer-events: stroke; cursor: pointer; }
+    @media (max-width: 900px) { .notes { grid-template-columns: 1fr; gap: 0; } .reads { grid-template-columns: 130px minmax(0,1fr); } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="mast">
+      <div class="brand" aria-label="Mission Pipeline engine workflow, version 4.1.0">
+        <span class="b1">MISSION PIPELINE</span><span class="b2">ENGINE WORKFLOW ATLAS</span><span class="b3">PROCESS<b>4.1.0</b></span>
+      </div>
+      <div class="mast-side">
+        <p class="mast-note" style="margin:0">Your words → plans → work → proof<br>Any model / any harness · memory travels with the folder</p>
+        <div class="tabs" role="group" aria-label="View">
+          <button type="button" class="tab" data-view="pipeline" aria-pressed="true"><small>01</small>Pipeline</button>
+          <button type="button" class="tab" data-view="overview" aria-pressed="false"><small>02</small>Task graph</button>
+          <button type="button" class="tab" data-view="detail" aria-pressed="false"><small>03</small>Seat lanes</button>
+          <button type="button" class="theme-btn" id="fillers-btn" aria-pressed="false" title="Example assignments: model / harness. Any seat can take any model and harness.">Show fillers</button>
+          <button type="button" class="theme-btn" id="theme-btn">Theme · Auto</button>
+        </div>
+      </div>
+    </header>
+    <p class="fillers-note" id="fillers-note" hidden>Example: the maintainer's current fillers. Any seat can take any model and harness.</p>
+    <div class="work wide">
+      <div>
+        <section class="view" id="view-pipeline" aria-labelledby="pl-title">
+          <div class="view-head"><div><h1 class="view-title" id="pl-title">Pipeline</h1>
+            <p class="view-sub">The principal talks only to the PM. The PM records the words, plans in batches and dispatches through its own harness. Select a box, arrow or numbered loop for its command and source files.</p>
+          </div><span class="label">Implemented process · 4.1.0</span></div>
+          <div class="scroll"><div class="board pipe-wrap" id="pipe-wrap"><div class="pipe" id="pipe"></div></div></div>
+          <div class="loops" id="loops" role="group" aria-label="Numbered loops"></div>
+          <div class="notes">
+            <article><h2 class="sub-title">Memory that travels</h2><p>Everything the process records lives in <code>.mission-pipeline/</code>: a SQLite skeleton connecting the run chain and checks, with Markdown leaves for words, decisions, cards, reports and summaries. Products live in git. Copy the folder while idle; any harness continues from the same memory.</p><p class="ins-src">Source: <a href="design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md">4.1 contract</a> · <a href="../engine/README.md">engine/README.md</a></p></article>
+            <article><h2 class="sub-title">What the user sees</h2><dl class="reads">
+              <dt>“How is it going?”</dt><dd><code>mp read status</code> — layer 0 plus subtasks with record changes since the last ask, including late hand-backs that were not accepted.</dd>
+              <dt>“Why isn't it done?”</dt><dd><code>mp read blocked</code> — block reason and next step.</dd>
+              <dt>“Explain X”</dt><dd><code>mp read show &lt;kind&gt; &lt;id&gt;</code> — layer 2 for X.</dd>
+              <dt>Evidence</dt><dd><code>mp read leaf &lt;id&gt;</code> — layer 3.</dd>
+              <dt>The tree</dt><dd><code>mp read why|from|chain|tree</code> — origins, dependents, a dispatch or a mission.</dd>
+            </dl><p class="ins-src">Source: <a href="../engine/plugin/pm/PM.md">PM.md</a> · <a href="../engine/src/cli/commands/read.ts">read.ts</a> · <a href="../engine/src/cli/layers.ts">layers.ts</a> · <a href="../engine/src/cli/status.ts">status.ts</a></p></article>
+          </div>
+          <h2 class="sub-title">Execution · exploration · legalization</h2>
+          <div class="scroll"><table class="compare">
+            <thead><tr><th scope="col"></th><th scope="col">Execution</th><th scope="col">Exploration</th><th scope="col">Legalization</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Who builds</th><td>Constructor: one task, its own git worktree and write scope.</td><td>Researcher authors; blind evidence uses a Constructor or a Researcher reader. A separate Researcher interprets registered research attempts.</td><td>The product already exists. Auditors fill missing reviews without changing it.</td></tr>
+              <tr><th scope="row">Who judges</th><td>Reviewer: each standard, gap and issue, on the verified candidate.</td><td>Crititor attacks; a new Stabilizer judges every attack round for scope and drift.</td><td>A fresh Auditor per node; then a fresh chain Auditor checks the words and seams.</td></tr>
+              <tr><th scope="row">Loop and cap</th><td>Initial candidate + 2 reworks. The Secretary can grant once, 1–2 more attempts; then only the user. Counts stay within one lineage: execution keeps them for the same task id; a new task id does not inherit them. A new PM batch has a new planning lineage.</td><td>Contract: default 3 attack rounds, including the fresh closing attack; definition can change the budget. Discussion replies also consume a round in 4.1.0. One Secretary extension of 1–2 rounds; then the user. Evidence resumes through a new card.</td><td>Backfill generations → chain → stamp. Failed legalization ends; a new user request starts a new chain object. Interrupted seats use the counted re-dispatch path.</td></tr>
+              <tr><th scope="row">Stop conditions</th><td>Pass, decision needed, abandonment, a stop, exhausted reworks or the same failure twice.</td><td>Convergence on the same version, no pending ruling; budget exhausted; repeated fatal class twice; no progress twice; direction ruling; abandonment.</td><td>Stamp, broken required link, failed backfill or chain not accepted (WI-25).</td></tr>
+              <tr><th scope="row">Back to decision layer</th><td>Constructor questions, Reviewer needs-decision, exhausted loops, Secretary re-plan.</td><td>Settled structural conclusion → Architect only while currently proven. Otherwise no-conclusion → Secretary. Direction or a key answer that does not stand → Secretary → PM and principal.</td><td>The requested result goes to the PM; failed links need their producing work fixed and reviewed.</td></tr>
+              <tr><th scope="row">“Proven” means</th><td>The program's current label: required positions pass on current bases and evidence, constraints covered, required prerequisites proven.</td><td>The same proof rules, with a Crititor + Stabilizer position; unresolved in-scope fatal/serious findings refute, pending direction rulings block acceptance.</td><td>All required nodes proven and the chain accepted; the program stamps at a recorded revision. A later affected basis or evidence removes the stamp.</td></tr>
+            </tbody>
+          </table></div>
+          <p class="ins-src">Source: <a href="../engine/src/flow/execution.ts">execution.ts</a> · <a href="../engine/src/flow/planning.ts">planning.ts</a> · <a href="../engine/src/flow/exploration/machine.ts">exploration/machine.ts</a> · <a href="../engine/src/flow/audit/flow.ts">audit/flow.ts</a> · <a href="design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md">carried process contract</a></p>
+        </section>
+        <section class="view" id="view-overview" aria-labelledby="ov-title" hidden>
+          <div class="view-head"><div><h2 class="view-title" id="ov-title">Task graph</h2><p class="view-sub">Illustrative plan, not a live mission. X1 has already settled and D1 is recorded; the current detailed plan contains T1–T4. Hover or focus highlights dependencies; click a task to open its cycle in 03.</p></div><span class="label" id="ov-count"></span></div>
+          <div class="scroll"><div class="board graph" id="graph"></div></div>
+        </section>
+        <section class="view" id="view-detail" aria-labelledby="dt-title" hidden>
+          <div class="view-head"><div><h2 class="view-title" id="dt-title">Seat lanes</h2><p class="view-sub" id="dt-sub"></p></div></div>
+          <p class="lane-rule">Every dispatched seat: required pages + format checks → refused → fix → hand back again. A refused hand-back does not count; identical recorded content again is a no-op.</p>
+          <div class="bar" id="task-bar" role="group" aria-label="Example task"><span class="label">Task</span></div>
+          <div class="bar" id="scn-bar" role="group" aria-label="Numbered recovery scenario"><span class="label">Scenario</span></div>
+          <div class="scroll"><div class="board lanes" id="lanes"></div></div>
+          <ol class="scenario-steps" id="scn-steps"></ol>
+        </section>
+      </div>
+      <aside class="inspector" id="inspector" aria-live="polite"></aside>
+    </div>
+    <div class="legend" aria-label="Legend"><span class="key"><i class="k-pr"></i>Principal touchpoint</span><span class="key"><i></i>Seat or program step</span><span class="key"><i class="k-cond"></i>Conditional</span><span class="key"><i class="k-gate"></i>Program gate</span><span class="key"><i class="k-sel"></i>Selected</span><span class="key"><i class="k-expl"></i>Exploration</span><span class="key"><i class="k-pill"></i>PM decision</span><span class="key"><i class="k-line"></i>Flow</span><span class="key"><i class="k-dash"></i>Only when needed</span><span class="key"><i class="k-hot"></i>Highlighted path</span></div>
+    <footer class="foot"><span>Proof is computed by mp. Filler identity changes no conclusion. Closing and delivery are independent.</span><nav aria-label="Sources"><a href="design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md">4.1 contract</a><a href="../engine/plugin/pm/PM.md">PM handbook</a><a href="../engine/plugin/pm/wi/INDEX.md">Work instructions</a><a href="workflow-3.0.html">3.0 history</a></nav></footer>
+  </main>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah" d="M0 1 L9 5 L0 9 Z"/></marker>
+    <marker id="ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah-hot" d="M0 1 L9 5 L0 9 Z"/></marker>
+  </defs></svg>
+  <script>
+  (() => {
+    'use strict';
+    const $ = (sel, root = document) => root.querySelector(sel);
+    const NS = 'http://www.w3.org/2000/svg';
+    const params = new URLSearchParams(location.search), capture = params.has('capture');
+    // File citations are relative to this page, and work both from disk and on Pages.
+    const src = (...files) => [...new Set(files)].map(f => ({ text: f, href: f.startsWith('docs/') ? f.slice(5) : '../' + f }));
+    const F = {
+      contract: 'docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md',
+      carried: 'docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md',
+      handbook: 'engine/plugin/pm/PM.md', readme: 'engine/README.md',
+      planning: 'engine/src/flow/planning.ts', execution: 'engine/src/flow/execution.ts',
+      secretary: 'engine/src/flow/secretary.ts', failures: 'engine/src/flow/failures.ts',
+      xflow: 'engine/src/flow/exploration/flow.ts', xstep: 'engine/src/flow/exploration/step.ts',
+      machine: 'engine/src/flow/exploration/machine.ts', definition: 'engine/src/flow/exploration/definition.ts',
+      audit: 'engine/src/flow/audit/flow.ts', pm: 'engine/src/process/pm.ts', seat: 'engine/src/process/seat.ts',
+      close: 'engine/src/process/close.ts', delivery: 'engine/src/delivery/delivery.ts',
+      manifest: 'engine/src/delivery/manifest.ts', proof: 'engine/src/delivery/candidate.ts',
+      land: 'engine/src/git/land.ts', cli: 'engine/src/cli/commands/pm.ts',
+      read: 'engine/src/cli/commands/read.ts', seatcli: 'engine/src/cli/commands/seat.ts',
+      index: 'engine/plugin/pm/wi/INDEX.md', caps: 'engine/src/common/records.ts', environment: 'engine/src/evaluator/environment.ts',
+      work: 'engine/src/memory/domain/work.ts', layers: 'engine/src/cli/layers.ts', status: 'engine/src/cli/status.ts'
+    };
+    const role = id => 'engine/plugin/roles/' + id + '.md';
+    const wiFile = id => 'engine/plugin/pm/wi/' + id + '.md';
+    // The maintainer's example assignments; seat identity never depends on the filler.
+    const MODEL_ASSIGNMENTS = Object.freeze({ pm: 'Opus 5.5 xhigh', researcher: 'Opus 5.5 xhigh', secretary: 'Opus 5.5 xhigh', architect: 'Opus 5.5 xhigh', constructor: 'Sonnet 5.5 xhigh', experiment: 'Opus 5.5 xhigh', reviewer: 'GPT-6.1-Sol xhigh (via Codex)', crititor: 'GPT-6.1-Sol xhigh (via Codex)', calibrator: 'GPT-6.1-Sol xhigh (via Codex)', stabilizer: 'GPT-6.1-Sol xhigh (via Codex)', auditor: 'GPT-6.1-Sol xhigh (via Codex)' });
+    const HARNESS_ASSIGNMENTS = Object.freeze(Object.fromEntries(Object.keys(MODEL_ASSIGNMENTS).map(id => [id, MODEL_ASSIGNMENTS[id].startsWith('GPT-') ? 'Codex' : 'Claude Code'])));
+    const FILLERS = Object.freeze(Object.fromEntries(Object.keys(MODEL_ASSIGNMENTS).map(id => [id, { model: MODEL_ASSIGNMENTS[id], harness: HARNESS_ASSIGNMENTS[id] }])));
+    const LANES = [
+      { id: 'principal', name: 'Principal', note: 'speaks only to the PM' },
+      { id: 'pm', name: 'PM', note: 'aligns · dispatches · records decisions' },
+      { id: 'calibrator', name: 'Calibrator', note: '① direction · ② derivation' },
+      { id: 'architect', name: 'Architect', note: 'decomposition · independent feasibility' },
+      { id: 'secretary', name: 'Secretary', note: 'one escalation · recorded authority' },
+      { id: 'constructor', name: 'Constructor', note: 'one task · one worktree; blind experiments' },
+      { id: 'reviewer', name: 'Reviewer', note: 'independent judgment on the candidate' },
+      { id: 'researcher', name: 'Researcher', note: 'author · reader · separate interpreter' },
+      { id: 'crititor', name: 'Crititor', note: 'attack · fresh closing attack' },
+      { id: 'stabilizer', name: 'Stabilizer', note: 'every attack round · scope and drift' },
+      { id: 'auditor', name: 'Auditor', note: 'node backfills · chain review, on request' },
+      { id: 'program', name: 'mp (program)', note: 'checks · candidates · runs · labels · git' }
+    ];
+    const S = {};
+    function step(id, lane, title, plain, copy, act, files, facts = [], kind = '') {
+      S[id] = { id, lane, title, plain, copy, act, src: src(...files, ...(FILLERS[lane] ? [role(lane)] : []), ...(FILLERS[lane] && lane !== 'pm' ? [F.seat] : [])), facts: [...facts, ...(FILLERS[lane] && lane !== 'pm' ? ['All seats: missing must-read pages or invalid fields → refused → fix → hand back again. Identical recorded hand-back → no-op.'] : [])], kind };
+    }
+    const hb = 'mp seat <id> handback --stdin';
+    step('message', 'principal', 'Talk to the PM', 'Each message becomes W-n', 'The principal speaks in plain sentences to the only PM, the session on their screen. The PM records every message verbatim before other work; the harness may provide an optional hook.', 'mp pm say "<message, verbatim>"', [F.contract, F.handbook, F.cli]);
+    step('answer', 'principal', 'Answer an escalation', 'PM records your ruling', 'An important decision outside recorded authority comes through the PM. The principal chooses; the PM records the answer linked to the words entry. Only the affected item waits.', 'mp pm say "<answer>" · mp pm answer <mission> <escalation> --option <option> --words W-n', [F.secretary, F.cli, wiFile('WI-24')]);
+    step('consent', 'principal', 'Consent to deliver', '“Deliver” also consents to land', 'The principal names the outputs to deliver. The PM records the words and uses that entry for delivery and landing. Landing fast-forwards from the recorded base.', 'mp pm say "<consent>" · mp pm deliver <mission> --outputs <outputs> --words W-n · mp pm land <delivery> --words W-n', [F.contract, F.handbook, F.cli]);
+    step('progress', 'principal', 'Ask how it is going', 'One query; depth on demand', 'Status returns layer 0 and subtasks whose changedRev advanced since the last ask. Record changes include late hand-backs that were not accepted, even if the task state stayed the same. Blocked gives block reasons; show expands the requested item; leaf gives evidence.', 'mp read status · mp read blocked · mp read show <kind> <id> · mp read leaf <id>', [F.handbook, F.read, F.layers, F.status]);
+    step('halt', 'principal', 'Stop or withdraw', 'The PM records a stop at once', 'A stop is written directly before propagation or landing recovery. New dispatches, accepted hand-backs and landing authorizations in scope are refused. The PM ends running seats through the harness and reports what it confirmed.', 'mp pm stop "<words>" --words W-n', [F.contract, F.pm, F.seat, F.land]);
+    step('audit-consent', 'principal', 'Request legalization', 'See the audit plan; agree to start', 'Only a user request initiates legalization. The program first lists the backfills and seat count. The principal sees that plan before agreeing to start. This can happen before or after closing.', 'mp pm legalize request <mission> <endpoint> --words W-n · mp pm legalize start <mission> <legalization> --words W-n', [F.contract, F.audit, F.cli]);
+    step('session', 'pm', 'Session', 'One PM, any harness', 'At session start the PM records its filler, reads the handbook core and asks for notices and ready steps. The PM launches seats using the sub-agent feature of its own harness.', 'mp pm session --filled-by "<harness>/<model>" · mp pm next', [F.pm, F.cli, F.handbook]);
+    step('words', 'pm', 'Record the words', 'Verbatim, append-only W-n', 'Each message is an anchored words entry. Repeating the latest identical message is a no-op. A requirement sourced from words must quote that W-n verbatim; a derived item instead names a recorded authorization.', 'mp pm say "<message>"', [F.pm, F.cli, F.contract]);
+    step('requirements', 'pm', 'Mission + requirements', 'Quote or recorded authorization', 'Open a mission and record individually versioned goal, limit, acceptance, authorization or decision items. Each item either quotes W-n verbatim or derives from a recorded authorization item. Withdrawn items stay withdrawn; a return uses a new id. Long-term constraints are separate.', 'mp pm mission open <mission> · mp pm requirement add <mission> <item> --type <type> --text "<text>" (--quote "<quote>" --words W-n | --authorization <item>) · mp pm constraint add', [F.pm, F.cli, 'engine/src/flow/requirements.ts']);
+    step('batch', 'pm', 'PM plan batch', 'Results, provenance, mode', 'The PM submits a batch of requirement and result-level plan changes. Each element names its provenance. Explorations are defined here; tasks beyond an exploration that has not stood are not decomposed yet.', 'mp pm plan template <mission> · mp pm plan submit <mission> --file <plan.json> --words W-n --mode stable|fast', [F.planning, F.cli, F.carried]);
+    step('pm-decision', 'pm', 'PM decision', 'Record the ruling in authority', 'The PM receives the Secretary notice and handles the decision within recorded authorization, or relays the principal’s answer. New direction or changed requirements go through a new PM plan batch. It never judges the product.', 'mp pm answer <mission> <escalation> --option <option> --words W-n · mp pm plan submit', [F.secretary, F.cli, wiFile('WI-24')]);
+    step('read', 'pm', 'Read at the asked depth', 'Status · blocks · detail · evidence', 'Use the principal’s requested depth. Status marks this ask unless --no-mark is set. The tree reads walk origins to words, dependents, a dispatch’s handover chain, or the whole mission.', 'mp read status · mp read blocked · mp read show <kind> <id> · mp read leaf <id> · mp read why <id> · mp read from <id> · mp read chain <dispatch> · mp read tree <mission>', [F.handbook, F.read]);
+    step('cal1', 'calibrator', 'Calibrator ①', 'Direction audit', 'A new instance audits a PM alignment batch against the words and authority. Pass makes the PM plan effective; fail returns reasons and questions to the PM. A continuation can request a full review.', hb, [F.planning, F.carried], ['The return to the PM is uncapped: the principal is present.', 'The seat reads every required material page.']);
+    step('effective', 'program', 'Plan in effect', 'Only after Calibrator ① passes', 'The program records the PM plan’s effective event. Only its executable scope is decomposed. Explorations can start from the effective PM plan independently of the detailed execution plan.', 'mp pm next (advances the recorded flow)', [F.planning, F.xstep]);
+    step('decompose', 'architect', 'Decomposition', 'Read-only; search existing interfaces', 'An Architect decomposes the approved PM plan into interfaces, modules and full task cards. Every new interface includes what existing interfaces were searched and why none was reused. It reads a checkout and changes no project file.', 'mp seat <id> checkout · ' + hb, [F.planning, 'engine/src/flow/mechanical.ts', F.carried]);
+    step('mechanical', 'program', 'Mechanical check', 'Coverage · paths · interfaces · DAG', 'The program checks provenance and coverage in executable scope, parallel write conflicts, acyclic scheduling dependencies, interface definitions and exploration order. Fail returns to decomposition. Changes to user-specified order go to the Secretary.', 'mp pm next (mechanical checks within flow advancement)', [F.planning, 'engine/src/flow/mechanical.ts'], ['At most 3 mechanical returns; repeated failure twice stops early.', 'Exhaustion is WI-08.'], 'gate');
+    step('feasibility', 'architect', 'Feasibility', 'Independent, read-only instance', 'A separate Architect checks recovery, capacity, estimates, critical path, dependencies and conflicts. Required for two or more tasks, an experiment, an exclusive resource or a long run; a single ordinary task skips this step.', hb, [F.planning, 'engine/src/flow/plandoc.ts', F.carried], ['One return to decomposition; unresolved blockers go to the Secretary.'], 'cond');
+    step('cal2', 'calibrator', 'Calibrator ②', 'Audit derivation and additions', 'Check the detailed plan’s semantic mapping to the approved PM plan and classify Architect additions. Pass releases the tasks; escalation goes to the Secretary. The Calibrator never directly returns a plan to the Architect.', hb, [F.planning, F.carried]);
+    step('detail', 'program', 'Detailed plan in effect', 'Standards recorded; tasks released', 'The program records the effective detailed plan and its standards. Tasks wait for accepted scheduling dependencies. Stable mode checks proof before queueing a Constructor; fast mode allows proof debt to carry forward. Claim does not re-check that proof gate.', 'mp pm next', [F.planning, F.execution]);
+    step('dispatch', 'pm', 'Next → dispatch', 'Claim step; launch through harness', 'Notices come first. The PM claims a ready step once and starts the named seat with the fixed prompt and its card only. Parallel steps may run together. The program launches no seats.', 'mp pm next · mp pm dispatch <step> --filled-by "<harness>/<model>"', [F.pm, F.cli, F.handbook]);
+    step('gate', 'program', 'Stable / fast gate', 'Checked before queueing', 'Before queueing a Constructor, both modes require accepted scheduling dependencies. Stable also requires the detailed plan and dependency products proven. Fast permits proof debt. Once queued, the claim does not re-check these inputs: a changed basis can leave a queued step dispatchable.', 'mp pm next (flow checks before queueing)', [F.execution, F.pm], ['Gate → ready → dispatch; accepted and proven are different facts.'], 'gate');
+    step('renew', 'pm', 'Renew after a move', 'Rerun, or review again', 'Environment identity includes OS, OS version, architecture and the declared version-command outputs and digests. Equal used fields in declared runs renew mechanically; otherwise execution queues verification and a Reviewer on the same candidate. Only converged explorations with stale experiment evidence reopen for reruns, attacker re-check and Stabilizer; settled results accepted with risk do not take this path.', 'mp pm renew', [F.pm, F.execution, F.xstep, F.environment], ['Readings alone do not trigger experiment renewal.'], 'cond');
+    step('release', 'pm', 'Release interrupted seat', 'Ended → free leases → retry', 'The program cannot observe harness processes. Confirmed --ended removes the worktree and frees exclusive leases. --abandoned requeues within the loop limit but keeps the old worktree and leases. Re-dispatch is possible only without lease conflicts; later confirm the old dispatch ended to free its leases. Late hand-backs are recorded and not accepted.', 'mp pm release <id> --ended · mp pm release <id> --abandoned', [F.pm, F.failures, F.work, wiFile('WI-28')], ['Two re-dispatches; exhausted lineage → WI-08.'], 'cond');
+    step('build', 'constructor', 'Build in own worktree', 'Task write scope', 'Implement the task inside its write scope using the harness’s tools. Own test runs are scratch. Hand back a report with work done, unmet standards, unfixed problems and decision questions. Leave changes as files; the program collects them.', 'mp seat <id> card · mp seat <id> read <material> · ' + hb, [F.execution, F.seat]);
+    step('collect', 'program', 'Collect candidate', 'Every non-ignored change', 'During Constructor hand-back, collect modified, deleted and new non-ignored files into the candidate commit without git add. A change outside the allowed paths refuses the hand-back. Ignored files inside the scope are listed and excluded.', 'mp seat <id> handback --stdin (program collection)', [F.seat, 'engine/src/git/workspace.ts']);
+    step('verify', 'program', 'Verification runs', 'Clean candidate checkout', 'Run the declared commands on a clean checkout of the candidate commit. Record commit, commands, environment identity, run class, results and output hash; keep failing tails in the run summary. The Constructor worktree’s scratch files do not enter this checkout.', 'mp pm next / mp seat <id> handback --stdin (program verification)', [F.execution, 'engine/src/process/runs.ts']);
+    step('review', 'reviewer', 'Review the candidate', 'Pass · rework · needs-decision', 'Independently judge the exact candidate the program verified, one answer per standard, gap and issue, with evidence or file pointers. Rework returns problems to a Constructor; unclear or conflicting standards go to the Secretary. Reviewer reruns are sampling runs.', 'mp seat <id> checkout · mp seat <id> rerun <command> · ' + hb, [F.execution, F.seat]);
+    step('proof', 'program', 'Accepted + label', 'mp computes proof', 'A Reviewer pass records execution acceptance. The program computes the current proof label from required reviews, current bases, constraints, evidence and prerequisites. Accepted work can be not fully proven. Accepted products unlock scheduling dependents.', 'mp read show task <id> · mp read status', [F.execution, F.contract, F.carried, 'engine/src/process/labelView.ts'], [], 'gate');
+    step('author', 'researcher', 'Author / revise', 'Question, goal and attack scope', 'Own an exploration’s product and defend it. Each dispatch discusses, asks for blind evidence or submits a full version. Continuation uses saved notes and a new card; no harness session id is needed.', 'mp seat <id> request-evidence --stdin · ' + hb, [F.xflow, F.machine, F.definition]);
+    step('attack', 'crititor', 'Attack this version', 'Fresh closing attacker too', 'Find real holes within the attack scope and re-check previous fixes or rebuttals. Cite severity, basis and consequence. A fresh closing instance attacks the same frozen version before convergence. Evidence can be requested without stating an expected result.', 'mp seat <id> request-evidence --stdin · ' + hb, [F.xflow, F.machine]);
+    step('disposition', 'researcher', 'Answer each finding', 'Revise · rebut · escalate', 'After an attack, answer only when its verdict is not pass and an open finding exists: the author for design/method, the independent Interpreter for research reasoning. Revise changes the product; rebut cites completed blind evidence; escalate names a direction question. A pass, including general-only findings, or no open finding goes straight to the Stabilizer. A later Stabilizer severity increase can require a response.', hb, [F.xflow, F.machine]);
+    step('stabilize', 'stabilizer', 'Stabilize every round', 'Scope + drift', 'A fresh Stabilizer judges scope, severity and drift after each attack round, including a clean pass. A clean nonclosing pass schedules a fresh Crititor on the same version; method pass starts registered attempts instead. An open finding made binding by raising its severity to serious returns to the author, or the research Interpreter, to answer. An undecided verdict can receive one re-judgment in the same round, without another attack round.', hb, [F.xflow, F.machine, F.xstep], ['Direction questions wait for Secretary (WI-33).', 'Default budget: 3 attack rounds; discussion replies also consume this budget in 4.1.0 (WI-08).']);
+    step('settle', 'program', 'Converge / stop → settle', 'Route only from current proof', 'Convergence needs no unresolved in-scope fatal/serious findings on the same version, a fresh closing attack and no pending direction ruling. Budget, fatal-repeat and no-progress stops go to Secretary. A settled structural conclusion goes to Architect only while currently proven. An unproven conclusion becomes no-conclusion for routing and goes to Secretary; direction results go there too.', 'mp pm next · mp read show exploration <id>', [F.machine, F.xstep, F.planning]);
+    step('experiment', 'constructor', 'Blind experiment', 'Steps only; no expected result', 'Carry out an evidence request exactly as the steps say. All files written are scratch. Use program reruns and cite their run ids; record unavailable quantities and unchecked assertions honestly. Evidence is not an execution product.', 'mp seat <id> rerun <command> · ' + hb, [F.xflow, 'engine/src/flow/exploration/cards.ts']);
+    step('reading', 'researcher', 'Blind reading', 'Steps, sources, observations', 'A separate Researcher reader investigates the listed sources without interpreting the result. Record every step, quantity and assertion with its source, including not obtained or not checked.', hb, [F.xflow, 'engine/src/flow/exploration/cards.ts']);
+    step('evidence', 'program', 'Record blind evidence', 'Sampling runs; resume by card', 'The program records executions and readings and returns the saved notes with new evidence to the requesting author or attacker in a new card. Experiments are sampling runs and never reused. Default maximum 3 evidence requests per turn; excess requests are recorded not run.', 'mp seat <id> rerun <command> · mp pm next', [F.xflow, F.machine, F.definition, F.seatcli]);
+    step('interpret', 'researcher', 'Interpret research', 'Registered attempts, all cited', 'For research explorations, the method is attacked before registered experiments or readings run. A new Researcher, who took no part in those executions, interprets every attempt record, failed and unrun ones included; the Crititor then attacks the reasoning.', hb, [F.xflow, F.machine, 'engine/src/flow/exploration/register.ts'], ['A key answer that does not stand counts as no conclusion.'], 'cond');
+    step('secretary', 'secretary', 'Secretary', 'Decide one escalation', 'Decide within recorded authority; needs-user asks through PM. Important decisions are notified only once the applied record matches the option. Some restart/grant paths omit that option, so their important-within-authority notice is absent in 4.1.0. First release normally requeues the Secretary within the re-dispatch limit, subject to leases. A failed or exhausted Secretary step goes to WI-24.', hb, [F.secretary, F.failures, F.pm, wiFile('WI-08'), wiFile('WI-24'), wiFile('WI-33')], ['One Secretary grant of 1–2 attempts per lineage; more requires the principal.']);
+    step('deliver', 'pm', 'Deliver', 'Selected outputs + consent W-n', 'Start delivery with the principal’s recorded consent and selected output versions. The program computes the manifest, creates and checks the final candidate and runs closing checks. Closing the mission is a separate operation.', 'mp pm deliver <mission> --outputs <outputs> --words W-n', [F.pm, F.delivery, F.cli]);
+    step('manifest', 'program', 'Manifest + proof check', 'One version per path; final tree', 'Follow selected outputs and their required prerequisites; proof units enter whole. Check one version per path/module. Build on the target branch’s current base and compare each scope, prerequisite and evidence input on the final candidate. Changed content is marked not fully proven and reported; 4.1.0 does not automatically queue its re-acceptance.', 'mp pm deliver <mission> --outputs <outputs> --words W-n (program checks)', [F.manifest, F.proof, F.delivery, 'engine/src/flow/mechanical.ts'], ['Incompatibility or overlay conflicts require a PM batch; 4.1.0 does not generate that delivery integration task automatically.', 'Ordinary detailed plans already enforce integration dependencies.', 'Only own-content differences enter needsReverification; prerequisite/evidence mismatches can lower proof without WI-07.'], 'gate');
+    step('checks', 'program', 'Closing checks + ref', 'Clean delivery candidate', 'Run the project’s closing commands on a clean candidate checkout. A failed check produces WI-21 and no delivery ref. Otherwise create refs/mission-pipeline/delivered/<mission>/<op> and record the proof results, including any not fully proven outputs.', 'mp pm deliver <mission> --outputs <outputs> --words W-n', [F.delivery, F.pm, wiFile('WI-21')]);
+    step('land', 'pm', 'Land', 'Use the same consent W-n', 'Request landing of the delivery from its recorded base. If that base moved, the CLI rebuilds and checks a new delivery, counted on the same delivery loop; the PM must land the new delivery id.', 'mp pm land <delivery> --words W-n', [F.pm, F.cli, F.land, wiFile('WI-05')]);
+    step('landing', 'program', 'Fast-forward B → D', 'Intent → git → inspect target ref', 'Hold the landing lock and record intent before git. Branch checked out nowhere: compare-and-swap update-ref. One clean permitted worktree: verify branch and HEAD at B, then merge --ff-only. Judge completion by the target ref at D. Recovery at B leaves intent open; WI-06 controls retry. Otherwise leave the ref for the principal.', 'mp pm land <delivery> --words W-n · mp pm land <delivery> --deliver-ref-only', [F.land, F.cli, wiFile('WI-06')], ['First attempt + 3 more, or the same verdict twice → WI-08 notice. This path does not automatically create a Secretary escalation in 4.1.0.']);
+    step('close', 'pm', 'Close: three tiers', 'with-risk · full · post-audit', 'Close records an immutable snapshot and holds production. full requires settled labels; proven accepted task products, the latest effective detailed plan and settled exploration artifacts; and no unaccepted nonabandoned plan tasks, unsettled explorations, queued steps or in-flight dispatches. Open escalations are listed but excluded from that unfinished total; PM batches not yet effective are not checked. PM stops in-flight production seats through its harness and releases them. mp pm mission open resumes held production.', 'mp pm close <mission> --mode with-risk|full|post-audit · mp pm release <id> --ended · mp pm mission open <mission>', [F.close, F.pm, F.cli, F.readme], ['Task checks span ids from all effective detailed plans; abandoned current task specs are skipped. Only the latest effective detailed plan enters proof checks.', 'with-risk / post-audit close now and list risks; audits, deliveries and permitted repairs continue.', 'CLI has no waitRunning option. The API closes immediately too; waitRunning only allows in-flight hand-backs.']);
+    step('legalize', 'pm', 'Legalize on request', 'Request → inspect → agree → start', 'Only the principal’s request starts legalization. Show the program’s backfill list and estimated seat count before recording agreement to start. A failed attempt ends; another request creates a new chain object.', 'mp pm legalize request <mission> <endpoint> --words W-n · mp pm legalize show <mission> <legalization> · mp pm legalize start <mission> <legalization> --words W-n', [F.audit, F.cli, wiFile('WI-25')], [], 'cond');
+    step('audit-plan', 'program', 'Backfill list', 'Generations; stop at proven nodes', 'Walk the endpoint’s required lineage and plan missing, undecided or stale review positions and constraint coverage. Parents are proven before children are backfilled; a restored parent may restore children mechanically. A negated or withdrawn node on a required path prevents legalization.', 'mp pm legalize show <mission> <legalization>', [F.audit, 'engine/src/flow/audit/lineage.ts']);
+    step('audit-node', 'auditor', 'Node backfill', 'Fresh Auditor for each node', 'Fill exactly the required review positions on the card against current bases and constraints. Never override a negation. A failed backfill ends the legalization under WI-25; judgments already recorded keep counting.', 'mp seat <id> checkout · mp seat <id> rerun <command> · ' + hb, [F.audit, wiFile('WI-25')]);
+    step('audit-chain', 'auditor', 'Chain review', 'Words honoured; seams hold', 'Once the nodes are proven, a separate Auditor judges whether the endpoint honours each quote and every seam holds. It does not re-judge nodes. A chain that does not pass ends this legalization.', hb, [F.audit, wiFile('WI-25')]);
+    step('stamp', 'program', 'Legalization stamp', 'Proof at a recorded revision', 'The program stamps only when the chain acceptance object is proven. A later affected basis, node or chain evidence removes the stamp. The requested result goes directly to the principal through the PM.', 'mp pm legalize show <mission> <legalization> · mp read why <id>', [F.audit, F.read, F.contract]);
+    step('stop', 'pm', 'Record stop', 'No new action in scope', S.halt.copy, S.halt.act, [F.pm, F.seat, F.land, wiFile('WI-26')], [], 'cond');
+    step('copy', 'program', 'Open copied memory', 'Check chain, leaves, objects', 'On a move, verify the event chain, rebuild state and labels, check leaves and referenced git objects, and repair worktrees when the repository is inside the folder. A broken event chain stops all writes (WI-29); missing content holds only users of it (WI-30). A shared repository holds git writes until PM confirms the active copy (WI-31).', 'mp read status · mp pm confirm-copy', [F.contract, F.readme, wiFile('WI-29'), wiFile('WI-30'), wiFile('WI-31')], [], 'cond');
+    step('drain', 'pm', 'Drain label work', 'WI-32: let large changes stop', 'Reads show the last stored labels marked recomputing. Proof-dependent decisions wait while a frontier exists. Once new large changes stop, the PM drains batches; stops are written directly and are never queued behind propagation work.', 'mp pm drain', [F.pm, F.contract, wiFile('WI-32')], [], 'cond');
+    step('gap', 'program', 'Held: queued steps', 'Close · stop · git hold · leases', 'mp pm next lists Held reasons for queued steps only: a closed mission, a stop, a git-write hold or an exclusive lease. Missing accepted dependencies and stable proof make execution flow return before queueing; they are not entries in this Held list. Use mp read blocked for the available block view.', 'mp pm next · mp read blocked', [F.pm, F.execution], [], 'cond');
+    step('ready','program','Ready step','Queued after the gate','The flow submitted this step after checking its inputs. PM next lists it subject to close, stop, git hold and leases. Dispatch claim does not re-check the stable proof/dependency gate.','mp pm next',[F.execution,F.pm]);
+    step('leases-free','program','Leases released','After confirmed ended','An ended release records release of this dispatch’s exclusive leases. An abandoned release retains them; a conflicting new claim is refused until they are released.','mp pm release <id> --ended',[F.pm,F.work,'engine/src/memory/projection.ts']);
+    step('handback-check','program','Hand-back checks','Every dispatched seat','Required material pages and each role’s hand-back format are checked. A refusal does not count: read missing pages or fix fields and submit again. Once recorded, identical content again is a no-op; different content is refused.','mp seat <id> read <material> --page <n> · mp seat <id> handback --stdin',[F.seat,F.seatcli]);
+    step('fix-constructor','constructor','Fix and hand back again','Same dispatch after refusal','Complete must-read pages or correct the refused hand-back. A format refusal does not consume an attempt. The same already recorded hand-back is a no-op.',hb,[F.seat]);
+    step('fix-researcher','researcher','Fix and hand back again','Same dispatch after refusal','Every dispatched seat follows this rule: complete must-read pages or fix fields, then hand back again. Identical recorded content is a no-op.',hb,[F.seat]);
+    step('method','program','Register accepted method','Research branch','After method attack and stabilization pass, freeze its version and run the registered experiments/readings. When every attempt has a record, an independent Researcher interprets all of them.','mp pm next',[F.machine,F.xflow,'engine/src/flow/exploration/register.ts']);
+    step('stop-release','pm','Release / narrow stop','Then plan cancelled work again','With the principal’s confirmation, release or narrow the stop. Cancelled work does not return automatically: submit a new PM plan batch where needed.','mp pm stop-release <stop> · mp pm stop-narrow <stop> --scope mission:<id> · mp pm plan submit',[F.cli,F.pm,wiFile('WI-26')]);
+    step('mission-open','pm','Open mission again','Resume held production','Opening a closed mission releases the close hold on its queued production steps. Existing stops and other gates still apply.','mp pm mission open <mission>',[F.close,F.cli]);
+    step('copy-recover','pm','WI-29 recovery','Copy again, or continue-from','Copy the memory again from an idle source, or continue from the last valid event named by status. continue-from cuts later events, rebuilds state/labels and resumes writes; redo the lost words, decisions and dispatches.','mp read status · mp pm continue-from <event>',[F.cli,wiFile('WI-29')]);
+    step('confirm-copy','pm','Confirm active copy','Gate for shared git writes','A copied folder sharing an external repository holds git writes: Constructor dispatch, candidate collection, delivery and landing. PM confirms the active copy before these writes resume.','mp pm confirm-copy',[F.cli,F.pm,wiFile('WI-31')],[],'gate');
+    step('landing-refused','program','Occupied → refused','WI-01 / WI-02; ref stays','WI-01: several occupants or rebase/bisect in progress. WI-02: a missing, dirty, uncertain or unpermitted external worktree. One clean permitted worktree can land; the refusal leaves the delivery ref.','mp pm land <delivery> --words W-n',[F.land,wiFile('WI-01'),wiFile('WI-02')]);
+    step('worktree-mismatch','program','Landed, worktree differs','WI-04 after target reaches D','A ref at D records landing done. A worktree that differs from D is reported separately under WI-04; it is not silently overwritten.','mp pm land <delivery> --words W-n',[F.land,wiFile('WI-04')]);
+    step('close-intent','pm','Close landing intent','Fresh check under landing lock','PM may close an open intent as not landed. A fresh check at D records landed instead; a held landing lock reports in progress. Otherwise close the intent and keep the delivery ref.','mp pm land <delivery> --close-not-landed',[F.land,F.cli,wiFile('WI-06')]);
+    step('intent-result','program','Intent result','Not landed / at D / in progress','Only after the locked fresh check: close as not landed while retaining the delivery ref, record done if already at D, or leave an in-progress landing untouched.','mp pm land <delivery> --close-not-landed',[F.land,F.cli]);
+    // Fixed coordinates, rendered from data and scaled to fit, as in the historical atlas.
+    const PW = 1400, PH = 1400, NW = 166, NH = 86;
+    const PN = [];
+    const pn = (id, x, y, w = NW, h = NH, note = S[id].plain) => PN.push({ id, x, y, w, h, note });
+    ['message','answer','consent','progress','halt','audit-consent'].forEach((id, i) => pn(id, 22 + i * 230, 30, 210, 70));
+    pn('session',22,150,160); pn('words',206,150,170); pn('requirements',400,150,232);
+    pn('batch',656,150,206); pn('pm-decision',886,150,236); pn('read',1146,150,232);
+    pn('cal1',22,324,150); pn('effective',196,324,150); pn('decompose',370,324,168);
+    pn('mechanical',562,324,164); pn('feasibility',750,324,168); pn('cal2',942,324,148); pn('detail',1114,324,264);
+    pn('gate',44,538,160); pn('ready',228,538,160); pn('dispatch',412,538,160); pn('renew',596,538,220); pn('release',840,538,296);
+    pn('build',228,686,166); pn('collect',422,686,166); pn('verify',616,686,166); pn('review',810,686,166); pn('proof',1004,686,132);
+    pn('secretary',44,838,160); pn('author',228,838,156); pn('attack',410,838,156); pn('disposition',592,838,156); pn('stabilize',774,838,156); pn('settle',956,838,180);
+    pn('experiment',410,964,156); pn('reading',592,964,156); pn('evidence',774,964,156); pn('interpret',956,964,180);
+    pn('deliver',22,1130,150); pn('manifest',196,1130,180); pn('checks',400,1130,180); pn('land',604,1130,150);
+    pn('landing',778,1130,180); pn('close',982,1130,190); pn('legalize',1196,1130,182);
+    pn('audit-plan',620,1256,184); pn('audit-node',830,1256,170); pn('audit-chain',1024,1256,168); pn('stamp',1216,1256,162);
+    const PE = {};
+    // Every edge carries its own explanation and file provenance, exposed by click and title.
+    function edge(id, a, b, text, files, opts = {}) { PE[id] = { id, a, b, text, src: src(...files), ...opts }; }
+    const planSrc = [F.planning], execSrc = [F.execution], xpSrc = [F.xflow, F.machine, F.xstep];
+    edge('speak','message','words','The PM records every user message as W-n.',[F.handbook,F.pm]);
+    edge('start','session','words','The session identifies the PM filler; user messages are recorded verbatim.',[F.handbook,F.cli]);
+    edge('quote','words','requirements','A requirement quotes W-n verbatim, or derives from a recorded authorization item.',[F.pm,F.cli,'engine/src/flow/requirements.ts']);
+    edge('plan','requirements','batch','Items and changed/dependent items become a PM alignment batch.',planSrc);
+    edge('batch-cal1','batch','cal1','Calibrator ① audits each PM batch.',planSrc,{ p:[[759,236],[759,272],[97,272],[97,324]] });
+    edge('cal1-effective','cal1','effective','Pass: record PM plan effective.',planSrc);
+    edge('effective-decompose','effective','decompose','Decompose executable scope after direction pass.',planSrc);
+    edge('decompose-mechanical','decompose','mechanical','Read-only Architect hand-back goes to program checks.',[F.planning,'engine/src/flow/mechanical.ts']);
+    edge('mechanical-feasibility','mechanical','feasibility','Checks pass; feasibility if required by the program’s rule.',[F.planning,'engine/src/flow/plandoc.ts'],{cond:true});
+    edge('feasibility-cal2','feasibility','cal2','Feasible or Secretary-accepted risk → Calibrator ②.',planSrc);
+    edge('skip-feasibility','mechanical','cal2','One ordinary task skips independent feasibility.',[F.planning,'engine/src/flow/plandoc.ts'],{cond:true,p:[[644,324],[644,303],[1016,303],[1016,324]]});
+    edge('cal2-detail','cal2','detail','Pass or authorized Secretary acceptance makes the detailed plan effective.',planSrc);
+    edge('detail-gate','detail','gate','The execution flow checks accepted dependencies and stable proof before queueing the Constructor.',[F.planning,F.execution],{p:[[1246,410],[1246,458],[34,458],[34,581],[44,581]]});
+    edge('gate-ready','gate','ready','Inputs pass the selected mode’s gate; submit the Constructor as a ready step.',[F.execution]);
+    edge('ready-dispatch','ready','dispatch','PM claims a queued step. Stable proof and dependencies are not re-checked at claim.',[F.pm,F.execution]);
+    edge('dispatch-build','dispatch','build','Claim creates this dispatch’s worktree; the Constructor builds.',[F.pm,F.execution]);
+    edge('collect','build','collect','Validated hand-back: collect changes in the allowed write scope.',[F.seat]);
+    edge('verify','collect','verify','Verify the candidate commit on a clean checkout.',execSrc);
+    edge('review','verify','review','Reviewer sees the same candidate and program runs.',execSrc);
+    edge('pass','review','proof','Pass records acceptance; mp computes the current proof label.',execSrc);
+    edge('effective-author','effective','author','Exploration starts from the effective PM plan; it need not wait for detailed execution tasks.',[F.planning,F.xstep],{p:[[271,410],[271,478],[218,478],[218,881],[228,881]]});
+    edge('dispatch-author','dispatch','author','The PM dispatches a Researcher author through its harness.',[F.pm,F.xflow],{p:[[492,624],[492,660],[220,660],[220,881],[228,881]]});
+    edge('author-attack','author','attack','Submit a product version for attack.',xpSrc);
+    edge('attack-dispose','attack','disposition','Only a verdict other than pass with an open finding needs dispositions: author for design/method, Interpreter for research reasoning. Otherwise go straight to Stabilizer, including a pass with general-only findings.',xpSrc,{cond:true});
+    edge('dispose-stabilize','disposition','stabilize','Judge scope and drift after the author’s dispositions.',xpSrc);
+    edge('attack-stabilize','attack','stabilize','A pass, including general-only findings, or no open finding goes directly to Stabilizer.',xpSrc,{cond:true,p:[[488,838],[488,816],[852,816],[852,838]]});
+    edge('stabilize-settle','stabilize','settle','Evaluate convergence and stop conditions after every stabilization.',xpSrc);
+    edge('blind-experiment','author','experiment','Optional blind evidence execution; no expectation on its card.',xpSrc,{cond:true});
+    edge('blind-reading','author','reading','Optional blind reading by a separate Researcher.',xpSrc,{cond:true,p:[[306,924],[306,944],[670,944],[670,964]]});
+    edge('attacker-evidence','attack','experiment','The attacker may also request blind evidence.',xpSrc,{cond:true});
+    edge('experiment-record','experiment','evidence','Record sampling runs and blind observations.',xpSrc,{cond:true,p:[[488,1050],[488,1070],[852,1070],[852,1050]]});
+    edge('reading-record','reading','evidence','Record source-cited observations.',xpSrc,{cond:true});
+    edge('evidence-interpret','evidence','interpret','Research only: registered attempts feed an independent interpretation.',xpSrc,{cond:true});
+    edge('interpret-attack','interpret','attack','The Crititor attacks the reasoning, then a Stabilizer judges that round.',xpSrc,{cond:true,p:[[1136,1007],[1150,1007],[1150,806],[488,806],[488,838]]});
+    edge('review-secretary','review','secretary','Unclear standards, conflicting standards or exhausted reworks escalate.',[F.execution,F.secretary],{cond:true,p:[[810,710],[210,710],[210,881],[204,881]]});
+    edge('build-secretary','build','secretary','Constructor questions escalate while verification and review continue.',[F.execution,F.secretary],{cond:true,p:[[228,750],[216,750],[216,930],[124,930],[124,924]]});
+    edge('stabilize-secretary','stabilize','secretary','A shift, drift or nonconvergence stop awaits the Secretary’s ruling.',[F.xstep,F.secretary],{cond:true,p:[[852,924],[852,940],[208,940],[208,894],[204,894]]});
+    edge('cal2-secretary','cal2','secretary','Calibrator ② escalates; it never directly sends back.',[F.planning,F.secretary],{cond:true,p:[[1016,410],[1016,436],[12,436],[12,881],[44,881]]});
+    edge('mechanical-secretary','mechanical','secretary','A user-order change or exhausted mechanical return goes to the Secretary.',[F.planning,F.secretary],{cond:true,p:[[644,410],[644,426],[10,426],[10,863],[44,863]]});
+    edge('feasibility-secretary','feasibility','secretary','Blocking findings after one revision go to the Secretary.',[F.planning,F.secretary],{cond:true,p:[[834,410],[834,432],[16,432],[16,872],[44,872]]});
+    edge('secretary-pm','secretary','pm-decision','Needs-user reaches PM. Important-within-authority notices require applied.what.option; some restart/grant paths omit it and send no such notice in 4.1.0.',[F.secretary,F.failures,F.pm],{cond:true,p:[[44,858],[6,858],[6,250],[1004,250],[1004,236]]});
+    edge('pm-answer','pm-decision','answer','The PM asks the principal for a decision outside recorded authority.',[F.secretary,F.handbook],{cond:true,p:[[1004,150],[1004,122],[357,122],[357,100]]});
+    edge('answer-pm','answer','pm-decision','mp pm answer records the ruling with its W-n.',[F.secretary,F.cli],{cond:true,p:[[357,100],[357,116],[1020,116],[1020,150]]});
+    edge('pm-requirements','pm-decision','requirements','Changed direction becomes words-backed items and another PM batch.',[F.planning,F.handbook],{cond:true,p:[[1004,236],[1004,260],[516,260],[516,236]]});
+    edge('status','progress','read','The PM follows the read-depth rule on request.',[F.handbook,F.read],{p:[[827,100],[827,128],[1262,128],[1262,150]]});
+    edge('consent-deliver','consent','deliver','The words entry consents to delivery and landing.',[F.cli,F.handbook],{p:[[597,100],[597,110],[2,110],[2,1173],[22,1173]]});
+    edge('proof-deliver','proof','deliver','Selected accepted outputs can be delivered with their actual proof state.',[F.delivery,F.proof],{p:[[1070,772],[1140,772],[1140,1094],[97,1094],[97,1130]]});
+    edge('deliver-manifest','deliver','manifest','Compute manifest, compatibility, candidate and final-tree proof checks.',[F.delivery,F.manifest,F.proof]);
+    edge('manifest-checks','manifest','checks','A compatible candidate runs closing checks before the delivery ref is created.',[F.delivery]);
+    edge('checks-land','checks','land','A created delivery ref can be offered for landing with the consent words.',[F.delivery,F.cli]);
+    edge('land-program','land','landing','Authorize an intent before the program’s fast-forward.',[F.land]);
+    edge('landing-close','landing','close','Common route: close separately after landing; delivery is not a close prerequisite.',[F.close,F.cli],{cond:true});
+    edge('close-legalize','close','legalize','Optional post-audit route; legalization can also be requested earlier.',[F.close,F.audit],{cond:true});
+    edge('audit-request','audit-consent','legalize','Principal requests and agrees to an audit plan.',[F.cli,F.audit],{cond:true,p:[[1277,100],[1390,100],[1390,1173],[1378,1173]]});
+    edge('legalize-plan','legalize','audit-plan','Plan the required backfill list before the agreed audit starts.',[F.audit,F.cli],{cond:true,p:[[1287,1216],[1287,1240],[712,1240],[712,1256]]});
+    edge('audit-nodes','audit-plan','audit-node','Dispatch fresh node Auditors by generation.',[F.audit]);
+    edge('audit-chain','audit-node','audit-chain','Once all nodes are proven, a fresh chain Auditor.',[F.audit]);
+    edge('audit-stamp','audit-chain','stamp','A proven chain receives a program stamp at a published revision.',[F.audit]);
+    edge('release-leases','release','leases-free','Confirm ended; the program releases exclusive leases.',[F.pm,F.work],{lanesOnly:true});
+    edge('leases-dispatch','leases-free','dispatch','Re-dispatch within the counted loop, only without lease conflicts.',[F.pm,F.work],{lanesOnly:true});
+    edge('round-revise','stabilize','disposition','Design/method: Stabilizer raises an open finding to serious, making it binding → Author answers.',xpSrc,{cond:true,p:[[852,838],[852,828],[670,828],[670,838]]});
+    edge('round-revise-interpreter','stabilize','interpret','Research reasoning: Stabilizer raises an open finding to serious, making it binding → Interpreter answers.',xpSrc,{cond:true,p:[[930,894],[938,894],[938,952],[1046,952],[1046,964]]});
+    edge('stabilizer-again','stabilize','stabilize','Undecided, eligible for re-judgment → one new Stabilizer on the same round; no new attack round.',xpSrc,{cond:true,lanesOnly:true});
+    edge('method-register','stabilize','method','Method pass freezes the version and its registered attempts.',xpSrc,{cond:true,lanesOnly:true});
+    edge('method-experiment','method','experiment','Run registered blind experiments.',xpSrc,{lanesOnly:true});
+    edge('method-reading','method','reading','Run registered blind readings.',xpSrc,{lanesOnly:true});
+    edge('reasoning-answer','attack','interpret','Research reasoning: only a verdict other than pass with an open finding sends dispositions to the independent Interpreter; otherwise go straight to Stabilizer.',xpSrc,{cond:true,lanesOnly:true});
+    edge('interpret-stabilize','interpret','stabilize','Interpreter dispositions complete the reasoning round; its Stabilizer judges.',xpSrc,{lanesOnly:true});
+    edge('build-handback','build','handback-check','Check required reads and Constructor hand-back fields.',[F.seat],{lanesOnly:true});
+    edge('author-handback','author','handback-check','Check required reads and Researcher hand-back fields.',[F.seat],{lanesOnly:true});
+    edge('refused-constructor','handback-check','fix-constructor','Refused without consuming an attempt; fix must-read pages or fields.',[F.seat],{lanesOnly:true});
+    edge('refused-researcher','handback-check','fix-researcher','The same refusal rule applies to every dispatched seat.',[F.seat],{lanesOnly:true});
+    edge('retry-constructor','fix-constructor','handback-check','Submit again; identical already recorded content is a no-op.',[F.seat],{lanesOnly:true});
+    edge('retry-researcher','fix-researcher','handback-check','Submit again; identical already recorded content is a no-op.',[F.seat],{lanesOnly:true});
+    edge('release-stop','stop','stop-release','Confirm with principal and release or narrow the stop.',[F.cli]);
+    edge('stop-plan','stop-release','batch','Cancelled work needs a new PM plan batch.',[F.cli,F.planning],{p:[[381,1322],[381,1320],[14,1320],[14,266],[759,266],[759,236]]});
+    edge('close-release','close','release','PM stops in-flight production seats through its harness, then releases ended dispatches.',[F.close,F.pm],{lanesOnly:true});
+    edge('release-open','release','mission-open','Close releases requeue production without consuming the failure loop; held until mission open.',[F.close,F.pm,F.cli],{lanesOnly:true});
+    edge('open-ready','mission-open','ready','Opening resumes queued production, subject to other holds.',[F.close,F.pm],{lanesOnly:true});
+    edge('copy-broken','copy','copy-recover','WI-29: writes stop; copy again or continue from the last valid event.',[F.cli,wiFile('WI-29')],{lanesOnly:true});
+    edge('copy-rebuild','copy-recover','copy','Copy again reopens checks; continue-from rebuilds state/labels and lost records need redoing.',[F.cli,wiFile('WI-29')],{lanesOnly:true});
+    edge('copy-git-gate','copy','confirm-copy','A shared/external git repository holds writes until the active copy is confirmed.',[F.cli,wiFile('WI-31')],{lanesOnly:true});
+    edge('copy-git-resume','confirm-copy','dispatch','Confirmation releases the git-write hold; other dispatch checks still apply.',[F.cli,F.pm],{lanesOnly:true});
+    edge('occupied-refused','landing','landing-refused','Occupancy fails WI-01/02 checks: refuse automatic landing and retain the delivery ref.',[F.land],{lanesOnly:true});
+    edge('landed-mismatch','landing','worktree-mismatch','Target at D records done; a mismatching worktree sends WI-04.',[F.land],{lanesOnly:true});
+    edge('landing-close-intent','landing','close-intent','PM can choose the close-not-landed exit for an open intent.',[F.land,F.cli],{lanesOnly:true});
+    edge('intent-check','close-intent','intent-result','Fresh check under lock determines closed-not-landed, landed or in-progress.',[F.land,F.cli],{lanesOnly:true});
+    edge('secretary-release','secretary','release','Harness confirms ended or releases abandoned; an initial release requeues within the counted limit.',[F.pm,F.secretary],{lanesOnly:true});
+    edge('secretary-requeue','release','secretary','First release requeues within the re-dispatch limit; a failed/exhausted Secretary instead goes to WI-24.',[F.pm,F.secretary],{lanesOnly:true});
+    // Numbered returns and continuations, in reading order.
+    edge('cal1-return','cal1','batch','① Fail returns reasons and questions to the PM; submit a new batch.',planSrc,{cond:true,p:[[97,324],[97,288],[759,288],[759,236]]});
+    edge('mechanical-return','mechanical','decompose','② Mechanical failure returns to Architect, counted (3).',planSrc,{cond:true,p:[[644,410],[644,448],[454,448],[454,410]]});
+    edge('feasibility-return','feasibility','decompose','③ One feasibility revision, then the Secretary.',planSrc,{cond:true,p:[[834,324],[834,294],[454,294],[454,324]]});
+    edge('cal2-return','secretary','decompose','④ Secretary send-back after Calibrator ② is counted as a mechanical return.',[F.planning,F.secretary],{cond:true,p:[[124,838],[124,472],[454,472],[454,410]]});
+    edge('rework','review','build','⑤ Rework: initial + 2 repairs; exhaustion or no progress → Secretary, WI-08.',[F.execution,F.caps],{cond:true,p:[[893,772],[893,796],[311,796],[311,772]]});
+    edge('round','stabilize','attack','Clean nonclosing pass → fresh Crititor on the same version, within budget and without a pending ruling. Method pass instead starts registered attempts.',xpSrc,{cond:true,p:[[852,838],[852,792],[488,792],[488,838]]});
+    edge('resume','evidence','author','⑦ Blind evidence resumes the requester with its saved notes in a new card.',xpSrc,{cond:true,p:[[852,1050],[852,1082],[306,1082],[306,924]]});
+    edge('resume-attacker','evidence','attack','⑦ An attacker request resumes the attacker in a new card.',xpSrc,{cond:true,p:[[930,1007],[944,1007],[944,932],[488,932],[488,924]]});
+    edge('next-task','proof','gate','Accepted outputs unlock dependents; check their inputs before queueing the next Constructor.',[F.execution,F.pm],{cond:true,p:[[1070,686],[1070,644],[124,644],[124,624]]});
+    edge('replan','secretary','decompose','Secretary re-plan requests another Architect attempt. Counts stay only within the same lineage: same execution task id; new PM batch gets a new planning lineage; new task ids do not inherit.',[F.execution,F.planning,F.secretary],{cond:true,p:[[124,924],[24,924],[24,484],[454,484],[454,410]]});
+    edge('structure-route','settle','decompose','⑨ A settled, proven structural conclusion starts the next decomposition round.',[F.planning,F.xstep],{cond:true,p:[[1136,881],[1156,881],[1156,488],[454,488],[454,410]]});
+    edge('direction-route','settle','secretary','Direction or no conclusion goes to Secretary. A settled conclusion whose artifact is not currently proven is routed as no-conclusion.',[F.planning,F.xstep],{cond:true,p:[[1046,924],[1046,936],[124,936],[124,924]]});
+    edge('renew-verify','renew','verify','⑩ After mp pm renew: restore equal declared evidence mechanically, otherwise verify for a new Reviewer.',[F.pm,F.execution],{cond:true});
+    edge('redispatch','release','dispatch','Release within the two re-dispatch limit → claim only if no exclusive lease conflicts. --ended frees leases; --abandoned keeps them until ended is confirmed.',[F.pm,F.failures,F.work],{cond:true,p:[[988,538],[988,490],[492,490],[492,538]]});
+    edge('rebuild','landing','manifest','Base moved: rebuild full candidate and checks, at most 3 per delivery.',[F.cli,F.delivery,F.land],{cond:true,p:[[868,1130],[868,1122],[286,1122],[286,1130]]});
+    edge('landing-retry','landing','land','⑬ Open intent at B: checked retry of the same B→D under the landing lock. First + 3 attempts.',[F.land,wiFile('WI-06')],{cond:true,p:[[868,1216],[868,1232],[679,1232],[679,1216]]});
+    edge('full-review','cal1','cal1','Continuation cannot be judged: a full review. Calibrator ② has the same fallback.',planSrc,{cond:true,p:[[172,348],[184,348],[184,394],[172,394]]});
+    edge('audit-retry','audit-node','legalize','⑮ Failed legalization ends. After producing work is fixed, another user request creates a new chain object.',[F.audit,wiFile('WI-25')],{cond:true,p:[[915,1342],[915,1354],[1390,1354],[1390,1226],[1287,1226],[1287,1216]]});
+    edge('integration','manifest','batch','⑯ Incompatible outputs or overlay conflicts need a PM batch for an integration task, then another delivery.',[F.delivery,F.cli],{cond:true,p:[[196,1173],[18,1173],[18,280],[862,280],[862,193]]});
+    const NUM = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯';
+    const LOOPS = [
+      ['cal1-return','PM direction return','Uncapped; new words-backed PM batch.',[404,280],['cal1-return'],['cal1','batch']],
+      ['mechanical-return','Mechanical return','3 returns; same failure twice or cap → WI-08.',[554,448],['mechanical-return'],['mechanical','decompose']],
+      ['feasibility-return','Feasibility return','One revision; unresolved → Secretary.',[702,294],['feasibility-return','feasibility-secretary'],['feasibility','decompose','secretary']],
+      ['cal2-return','Calibrator ② return','Always through Secretary; send-back uses mechanical-return count.',[992,436],['cal2-secretary','cal2-return'],['cal2','secretary','decompose']],
+      ['rework','Reviewer rework','Initial + 2 reworks. WI-08: one Secretary grant of 1–2, then user.',[660,796],['rework','review-secretary'],['review','build','secretary']],
+      ['round','Exploration rounds','Clean pass → fresh Crititor, same version. Attack verdict other than pass + open finding → Author / Interpreter. Stabilizer raises an open finding to serious → response too. Default 3; nonconvergence → WI-08.',[532,792],['round','author-attack','attack-dispose','dispose-stabilize','round-revise','round-revise-interpreter'],['author','attack','disposition','stabilize','interpret']],
+      ['resume','Evidence continuation','Blind execution / reading → new card for the requester. Default 3 requests per turn.',[660,1082],['blind-experiment','blind-reading','experiment-record','reading-record','resume','resume-attacker'],['author','attack','experiment','reading','evidence']],
+      ['next-task','Next dependent task','Accepted outputs unlock dependents; stable mode still needs proof.',[970,644],['next-task','gate-ready','ready-dispatch','dispatch-build'],['proof','gate','ready','dispatch','build']],
+      ['replan','Re-plan / next planning round','Currently proven structure → Architect; otherwise no-conclusion → Secretary. Counts: same task id only; new PM batch or task id starts a new lineage.',[1030,478],['replan','structure-route','direction-route','secretary-pm','pm-requirements'],['settle','secretary','pm-decision','decompose']],
+      ['renew','Renew / re-review','mp pm renew: equal declared used fields renew mechanically; otherwise a Reviewer. OS, OS version, architecture + version commands identify the environment; stale experiments reopen only converged explorations.',[532,654],['renew-verify','verify','review'],['renew','verify','review']],
+      ['redispatch','Interrupted dispatch','WI-28: ended → free leases → re-dispatch (2). Abandoned keeps leases; retry requires no conflict. Then WI-08.',[700,490],['redispatch'],['release','dispatch']],
+      ['rebuild','Delivery rebuild','WI-05: 3 per delivery; all checks repeated. WI-08 notice at cap; no automatic Secretary dispatch in 4.1.0.',[574,1122],['rebuild','manifest-checks'],['landing','manifest','checks']],
+      ['landing-retry','Landing retry','WI-06: intent stays open at B. First + 3 attempts; repeat verdict → WI-08 notice; no automatic Secretary dispatch.',[744,1232],['landing-retry','land-program'],['landing','land']],
+      ['full-review','Full calibration fallback','A continuation requests or needs full review. Applies to both Calibrators.',[184,374],['full-review'],['cal1','cal2']],
+      ['audit-retry','Legalization again','WI-25: fix the required link / seam; new request, new chain object.',[1130,1354],['audit-retry'],['audit-node','legalize']],
+      ['integration','Delivery integration','PM batch → integration task → Reviewer → deliver again. Conflicts are returned, not automatically assigned.',[924,280],['integration','batch-cal1'],['manifest','batch']]
+    ].map(([id,name,text,at,path,nodes],i)=>({id,name,text,at,path,nodes,num:NUM[i],src:src(...new Set(path.flatMap(e=>PE[e].src.map(s=>s.text))))}));
+    const WI = {
+      "WI-01": "Target branch checked out in several worktrees, or held by a rebase or bisect: not landed",
+      "WI-02": "Target branch checked out in one worktree that is not clean, or that is external: not landed",
+      "WI-03": "An external worktree or branch changed paths in a mission's write scope",
+      "WI-04": "A worktree does not match the delivery after landing",
+      "WI-05": "The target branch moved: the delivery candidate is rebuilt on a new base",
+      "WI-06": "A landing did not complete, or a landing intent is left open (A / in progress / B / C)",
+      "WI-07": "A selected output's content changed on the delivery candidate",
+      "WI-08": "A lineage's automatic loop is exhausted, or repeats the same failure (incl. an exploration's round budget)",
+      "WI-13": "Unsupported repository format or content transform, or git objects a step needs are missing",
+      "WI-16": "A dependency cycle",
+      "WI-19": "The transform description changed after acceptance",
+      "WI-20": "Inconsistent program records or namespace, or an internal error",
+      "WI-21": "The delivery candidate's closing checks failed",
+      "WI-23": "A re-plan dropped or changed a task that has work in flight",
+      "WI-24": "The Secretary could not decide: you and the user decide (mp pm answer)",
+      "WI-25": "A legalization cannot complete: a broken link, a failed backfill, or the chain not accepted",
+      "WI-26": "A decision-layer step cannot continue as it is (a stop covered it)",
+      "WI-28": "A dispatch is interrupted: its seat ended without a hand-back, or nobody knows (release --ended / --abandoned)",
+      "WI-29": "The memory's event chain is broken: all writes are stopped",
+      "WI-30": "A leaf is missing or edited by hand, or a commit the memory names is not reachable here",
+      "WI-31": "The repository lives outside the folder, or a copy shares one repository with another copy",
+      "WI-32": "Recomputing the labels does not finish (mp pm drain)",
+      "WI-33": "An exploration awaits a ruling: the Stabilizer found a shift of direction or a drift"
+};
+    pn('stop',22,1322,160,70); pn('stop-release',206,1322,350,70);
+    edge('principal-stop','halt','stop','PM records the stop at once, then stops seats through its harness; release/narrow later permits a new PM batch.',[F.pm,F.cli,F.handbook,F.contract],{cond:true,p:[[1047,100],[1047,108],[4,108],[4,1357],[22,1357]]});
+    const EXCEPTIONS = [
+      { id:'deps', title:'Held queued steps', short:'Close / stop / git hold / leases', step:'gap', wis:[], copy:S.gap.copy, act:S.gap.act, files:[F.pm,F.execution] },
+      { id:'interrupted', title:'Seat ended without hand-back', short:'Release, then re-dispatch', step:'release', wis:['WI-28','WI-08'], copy:S.release.copy, act:S.release.act, files:[F.pm,F.failures] },
+      { id:'undecided', title:'Secretary could not decide', short:'PM records the user’s ruling', step:'pm-decision', wis:['WI-24'], copy:'Only this escalation waits. A first release requeues the Secretary within the re-dispatch limit, subject to leases. A failed or exhausted step then goes to WI-24; it is not retried after that program ask-user decision. The PM records the principal’s answer using an option from the escalation. An applied or superseded decision cannot be answered again.', act:S['pm-decision'].act, files:[F.secretary,F.cli] },
+      { id:'ruling', title:'Exploration awaiting ruling', short:'Scope shift or drift', step:'stabilize', wis:['WI-33'], copy:S.stabilize.copy, act:'mp read show exploration <id> · mp pm answer <mission> <escalation> --option <option> --words W-n', files:[F.xstep,F.secretary] },
+      { id:'copy', title:'Folder copied or moved', short:'Chain · leaves · git checked', step:'copy', wis:['WI-29','WI-30','WI-31'], copy:S.copy.copy, act:S.copy.act, files:[F.contract,F.readme] },
+      { id:'labels', title:'Labels recomputing', short:'Proof-dependent actions wait', step:'drain', wis:['WI-32'], copy:S.drain.copy, act:S.drain.act, files:[F.pm,F.contract] },
+      { id:'debt', title:'Delivery not fully proven', short:'Actual final-tree proof state', step:'manifest', wis:['WI-07'], copy:'Own-content changes, prerequisite mismatches and evidence-input mismatches can lower final-tree proof. Only own-content changes enter needsReverification and cause WI-07 after the delivery ref is created; other mismatches do not necessarily send it. 4.1.0 stores reverification data without registering a replacement product version or queueing verification/re-acceptance; the PM must request the work through a plan batch.', act:'mp read show delivery <id> · mp pm plan submit <mission> --file <plan.json> --words W-n', files:[F.proof,F.delivery,F.cli] }
+    ].map(e=>({...e,src:src(...e.files,...e.wis.map(wiFile),F.index)}));
+    const TASKS = [
+      { id:'X1',title:'Compare two approaches',type:'exploration',state:'ACCEPTED',p:8,col:0,row:2,deps:[],copy:'Illustrative earlier round: a directional exploration has settled on a version that survived attack and stabilization. The principal’s resulting decision is recorded as D1.' },
+      { id:'D1',title:'PM decision',type:'decision',state:'RECORDED',col:1,row:2,deps:['X1'],copy:'Illustrative recorded direction choice. PM records the principal’s answer with its W-n, then a new plan batch. This box is a PM decision, not a producing task.' },
+      { id:'T1',title:'Interface contract',type:'execution',state:'ACCEPTED',p:9,col:0,row:0,deps:[],copy:'An accepted interface-definition task in the example detailed plan. Both implementations depend on this definition and own disjoint module paths.' },
+      { id:'T2',title:'Parser module',type:'execution',state:'RUNNING',p:7,col:1,row:0,deps:['T1'],copy:'One Constructor in its own worktree implements the parser. A Reviewer judges its candidate against the interface and declared acceptance standards.' },
+      { id:'T3',title:'Writer module',type:'execution',state:'READY',p:6,col:1,row:1,deps:['T1'],copy:'A separate module with a disjoint write scope. It can be built in parallel with T2 once the contract is accepted and its inputs pass the selected mode’s gate.' },
+      { id:'T4',title:'Integration checks',type:'execution',state:'BLOCKED',p:5,col:3,row:1,deps:['T2','T3'],copy:'An integration task depends on every module implementation. It verifies the seams and the combined output after both implementations are accepted.' }
+    ];
+    const GRAPH_EDGES = [['X1','D1','routing'],['D1','T1','plan-basis'],['T1','T2'],['T1','T3'],['T2','T4'],['T3','T4']];
+    const GRAPH_SRC = src(F.planning,'engine/src/flow/mechanical.ts',F.execution,F.carried);
+    const TYPE_LABEL = {execution:'Execution',exploration:'Exploration',decision:'PM decision'};
+    const STATE_LABEL = {ACCEPTED:'Accepted',RECORDED:'Recorded',READY:'Ready',RUNNING:'Running',BLOCKED:'Blocked'};
+    const taskById = id => TASKS.find(t=>t.id===id);
+    const executionCells = { session:0,batch:1,'pm-decision':7,cal1:2,cal2:5,decompose:3,feasibility:4,secretary:7,dispatch:0,build:2,review:5,gate:1,collect:3,verify:4,proof:6,renew:6,release:8,deliver:8,manifest:8,land:9,landing:9,close:9,legalize:8,'audit-node':8,'audit-chain':9,copy:7,drain:8,stop:6 };
+    const explorationCells = { session:0,batch:1,'pm-decision':7,cal1:2,cal2:4,decompose:3,feasibility:4,secretary:7,dispatch:0,author:2,disposition:5,attack:4,stabilize:6,experiment:3,reading:4,interpret:8,evidence:5,settle:7,renew:6,release:8,legalize:8,'audit-node':8,'audit-chain':9,copy:8,drain:9,stop:6,gate:1 };
+    const COMMON_SCENARIOS = [
+      {id:'handback',name:'Hand-back checks · all seats',wis:[],nodes:['build','handback-check','fix-constructor','handback-check'],paths:['build-handback','refused-constructor','retry-constructor'],text:['Every dispatched seat must read required pages and satisfy its role’s hand-back format.','Refusal → read/fix → hand back again on the same dispatch. Refused submissions do not count as attempts.','Once recorded, identical hand-back content again is a no-op; different content is refused.']},
+      {id:'close',name:'Close / resume',wis:[],nodes:['close','release','mission-open','ready','dispatch'],paths:['close-release','release-open','open-ready','ready-dispatch'],text:['Close writes a snapshot and holds production immediately. PM stops in-flight production seats in the harness, then releases them --ended.','Those releases requeue without consuming the failure loop; queued production stays held while closed. Late hand-backs are recorded but not accepted.','mp pm mission open <mission> resumes held production, subject to stops and other holds. Audits, deliveries and permitted repairs can continue while closed.']},
+      {id:'landing-exits',name:'Landing exits',wis:['WI-01','WI-02','WI-04','WI-06'],nodes:['land','landing','landing-refused','worktree-mismatch','close-intent','intent-result'],paths:['land-program','occupied-refused','landed-mismatch','landing-close-intent','intent-check'],text:['Several occupants or rebase/bisect → WI-01 refusal. A dirty, missing, uncertain or unpermitted external worktree → WI-02 refusal. The delivery ref stays.','One clean permitted occupant can land. If target is D but the worktree differs, record landed and send WI-04.','mp pm land <delivery> --close-not-landed checks again under lock: at D → landed; lock held → in progress; otherwise close the open intent as not landed and keep the ref.']},
+
+      {id:'interrupted',name:'Seat ended',wis:['WI-28'],nodes:['dispatch','build','release','leases-free','dispatch','build'],paths:['release-leases','leases-dispatch','dispatch-build'],text:['The harness found a seat ended without a hand-back.','Confirmed ended → release leases → re-dispatch. Abandoned keeps old leases; a conflicting claim is refused until ended is confirmed. Late hand-backs are recorded, not accepted.','Re-dispatch in a new worktree only without lease conflicts and within the two re-dispatch limit; exhaustion → WI-08.']},
+      {id:'budget',name:'Loop exhausted',wis:['WI-08'],nodes:['review','secretary','pm-decision','answer','dispatch','build'],paths:['review-secretary','secretary-pm','pm-answer','answer-pm','dispatch-build'],text:['Initial candidate + two reworks are used, or the same failure repeats twice.','The Secretary chooses a grant, re-plan, abandonment or ask-user within authority. Its one grant is 1–2 attempts.','After its grant is used, only the principal can add more. Execution counts persist for the same task id; new ids do not inherit them. Planning counts are scoped to the PM batch.']},
+      {id:'undecided',name:'Secretary undecided',wis:['WI-24'],nodes:['review','secretary','release','secretary','pm-decision','answer','pm-decision'],paths:['review-secretary','secretary-release','secretary-requeue','secretary-pm','pm-answer','answer-pm'],text:['A first Secretary release requeues it within the re-dispatch limit, subject to retained leases. A failed or exhausted step has no usable decision.','Then WI-24 asks PM and principal; no further Secretary is automatically queued for that program ask-user decision.','PM records the principal’s answer: mp pm answer … --words W-n.']},
+      {id:'stop',name:'A stop',wis:['WI-26'],nodes:['halt','stop','release','stop-release','batch'],paths:['principal-stop','release-stop','stop-plan'],text:['The PM writes the principal’s stop immediately; no new action in scope can be accepted or landed.','The PM stops running seats through its harness, then releases confirmed ended dispatches.','With the principal’s confirmation, mp pm stop-release or stop-narrow clears the appropriate scope. Cancelled work needs planning again; use a new PM batch.']},
+      {id:'copy',name:'Copy / move',wis:['WI-29','WI-30','WI-31','WI-28'],nodes:['copy','copy-recover','copy','confirm-copy','dispatch','release','leases-free','renew'],paths:['copy-broken','copy-rebuild','copy-git-gate','copy-git-resume','release-leases'],text:['Copy while idle. On open, check the event chain, leaves and git objects and rebuild labels.','WI-29: copy again from an idle source, or mp pm continue-from <last-valid-event> → rebuild state/labels and redo lost records. Missing content holds affected users only.','Shared git writes → mp pm confirm-copy gate → writes resume. Review old in-flight dispatches, release where appropriate and renew changed-environment evidence.']},
+      {id:'labels',name:'Labels recomputing',wis:['WI-32'],nodes:['gate','drain','ready','dispatch','build'],paths:['gate-ready','ready-dispatch','dispatch-build'],text:['Large basis changes leave a stored label frontier; current labels are marked recomputing.','Stable queueing, full close, delivery and legalization wait for settled labels. Already queued claims do not re-check stable proof; fast work can carry proof debt.','Let new large changes stop, then mp pm drain. The ten-minute notice names WI-32.']},
+      {id:'debt',name:'Delivery proof debt',wis:['WI-07'],nodes:['deliver','manifest','land','landing','close'],paths:['deliver-manifest','land-program','landing-close'],text:['Own content, prerequisites or evidence inputs differ on the final candidate; these can lower proof.','Only own-content changes enter needsReverification and emit WI-07 after the delivery ref exists. Prerequisite/evidence mismatches need not emit it. 4.1.0 stores reverification data without automatically dispatching re-acceptance.','Request a plan batch for the missing work, or deliver with its recorded proof state. A full close still needs proven outputs.']},
+      {id:'replan',name:'Re-plan in flight',wis:['WI-23'],nodes:['review','secretary','decompose','cal2','dispatch','build'],paths:['review-secretary','replan'],text:['A Secretary re-plan starts a new Architect attempt; a direction change instead requires a PM batch.','A changed or dropped task’s old dispatches may finish, but their old-card work is not continued.','New attempts use the updated card. Same execution task id retains counts; new ids do not inherit them. A new PM batch starts a new planning lineage.']},
+      {id:'base',name:'Target branch moved',wis:['WI-05','WI-08'],nodes:['land','landing','manifest','deliver','land'],paths:['land-program','rebuild'],text:['The target is no longer at recorded base B. Nothing is merged.','Rebuild on the new base with manifest, proof and closing checks again (3 rebuilds per delivery).','Land the new delivery id; or deliver the old ref only.']},
+      {id:'landing',name:'Open landing intent',wis:['WI-06'],nodes:['land','landing','land','landing'],paths:['land-program','landing-retry'],text:['If the landing lock is held, report in progress and touch nothing. Occupancy can refuse landing under WI-01/02; target at D with a mismatching worktree sends WI-04.','Target at D records done. At B the intent stays open; checked retry reissues the same B→D.','Other state, changed HEAD or a git lock requires WI-06 disposition. PM can use mp pm land <delivery> --close-not-landed after a fresh locked check. First attempt + three retries; repeated verdict stops early.']},
+      {id:'audit',name:'Legalization failed',wis:['WI-25'],nodes:['legalize','audit-node','audit-chain','legalize'],paths:['audit-retry'],text:['A required node is negated or withdrawn, a backfill fails, or the chain is not accepted.','This legalization ends; judgments already recorded keep counting and other work continues.','Fix the producing work / seam and ask again: a new chain object, with the user’s consent.']}
+    ];
+    const NORMAL_EXEC = {id:'normal',name:'Execution cycle',wis:[],nodes:['batch','cal1','decompose','feasibility','cal2','gate','ready','dispatch','build','collect','verify','review','proof'],paths:['gate-ready','ready-dispatch','dispatch-build','collect','verify','review','pass'],text:['The detailed plan becomes effective after its direction, mechanical and required feasibility reviews.','Inputs pass the gate → ready → PM dispatch. Claim does not re-check stable proof. Constructor builds in its worktree. mp collects and verifies the candidate.','The Reviewer passes it, sends problems back for rework, or asks the Secretary for a decision. Acceptance and proof unlock dependents.']};
+    const NORMAL_XP = {id:'normal',name:'Exploration cycle',wis:[],nodes:['batch','cal1','dispatch','author','attack','experiment','evidence','disposition','stabilize','settle','secretary','pm-decision'],paths:['author-attack','attack-dispose','attack-stabilize','dispose-stabilize','round-revise','stabilize-settle','blind-experiment','experiment-record','direction-route','secretary-pm'],text:['The effective PM plan defines the question, acceptance goal, attack scope and decision type.','Researcher authors; Crititor attacks. Blind execution or reading may settle a claim; a new card resumes the requester.','Only a verdict other than pass with an open finding needs an Author / research Interpreter response. Otherwise, including a pass with general-only findings, go straight to Stabilizer. Raising an open finding to serious sends it back for an answer; a clean nonclosing pass schedules a fresh Crititor on the same version. Closing attack + Stabilizer are required for convergence.','Settle and route: proven structural result to Architect; direction or no conclusion to Secretary, PM and principal.']};
+    const XP_SCENARIOS = [
+      {id:'stabilizer-again',name:'Stabilizer re-judgment',wis:[],nodes:['attack','stabilize','stabilize','attack'],paths:['attack-stabilize','stabilizer-again','round-revise','round-revise-interpreter','round'],text:['A Stabilizer verdict is undecided after the blocking/ruling conditions permit another judgment.','One fresh Stabilizer re-judges the same round; no extra attack round is consumed.','A clean nonclosing pass then goes to a fresh Crititor on the same frozen version. An open finding raised to serious goes to Author / research Interpreter to answer.']},
+      {id:'research',name:'Research branch',wis:[],nodes:['author','attack','disposition','stabilize','method','experiment','reading','evidence','interpret','attack','interpret','stabilize','attack','stabilize','settle'],paths:['author-attack','attack-dispose','dispose-stabilize','round-revise','method-register','method-experiment','method-reading','experiment-record','reading-record','evidence-interpret','interpret-attack','reasoning-answer','interpret-stabilize','round-revise-interpreter','round','attack-stabilize','stabilize-settle'],text:['Method → Crititor; only a verdict other than pass with an open finding needs Author dispositions. Otherwise, including a pass with general-only findings, go straight to Stabilizer. Stabilizer pass freezes the method and its registered attempts; raising an open finding to serious sends it to Author to answer.','Registered experiments and readings run independently; all attempts, failed and unrun included, are recorded.','An independent Researcher interprets those records → Crititor reasoning attack. Only a verdict other than pass with an open finding needs Interpreter dispositions; otherwise go straight to Stabilizer. An open reasoning finding raised to serious by Stabilizer returns to that Interpreter to answer.','Clean reasoning pass → fresh Crititor on the same version → closing Stabilizer → converge / settle.']},
+
+      {id:'ruling',name:'Exploration awaiting ruling',wis:['WI-33'],nodes:['author','attack','disposition','stabilize','secretary','pm-decision','answer','author'],paths:['author-attack','attack-dispose','dispose-stabilize','stabilize-secretary','secretary-pm','pm-answer'],text:['The Stabilizer found a shift of direction or a drifting round.','The version remains pending and cannot converge while the ruling waits. Direction findings are not fixed.','The Secretary rules within authority or asks through PM; the principal can keep the definition, change direction or end the exploration.']},
+      {id:'rounds',name:'Three rounds used',wis:['WI-08'],nodes:['author','attack','disposition','stabilize','attack','stabilize','secretary','pm-decision'],paths:['round','author-attack','attack-dispose','dispose-stabilize','stabilize-secretary'],text:['Contract: default 3 attack rounds. 4.1.0 also counts attacker discussion replies against that budget; the fresh closing attack consumes a round.','Not converged, repeated fatal class or no progress → Secretary, with findings, dispositions and Stabilizer judgments.','Grant 1–2 rounds once, accept residual risk when allowed, re-plan or abandon. More rounds after the grant require the principal.']},
+      {id:'renew',name:'Exploration reopened',wis:['WI-08','WI-33'],nodes:['renew','experiment','evidence','attack','stabilize','settle','secretary'],paths:['attacker-evidence','experiment-record','attack-stabilize','stabilize-settle'],text:['OS, OS version, architecture or declared version-command outputs changed; experiment evidence supporting a converged exploration is stale. A settled accept-risk result does not reopen this way.','The program reopens it, reruns the same evidence requests, then schedules the attacker re-check and its Stabilizer.','A new stop is routed like the first; unchanged conclusions need no second routing, changed conclusions do.']}
+    ];
+    const LOOP_ORDER = ['cal1-return','full-review','mechanical-return','feasibility-return','cal2-return','rework','round','resume','next-task','replan','renew','redispatch','integration','rebuild','landing-retry','audit-retry'];
+    LOOPS.sort((a,b)=>LOOP_ORDER.indexOf(a.id)-LOOP_ORDER.indexOf(b.id));
+    LOOPS.forEach((l,i)=>{ l.num=NUM[i]; });
+    for (const l of LOOPS) for (const e of l.path) PE[e].text = PE[e].text.replace(/^[①-⑯] /, l.num+' ');
+    step('task-loop','program','Task loop','Parallel execution and exploration tracks','Each execution task has one Constructor candidate and a Reviewer. Each exploration has an author, attacker and a Stabilizer after every attack round, with optional blind evidence. The PM claims ready seats through its harness; multiple tasks may progress together.','mp pm next · mp pm dispatch <step>',[F.execution,F.xflow,F.pm]);
+    const PRIMARY_EXEC = ['gate','ready','dispatch','build','collect','verify','review','proof'];
+    const PRIMARY_XP = ['dispatch','author','attack','disposition','stabilize','settle','experiment','reading','evidence','interpret'];
+    const BASE_EDGES = {
+      execution: ['gate-ready','ready-dispatch','dispatch-build','collect','verify','review','pass','rework','review-secretary','next-task'],
+      exploration: ['dispatch-author','author-attack','attack-dispose','dispose-stabilize','attack-stabilize','round-revise','round-revise-interpreter','stabilize-settle','blind-experiment','blind-reading','attacker-evidence','experiment-record','reading-record','evidence-interpret','interpret-attack','round','resume','resume-attacker','stabilize-secretary']
+    };
+    // Duplicate cells stack within the same seat's lane rather than overlap.
+    Object.assign(executionCells,{gate:0,ready:1,dispatch:2,build:3,collect:4,verify:5,review:6,proof:7,'pm-decision':8,secretary:8,'leases-free':8,'handback-check':4,'fix-constructor':5,'stop-release':7,'mission-open':9,'copy-recover':8,'confirm-copy':9,'landing-refused':9,'worktree-mismatch':9,'close-intent':9,'intent-result':9});
+    Object.assign(explorationCells,{dispatch:1,ready:0,method:7,'leases-free':8,'handback-check':3,'fix-researcher':4,'stop-release':7,'mission-open':9,'copy-recover':8,'confirm-copy':9});
+    let theme = 'auto';
+    try { theme=localStorage.getItem('mp-workflow-theme')||'auto'; } catch (_) {}
+    if (['light','dark','auto'].includes(params.get('theme'))) theme=params.get('theme');
+    let view='pipeline',selTask='T2',detailTask='T2',scenario='normal',showFillers=false,frame=0;
+    let focus={kind:'step',id:'batch'},inspectorOpen=false;
+    const variantOf = t => t.type==='exploration'?'exploration':t.type==='execution'?'execution':'decision';
+    function applyTheme() {
+      if(theme==='light'||theme==='dark') document.documentElement.dataset.look=theme;
+      else delete document.documentElement.dataset.look;
+      $('#theme-btn').textContent='Theme · '+theme[0].toUpperCase()+theme.slice(1);
+    }
+    $('#theme-btn').addEventListener('click',()=>{theme={auto:'light',light:'dark',dark:'auto'}[theme]||'auto';try{localStorage.setItem('mp-workflow-theme',theme);}catch(_){}applyTheme();});
+    function fillerText(lane, id) { const key=lane==='constructor'&&id==='experiment'?'experiment':lane; return FILLERS[key] ? (showFillers ? FILLERS[key].model+(FILLERS[key].harness==='Codex'?'':' / '+FILLERS[key].harness) : 'any model / any harness') : ''; }
+    function laneFillerText(lane) { return showFillers&&lane==='constructor' ? 'Execution: '+fillerText(lane,'build')+'; blind experiments: '+fillerText(lane,'experiment') : fillerText(lane); }
+    function roleText(s) { return laneName(s.lane)+(FILLERS[s.lane]?' · '+fillerText(s.lane,s.id):''); }
+    function laneName(id) {return LANES.find(l=>l.id===id).name;}
+    function tooltip(d) { return d.copy+'\nCommand: '+d.act+'\nSource: '+d.src.map(s=>s.text).join(', '); }
+    function select(kind,id) {focus={kind,id};inspectorOpen=true;markPipe();markLanes();renderInspector();}
+    $('#fillers-btn').addEventListener('click',()=>{
+      showFillers=!showFillers;$('#fillers-note').hidden=!showFillers;$('#fillers-btn').setAttribute('aria-pressed',String(showFillers));
+      document.querySelectorAll('.pnode .p-role').forEach(el=>{const s=S[el.parentElement.dataset.id];el.textContent=roleText(s);});
+      renderLanes();renderInspector();schedule();
+    });
+    function svgHost(host) {const svg=document.createElementNS(NS,'svg');svg.setAttribute('class','wires');svg.setAttribute('aria-hidden','true');host.appendChild(svg);return svg;}
+    function path(svg,pts,cls,hot,id) {
+      const p=document.createElementNS(NS,'path');p.setAttribute('d',pts.map((pt,i)=>(i?'L':'M')+pt[0].toFixed(1)+' '+pt[1].toFixed(1)).join(' '));
+      p.setAttribute('class','wire '+cls);p.setAttribute('marker-end','url(#'+(hot?'ah-hot':'ah')+')');
+      if(id){p.dataset.edge=id;const tt=document.createElementNS(NS,'title');tt.textContent=PE[id].text+'\nSource: '+PE[id].src.map(s=>s.text).join(', ');p.appendChild(tt);p.addEventListener('click',()=>select('edge',id));}
+      svg.appendChild(p);
+    }
+    function makeNode(id,cls='pnode',note=S[id].plain) {
+      const d=S[id],b=document.createElement('button');b.type='button';b.className=[cls,d.kind,d.lane==='principal'?'principal':''].filter(Boolean).join(' ');b.dataset.id=id;b.title=tooltip(d);
+      if(cls==='pnode'){
+        b.innerHTML='<span class="p-role"></span><span class="p-title"></span><span class="p-note"></span>';
+        b.querySelector('.p-role').textContent=roleText(d);
+        b.querySelector('.p-title').textContent=d.title;b.querySelector('.p-note').textContent=note;
+      }else{
+        b.innerHTML='<span class="num"></span><span class="s-title"></span><span class="s-plain"></span><span class="s-act"></span>';
+        b.querySelector('.s-title').textContent=d.title;b.querySelector('.s-plain').textContent=d.plain;
+        const short=d.act.match(/^mp (?:pm|read) [a-z-]+(?: (?:submit|request|start|open))?|^mp seat <id> [a-z-]+/);
+        b.querySelector('.s-act').textContent=(short?short[0]:d.act)+(d.act.includes(' · ')?' …':'');
+      }
+      b.addEventListener('click',()=>select('step',id));return b;
+    }
+    function makeRail(host,isLanes=false) {
+      const rail=document.createElement('aside');rail.className='exception-rail';rail.setAttribute('aria-label','Readiness gaps and exceptions');
+      if(isLanes){rail.style.gridColumn='11 / 13';rail.style.gridRow='1 / 13';}else Object.assign(rail.style,{left:'1180px',top:'498px',width:'198px',height:'584px'});
+      const h=document.createElement('h3');h.textContent='EXCEPTION RAIL';rail.appendChild(h);
+      EXCEPTIONS.forEach((e,i)=>{const b=document.createElement('button');b.type='button';b.className='exception';b.dataset.exception=e.id;b.title=tooltip(e);
+        const t=document.createElement('strong');t.textContent=String(i+1).padStart(2,'0')+' '+e.title;const sub=document.createElement('span');sub.textContent=(e.wis.join(' · ')||'mp pm next')+' — '+e.short;b.append(t,sub);b.addEventListener('click',()=>select('exception',e.id));rail.appendChild(b);});
+      host.appendChild(rail);
+    }
+    function label(host,cls,x,y,text) {const el=document.createElement('div');el.className=cls;Object.assign(el.style,{left:x+'px',top:y+'px'});el.textContent=text;host.appendChild(el);}
+    function renderPipe() {
+      const host=$('#pipe');host.replaceChildren();
+      for(const [y,h,name,note] of [[0,112,'Principal','talks only to the PM'],[120,138,'PM','records · plans · decides · dispatches'],[300,128,'Decision layer','feasibility is conditional; explorations begin from the PM plan']]){
+        const band=document.createElement('div');band.className='p-band';Object.assign(band.style,{top:y+'px',height:h+'px'});
+        const bn=document.createElement('span');bn.className='p-band-name';bn.textContent=name;const small=document.createElement('small');small.textContent=note;bn.appendChild(small);band.appendChild(bn);host.appendChild(band);
+      }
+      const loop=document.createElement('div');loop.className='loopbox';Object.assign(loop.style,{left:'22px',top:'498px',width:'1136px',height:'552px'});loop.title=tooltip(S['task-loop']);loop.addEventListener('click',()=>select('step','task-loop'));host.appendChild(loop);
+      label(host,'loop-title',44,508,'TASK LOOP · parallel tracks, many tasks at once');
+      label(host,'track',44,684,'EXECUTION');label(host,'track',228,810,'EXPLORATION');
+      label(host,'track',216,946,'EVIDENCE');label(host,'track',22,1100,'DELIVERY / LANDING / CLOSE · independent operations');
+      label(host,'track',22,1270,'LEGALIZATION · only on request, before or after close');
+      label(host,'track',22,1298,'PM STOP CONTROL');
+      const svg=svgHost(host);svg.setAttribute('viewBox',`0 0 ${PW} ${PH}`);
+      for(const n of PN){const b=makeNode(n.id,'pnode',n.note);b.id='pn-'+n.id;Object.assign(b.style,{left:n.x+'px',top:n.y+'px',width:n.w+'px',height:n.h+'px'});host.appendChild(b);}
+      makeRail(host);
+      for(const l of LOOPS){const b=document.createElement('button');b.type='button';b.className='ppill';b.dataset.loop=l.id;b.title=l.name+' — '+l.text;Object.assign(b.style,{left:l.at[0]+'px',top:l.at[1]+'px'});b.textContent=l.num;b.setAttribute('aria-label',l.num+' '+l.name);b.addEventListener('click',()=>select('loop',l.id));host.appendChild(b);}
+      const keys=$('#loops');keys.replaceChildren(...LOOPS.map(l=>{const b=document.createElement('button');b.type='button';b.className='loop-key';b.dataset.loop=l.id;b.innerHTML='<span class="n"></span><strong></strong><span></span>';b.querySelector('.n').textContent=l.num;b.querySelector('strong').textContent=l.name;b.querySelector('span:last-child').textContent=l.text;b.addEventListener('click',()=>select('loop',l.id));return b;}));
+      markPipe();
+    }
+    function pipeBox(id){const n=PN.find(n=>n.id===id);return{x:n.x,y:n.y,w:n.w,h:n.h,r:n.x+n.w,b:n.y+n.h,cx:n.x+n.w/2,cy:n.y+n.h/2};}
+    function autoRoute(A,B) {
+      if(Math.abs(A.cy-B.cy)<2)return [[A.r,A.cy],[B.x,B.cy]];
+      if(Math.abs(A.cx-B.cx)<2)return B.cy>A.cy?[[A.cx,A.b],[B.cx,B.y]]:[[A.cx,A.y],[B.cx,B.b]];
+      const mid=(A.cy<B.cy?A.b:B.b)+12;
+      return A.cy<B.cy?[[A.cx,A.b],[A.cx,mid],[B.cx,mid],[B.cx,B.y]]:[[A.cx,A.y],[A.cx,mid],[B.cx,mid],[B.cx,B.b]];
+    }
+    function titleZones(host) {
+      const h=host.getBoundingClientRect(),scale=host.id==='pipe'?h.width/PW:1,zones=[];
+      for(const cls of ['.p-band-name','.band-name','.loop-title','.track']) for(const el of host.querySelectorAll(cls)) {
+        if(!el.offsetParent)continue;
+        const r=el.getBoundingClientRect();
+        zones.push({left:(r.left-h.left)/scale-3,right:(r.left-h.left+r.width)/scale+3,top:(r.top-h.top)/scale-3,bottom:(r.top-h.top+r.height)/scale+3});
+      }
+      return zones;
+    }
+    function avoidTitles(points,zones) {
+      let pts=points;
+      for(let pass=0;pass<80;pass++) {
+        let changed=false;
+        outer:for(let i=1;i<pts.length;i++) {
+          const a=pts[i-1],b=pts[i];
+          for(const r of zones) {
+            let detour;
+            if(a[0]===b[0]&&a[0]>r.left&&a[0]<r.right&&Math.max(a[1],b[1])>r.top&&Math.min(a[1],b[1])<r.bottom) {
+              if(Math.min(a[1],b[1])>=r.top||Math.max(a[1],b[1])<=r.bottom)continue;
+              const side=a[0]-r.left<r.right-a[0]?r.left-2:r.right+2;
+              const near=a[1]<b[1]?r.top-2:r.bottom+2,far=a[1]<b[1]?r.bottom+2:r.top-2;
+              detour=[[a[0],near],[side,near],[side,far],[b[0],far]];
+            } else if(a[1]===b[1]&&a[1]>r.top&&a[1]<r.bottom&&Math.max(a[0],b[0])>r.left&&Math.min(a[0],b[0])<r.right) {
+              if(Math.min(a[0],b[0])>=r.left||Math.max(a[0],b[0])<=r.right)continue;
+              const side=a[1]-r.top<r.bottom-a[1]?r.top-2:r.bottom+2;
+              const near=a[0]<b[0]?r.left-2:r.right+2,far=a[0]<b[0]?r.right+2:r.left-2;
+              detour=[[near,a[1]],[near,side],[far,side],[far,b[1]]];
+            }
+            if(detour){pts=[...pts.slice(0,i),...detour,...pts.slice(i)];changed=true;break outer;}
+          }
+        }
+        if(!changed)break;
+      }
+      return pts;
+    }
+    function drawPipe(){const svg=$('#pipe .wires');if(!svg)return;svg.replaceChildren();const loop=focus.kind==='loop'?LOOPS.find(l=>l.id===focus.id):null,zones=titleZones($('#pipe'));
+      for(const [id,e]of Object.entries(PE)){if(e.lanesOnly||!PN.some(n=>n.id===e.a)||!PN.some(n=>n.id===e.b))continue;const hot=!!loop&&loop.path.includes(id)||focus.kind==='edge'&&focus.id===id;
+        path(svg,avoidTitles(e.p||autoRoute(pipeBox(e.a),pipeBox(e.b)),zones),[e.cond?'cond':'',hot?'hot':'',loop&&!hot?'dim':''].join(' '),hot,id);}}
+    function markPipe(){const loop=focus.kind==='loop'?LOOPS.find(l=>l.id===focus.id):null;document.querySelectorAll('.pnode').forEach(b=>{const on=focus.kind==='step'&&focus.id===b.dataset.id||loop&&loop.nodes.includes(b.dataset.id);b.classList.toggle('on',!!on);b.setAttribute('aria-pressed',String(!!on));});document.querySelectorAll('[data-loop]').forEach(b=>b.setAttribute('aria-pressed',String(!!loop&&b.dataset.loop===loop.id)));drawPipe();}
+    function fitPipe(){const wrap=$('#pipe-wrap');if(!wrap||!wrap.offsetParent)return;const avail=wrap.parentElement.clientWidth-2,k=Math.min(1.15,Math.max(.78,avail/PW));$('#pipe').style.transform=`scale(${k})`;wrap.style.width=PW*k+2+'px';wrap.style.height=PH*k+2+'px';}
+    function closure(id,dir){const out=new Set(),stack=[id];while(stack.length){const cur=stack.pop();for(const[a,b]of GRAPH_EDGES){const next=dir==='up'?(b===cur?a:null):(a===cur?b:null);if(next&&!out.has(next)){out.add(next);stack.push(next);}}}return out;}
+    function renderGraph(){const host=$('#graph');host.replaceChildren();svgHost(host);for(const t of TASKS){const b=document.createElement('button');b.type='button';b.className='task '+t.type;b.id='task-'+t.id;b.dataset.id=t.id;b.dataset.state=t.state;b.style.gridColumn=t.col+1;b.style.gridRow=t.row+1;b.title=t.copy+'\nCommand: mp read show '+(t.type==='decision'?'decision':t.type==='exploration'?'exploration':'task')+' <id>\nSource: '+GRAPH_SRC.map(s=>s.text).join(', ');
+        b.innerHTML='<span class="t-top"><span class="t-meta"></span><span class="t-state"></span></span><span class="t-title"></span>';b.querySelector('.t-meta').textContent=t.id+' · '+TYPE_LABEL[t.type]+(t.p?' · P'+t.p:'');b.querySelector('.t-state').textContent=STATE_LABEL[t.state];b.querySelector('.t-title').textContent=t.title;
+        const highlight=()=>{selTask=t.id;markGraph();schedule();};b.addEventListener('mouseenter',highlight);b.addEventListener('focus',highlight);b.addEventListener('click',()=>{selTask=t.id;detailTask=t.id;scenario='normal';focus={kind:'step',id:t.type==='decision'?'pm-decision':t.type==='exploration'?'author':'build'};setView('detail');renderTaskBar();renderLanes();renderInspector();});host.appendChild(b);}
+      for(const[k,text]of [['up','Waits for'],['down','Unlocks']]){const tag=document.createElement('span');tag.className='graph-tags';tag.dataset.tag=k;tag.textContent=text;host.appendChild(tag);}$('#ov-count').textContent='Example · 4 current tasks · 2 earlier-round inputs';markGraph();}
+    function markGraph(){const up=closure(selTask,'up'),down=closure(selTask,'down');for(const t of TASKS){const el=$('#task-'+t.id);if(!el)continue;el.classList.toggle('sel',t.id===selTask);el.classList.toggle('dim',t.id!==selTask&&!up.has(t.id)&&!down.has(t.id));el.setAttribute('aria-pressed',String(t.id===selTask));}}
+    function box(el,host){const r=el.getBoundingClientRect(),h=host.getBoundingClientRect(),x=r.left-h.left,y=r.top-h.top;return{x,y,w:r.width,h:r.height,r:x+r.width,b:y+r.height,cx:x+r.width/2,cy:y+r.height/2};}
+    function drawGraph(){const host=$('#graph'),svg=$('.wires',host);if(!svg||!host.offsetParent)return;svg.replaceChildren();const up=closure(selTask,'up'),down=closure(selTask,'down');for(const[a,b,kind]of GRAPH_EDGES){const A=box($('#task-'+a),host),B=box($('#task-'+b),host),hot=(b===selTask||up.has(b))&&up.has(a)||(a===selTask||down.has(a))&&down.has(b);let pts;
+        if(B.cy<A.cy&&B.cx<A.cx){const x=A.x-18;pts=[[A.x,A.cy],[x,A.cy],[x,B.cy],[B.r,B.cy]];}else if(Math.abs(A.cy-B.cy)<2)pts=[[A.r,A.cy],[B.x,B.cy]];else{const x=B.x-22;pts=[[A.r,A.cy],[x,A.cy],[x,B.cy],[B.x,B.cy]];}path(svg,pts,(hot?'hot':'dim')+(kind?' cond':''),hot);
+        const p=svg.lastChild,tt=document.createElementNS(NS,'title');tt.textContent='Illustrative '+(kind||'scheduling dependency')+' '+a+' → '+b+'; source: '+GRAPH_SRC.map(s=>s.text).join(', ');p.appendChild(tt);p.addEventListener('click',()=>{focus={kind:'graph-edge',id:a+' → '+b};inspectorOpen=true;renderInspector();});}
+      for(const[k,set]of [['up',up],['down',down]]){const tag=host.querySelector('[data-tag="'+k+'"]'),bounds=[...set].map(id=>box($('#task-'+id),host));tag.hidden=!bounds.length;if(bounds.length){tag.style.left=Math.min(...bounds.map(b=>b.x))+'px';tag.style.top=Math.min(...bounds.map(b=>b.y))-20+'px';}}}
+    function scenariosFor(){const v=variantOf(taskById(detailTask));if(v==='decision')return [{id:'normal',name:'Recorded PM decision',wis:[],nodes:['pm-decision'],paths:[],text:['An earlier-round exploration settled. The principal made the direction choice through PM.','PM recorded it with mp pm answer … --words W-n, then submitted the next plan batch.']}];const shared=COMMON_SCENARIOS.filter(s=>v!=='exploration'||['interrupted','undecided','stop','copy','labels','audit','handback','close'].includes(s.id)).map(s=>v==='exploration'?{...s,paths:s.paths.map(p=>p==='review-secretary'?'stabilize-secretary':p==='dispatch-build'?'dispatch-author':p==='build-handback'?'author-handback':p==='refused-constructor'?'refused-researcher':p==='retry-constructor'?'retry-researcher':p),nodes:s.nodes.map(id=>({build:'author',review:'stabilize',proof:'settle',collect:'evidence',verify:'evidence','fix-constructor':'fix-researcher'})[id]||id)}:s);return v==='exploration'?[NORMAL_XP,...XP_SCENARIOS,...shared]:[NORMAL_EXEC,{id:'renew',name:'Environment re-review',wis:[],nodes:['renew','verify','review','proof'],paths:['renew-verify','review','pass'],text:['Environment identity: OS, OS version, architecture and declared version-command outputs/digests. mp pm renew reruns affected declared commands.','Equal used fields renew evidence mechanically; sampling or changed fields need a new Reviewer on the same candidate.','Reviewer pass preserves acceptance, rework returns to Constructor, needs-decision goes to Secretary.']},...shared];}
+    function currentScenario(){return scenariosFor().find(s=>s.id===scenario)||scenariosFor()[0];}
+    function renderTaskBar(){const bar=$('#task-bar');bar.querySelectorAll('.chip').forEach(c=>c.remove());for(const t of TASKS){const b=document.createElement('button');b.type='button';b.className='chip';b.textContent=t.id;const small=document.createElement('small');small.textContent=t.title;b.appendChild(small);b.setAttribute('aria-pressed',String(t.id===detailTask));b.addEventListener('click',()=>{detailTask=t.id;selTask=t.id;scenario='normal';focus={kind:'step',id:t.type==='decision'?'pm-decision':t.type==='exploration'?'author':'build'};inspectorOpen=false;renderTaskBar();renderLanes();markGraph();renderInspector();});bar.appendChild(b);}}
+    function renderScenarioBar(){const bar=$('#scn-bar');bar.querySelectorAll('.chip').forEach(c=>c.remove());for(const[s,i]of scenariosFor().map((s,i)=>[s,i])){const b=document.createElement('button');b.type='button';b.className='chip';b.textContent=String(i+1).padStart(2,'0')+' '+s.name;b.title=s.wis.map(id=>id+': '+WI[id]).join('\n');b.setAttribute('aria-pressed',String(s.id===currentScenario().id));b.addEventListener('click',()=>{scenario=s.id;inspectorOpen=false;renderLanes();renderInspector();});bar.appendChild(b);}
+      const sc=currentScenario();$('#scn-steps').replaceChildren(...sc.text.map((text,i)=>{const li=document.createElement('li'),n=document.createElement('b'),span=document.createElement('span');n.textContent=String(i+1).padStart(2,'0');span.textContent=text;li.append(n,span);return li;}));if(sc.wis.length){const li=document.createElement('li');li.className='scenario-wis';const n=document.createElement('b');n.textContent='WI';const span=document.createElement('span');for(const id of sc.wis){const a=document.createElement('a');a.href=src(wiFile(id))[0].href;a.textContent=id+': '+WI[id];span.append(a,document.createElement('br'));}li.append(n,span);$('#scn-steps').appendChild(li);}}
+    function renderLanes(){const t=taskById(detailTask),v=variantOf(t),sc=currentScenario(),host=$('#lanes');host.replaceChildren();host.style.setProperty('--cols',12);svgHost(host);
+      $('#dt-title').textContent='Seat lanes · '+t.id+' '+t.title;$('#dt-sub').textContent='Illustrative '+TYPE_LABEL[t.type].toLowerCase()+' cycle. One lane per role; each box has one seat, or an mp step. Time runs left to right. Empty lanes do not take part in this cycle.';
+      const primary=v==='decision'?['pm-decision']:v==='exploration'?PRIMARY_XP:PRIMARY_EXEC;
+      const cells=v==='exploration'?explorationCells:executionCells;
+      const ids=[...new Set([...primary,...sc.nodes])];
+      LANES.forEach((lane,i)=>{const band=document.createElement('div');band.className='band';band.style.gridRow=i+1;band.dataset.lane=lane.id;const name=document.createElement('span');name.className='band-name';name.textContent=lane.name;const small=document.createElement('small');small.textContent=(FILLERS[lane.id]?laneFillerText(lane.id)+' · ':'')+lane.note;name.appendChild(small);band.appendChild(name);if(!ids.some(id=>S[id].lane===lane.id)){const none=document.createElement('span');none.className='inactive-lane';none.textContent='No step in this cycle';band.appendChild(none);}host.appendChild(band);});
+      const groups=new Map();for(const id of ids){const s=S[id],col=cells[id]??8,key=s.lane+':'+col;let cell=groups.get(key);if(!cell){cell=document.createElement('div');cell.className='lane-cell';cell.style.gridColumn=col+1;cell.style.gridRow=LANES.findIndex(l=>l.id===s.lane)+1;groups.set(key,cell);host.appendChild(cell);}const b=makeNode(id,'step');b.id='step-'+id;cell.appendChild(b);}
+      makeRail(host,true);renderScenarioBar();markLanes();schedule();}
+    function markLanes(){const sc=currentScenario(),nums={};sc.nodes.forEach((id,i)=>{(nums[id]??=[]).push(i+1);});document.querySelectorAll('#lanes .step').forEach(b=>{const id=b.dataset.id,on=id in nums;b.classList.toggle('on',on);b.classList.toggle('dim',!on);b.classList.toggle('sel',focus.kind==='step'&&focus.id===id);b.querySelector('.num').textContent=on?nums[id].join(' · '):'';});schedule();}
+    function drawLanes(){const host=$('#lanes'),svg=$('.wires',host);if(!svg||!host.offsetParent)return;svg.replaceChildren();const sc=currentScenario(),v=variantOf(taskById(detailTask)),all=[...new Set([...(BASE_EDGES[v]||[]),...sc.paths])],zones=titleZones(host);for(const id of all){const e=PE[id];const a=$('#step-'+e.a),b=$('#step-'+e.b);if(!a||!b)continue;const A=box(a,host),B=box(b,host),hot=sc.paths.includes(id);let pts;if(e.a===e.b){pts=[[A.r,A.cy],[A.r+12,A.cy],[A.r+12,A.b+10],[A.cx,A.b+10],[A.cx,A.b]];}else if(A.cx>B.cx){const y=Math.max(A.b,B.b)+12;pts=[[A.cx,A.b],[A.cx,y],[B.cx,y],[B.cx,B.b]];}else pts=autoRoute(A,B);path(svg,avoidTitles(pts,zones),[e.cond?'cond':'',hot?'hot':'dim'].join(' '),hot,id);}}
+    function renderInspector(){let d;
+      if(focus.kind==='loop'){const l=LOOPS.find(l=>l.id===focus.id);d={title:l.num+' '+l.name,copy:l.text,act:l.path.map(id=>S[PE[id].a].act).join(' · '),src:l.src,plain:'Recorded return / continuation'};}
+      else if(focus.kind==='edge'){const e=PE[focus.id];d={title:S[e.a].title+' → '+S[e.b].title,copy:e.text,act:S[e.b].act,src:e.src,plain:'Process edge'};}
+      else if(focus.kind==='graph-edge'){d={title:focus.id,copy:focus.id.includes('X1')||focus.id.includes('D1')?'Earlier-round exploration → recorded decision → next plan: provenance and direction, rather than a task scheduling dependency. The current tasks have already been planned from that settled result.':'Illustrative scheduling dependency. It needs the accepted prerequisite product; stable mode additionally requires proof. These sample ids are not records from a real mission.',act:'mp read show task <id>',src:GRAPH_SRC,plain:'Example plan edge'};}
+      else if(focus.kind==='exception'){const e=EXCEPTIONS.find(e=>e.id===focus.id);d={...e,plain:e.short,facts:e.wis.map(id=>id+': '+WI[id])};}
+      else {const s=S[focus.id]||S.batch;d={...s,plain:laneName(s.lane)+' · '+s.plain,facts:[...s.facts,...(FILLERS[s.lane]?['Filler: '+fillerText(s.lane,s.id)+' (information only)']:[])]};}
+      const host=$('#inspector');host.replaceChildren();host.classList.toggle('open',inspectorOpen);
+      const close=document.createElement('button');close.type='button';close.className='ins-close';close.textContent='Close details ×';close.addEventListener('click',()=>{inspectorOpen=false;renderInspector();});host.appendChild(close);
+      const a=document.createElement('div'),b=document.createElement('div'),c=document.createElement('div');a.className='ins-a';b.className='ins-b';c.className='ins-c';host.append(a,b,c);
+      const k=document.createElement('p');k.className='label';k.textContent='4.1.0 · source-backed detail';const h=document.createElement('h2');h.className='ins-title';h.textContent=d.title;const sub=document.createElement('p');sub.className='ins-sub';sub.textContent=d.plain;const copy=document.createElement('p');copy.className='ins-copy';copy.textContent=d.copy;a.append(k,h,sub,copy);
+      if(d.facts?.length){const ul=document.createElement('ul');ul.className='ins-list';d.facts.forEach(f=>{const li=document.createElement('li');li.textContent=f;ul.appendChild(li);});b.appendChild(ul);}
+      const cmd=document.createElement('p');cmd.className='ins-act';cmd.textContent=d.act;c.appendChild(cmd);const p=document.createElement('p');p.className='ins-src';p.append('Source files ');for(const source of d.src){const link=document.createElement('a');link.href=source.href;link.textContent=source.text;p.append(link,document.createElement('br'));}c.appendChild(p);
+    }
+    function setView(next){view=next;inspectorOpen=false;document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));$('#view-pipeline').hidden=view!=='pipeline';$('#view-overview').hidden=view!=='overview';$('#view-detail').hidden=view!=='detail';$('.work').classList.add('wide');renderInspector();schedule();}
+    document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
+    document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(inspectorOpen){inspectorOpen=false;renderInspector();}else if(view==='detail')setView('overview');}});
+    function draw(){frame=0;fitPipe();drawPipe();drawGraph();drawLanes();if(capture){let meta=$('meta[name="capture-height"]');if(!meta){meta=document.createElement('meta');meta.name='capture-height';document.head.appendChild(meta);}meta.content=String(Math.ceil(document.documentElement.scrollHeight));}}
+    function schedule(){if(!frame)frame=requestAnimationFrame(draw);}
+    if(capture)document.body.classList.add('capture');
+    applyTheme();renderPipe();renderGraph();renderTaskBar();renderLanes();renderInspector();setView('pipeline');
+    new ResizeObserver(schedule).observe(document.body);
+    if(document.fonts?.ready)document.fonts.ready.then(schedule);
+  })();
+  </script>
+</body>
+</html>

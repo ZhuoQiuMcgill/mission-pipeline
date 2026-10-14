@@ -2,6 +2,10 @@
 
 Mission Pipeline runs a software project as a traceable process that any agent harness and any model can carry out. You talk to one PM, the session on your screen. Seats, filled by whatever harness and model the PM chooses, plan, build, review and attack the work, and every step is kept in a memory that lives in your project folder. Version 4.1 is in [`engine/`](engine/).
 
+[![Mission Pipeline 4.1.0 workflow: principal and PM, the decision layer, parallel execution and exploration tracks, delivery, landing, close and legalization](docs/workflow-4.1-light.png)](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-4.1.html)
+
+[Interactive workflow](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-4.1.html): explore the pipeline, select example tasks, walk their seat lanes and replay recovery scenarios. The page is [docs/workflow-4.1.html](docs/workflow-4.1.html); regenerate the image with `python tools/render_workflow.py --page docs/workflow-4.1.html --out docs/workflow-4.1-light.png`.
+
 ## What it is
 
 Three parts, and nothing else:
@@ -48,7 +52,7 @@ Then open your project with any agent harness (Claude Code, Codex, …) and tell
 
 ### The 3.0 workflow (historical)
 
-This page and image show the 3.0 process. 4.1 changed the seats and the process (see the design contract). An updated workflow page for 4.1 is planned.
+This page and image show the 3.0 process. 4.1 changed the seats and the process (see the design contract).
 
 [![Mission Pipeline 3.0 pipeline: the principal's touchpoints, the PM's charter and plan, the task loop with execution and exploration tracks and its numbered loops, and closure](docs/workflow-3.0-light.png)](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-3.0.html)
 

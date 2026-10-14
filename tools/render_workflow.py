@@ -1,10 +1,11 @@
-"""Render docs/workflow-3.0.html into the README screenshot (light theme).
+"""Render a workflow page into a README screenshot (light theme).
 
-Opens the page in capture mode (both views, no controls) with a headless Chromium,
+Opens the page in capture mode (pipeline, no controls) with a headless Chromium,
 reads the page height the page reports, then takes one full-height screenshot.
-Writes docs/workflow-3.0-light.png.
+Defaults to docs/workflow-3.0.html and docs/workflow-3.0-light.png.
 
     python tools/render_workflow.py [--chrome PATH] [--width 1600] [--no-sandbox]
+    python tools/render_workflow.py --page docs/workflow-4.1.html --out docs/workflow-4.1-light.png
 
 The browser is found from --chrome, then $CHROME, then common executable names,
 then a Playwright download under ~/.cache/ms-playwright. Run it after every edit to
@@ -52,24 +53,33 @@ def run(chrome, args, sandbox, profile):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--page", type=Path, default=PAGE, help="HTML page, relative to the repository root or absolute")
+    parser.add_argument("--out", type=Path, help="PNG output; defaults to <page-stem>-light.png beside the page")
     parser.add_argument("--chrome")
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--no-sandbox", action="store_true", help="needed in some containers and WSL")
     opts = parser.parse_args()
+    page = (ROOT / opts.page).resolve()
+    out = (ROOT / opts.out).resolve() if opts.out is not None else page.with_name(f"{page.stem}-light.png")
+    if not page.is_file():
+        parser.error(f"Page does not exist: {page}")
+    if opts.width < 1:
+        parser.error("--width must be positive")
     chrome = find_chrome(opts.chrome)
     sandbox = not opts.no_sandbox
     with tempfile.TemporaryDirectory() as profile:
         # A shared profile keeps the web fonts cached, so measuring and capturing see the same layout.
-        run(chrome, [f"--window-size={opts.width},1200", "--dump-dom", f"{PAGE.as_uri()}?capture"], sandbox, profile)
+        run(chrome, [f"--window-size={opts.width},1200", "--dump-dom", f"{page.as_uri()}?capture"], sandbox, profile)
         for theme in ("light",):
-            url = f"{PAGE.as_uri()}?capture&theme={theme}"
+            url = f"{page.as_uri()}?capture&theme={theme}"
             dom = run(chrome, [f"--window-size={opts.width},1200", "--dump-dom", url], sandbox, profile).stdout
             match = re.search(r'<meta name="capture-height" content="(\d+)"', dom)
             if not match:
                 raise SystemExit(f"The page did not report its height for the {theme} theme")
-            out = ROOT / "docs" / f"workflow-3.0-{theme}.png"
+            out.parent.mkdir(parents=True, exist_ok=True)
             run(chrome, [f"--window-size={opts.width},{match.group(1)}", f"--screenshot={out}", url], sandbox, profile)
-            print(f"{out.relative_to(ROOT)}  {opts.width}x{match.group(1)}")
+            display = out.relative_to(ROOT) if out.is_relative_to(ROOT) else out
+            print(f"{display}  {opts.width}x{match.group(1)}")
 
 
 if __name__ == "__main__":
