@@ -296,14 +296,15 @@
     @media print { .tabs, .theme-btn, .inspector, .bar { display: none !important; } .view[hidden] { display: block !important; } }
 
     /* 4.1 extends the same atlas style and grid/wire engine. */
-    .pipe { height: 1400px; }
-    .pnode { overflow-wrap: anywhere; padding: 5px 9px; }
-    .pnode .p-note { font-family: var(--font); line-height: 1.3; }
-    .pnode .p-role { font-size: 9px; line-height: 1.2; text-transform: none; letter-spacing: 0; }
-    .pnode .p-title { font-size: 12.5px; }
-    .ppill { padding: 1px 6px; font-size: 12px; }
-    .track { font-size: 11px; font-weight: 700; letter-spacing: .08em; }
-    .loop-title { font-size: 13px; font-weight: 700; letter-spacing: .06em; }
+    .pipe { height: 750px; }
+    .inventory { height: 1400px; }
+    .inventory .pnode { overflow-wrap: anywhere; padding: 5px 9px; }
+    .inventory .pnode .p-note { font-family: var(--font); line-height: 1.3; }
+    .inventory .pnode .p-role { font-size: 9px; line-height: 1.2; text-transform: none; letter-spacing: 0; }
+    .inventory .pnode .p-title { font-size: 12.5px; }
+    .inventory .ppill { padding: 1px 6px; font-size: 12px; }
+    .inventory .track { font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+    .inventory .loop-title { font-size: 13px; font-weight: 700; letter-spacing: .06em; }
     .exception-rail { position: absolute; z-index: 3; padding: 12px; border: 1px dashed var(--line); background: var(--paper); }
     .exception-rail h3 { margin: 0 0 12px; font-size: 11px; letter-spacing: .12em; }
     .exception { display: block; width: 100%; text-align: left; padding: 9px 0; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
@@ -316,7 +317,7 @@
     .lane-cell .step { margin: 0; min-width: 0; overflow-wrap: anywhere; }
     .band-name { max-width: 82%; }
     .p-band-name, .band-name, .loop-title, .track, .graph-tags { z-index: 5; background: var(--paper); padding: 1px 5px; line-height: 1.4; }
-    .ppill { min-width: 22px; padding: 1px 2px; text-align: center; }
+    .inventory .ppill { min-width: 22px; padding: 1px 2px; text-align: center; }
     .fillers-note { margin: 8px 0 16px; font-size: 12.5px; color: var(--ink-2); }
     .lane-rule { font-size: 12.5px; color: var(--ink-2); max-width: 100ch; }
     .band-name small { display: inline; }
@@ -333,6 +334,22 @@
     .inspector.open .ins-close { display: block; margin-bottom: 16px; }
     .wires .wire { pointer-events: stroke; cursor: pointer; }
     @media (max-width: 900px) { .notes { grid-template-columns: 1fr; gap: 0; } .reads { grid-template-columns: 130px minmax(0,1fr); } }
+    /* The summary map keeps the 3.0 visual hierarchy; detail retains all 4.1 steps. */
+    #pipe .p-band { height: 112px; }
+    #pipe .p-band-name, #pipe .loop-title, #pipe .track { padding: 0; background: none; }
+    #pipe .loop-title b { font-size: 17px; }
+    #pipe .loop-title span { line-height: 1.5; }
+    #pipe .track { display: flex; align-items: baseline; gap: 10px; }
+    #pipe .p-filler { font: 8px/1.3 var(--font); color: var(--muted); white-space: nowrap; letter-spacing: -.15px; }
+    .notes .sub-title { font-size: 15px; margin-top: 24px; }
+    .reads { grid-template-columns: 130px minmax(0,1fr); font-size: 12px; }
+    #loops { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
+    .inventory-details { margin-top: 28px; border-top: 1px solid var(--hair); padding-top: 14px; }
+    .inventory-details > summary { cursor: pointer; font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .inventory-details .view-sub { margin-bottom: 12px; }
+    .ins-related { border-top: 1px solid var(--hair); margin-top: 12px; padding-top: 10px; }
+    .ins-related summary { cursor: pointer; font-weight: 600; }
+    @media (max-width: 760px) { #loops { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -357,13 +374,13 @@
       <div>
         <section class="view" id="view-pipeline" aria-labelledby="pl-title">
           <div class="view-head"><div><h1 class="view-title" id="pl-title">Pipeline</h1>
-            <p class="view-sub">The principal talks only to the PM. The PM records the words, plans in batches and dispatches through its own harness. Select a box, arrow or numbered loop for its command and source files.</p>
+            <p class="view-sub">The principal talks only to the PM. The PM records the words, plans in batches and dispatches through its own harness. Select a box or labeled loop for its commands and source files; the full process inventory is in 03.</p>
           </div><span class="label">Implemented process · 4.1.0</span></div>
           <div class="scroll"><div class="board pipe-wrap" id="pipe-wrap"><div class="pipe" id="pipe"></div></div></div>
           <div class="loops" id="loops" role="group" aria-label="Numbered loops"></div>
           <div class="notes">
             <article><h2 class="sub-title">Memory that travels</h2><p>Everything the process records lives in <code>.mission-pipeline/</code>: a SQLite skeleton connecting the run chain and checks, with Markdown leaves for words, decisions, cards, reports and summaries. Products live in git. Copy the folder while idle; any harness continues from the same memory.</p><p class="ins-src">Source: <a href="design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md">4.1 contract</a> · <a href="../engine/README.md">engine/README.md</a></p></article>
-            <article><h2 class="sub-title">What the user sees</h2><dl class="reads">
+            <article><h2 class="sub-title">What you can ask</h2><dl class="reads">
               <dt>“How is it going?”</dt><dd><code>mp read status</code> — layer 0 plus subtasks with record changes since the last ask, including late hand-backs that were not accepted.</dd>
               <dt>“Why isn't it done?”</dt><dd><code>mp read blocked</code> — block reason and next step.</dd>
               <dt>“Explain X”</dt><dd><code>mp read show &lt;kind&gt; &lt;id&gt;</code> — layer 2 for X.</dd>
@@ -375,12 +392,12 @@
           <div class="scroll"><table class="compare">
             <thead><tr><th scope="col"></th><th scope="col">Execution</th><th scope="col">Exploration</th><th scope="col">Legalization</th></tr></thead>
             <tbody>
-              <tr><th scope="row">Who builds</th><td>Constructor: one task, its own git worktree and write scope.</td><td>Researcher authors; blind evidence uses a Constructor or a Researcher reader. A separate Researcher interprets registered research attempts.</td><td>The product already exists. Auditors fill missing reviews without changing it.</td></tr>
-              <tr><th scope="row">Who judges</th><td>Reviewer: each standard, gap and issue, on the verified candidate.</td><td>Crititor attacks; a new Stabilizer judges every attack round for scope and drift.</td><td>A fresh Auditor per node; then a fresh chain Auditor checks the words and seams.</td></tr>
-              <tr><th scope="row">Loop and cap</th><td>Initial candidate + 2 reworks. The Secretary can grant once, 1–2 more attempts; then only the user. Counts stay within one lineage: execution keeps them for the same task id; a new task id does not inherit them. A new PM batch has a new planning lineage.</td><td>Contract: default 3 attack rounds, including the fresh closing attack; definition can change the budget. Discussion replies also consume a round in 4.1.0. One Secretary extension of 1–2 rounds; then the user. Evidence resumes through a new card.</td><td>Backfill generations → chain → stamp. Failed legalization ends; a new user request starts a new chain object. Interrupted seats use the counted re-dispatch path.</td></tr>
-              <tr><th scope="row">Stop conditions</th><td>Pass, decision needed, abandonment, a stop, exhausted reworks or the same failure twice.</td><td>Convergence on the same version, no pending ruling; budget exhausted; repeated fatal class twice; no progress twice; direction ruling; abandonment.</td><td>Stamp, broken required link, failed backfill or chain not accepted (WI-25).</td></tr>
-              <tr><th scope="row">Back to decision layer</th><td>Constructor questions, Reviewer needs-decision, exhausted loops, Secretary re-plan.</td><td>Settled structural conclusion → Architect only while currently proven. Otherwise no-conclusion → Secretary. Direction or a key answer that does not stand → Secretary → PM and principal.</td><td>The requested result goes to the PM; failed links need their producing work fixed and reviewed.</td></tr>
-              <tr><th scope="row">“Proven” means</th><td>The program's current label: required positions pass on current bases and evidence, constraints covered, required prerequisites proven.</td><td>The same proof rules, with a Crititor + Stabilizer position; unresolved in-scope fatal/serious findings refute, pending direction rulings block acceptance.</td><td>All required nodes proven and the chain accepted; the program stamps at a recorded revision. A later affected basis or evidence removes the stamp.</td></tr>
+              <tr><th scope="row">Who builds</th><td>A Constructor builds one task in its own git worktree.</td><td>A Researcher authors, with blind evidence and separate interpretation when needed.</td><td>Auditors fill missing reviews without changing the product.</td></tr>
+              <tr><th scope="row">Who judges</th><td>A Reviewer judges each standard, gap and issue on the verified candidate.</td><td>A Crititor attacks and a fresh Stabilizer judges scope and drift every round.</td><td>Fresh node Auditors backfill, then a fresh chain Auditor checks the words and seams.</td></tr>
+              <tr><th scope="row">Loop and cap</th><td>One candidate + two reworks; one Secretary grant of 1–2 more, then you.</td><td>Three attack rounds by default, including closing attacks and discussion replies; one 1–2-round grant, then you.</td><td>Backfill → chain → stamp; a failed attempt needs a new user request and chain.</td></tr>
+              <tr><th scope="row">Stop conditions</th><td>Pass, decision needed, abandonment, stop, spent reworks or the same failure twice.</td><td>Convergence, pending direction ruling, spent rounds, fatal repetition or no progress twice, or abandonment.</td><td>Stamp, a broken required link, failed backfill or rejected chain.</td></tr>
+              <tr><th scope="row">Back to decision layer</th><td>Questions, needs-decision and spent loops go to the Secretary.</td><td>Currently proven structural findings go to Architect; direction or no conclusion goes to Secretary and PM.</td><td>The result goes through PM; failed links need their producing work fixed and reviewed.</td></tr>
+              <tr><th scope="row">“Proven” means</th><td>Required reviews pass on current bases and evidence, with constraints covered and prerequisites proven.</td><td>The same rules apply, with attack and stabilization, no unresolved serious findings and no pending ruling.</td><td>Required nodes and the accepted chain are proven at the stamped revision; affected changes remove it.</td></tr>
             </tbody>
           </table></div>
           <p class="ins-src">Source: <a href="../engine/src/flow/execution.ts">execution.ts</a> · <a href="../engine/src/flow/planning.ts">planning.ts</a> · <a href="../engine/src/flow/exploration/machine.ts">exploration/machine.ts</a> · <a href="../engine/src/flow/audit/flow.ts">audit/flow.ts</a> · <a href="design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md">carried process contract</a></p>
@@ -396,6 +413,12 @@
           <div class="bar" id="scn-bar" role="group" aria-label="Numbered recovery scenario"><span class="label">Scenario</span></div>
           <div class="scroll"><div class="board lanes" id="lanes"></div></div>
           <ol class="scenario-steps" id="scn-steps"></ol>
+          <details class="inventory-details" id="inventory-details">
+            <summary>Full 4.1 process inventory · planning, program steps and exits</summary>
+            <p class="view-sub">The complete seat map and all 16 returns, including the exception rail, stop and close controls, copied memory, landing exits and work instructions. Select any step or return for its commands and source files.</p>
+            <div class="scroll"><div class="board pipe-wrap" id="inventory-wrap"><div class="pipe inventory" id="inventory"></div></div></div>
+            <div class="loops" id="inventory-loops" role="group" aria-label="All sixteen process returns"></div>
+          </details>
         </section>
       </div>
       <aside class="inspector" id="inspector" aria-live="polite"></aside>
@@ -524,9 +547,9 @@
     step('close-intent','pm','Close landing intent','Fresh check under landing lock','PM may close an open intent as not landed. A fresh check at D records landed instead; a held landing lock reports in progress. Otherwise close the intent and keep the delivery ref.','mp pm land <delivery> --close-not-landed',[F.land,F.cli,wiFile('WI-06')]);
     step('intent-result','program','Intent result','Not landed / at D / in progress','Only after the locked fresh check: close as not landed while retaining the delivery ref, record done if already at D, or leave an in-progress landing untouched.','mp pm land <delivery> --close-not-landed',[F.land,F.cli]);
     // Fixed coordinates, rendered from data and scaled to fit, as in the historical atlas.
-    const PW = 1400, PH = 1400, NW = 166, NH = 86;
-    const PN = [];
-    const pn = (id, x, y, w = NW, h = NH, note = S[id].plain) => PN.push({ id, x, y, w, h, note });
+    const DETAIL_PW = 1400, DETAIL_PH = 1400, DETAIL_NW = 166, DETAIL_NH = 86;
+    const DETAIL_PN = [];
+    const pn = (id, x, y, w = DETAIL_NW, h = DETAIL_NH, note = S[id].plain) => DETAIL_PN.push({ id, x, y, w, h, note });
     ['message','answer','consent','progress','halt','audit-consent'].forEach((id, i) => pn(id, 22 + i * 230, 30, 210, 70));
     pn('session',22,150,160); pn('words',206,150,170); pn('requirements',400,150,232);
     pn('batch',656,150,206); pn('pm-decision',886,150,236); pn('read',1146,150,232);
@@ -539,9 +562,9 @@
     pn('deliver',22,1130,150); pn('manifest',196,1130,180); pn('checks',400,1130,180); pn('land',604,1130,150);
     pn('landing',778,1130,180); pn('close',982,1130,190); pn('legalize',1196,1130,182);
     pn('audit-plan',620,1256,184); pn('audit-node',830,1256,170); pn('audit-chain',1024,1256,168); pn('stamp',1216,1256,162);
-    const PE = {};
+    const DETAIL_PE = {};
     // Every edge carries its own explanation and file provenance, exposed by click and title.
-    function edge(id, a, b, text, files, opts = {}) { PE[id] = { id, a, b, text, src: src(...files), ...opts }; }
+    function edge(id, a, b, text, files, opts = {}) { DETAIL_PE[id] = { id, a, b, text, src: src(...files), ...opts }; }
     const planSrc = [F.planning], execSrc = [F.execution], xpSrc = [F.xflow, F.machine, F.xstep];
     edge('speak','message','words','The PM records every user message as W-n.',[F.handbook,F.pm]);
     edge('start','session','words','The session identifies the PM filler; user messages are recorded verbatim.',[F.handbook,F.cli]);
@@ -653,7 +676,7 @@
     edge('audit-retry','audit-node','legalize','⑮ Failed legalization ends. After producing work is fixed, another user request creates a new chain object.',[F.audit,wiFile('WI-25')],{cond:true,p:[[915,1342],[915,1354],[1390,1354],[1390,1226],[1287,1226],[1287,1216]]});
     edge('integration','manifest','batch','⑯ Incompatible outputs or overlay conflicts need a PM batch for an integration task, then another delivery.',[F.delivery,F.cli],{cond:true,p:[[196,1173],[18,1173],[18,280],[862,280],[862,193]]});
     const NUM = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯';
-    const LOOPS = [
+    const DETAIL_LOOPS = [
       ['cal1-return','PM direction return','Uncapped; new words-backed PM batch.',[404,280],['cal1-return'],['cal1','batch']],
       ['mechanical-return','Mechanical return','3 returns; same failure twice or cap → WI-08.',[554,448],['mechanical-return'],['mechanical','decompose']],
       ['feasibility-return','Feasibility return','One revision; unresolved → Secretary.',[702,294],['feasibility-return','feasibility-secretary'],['feasibility','decompose','secretary']],
@@ -670,7 +693,7 @@
       ['full-review','Full calibration fallback','A continuation requests or needs full review. Applies to both Calibrators.',[184,374],['full-review'],['cal1','cal2']],
       ['audit-retry','Legalization again','WI-25: fix the required link / seam; new request, new chain object.',[1130,1354],['audit-retry'],['audit-node','legalize']],
       ['integration','Delivery integration','PM batch → integration task → Reviewer → deliver again. Conflicts are returned, not automatically assigned.',[924,280],['integration','batch-cal1'],['manifest','batch']]
-    ].map(([id,name,text,at,path,nodes],i)=>({id,name,text,at,path,nodes,num:NUM[i],src:src(...new Set(path.flatMap(e=>PE[e].src.map(s=>s.text))))}));
+    ].map(([id,name,text,at,path,nodes],i)=>({id,name,text,at,path,nodes,num:NUM[i],src:src(...new Set(path.flatMap(e=>DETAIL_PE[e].src.map(s=>s.text))))}));
     const WI = {
       "WI-01": "Target branch checked out in several worktrees, or held by a rebase or bisect: not landed",
       "WI-02": "Target branch checked out in one worktree that is not clean, or that is external: not landed",
@@ -750,9 +773,9 @@
       {id:'renew',name:'Exploration reopened',wis:['WI-08','WI-33'],nodes:['renew','experiment','evidence','attack','stabilize','settle','secretary'],paths:['attacker-evidence','experiment-record','attack-stabilize','stabilize-settle'],text:['OS, OS version, architecture or declared version-command outputs changed; experiment evidence supporting a converged exploration is stale. A settled accept-risk result does not reopen this way.','The program reopens it, reruns the same evidence requests, then schedules the attacker re-check and its Stabilizer.','A new stop is routed like the first; unchanged conclusions need no second routing, changed conclusions do.']}
     ];
     const LOOP_ORDER = ['cal1-return','full-review','mechanical-return','feasibility-return','cal2-return','rework','round','resume','next-task','replan','renew','redispatch','integration','rebuild','landing-retry','audit-retry'];
-    LOOPS.sort((a,b)=>LOOP_ORDER.indexOf(a.id)-LOOP_ORDER.indexOf(b.id));
-    LOOPS.forEach((l,i)=>{ l.num=NUM[i]; });
-    for (const l of LOOPS) for (const e of l.path) PE[e].text = PE[e].text.replace(/^[①-⑯] /, l.num+' ');
+    DETAIL_LOOPS.sort((a,b)=>LOOP_ORDER.indexOf(a.id)-LOOP_ORDER.indexOf(b.id));
+    DETAIL_LOOPS.forEach((l,i)=>{ l.num=NUM[i]; });
+    for (const l of DETAIL_LOOPS) for (const e of l.path) DETAIL_PE[e].text = DETAIL_PE[e].text.replace(/^[①-⑯] /, l.num+' ');
     step('task-loop','program','Task loop','Parallel execution and exploration tracks','Each execution task has one Constructor candidate and a Reviewer. Each exploration has an author, attacker and a Stabilizer after every attack round, with optional blind evidence. The PM claims ready seats through its harness; multiple tasks may progress together.','mp pm next · mp pm dispatch <step>',[F.execution,F.xflow,F.pm]);
     const PRIMARY_EXEC = ['gate','ready','dispatch','build','collect','verify','review','proof'];
     const PRIMARY_XP = ['dispatch','author','attack','disposition','stabilize','settle','experiment','reading','evidence','interpret'];
@@ -763,6 +786,97 @@
     // Duplicate cells stack within the same seat's lane rather than overlap.
     Object.assign(executionCells,{gate:0,ready:1,dispatch:2,build:3,collect:4,verify:5,review:6,proof:7,'pm-decision':8,secretary:8,'leases-free':8,'handback-check':4,'fix-constructor':5,'stop-release':7,'mission-open':9,'copy-recover':8,'confirm-copy':9,'landing-refused':9,'worktree-mismatch':9,'close-intent':9,'intent-result':9});
     Object.assign(explorationCells,{dispatch:1,ready:0,method:7,'leases-free':8,'handback-check':3,'fix-researcher':4,'stop-release':7,'mission-open':9,'copy-recover':8,'confirm-copy':9});
+    /* Pipeline map: the 3.0 principal band, column grid and five labeled returns. */
+    const PW = 1400, PH = 770, NW = 125, NH = 90;
+    const C = [595, 750, 905, 1055];
+    const R1 = 236, R2 = 374, R3 = 526;
+    const PRINCIPAL = {
+      message: { role: 'You say', title: 'Goals · decisions · grants', note: 'the PM records your words as W-n', steps: ['message', 'words'] },
+      answer: { role: 'You decide', title: 'What only you can decide', note: 'escalations, via the PM · mp pm answer', steps: ['answer', 'pm-decision'] },
+      progress: { role: 'You ask', title: 'How is it going?', note: 'mp read status · mp read blocked', steps: ['progress', 'read'] },
+      halt: { role: 'You stop', title: 'Stop or narrow', note: 'mp pm stop', steps: ['halt', 'stop', 'stop-release'] },
+      consent: { role: 'You consent', title: 'Deliver and land', note: 'your words are the consent', steps: ['consent', 'land'] }
+    };
+    const PN = [
+      { id: 'message', kind: 'principal', x: 20, y: 28, w: 210, h: 78, ...PRINCIPAL.message },
+      { id: 'answer', kind: 'principal', x: 245, y: 28, w: 240, h: 78, ...PRINCIPAL.answer },
+      { id: 'progress', kind: 'principal', x: 500, y: 28, w: 190, h: 78, ...PRINCIPAL.progress },
+      { id: 'halt', kind: 'principal', x: 705, y: 28, w: 300, h: 78, ...PRINCIPAL.halt },
+      { id: 'consent', kind: 'principal', x: 1180, y: 28, w: 200, h: 78, ...PRINCIPAL.consent },
+      { id: 'batch', kind: 'major', x: 20, y: 330, w: 115, h: 124, role: 'PM', title: 'Align', note: 'mission · requirement items quoting you · PM plan', steps: ['batch', 'words', 'requirements', 'session', 'pm-decision', 'read', 'effective'] },
+      { id: 'cal1', x: 155, y: 330, w: 105, h: 124, role: 'Calibrator ①', title: 'Direction audit', note: 'the plan against your words', steps: ['cal1'] },
+      { id: 'decompose', kind: 'major', x: 270, y: 330, w: 145, h: 124, role: 'Architect', title: 'Decompose', note: 'read-only · tasks · interfaces · feasibility', steps: ['decompose', 'mechanical', 'feasibility'] },
+      { id: 'cal2', x: 430, y: 330, w: 105, h: 124, role: 'Calibrator ②', title: 'Plan audit', note: 'detailed plan against the PM plan', steps: ['cal2', 'detail'] },
+      { id: 'dispatch', x: C[0], y: R1, w: 435, h: 84, role: 'PM', title: 'Dispatch', note: 'mp pm next → mp pm dispatch; stable mode waits for proven inputs', steps: ['dispatch', 'gate', 'ready', 'renew', 'release'] },
+      { id: 'build', x: C[0], y: R2, role: 'Constructor', title: 'Build', note: 'own git worktree', steps: ['build', 'collect', 'handback-check'] },
+      { id: 'verify', x: C[1], y: R2, role: 'MP', title: 'Verify', note: 'candidate commit · declared runs on a clean checkout', steps: ['verify', 'collect'] },
+      { id: 'review', x: C[2], y: R2, role: 'Reviewer', title: 'Accept', note: 'pass · rework · needs decision', steps: ['review'] },
+      { id: 'author', x: C[0], y: R3, role: 'Researcher', title: 'Author', note: 'question · goal · version', steps: ['author', 'disposition', 'experiment', 'reading', 'evidence', 'interpret', 'method'] },
+      { id: 'attack', x: C[1], y: R3, role: 'Crititor', title: 'Attack', note: 'fresh attacker to close', steps: ['attack'] },
+      { id: 'stabilize', x: C[2], y: R3, role: 'Stabilizer', title: 'Judge the round', note: 'scope and drift, every round', steps: ['stabilize', 'settle'] },
+      { id: 'proof', kind: 'gate', x: C[3], y: 443, w: 105, h: 110, role: 'MP', title: 'Proven', note: 'accepted or settled, and its label is proven', steps: ['proof', 'settle', 'drain'] },
+      { id: 'secretary', x: 680, y: 696, w: 320, h: 64, role: 'Secretary', title: 'Decide', note: 'within your recorded authority', steps: ['secretary', 'pm-decision'] },
+      { id: 'deliver', kind: 'major', x: 1180, y: 430, w: 200, h: 136, role: 'PM', title: 'Deliver & land', note: 'proof on the final tree · fast-forward from the recorded base', steps: ['deliver', 'manifest', 'checks', 'land', 'landing'] },
+      { id: 'close', kind: 'major', x: 1180, y: 600, w: 96, h: 104, role: 'PM', title: 'Close', note: 'three tiers', steps: ['close', 'mission-open'] },
+      { id: 'audit-node', kind: 'cond', x: 1288, y: 600, w: 92, h: 104, role: 'Auditor', title: 'Legalize', note: 'on request, before or after close', steps: ['audit-node', 'legalize', 'audit-consent', 'audit-plan', 'audit-chain', 'stamp'] }
+    ].map(n => ({ w: NW, h: NH, ...n }));
+    // Explicit orthogonal paths: no adaptive routing or wires along the frame.
+    const PE = {
+      'w-say': { a: 'message', b: 'batch', p: [[70,106],[70,330]] },
+      'w-decide': { a: 'answer', b: 'batch', p: [[300,106],[300,126],[100,126],[100,330]], both: true, principal: true },
+      'w-ask': { a: 'progress', b: 'batch', p: [[600,106],[600,148],[125,148],[125,330]], principal: true },
+      'w-stop': { a: 'halt', b: 'dispatch', p: [[725,106],[725,236]], principal: true },
+      'w-consent': { a: 'consent', b: 'deliver', p: [[1250,106],[1250,430]] },
+      'w-align-audit': { a: 'batch', b: 'cal1', p: [[135,392],[155,392]] },
+      'w-audit-architect': { a: 'cal1', b: 'decompose', p: [[260,392],[270,392]] },
+      'w-architect-audit': { a: 'decompose', b: 'cal2', p: [[415,392],[430,392]] },
+      'w-plan-dispatch': { a: 'cal2', b: 'dispatch', p: [[535,392],[550,392],[550,278],[595,278]] },
+      'w-dispatch-build': { a: 'dispatch', b: 'build', p: [[620,320],[620,374]] },
+      'w-dispatch-author': { a: 'dispatch', b: 'author', p: [[595,298],[577,298],[577,571],[595,571]] },
+      'w-build-verify': { a: 'build', b: 'verify', p: [[720,419],[750,419]] },
+      'w-verify-review': { a: 'verify', b: 'review', p: [[875,419],[905,419]] },
+      'w-author-attack': { a: 'author', b: 'attack', p: [[720,571],[750,571]] },
+      'w-attack-stabilizer': { a: 'attack', b: 'stabilize', p: [[875,571],[905,571]] },
+      'w-review-proven': { a: 'review', b: 'proof', p: [[1030,419],[1042,419],[1042,498],[1055,498]] },
+      'w-settled-proven': { a: 'stabilize', b: 'proof', p: [[1030,571],[1042,571],[1042,498],[1055,498]] },
+      'w-proven-deliver': { a: 'proof', b: 'deliver', p: [[1160,498],[1180,498]] },
+      'w-deliver-close': { a: 'deliver', b: 'close', p: [[1228,566],[1228,600]] },
+      'w-close-audit': { a: 'close', b: 'audit-node', p: [[1276,652],[1288,652]], cond: true },
+      'w-next-task': { a: 'proof', b: 'dispatch', p: [[1125,443],[1125,218],[660,218],[660,236]], cond: true },
+      'w-rework': { a: 'review', b: 'build', p: [[967,464],[967,486],[657,486],[657,464]], cond: true },
+      'w-next-round': { a: 'stabilize', b: 'author', p: [[967,616],[967,630],[657,630],[657,616]], cond: true },
+      'w-escalate': { a: 'task-loop', b: 'secretary', p: [[840,666],[840,696]], cond: true },
+      'w-secretary-pm': { a: 'secretary', b: 'batch', p: [[680,730],[80,730],[80,454]], cond: true },
+      'w-direction-return': { a: 'cal1', b: 'batch', p: [[207,330],[207,285],[80,285],[80,330]], cond: true },
+      'w-plan-return': { a: 'cal2', b: 'decompose', p: [[482,330],[482,310],[345,310],[345,330]], cond: true },
+      'w-structure-return': { a: 'stabilize', b: 'decompose', p: [[1015,616],[1015,650],[350,650],[350,454]], cond: true }
+    };
+    for (const [id, e] of Object.entries(PE)) {
+      e.id = id;
+      e.text = PN.find(n => n.id === e.a)?.title + ' → ' + PN.find(n => n.id === e.b)?.title;
+      e.src = src(...new Set([e.a, e.b].flatMap(id => S[id].src.map(s => s.text))));
+    }
+    PE['w-plan-return'].text = 'Calibrator ② escalates to the Secretary; only its ruling returns the detailed plan to the Architect.';
+    PE['w-structure-return'].text = 'A settled, currently proven structural conclusion returns to the Architect; direction or no conclusion goes through the Secretary to PM.';
+    PE['w-escalate'].text = 'Escalations from either track go to the Secretary; only affected work waits.';
+    PE['w-next-task'].text = 'Accepted outputs unlock scheduling dependents; stable mode also requires the detailed plan and input products proven before queueing.';
+    const LOOPS = [
+      { id: '1', num: '①', name: 'Next tasks', pill: 'proven → unlocks the next tasks', at: [890,218], path: ['w-next-task'], nodes: ['proof','dispatch'],
+        text: 'Accepted outputs unlock scheduling dependents. Stable mode also requires the detailed plan and input products proven before queueing; fast mode permits proof debt. Dispatch claims an already queued step without re-checking that gate.' },
+      { id: '2', num: '②', name: 'Rework → rebuild', pill: 'rework → rebuild', at: [812,486], path: ['w-rework'], nodes: ['review','build','secretary'],
+        text: 'Execution allows one candidate plus two reworks. Exhaustion or the same failure twice goes to the Secretary under WI-08. It may grant 1–2 more attempts once within authority; more needs you. Counts stay with the same task id.' },
+      { id: '3', num: '③', name: 'Next round', pill: 'next round', at: [812,630], path: ['w-next-round'], nodes: ['author','attack','stabilize','secretary'],
+        text: 'Exploration defaults to three attack rounds; the closing attack and, in 4.1.0, discussion replies count. Findings return to Author or Interpreter when needed; a clean nonclosing pass goes to a fresh Crititor on the same version. Spent rounds, repeated fatal class or no progress twice goes to the Secretary: one 1–2-round grant, then you.' },
+      { id: '4', num: '④', name: 'Escalate → Secretary → you', pill: 'escalate → Secretary → you', at: [412,730], path: ['w-escalate','w-secretary-pm','w-decide'], nodes: ['secretary','batch','answer'],
+        text: 'Questions, unclear standards, spent budgets and direction rulings go to the Secretary. It decides within recorded authority; what it cannot decide goes through PM to you, and only affected work waits. A failed or exhausted Secretary step uses WI-24; important notices require a matching applied option, which some 4.1.0 restart/grant paths omit.' },
+      { id: '5', num: '⑤', name: 'Returned → revise the plan', pill: 'returned → revise the plan', at: [510,650], path: ['w-direction-return','w-plan-return','w-structure-return'], nodes: ['cal1','cal2','batch','decompose','stabilize'],
+        text: 'Calibrator ① returns to PM without a cap, with full-review fallback for either Calibrator. Mechanical checks allow three returns; the same failure twice stops early under WI-08. Feasibility allows one revision; Calibrator ② returns through the Secretary using the mechanical count. Currently proven, settled structure goes to Architect; direction or no conclusion goes to Secretary and PM. A new PM batch starts a new planning lineage.' }
+    ];
+    for (const l of LOOPS) {
+      l.src = src(...new Set(l.path.flatMap(id => PE[id].src.map(s => s.text))));
+      l.act = [...new Set(l.path.map(id => S[PE[id].b].act))].join(' · ');
+    }
+
     let theme = 'auto';
     try { theme=localStorage.getItem('mp-workflow-theme')||'auto'; } catch (_) {}
     if (['light','dark','auto'].includes(params.get('theme'))) theme=params.get('theme');
@@ -775,22 +889,23 @@
       $('#theme-btn').textContent='Theme · '+theme[0].toUpperCase()+theme.slice(1);
     }
     $('#theme-btn').addEventListener('click',()=>{theme={auto:'light',light:'dark',dark:'auto'}[theme]||'auto';try{localStorage.setItem('mp-workflow-theme',theme);}catch(_){}applyTheme();});
-    function fillerText(lane, id) { const key=lane==='constructor'&&id==='experiment'?'experiment':lane; return FILLERS[key] ? (showFillers ? FILLERS[key].model+(FILLERS[key].harness==='Codex'?'':' / '+FILLERS[key].harness) : 'any model / any harness') : ''; }
+    function fillerText(lane, id) { const key=lane==='constructor'&&id==='experiment'?'experiment':lane; return FILLERS[key] ? (showFillers ? FILLERS[key].model+(FILLERS[key].harness==='Codex'?'':' / '+FILLERS[key].harness) : '') : ''; }
     function laneFillerText(lane) { return showFillers&&lane==='constructor' ? 'Execution: '+fillerText(lane,'build')+'; blind experiments: '+fillerText(lane,'experiment') : fillerText(lane); }
-    function roleText(s) { return laneName(s.lane)+(FILLERS[s.lane]?' · '+fillerText(s.lane,s.id):''); }
+    function roleText(s) { return laneName(s.lane)+(showFillers&&FILLERS[s.lane]?' · '+fillerText(s.lane,s.id):''); }
     function laneName(id) {return LANES.find(l=>l.id===id).name;}
     function tooltip(d) { return d.copy+'\nCommand: '+d.act+'\nSource: '+d.src.map(s=>s.text).join(', '); }
     function select(kind,id) {focus={kind,id};inspectorOpen=true;markPipe();markLanes();renderInspector();}
     $('#fillers-btn').addEventListener('click',()=>{
       showFillers=!showFillers;$('#fillers-note').hidden=!showFillers;$('#fillers-btn').setAttribute('aria-pressed',String(showFillers));
-      document.querySelectorAll('.pnode .p-role').forEach(el=>{const s=S[el.parentElement.dataset.id];el.textContent=roleText(s);});
+      updatePipeFillers();
+      document.querySelectorAll('#inventory .pnode .p-role').forEach(el=>{const s=S[el.parentElement.dataset.id];el.textContent=roleText(s);});
       renderLanes();renderInspector();schedule();
     });
     function svgHost(host) {const svg=document.createElementNS(NS,'svg');svg.setAttribute('class','wires');svg.setAttribute('aria-hidden','true');host.appendChild(svg);return svg;}
-    function path(svg,pts,cls,hot,id) {
+    function path(svg,pts,cls,hot,id,edges=DETAIL_PE,edgeKind='detail-edge') {
       const p=document.createElementNS(NS,'path');p.setAttribute('d',pts.map((pt,i)=>(i?'L':'M')+pt[0].toFixed(1)+' '+pt[1].toFixed(1)).join(' '));
       p.setAttribute('class','wire '+cls);p.setAttribute('marker-end','url(#'+(hot?'ah-hot':'ah')+')');
-      if(id){p.dataset.edge=id;const tt=document.createElementNS(NS,'title');tt.textContent=PE[id].text+'\nSource: '+PE[id].src.map(s=>s.text).join(', ');p.appendChild(tt);p.addEventListener('click',()=>select('edge',id));}
+      if(id){p.dataset.edge=id;const tt=document.createElementNS(NS,'title');tt.textContent=edges[id].text+'\nSource: '+edges[id].src.map(s=>s.text).join(', ');p.appendChild(tt);p.addEventListener('click',()=>select(edgeKind,id));}
       svg.appendChild(p);
     }
     function makeNode(id,cls='pnode',note=S[id].plain) {
@@ -816,8 +931,8 @@
       host.appendChild(rail);
     }
     function label(host,cls,x,y,text) {const el=document.createElement('div');el.className=cls;Object.assign(el.style,{left:x+'px',top:y+'px'});el.textContent=text;host.appendChild(el);}
-    function renderPipe() {
-      const host=$('#pipe');host.replaceChildren();
+    function renderInventory() {
+      const host=$('#inventory');host.replaceChildren();
       for(const [y,h,name,note] of [[0,112,'Principal','talks only to the PM'],[120,138,'PM','records · plans · decides · dispatches'],[300,128,'Decision layer','feasibility is conditional; explorations begin from the PM plan']]){
         const band=document.createElement('div');band.className='p-band';Object.assign(band.style,{top:y+'px',height:h+'px'});
         const bn=document.createElement('span');bn.className='p-band-name';bn.textContent=name;const small=document.createElement('small');small.textContent=note;bn.appendChild(small);band.appendChild(bn);host.appendChild(band);
@@ -828,14 +943,14 @@
       label(host,'track',216,946,'EVIDENCE');label(host,'track',22,1100,'DELIVERY / LANDING / CLOSE · independent operations');
       label(host,'track',22,1270,'LEGALIZATION · only on request, before or after close');
       label(host,'track',22,1298,'PM STOP CONTROL');
-      const svg=svgHost(host);svg.setAttribute('viewBox',`0 0 ${PW} ${PH}`);
-      for(const n of PN){const b=makeNode(n.id,'pnode',n.note);b.id='pn-'+n.id;Object.assign(b.style,{left:n.x+'px',top:n.y+'px',width:n.w+'px',height:n.h+'px'});host.appendChild(b);}
+      const svg=svgHost(host);svg.setAttribute('viewBox',`0 0 ${DETAIL_PW} ${DETAIL_PH}`);
+      for(const n of DETAIL_PN){const b=makeNode(n.id,'pnode',n.note);b.id='in-'+n.id;Object.assign(b.style,{left:n.x+'px',top:n.y+'px',width:n.w+'px',height:n.h+'px'});host.appendChild(b);}
       makeRail(host);
-      for(const l of LOOPS){const b=document.createElement('button');b.type='button';b.className='ppill';b.dataset.loop=l.id;b.title=l.name+' — '+l.text;Object.assign(b.style,{left:l.at[0]+'px',top:l.at[1]+'px'});b.textContent=l.num;b.setAttribute('aria-label',l.num+' '+l.name);b.addEventListener('click',()=>select('loop',l.id));host.appendChild(b);}
-      const keys=$('#loops');keys.replaceChildren(...LOOPS.map(l=>{const b=document.createElement('button');b.type='button';b.className='loop-key';b.dataset.loop=l.id;b.innerHTML='<span class="n"></span><strong></strong><span></span>';b.querySelector('.n').textContent=l.num;b.querySelector('strong').textContent=l.name;b.querySelector('span:last-child').textContent=l.text;b.addEventListener('click',()=>select('loop',l.id));return b;}));
-      markPipe();
+      for(const l of DETAIL_LOOPS){const b=document.createElement('button');b.type='button';b.className='ppill';b.dataset.detailLoop=l.id;b.title=l.name+' — '+l.text;Object.assign(b.style,{left:l.at[0]+'px',top:l.at[1]+'px'});b.textContent=l.num;b.setAttribute('aria-label',l.num+' '+l.name);b.addEventListener('click',()=>select('detail-loop',l.id));host.appendChild(b);}
+      const keys=$('#inventory-loops');keys.replaceChildren(...DETAIL_LOOPS.map(l=>{const b=document.createElement('button');b.type='button';b.className='loop-key';b.dataset.detailLoop=l.id;b.innerHTML='<span class="n"></span><strong></strong><span></span>';b.querySelector('.n').textContent=l.num;b.querySelector('strong').textContent=l.name;b.querySelector('span:last-child').textContent=l.text;b.addEventListener('click',()=>select('detail-loop',l.id));return b;}));
+      drawInventory();
     }
-    function pipeBox(id){const n=PN.find(n=>n.id===id);return{x:n.x,y:n.y,w:n.w,h:n.h,r:n.x+n.w,b:n.y+n.h,cx:n.x+n.w/2,cy:n.y+n.h/2};}
+    function inventoryBox(id){const n=DETAIL_PN.find(n=>n.id===id);return{x:n.x,y:n.y,w:n.w,h:n.h,r:n.x+n.w,b:n.y+n.h,cx:n.x+n.w/2,cy:n.y+n.h/2};}
     function autoRoute(A,B) {
       if(Math.abs(A.cy-B.cy)<2)return [[A.r,A.cy],[B.x,B.cy]];
       if(Math.abs(A.cx-B.cx)<2)return B.cy>A.cy?[[A.cx,A.b],[B.cx,B.y]]:[[A.cx,A.y],[B.cx,B.b]];
@@ -843,7 +958,7 @@
       return A.cy<B.cy?[[A.cx,A.b],[A.cx,mid],[B.cx,mid],[B.cx,B.y]]:[[A.cx,A.y],[A.cx,mid],[B.cx,mid],[B.cx,B.b]];
     }
     function titleZones(host) {
-      const h=host.getBoundingClientRect(),scale=host.id==='pipe'?h.width/PW:1,zones=[];
+      const h=host.getBoundingClientRect(),scale=host.id==='inventory'?h.width/DETAIL_PW:1,zones=[];
       for(const cls of ['.p-band-name','.band-name','.loop-title','.track']) for(const el of host.querySelectorAll(cls)) {
         if(!el.offsetParent)continue;
         const r=el.getBoundingClientRect();
@@ -877,11 +992,130 @@
       }
       return pts;
     }
-    function drawPipe(){const svg=$('#pipe .wires');if(!svg)return;svg.replaceChildren();const loop=focus.kind==='loop'?LOOPS.find(l=>l.id===focus.id):null,zones=titleZones($('#pipe'));
-      for(const [id,e]of Object.entries(PE)){if(e.lanesOnly||!PN.some(n=>n.id===e.a)||!PN.some(n=>n.id===e.b))continue;const hot=!!loop&&loop.path.includes(id)||focus.kind==='edge'&&focus.id===id;
-        path(svg,avoidTitles(e.p||autoRoute(pipeBox(e.a),pipeBox(e.b)),zones),[e.cond?'cond':'',hot?'hot':'',loop&&!hot?'dim':''].join(' '),hot,id);}}
-    function markPipe(){const loop=focus.kind==='loop'?LOOPS.find(l=>l.id===focus.id):null;document.querySelectorAll('.pnode').forEach(b=>{const on=focus.kind==='step'&&focus.id===b.dataset.id||loop&&loop.nodes.includes(b.dataset.id);b.classList.toggle('on',!!on);b.setAttribute('aria-pressed',String(!!on));});document.querySelectorAll('[data-loop]').forEach(b=>b.setAttribute('aria-pressed',String(!!loop&&b.dataset.loop===loop.id)));drawPipe();}
-    function fitPipe(){const wrap=$('#pipe-wrap');if(!wrap||!wrap.offsetParent)return;const avail=wrap.parentElement.clientWidth-2,k=Math.min(1.15,Math.max(.78,avail/PW));$('#pipe').style.transform=`scale(${k})`;wrap.style.width=PW*k+2+'px';wrap.style.height=PH*k+2+'px';}
+    function renderPipe() {
+      const pipe = $('#pipe');
+      pipe.replaceChildren();
+      const band = document.createElement('div'); band.className = 'p-band';
+      const bn = document.createElement('span'); bn.className = 'p-band-name'; bn.textContent = 'Principal';
+      const bs = document.createElement('small'); bs.textContent = 'you speak in plain sentences; the PM records your words'; bn.appendChild(bs);
+      band.appendChild(bn); pipe.appendChild(band);
+      const loop = document.createElement('div'); loop.className = 'loopbox';
+      Object.assign(loop.style, { left: '565px', top: '160px', width: '595px', height: '506px' });
+      loop.title = tooltip(S['task-loop']); loop.addEventListener('click', () => select('step', 'task-loop')); pipe.appendChild(loop);
+      const title = document.createElement('div'); title.className = 'loop-title';
+      Object.assign(title.style, { left: '585px', top: '171px' }); title.innerHTML = '<b>TASK LOOP</b>';
+      const sub = document.createElement('div'); sub.className = 'loop-title';
+      Object.assign(sub.style, { left: '760px', top: '171px', width: '382px' });
+      sub.innerHTML = '<span>once per task · many tasks at once · the PM dispatches through its own harness</span>'; pipe.append(title, sub);
+      for (const [x, y, name, note] of [[750, 344, 'EXECUTION', 'design and criteria decided'], [595, 498, 'EXPLORATION', 'findings needed for a decision']]) {
+        const tr = document.createElement('div'); tr.className = 'track'; Object.assign(tr.style, { left: x + 'px', top: y + 'px' });
+        const b = document.createElement('b'); b.textContent = name; const span = document.createElement('span'); span.textContent = note; tr.append(b, span); pipe.appendChild(tr);
+      }
+      const svg = svgHost(pipe); svg.setAttribute('viewBox', `0 0 ${PW} ${PH}`);
+      for (const n of PN) {
+        const b = document.createElement('button'); b.type = 'button'; b.id = 'pn-' + n.id; b.dataset.id = n.id;
+        b.className = ['pnode', n.kind || ''].filter(Boolean).join(' ');
+        b.title = tooltip(S[n.steps[0]]);
+        Object.assign(b.style, { left: n.x + 'px', top: n.y + 'px', width: n.w + 'px', height: n.h + 'px' });
+        b.innerHTML = '<span class="p-role"></span><span class="p-title"></span><span class="p-note"></span><span class="p-filler" hidden></span>';
+        b.querySelector('.p-role').textContent = n.role; b.querySelector('.p-title').textContent = n.title; b.querySelector('.p-note').textContent = n.note;
+        b.addEventListener('click', () => select(n.kind === 'principal' ? 'principal' : 'pnode', n.id)); pipe.appendChild(b);
+      }
+      for (const l of LOOPS) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'ppill'; b.dataset.loop = l.id;
+        Object.assign(b.style, { left: l.at[0] + 'px', top: l.at[1] + 'px' });
+        const n = document.createElement('b'); n.textContent = l.num; b.append(n, l.pill);
+        b.title = l.text; b.setAttribute('aria-label', l.num + ' ' + l.pill); b.addEventListener('click', () => select('loop', l.id)); pipe.appendChild(b);
+      }
+      $('#loops').replaceChildren(...LOOPS.map(l => {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'loop-key'; b.dataset.loop = l.id;
+        b.innerHTML = '<span class="n"></span><strong></strong><span></span>';
+        b.querySelector('.n').textContent = l.num; b.querySelector('strong').textContent = l.name; b.querySelector('span:last-child').textContent = l.text;
+        b.addEventListener('click', () => select('loop', l.id)); return b;
+      }));
+      updatePipeFillers(); markPipe();
+    }
+    function updatePipeFillers() {
+      const metrics = document.createElement('canvas').getContext?.('2d');
+      for (const n of PN) {
+        const line = $('#pn-' + n.id + ' .p-filler'), lane = S[n.steps[0]].lane;
+        line.hidden = !showFillers || n.kind === 'principal' || !FILLERS[lane];
+        line.textContent = showFillers && n.kind !== 'principal' ? fillerText(lane, n.id) : '';
+        line.title = line.textContent;
+        if (!line.hidden) {
+          if (metrics) metrics.font = '8px ' + getComputedStyle(line).fontFamily;
+          const width = metrics ? metrics.measureText(line.textContent).width : line.textContent.length * 4.8;
+          line.style.fontSize = Math.min(8, 8 * (n.w - (n.kind === 'major' ? 28 : 22)) / width) + 'px';
+        }
+      }
+    }
+    // Bridge only principal drops. Shared endpoints on the acceptance bus are junctions.
+    function principalGaps() {
+      const gaps = [];
+      for (const principal of Object.values(PE).filter(e => e.principal)) {
+        for (let i = 1; i < principal.p.length; i++) {
+          const [a, b] = [principal.p[i - 1], principal.p[i]];
+          if (a[0] !== b[0]) continue;
+          for (const e of Object.values(PE).filter(e => !e.principal)) {
+            for (let j = 1; j < e.p.length; j++) {
+              const [c, d] = [e.p[j - 1], e.p[j]];
+              if (c[1] === d[1] && a[0] > Math.min(c[0], d[0]) && a[0] < Math.max(c[0], d[0]) && c[1] > Math.min(a[1], b[1]) && c[1] < Math.max(a[1], b[1])) gaps.push([a[0], c[1]]);
+            }
+          }
+        }
+      }
+      return gaps;
+    }
+    function drawPipe() {
+      const svg = $('#pipe .wires'); if (!svg) return;
+      svg.replaceChildren();
+      const defs = document.createElementNS(NS, 'defs'), mask = document.createElementNS(NS, 'mask');
+      mask.id = 'principal-gaps'; mask.setAttribute('maskUnits', 'userSpaceOnUse');
+      mask.setAttribute('x', 0); mask.setAttribute('y', 0); mask.setAttribute('width', PW); mask.setAttribute('height', PH);
+      const field = document.createElementNS(NS, 'rect'); field.setAttribute('width', PW); field.setAttribute('height', PH); field.setAttribute('fill', 'white'); mask.appendChild(field);
+      for (const [x, y] of principalGaps()) {
+        const gap = document.createElementNS(NS, 'rect'); gap.setAttribute('x', x - 5); gap.setAttribute('y', y - 3);
+        gap.setAttribute('width', 10); gap.setAttribute('height', 6); gap.setAttribute('fill', 'black'); mask.appendChild(gap);
+      }
+      defs.appendChild(mask); svg.appendChild(defs);
+      const loop = focus.kind === 'loop' ? LOOPS.find(l => l.id === focus.id) : null;
+      for (const [id, e] of Object.entries(PE)) {
+        const hot = !!loop && loop.path.includes(id) || focus.kind === 'edge' && focus.id === id;
+        path(svg, e.p, [e.cond ? 'cond' : '', hot ? 'hot' : '', loop && !hot ? 'dim' : ''].join(' '), hot, id, PE, 'edge');
+        const p = svg.lastChild;
+        if (!e.principal) p.setAttribute('mask', 'url(#principal-gaps)');
+        if (e.both) p.setAttribute('marker-start', 'url(#' + (hot ? 'ah-hot' : 'ah') + ')');
+      }
+    }
+    function markPipe() {
+      const loop = focus.kind === 'loop' ? LOOPS.find(l => l.id === focus.id) : null;
+      document.querySelectorAll('#pipe .pnode').forEach(b => {
+        const on = ['principal','pnode','step'].includes(focus.kind) && focus.id === b.dataset.id || loop && loop.nodes.includes(b.dataset.id);
+        b.classList.toggle('on', !!on); b.setAttribute('aria-pressed', String(!!on));
+      });
+      document.querySelectorAll('[data-loop]').forEach(b => b.setAttribute('aria-pressed', String(!!loop && b.dataset.loop === loop.id)));
+      drawPipe(); drawInventory();
+    }
+    function fitCanvas(wrapId, hostId, width, height) {
+      const wrap = $(wrapId); if (!wrap || !wrap.offsetParent) return;
+      const k = Math.min(1.15, Math.max(.7, (wrap.parentElement.clientWidth - 2) / width));
+      $(hostId).style.transform = `scale(${k})`; wrap.style.width = width * k + 2 + 'px'; wrap.style.height = height * k + 2 + 'px';
+    }
+    function fitPipe() { fitCanvas('#pipe-wrap', '#pipe', PW, PH); }
+    function drawInventory() {
+      const host = $('#inventory'), svg = $('#inventory .wires'); if (!svg || !host.offsetParent) return;
+      svg.replaceChildren();
+      const loop = focus.kind === 'detail-loop' ? DETAIL_LOOPS.find(l => l.id === focus.id) : null, zones = titleZones(host);
+      for (const [id, e] of Object.entries(DETAIL_PE)) {
+        if (e.lanesOnly || !DETAIL_PN.some(n => n.id === e.a) || !DETAIL_PN.some(n => n.id === e.b)) continue;
+        const hot = !!loop && loop.path.includes(id) || focus.kind === 'detail-edge' && focus.id === id;
+        path(svg, avoidTitles(e.p || autoRoute(inventoryBox(e.a), inventoryBox(e.b)), zones), [e.cond ? 'cond' : '', hot ? 'hot' : '', loop && !hot ? 'dim' : ''].join(' '), hot, id);
+      }
+      document.querySelectorAll('[data-detail-loop]').forEach(b => b.setAttribute('aria-pressed', String(!!loop && b.dataset.detailLoop === loop.id)));
+      document.querySelectorAll('#inventory .pnode').forEach(b => b.classList.toggle('on', focus.kind === 'step' && focus.id === b.dataset.id || !!loop && loop.nodes.includes(b.dataset.id)));
+    }
+    $('#inventory-details').addEventListener('toggle', () => { fitCanvas('#inventory-wrap', '#inventory', DETAIL_PW, DETAIL_PH); drawInventory(); schedule(); });
+
     function closure(id,dir){const out=new Set(),stack=[id];while(stack.length){const cur=stack.pop();for(const[a,b]of GRAPH_EDGES){const next=dir==='up'?(b===cur?a:null):(a===cur?b:null);if(next&&!out.has(next)){out.add(next);stack.push(next);}}}return out;}
     function renderGraph(){const host=$('#graph');host.replaceChildren();svgHost(host);for(const t of TASKS){const b=document.createElement('button');b.type='button';b.className='task '+t.type;b.id='task-'+t.id;b.dataset.id=t.id;b.dataset.state=t.state;b.style.gridColumn=t.col+1;b.style.gridRow=t.row+1;b.title=t.copy+'\nCommand: mp read show '+(t.type==='decision'?'decision':t.type==='exploration'?'exploration':'task')+' <id>\nSource: '+GRAPH_SRC.map(s=>s.text).join(', ');
         b.innerHTML='<span class="t-top"><span class="t-meta"></span><span class="t-state"></span></span><span class="t-title"></span>';b.querySelector('.t-meta').textContent=t.id+' · '+TYPE_LABEL[t.type]+(t.p?' · P'+t.p:'');b.querySelector('.t-state').textContent=STATE_LABEL[t.state];b.querySelector('.t-title').textContent=t.title;
@@ -903,33 +1137,41 @@
       const primary=v==='decision'?['pm-decision']:v==='exploration'?PRIMARY_XP:PRIMARY_EXEC;
       const cells=v==='exploration'?explorationCells:executionCells;
       const ids=[...new Set([...primary,...sc.nodes])];
-      LANES.forEach((lane,i)=>{const band=document.createElement('div');band.className='band';band.style.gridRow=i+1;band.dataset.lane=lane.id;const name=document.createElement('span');name.className='band-name';name.textContent=lane.name;const small=document.createElement('small');small.textContent=(FILLERS[lane.id]?laneFillerText(lane.id)+' · ':'')+lane.note;name.appendChild(small);band.appendChild(name);if(!ids.some(id=>S[id].lane===lane.id)){const none=document.createElement('span');none.className='inactive-lane';none.textContent='No step in this cycle';band.appendChild(none);}host.appendChild(band);});
+      LANES.forEach((lane,i)=>{const band=document.createElement('div');band.className='band';band.style.gridRow=i+1;band.dataset.lane=lane.id;const name=document.createElement('span');name.className='band-name';name.textContent=lane.name;const small=document.createElement('small');small.textContent=(showFillers&&FILLERS[lane.id]?laneFillerText(lane.id)+' · ':'')+lane.note;name.appendChild(small);band.appendChild(name);if(!ids.some(id=>S[id].lane===lane.id)){const none=document.createElement('span');none.className='inactive-lane';none.textContent='No step in this cycle';band.appendChild(none);}host.appendChild(band);});
       const groups=new Map();for(const id of ids){const s=S[id],col=cells[id]??8,key=s.lane+':'+col;let cell=groups.get(key);if(!cell){cell=document.createElement('div');cell.className='lane-cell';cell.style.gridColumn=col+1;cell.style.gridRow=LANES.findIndex(l=>l.id===s.lane)+1;groups.set(key,cell);host.appendChild(cell);}const b=makeNode(id,'step');b.id='step-'+id;cell.appendChild(b);}
       makeRail(host,true);renderScenarioBar();markLanes();schedule();}
     function markLanes(){const sc=currentScenario(),nums={};sc.nodes.forEach((id,i)=>{(nums[id]??=[]).push(i+1);});document.querySelectorAll('#lanes .step').forEach(b=>{const id=b.dataset.id,on=id in nums;b.classList.toggle('on',on);b.classList.toggle('dim',!on);b.classList.toggle('sel',focus.kind==='step'&&focus.id===id);b.querySelector('.num').textContent=on?nums[id].join(' · '):'';});schedule();}
-    function drawLanes(){const host=$('#lanes'),svg=$('.wires',host);if(!svg||!host.offsetParent)return;svg.replaceChildren();const sc=currentScenario(),v=variantOf(taskById(detailTask)),all=[...new Set([...(BASE_EDGES[v]||[]),...sc.paths])],zones=titleZones(host);for(const id of all){const e=PE[id];const a=$('#step-'+e.a),b=$('#step-'+e.b);if(!a||!b)continue;const A=box(a,host),B=box(b,host),hot=sc.paths.includes(id);let pts;if(e.a===e.b){pts=[[A.r,A.cy],[A.r+12,A.cy],[A.r+12,A.b+10],[A.cx,A.b+10],[A.cx,A.b]];}else if(A.cx>B.cx){const y=Math.max(A.b,B.b)+12;pts=[[A.cx,A.b],[A.cx,y],[B.cx,y],[B.cx,B.b]];}else pts=autoRoute(A,B);path(svg,avoidTitles(pts,zones),[e.cond?'cond':'',hot?'hot':'dim'].join(' '),hot,id);}}
+    function drawLanes(){const host=$('#lanes'),svg=$('.wires',host);if(!svg||!host.offsetParent)return;svg.replaceChildren();const sc=currentScenario(),v=variantOf(taskById(detailTask)),all=[...new Set([...(BASE_EDGES[v]||[]),...sc.paths])],zones=titleZones(host);for(const id of all){const e=DETAIL_PE[id];const a=$('#step-'+e.a),b=$('#step-'+e.b);if(!a||!b)continue;const A=box(a,host),B=box(b,host),hot=sc.paths.includes(id);let pts;if(e.a===e.b){pts=[[A.r,A.cy],[A.r+12,A.cy],[A.r+12,A.b+10],[A.cx,A.b+10],[A.cx,A.b]];}else if(A.cx>B.cx){const y=Math.max(A.b,B.b)+12;pts=[[A.cx,A.b],[A.cx,y],[B.cx,y],[B.cx,B.b]];}else pts=autoRoute(A,B);path(svg,avoidTitles(pts,zones),[e.cond?'cond':'',hot?'hot':'dim'].join(' '),hot,id);}}
     function renderInspector(){let d;
-      if(focus.kind==='loop'){const l=LOOPS.find(l=>l.id===focus.id);d={title:l.num+' '+l.name,copy:l.text,act:l.path.map(id=>S[PE[id].a].act).join(' · '),src:l.src,plain:'Recorded return / continuation'};}
-      else if(focus.kind==='edge'){const e=PE[focus.id];d={title:S[e.a].title+' → '+S[e.b].title,copy:e.text,act:S[e.b].act,src:e.src,plain:'Process edge'};}
+      if(focus.kind==='loop'){const l=LOOPS.find(l=>l.id===focus.id);d={title:l.num+' '+l.name,copy:l.text,act:l.act,src:l.src,plain:l.pill};}
+      else if(focus.kind==='detail-loop'){const l=DETAIL_LOOPS.find(l=>l.id===focus.id);d={title:l.num+' '+l.name,copy:l.text,act:l.path.map(id=>S[DETAIL_PE[id].a].act).join(' · '),src:l.src,plain:'Recorded return / continuation'};}
+      else if(focus.kind==='principal'||focus.kind==='pnode'){const n=PN.find(n=>n.id===focus.id),s=S[n.steps[0]];d={...s,title:n.title,plain:n.role+' · '+n.note,related:n.steps.slice(1)};}
+      else if(focus.kind==='edge'||focus.kind==='detail-edge'){const e=(focus.kind==='edge'?PE:DETAIL_PE)[focus.id];d={title:e.text,copy:e.text,act:S[e.b].act,src:e.src,plain:'Process edge'};}
       else if(focus.kind==='graph-edge'){d={title:focus.id,copy:focus.id.includes('X1')||focus.id.includes('D1')?'Earlier-round exploration → recorded decision → next plan: provenance and direction, rather than a task scheduling dependency. The current tasks have already been planned from that settled result.':'Illustrative scheduling dependency. It needs the accepted prerequisite product; stable mode additionally requires proof. These sample ids are not records from a real mission.',act:'mp read show task <id>',src:GRAPH_SRC,plain:'Example plan edge'};}
       else if(focus.kind==='exception'){const e=EXCEPTIONS.find(e=>e.id===focus.id);d={...e,plain:e.short,facts:e.wis.map(id=>id+': '+WI[id])};}
-      else {const s=S[focus.id]||S.batch;d={...s,plain:laneName(s.lane)+' · '+s.plain,facts:[...s.facts,...(FILLERS[s.lane]?['Filler: '+fillerText(s.lane,s.id)+' (information only)']:[])]};}
+      else {const s=S[focus.id]||S.batch;d={...s,plain:laneName(s.lane)+' · '+s.plain,facts:[...s.facts,...(showFillers&&FILLERS[s.lane]?['Filler: '+fillerText(s.lane,s.id)+' (information only)']:[])]};}
       const host=$('#inspector');host.replaceChildren();host.classList.toggle('open',inspectorOpen);
       const close=document.createElement('button');close.type='button';close.className='ins-close';close.textContent='Close details ×';close.addEventListener('click',()=>{inspectorOpen=false;renderInspector();});host.appendChild(close);
       const a=document.createElement('div'),b=document.createElement('div'),c=document.createElement('div');a.className='ins-a';b.className='ins-b';c.className='ins-c';host.append(a,b,c);
       const k=document.createElement('p');k.className='label';k.textContent='4.1.0 · source-backed detail';const h=document.createElement('h2');h.className='ins-title';h.textContent=d.title;const sub=document.createElement('p');sub.className='ins-sub';sub.textContent=d.plain;const copy=document.createElement('p');copy.className='ins-copy';copy.textContent=d.copy;a.append(k,h,sub,copy);
       if(d.facts?.length){const ul=document.createElement('ul');ul.className='ins-list';d.facts.forEach(f=>{const li=document.createElement('li');li.textContent=f;ul.appendChild(li);});b.appendChild(ul);}
       const cmd=document.createElement('p');cmd.className='ins-act';cmd.textContent=d.act;c.appendChild(cmd);const p=document.createElement('p');p.className='ins-src';p.append('Source files ');for(const source of d.src){const link=document.createElement('a');link.href=source.href;link.textContent=source.text;p.append(link,document.createElement('br'));}c.appendChild(p);
+      for(const id of d.related||[]){const s=S[id],details=document.createElement('details');details.className='ins-related';
+        const summary=document.createElement('summary');summary.textContent=s.title;const copy=document.createElement('p');copy.className='ins-copy';copy.textContent=s.copy;
+        const cmd=document.createElement('p');cmd.className='ins-act';cmd.textContent=s.act;const sources=document.createElement('p');sources.className='ins-src';
+        for(const source of s.src){const link=document.createElement('a');link.href=source.href;link.textContent=source.text;sources.append(link,document.createElement('br'));}
+        details.append(summary,copy,cmd);if(s.facts.length){const ul=document.createElement('ul');ul.className='ins-list';for(const fact of s.facts){const li=document.createElement('li');li.textContent=fact;ul.appendChild(li);}details.appendChild(ul);}details.appendChild(sources);c.appendChild(details);
+      }
     }
     function setView(next){view=next;inspectorOpen=false;document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));$('#view-pipeline').hidden=view!=='pipeline';$('#view-overview').hidden=view!=='overview';$('#view-detail').hidden=view!=='detail';$('.work').classList.add('wide');renderInspector();schedule();}
     document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
     document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(inspectorOpen){inspectorOpen=false;renderInspector();}else if(view==='detail')setView('overview');}});
-    function draw(){frame=0;fitPipe();drawPipe();drawGraph();drawLanes();if(capture){let meta=$('meta[name="capture-height"]');if(!meta){meta=document.createElement('meta');meta.name='capture-height';document.head.appendChild(meta);}meta.content=String(Math.ceil(document.documentElement.scrollHeight));}}
+    function draw(){frame=0;fitPipe();fitCanvas('#inventory-wrap','#inventory',DETAIL_PW,DETAIL_PH);drawPipe();drawInventory();drawGraph();drawLanes();if(capture){let meta=$('meta[name="capture-height"]');if(!meta){meta=document.createElement('meta');meta.name='capture-height';document.head.appendChild(meta);}meta.content=String(Math.ceil(document.documentElement.scrollHeight));}}
     function schedule(){if(!frame)frame=requestAnimationFrame(draw);}
     if(capture)document.body.classList.add('capture');
-    applyTheme();renderPipe();renderGraph();renderTaskBar();renderLanes();renderInspector();setView('pipeline');
+    applyTheme();renderInventory();renderPipe();renderGraph();renderTaskBar();renderLanes();renderInspector();setView('pipeline');
     new ResizeObserver(schedule).observe(document.body);
-    if(document.fonts?.ready)document.fonts.ready.then(schedule);
+    if(document.fonts?.ready)document.fonts.ready.then(()=>{updatePipeFillers();schedule();});
   })();
   </script>
 </body>
