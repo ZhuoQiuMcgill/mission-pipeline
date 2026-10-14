@@ -998,8 +998,8 @@
         const band=document.createElement('div');band.className='p-band';Object.assign(band.style,{top:y+'px',height:h+'px'});
         const bn=document.createElement('span');bn.className='p-band-name';bn.textContent=name;const small=document.createElement('small');small.textContent=note;bn.appendChild(small);band.appendChild(bn);host.appendChild(band);
       }
-      const loop=document.createElement('div');loop.className='loopbox';Object.assign(loop.style,{left:'22px',top:'498px',width:'1136px',height:'552px'});loop.title=tooltip(S['task-loop']);loop.addEventListener('click',()=>select('step','task-loop'));host.appendChild(loop);
-      label(host,'loop-title',44,508,'TASK LOOP · parallel tracks, many tasks at once');
+      const loop=document.createElement('div');loop.className='loopbox';Object.assign(loop.style,{left:'22px',top:'498px',width:'1136px',height:'552px'});host.appendChild(loop);
+      const title=document.createElement('button');title.type='button';title.className='loop-title';Object.assign(title.style,{left:'44px',top:'508px'});title.textContent='TASK LOOP · parallel tracks, many tasks at once';title.title=tooltip(S['task-loop']);title.addEventListener('click',()=>select('step','task-loop'));host.appendChild(title);
       label(host,'track',44,684,'EXECUTION');label(host,'track',228,810,'EXPLORATION');
       label(host,'track',216,946,'EVIDENCE');label(host,'track',22,1100,'DELIVERY / LANDING / CLOSE · independent operations');
       label(host,'track',22,1270,'LEGALIZATION · only on request, before or after close');
@@ -1062,9 +1062,10 @@
       band.appendChild(bn); pipe.appendChild(band);
       const loop = document.createElement('div'); loop.className = 'loopbox';
       Object.assign(loop.style, { left: '565px', top: '160px', width: '595px', height: '506px' });
-      loop.title = tooltip(S['task-loop']); loop.addEventListener('click', () => select('step', 'task-loop')); pipe.appendChild(loop);
-      const title = document.createElement('div'); title.className = 'loop-title';
+      pipe.appendChild(loop);
+      const title = document.createElement('button'); title.type = 'button'; title.className = 'loop-title';
       Object.assign(title.style, { left: '585px', top: '171px' }); title.innerHTML = '<b>TASK LOOP</b>';
+      title.title = tooltip(S['task-loop']); title.addEventListener('click', () => select('step', 'task-loop'));
       const sub = document.createElement('div'); sub.className = 'loop-title';
       Object.assign(sub.style, { left: '760px', top: '171px', width: '382px' });
       sub.innerHTML = '<span>once per task · many tasks at once · the PM dispatches through its own harness</span>'; pipe.append(title, sub);
@@ -1199,7 +1200,7 @@
       else if(focus.kind==='exception'){const e=EXCEPTIONS.find(e=>e.id===focus.id);d={...e,plain:e.short,facts:e.wis.map(id=>id+': '+WI[id])};}
       else {const s=S[focus.id]||S.batch;d={...s,plain:laneName(s.lane)+' · '+s.plain,facts:[...s.facts]};}
       const host=$('#inspector');host.replaceChildren();host.classList.toggle('open',inspectorOpen);
-      const close=document.createElement('button');close.type='button';close.className='ins-close';close.textContent='Close details ×';close.addEventListener('click',()=>{inspectorOpen=false;renderInspector();});host.appendChild(close);
+      const close=document.createElement('button');close.type='button';close.className='ins-close';close.textContent='Close details ×';close.addEventListener('click',closeInspector);host.appendChild(close);
       const a=document.createElement('div'),b=document.createElement('div'),c=document.createElement('div');a.className='ins-a';b.className='ins-b';c.className='ins-c';host.append(a,b,c);
       const k=document.createElement('p');k.className='label';k.textContent='4.1.0 · source-backed detail';const h=document.createElement('h2');h.className='ins-title';h.textContent=d.title;const sub=document.createElement('p');sub.className='ins-sub';sub.textContent=d.plain;const copy=document.createElement('p');copy.className='ins-copy';copy.textContent=d.copy;a.append(k,h,sub,copy);
       const seatsHere = ['pnode', 'step'].includes(focus.kind) ? NODE_SEATS[focus.id] : null;
@@ -1215,7 +1216,17 @@
     }
     function setView(next){view=next;inspectorOpen=false;document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));$('#view-pipeline').hidden=view!=='pipeline';$('#view-overview').hidden=view!=='overview';$('#view-detail').hidden=view!=='detail';$('.work').classList.add('wide');renderInspector();schedule();}
     document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
-    document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(inspectorOpen){inspectorOpen=false;renderInspector();}else if(view==='detail')setView('overview');}});
+    function closeInspector(){inspectorOpen=false;renderInspector();}
+    // Detail controls are buttons; clickable wires use data-edge or belong to the task graph.
+    const detailClickables='button, [data-edge], #graph .wire';
+    const isEmptySpace=target=>!target.closest('#inspector')&&!target.closest(detailClickables);
+    let pointerDownOnEmptySpace=false;
+    document.addEventListener('pointerdown',e=>{pointerDownOnEmptySpace=isEmptySpace(e.target);},true);
+    document.addEventListener('click',e=>{
+      const startedOnEmptySpace=pointerDownOnEmptySpace;pointerDownOnEmptySpace=false;
+      if(inspectorOpen&&startedOnEmptySpace&&isEmptySpace(e.target))closeInspector();
+    },true);
+    document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(inspectorOpen)closeInspector();else if(view==='detail')setView('overview');}});
     function draw(){frame=0;fitPipe();fitCanvas('#inventory-wrap','#inventory',DETAIL_PW,DETAIL_PH);drawPipe();drawInventory();drawGraph();drawLanes();if(capture){let meta=$('meta[name="capture-height"]');if(!meta){meta=document.createElement('meta');meta.name='capture-height';document.head.appendChild(meta);}meta.content=String(Math.ceil(document.documentElement.scrollHeight));}}
     function schedule(){if(!frame)frame=requestAnimationFrame(draw);}
     if(capture)document.body.classList.add('capture');
