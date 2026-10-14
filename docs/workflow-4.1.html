@@ -15,6 +15,7 @@
       --line: #a9a497; --hair: #d2cdc3; --grid: rgba(40, 36, 20, .05);
       --accent: #b97a33; --accent-soft: rgba(185, 122, 51, .14); --accent-ink: #8a5821; --on-accent: #17130e;
       --ok: #55613f; --edge: #77746b; --on-ink: #f3f1ed; --shadow: rgba(30, 26, 14, .10);
+      --m-opus: #6b4fa0; --m-sonnet: #1f7a68; --m-gpt: #2f62a8;
       --font: "MiSans Latin", "MiSans", "HarmonyOS Sans", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
       --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
       color-scheme: light;
@@ -25,6 +26,7 @@
         --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
         --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e; --on-accent: #11181b;
         --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+        --m-opus: #b9a3e8; --m-sonnet: #6cc7b3; --m-gpt: #8ab4ef;
         color-scheme: dark;
       }
     }
@@ -33,6 +35,7 @@
       --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
       --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e; --on-accent: #11181b;
       --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      --m-opus: #b9a3e8; --m-sonnet: #6cc7b3; --m-gpt: #8ab4ef;
       color-scheme: dark;
     }
     /* The page's own Theme button wins over the system and any host setting */
@@ -41,6 +44,7 @@
       --line: #a9a497; --hair: #d2cdc3; --grid: rgba(40, 36, 20, .05);
       --accent: #b97a33; --accent-soft: rgba(185, 122, 51, .14); --accent-ink: #8a5821; --on-accent: #17130e;
       --ok: #55613f; --edge: #77746b; --on-ink: #f3f1ed; --shadow: rgba(30, 26, 14, .10);
+      --m-opus: #6b4fa0; --m-sonnet: #1f7a68; --m-gpt: #2f62a8;
       color-scheme: light;
     }
     html:root[data-look="dark"] {
@@ -48,6 +52,7 @@
       --line: #56656a; --hair: #2b383d; --grid: rgba(224, 227, 220, .045);
       --accent: #c5a16b; --accent-soft: rgba(197, 161, 107, .16); --accent-ink: #dcbd8e; --on-accent: #11181b;
       --ok: #a3b38c; --edge: #8f9b9c; --on-ink: #11181b; --shadow: rgba(0, 0, 0, .35);
+      --m-opus: #b9a3e8; --m-sonnet: #6cc7b3; --m-gpt: #8ab4ef;
       color-scheme: dark;
     }
 
@@ -81,6 +86,23 @@
     .tab:hover { color: var(--ink); }
     .theme-btn { white-space: nowrap; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--hair); padding: 5px 9px; }
     .theme-btn:hover { color: var(--ink); border-color: var(--line); }
+    .theme-btn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+    /* Show model: a tag per seat, coloured by model family */
+    .mchip { display: inline-block; padding: 0 4px; border: 1px solid currentColor; background: var(--paper); font: 600 9px/1.45 var(--font); letter-spacing: .01em; white-space: nowrap; text-transform: none; }
+    .mchip.opus { color: var(--m-opus); } .mchip.sonnet { color: var(--m-sonnet); } .mchip.gpt { color: var(--m-gpt); }
+    .mchips { display: none; gap: 3px; pointer-events: none; }
+    .show-models .mchips { display: flex; }
+    .mchips.above, .mchips.below { position: absolute; left: 4px; z-index: 5; }
+    .mchips.above { bottom: calc(100% + 2px); } .mchips.below { top: calc(100% + 2px); }
+    .mchips.inside { flex-wrap: wrap; margin-top: 2px; }
+    .show-models .pnode.has-inside .p-note { display: none; }
+    .band-name .mchip { display: none; margin-left: 8px; letter-spacing: .02em; }
+    .show-models .band-name .mchip { display: inline-block; }
+    .model-key { display: none; margin-top: 16px; padding: 12px 0 2px; border-top: 1px solid var(--hair); font-size: 12.5px; color: var(--ink-2); }
+    .show-models .model-key { display: grid; gap: 7px; }
+    .model-key div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+    .model-key .mchip { justify-self: start; }
+    .model-key p { margin: 4px 0 0; font-size: 12px; color: var(--muted); max-width: 90ch; }
 
     /* Mission timeline */
     .mission { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--hair); }
@@ -318,7 +340,6 @@
     .band-name { max-width: 82%; }
     .p-band-name, .band-name, .loop-title, .track, .graph-tags { z-index: 5; background: var(--paper); padding: 1px 5px; line-height: 1.4; }
     .inventory .ppill { min-width: 22px; padding: 1px 2px; text-align: center; }
-    .fillers-note { margin: 8px 0 16px; font-size: 12.5px; color: var(--ink-2); }
     .lane-rule { font-size: 12.5px; color: var(--ink-2); max-width: 100ch; }
     .band-name small { display: inline; }
     .inactive-lane { display: block; padding: 30px 12px 7px; color: var(--muted); font-size: 10px; }
@@ -340,7 +361,6 @@
     #pipe .loop-title b { font-size: 17px; }
     #pipe .loop-title span { line-height: 1.5; }
     #pipe .track { display: flex; align-items: baseline; gap: 10px; }
-    #pipe .p-filler { font: 8px/1.3 var(--font); color: var(--muted); white-space: nowrap; letter-spacing: -.15px; }
     .notes .sub-title { font-size: 15px; margin-top: 24px; }
     .reads { grid-template-columns: 130px minmax(0,1fr); font-size: 12px; }
     #loops { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
@@ -364,12 +384,11 @@
           <button type="button" class="tab" data-view="pipeline" aria-pressed="true"><small>01</small>Pipeline</button>
           <button type="button" class="tab" data-view="overview" aria-pressed="false"><small>02</small>Task graph</button>
           <button type="button" class="tab" data-view="detail" aria-pressed="false"><small>03</small>Seat lanes</button>
-          <button type="button" class="theme-btn" id="fillers-btn" aria-pressed="false" title="Example assignments: model / harness. Any seat can take any model and harness.">Show fillers</button>
+          <button type="button" class="theme-btn" id="model-btn" aria-pressed="false">Show model</button>
           <button type="button" class="theme-btn" id="theme-btn">Theme · Auto</button>
         </div>
       </div>
     </header>
-    <p class="fillers-note" id="fillers-note" hidden>Example: the maintainer's current fillers. Any seat can take any model and harness.</p>
     <div class="work wide">
       <div>
         <section class="view" id="view-pipeline" aria-labelledby="pl-title">
@@ -377,6 +396,12 @@
             <p class="view-sub">The principal talks only to the PM. The PM records the words, plans in batches and dispatches through its own harness. Select a box or labeled loop for its commands and source files; the full process inventory is in 03.</p>
           </div><span class="label">Implemented process · 4.1.0</span></div>
           <div class="scroll"><div class="board pipe-wrap" id="pipe-wrap"><div class="pipe" id="pipe"></div></div></div>
+          <div class="model-key" id="model-key" aria-label="Seat models">
+            <div><span class="mchip opus">Opus 5.5 · xhigh</span><span>Claude Opus 5.5: PM, Researcher, Secretary, Architect, and the Constructors on the exploration track.</span></div>
+            <div><span class="mchip sonnet">Sonnet 5.5 · xhigh</span><span>Claude Sonnet 5.5: the Constructors on the execution track.</span></div>
+            <div><span class="mchip gpt">GPT-6.1-Sol · xhigh</span><span>GPT-6.1-Sol via the Codex CLI: Reviewer, Crititor, Calibrator, Stabilizer and Auditor.</span></div>
+            <p>When the product itself is GPT-made, the review seats switch to Claude Opus, so the reviewer's model family always differs from the builder's. Sonnet never directs, briefs or judges an Opus seat. Seat settings as of the model rule of 2026-10-03, amended 2026-10-05.</p>
+          </div>
           <div class="loops" id="loops" role="group" aria-label="Numbered loops"></div>
           <div class="notes">
             <article><h2 class="sub-title">Memory that travels</h2><p>Everything the process records lives in <code>.mission-pipeline/</code>: a SQLite skeleton connecting the run chain and checks, with Markdown leaves for words, decisions, cards, reports and summaries. Products live in git. Copy the folder while idle; any harness continues from the same memory.</p><p class="ins-src">Source: <a href="design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md">4.1 contract</a> · <a href="../engine/README.md">engine/README.md</a></p></article>
@@ -424,7 +449,7 @@
       <aside class="inspector" id="inspector" aria-live="polite"></aside>
     </div>
     <div class="legend" aria-label="Legend"><span class="key"><i class="k-pr"></i>Principal touchpoint</span><span class="key"><i></i>Seat or program step</span><span class="key"><i class="k-cond"></i>Conditional</span><span class="key"><i class="k-gate"></i>Program gate</span><span class="key"><i class="k-sel"></i>Selected</span><span class="key"><i class="k-expl"></i>Exploration</span><span class="key"><i class="k-pill"></i>PM decision</span><span class="key"><i class="k-line"></i>Flow</span><span class="key"><i class="k-dash"></i>Only when needed</span><span class="key"><i class="k-hot"></i>Highlighted path</span></div>
-    <footer class="foot"><span>Proof is computed by mp. Filler identity changes no conclusion. Closing and delivery are independent.</span><nav aria-label="Sources"><a href="design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md">4.1 contract</a><a href="../engine/plugin/pm/PM.md">PM handbook</a><a href="../engine/plugin/pm/wi/INDEX.md">Work instructions</a><a href="workflow-3.0.html">3.0 history</a></nav></footer>
+    <footer class="foot"><span>Proof is computed by mp. Closing and delivery are independent.</span><nav aria-label="Sources"><a href="design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md">4.1 contract</a><a href="../engine/plugin/pm/PM.md">PM handbook</a><a href="../engine/plugin/pm/wi/INDEX.md">Work instructions</a><a href="workflow-3.0.html">3.0 history</a></nav></footer>
   </main>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
     <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="ah" d="M0 1 L9 5 L0 9 Z"/></marker>
@@ -456,10 +481,13 @@
     };
     const role = id => 'engine/plugin/roles/' + id + '.md';
     const wiFile = id => 'engine/plugin/pm/wi/' + id + '.md';
-    // The maintainer's example assignments; seat identity never depends on the filler.
-    const MODEL_ASSIGNMENTS = Object.freeze({ pm: 'Opus 5.5 xhigh', researcher: 'Opus 5.5 xhigh', secretary: 'Opus 5.5 xhigh', architect: 'Opus 5.5 xhigh', constructor: 'Sonnet 5.5 xhigh', experiment: 'Opus 5.5 xhigh', reviewer: 'GPT-6.1-Sol xhigh (via Codex)', crititor: 'GPT-6.1-Sol xhigh (via Codex)', calibrator: 'GPT-6.1-Sol xhigh (via Codex)', stabilizer: 'GPT-6.1-Sol xhigh (via Codex)', auditor: 'GPT-6.1-Sol xhigh (via Codex)' });
-    const HARNESS_ASSIGNMENTS = Object.freeze(Object.fromEntries(Object.keys(MODEL_ASSIGNMENTS).map(id => [id, MODEL_ASSIGNMENTS[id].startsWith('GPT-') ? 'Codex' : 'Claude Code'])));
-    const FILLERS = Object.freeze(Object.fromEntries(Object.keys(MODEL_ASSIGNMENTS).map(id => [id, { model: MODEL_ASSIGNMENTS[id], harness: HARNESS_ASSIGNMENTS[id] }])));
+    const MODELS = {
+      opus: { label: 'Opus 5.5 · xhigh', full: 'Claude Opus 5.5, effort xhigh' },
+      sonnet: { label: 'Sonnet 5.5 · xhigh', full: 'Claude Sonnet 5.5, effort xhigh' },
+      gpt: { label: 'GPT-6.1-Sol · xhigh', full: 'GPT-6.1-Sol via the Codex CLI, effort xhigh' },
+    };
+    const SEAT_MODEL = { PM: 'opus', Researcher: 'opus', Secretary: 'opus', Architect: 'opus', 'Constructors · execution': 'sonnet', 'Constructors · exploration': 'opus',
+      Reviewer: 'gpt', Crititor: 'gpt', Calibrator: 'gpt', Stabilizer: 'gpt', Auditor: 'gpt' };
     const LANES = [
       { id: 'principal', name: 'Principal', note: 'speaks only to the PM' },
       { id: 'pm', name: 'PM', note: 'aligns · dispatches · records decisions' },
@@ -476,7 +504,7 @@
     ];
     const S = {};
     function step(id, lane, title, plain, copy, act, files, facts = [], kind = '') {
-      S[id] = { id, lane, title, plain, copy, act, src: src(...files, ...(FILLERS[lane] ? [role(lane)] : []), ...(FILLERS[lane] && lane !== 'pm' ? [F.seat] : [])), facts: [...facts, ...(FILLERS[lane] && lane !== 'pm' ? ['All seats: missing must-read pages or invalid fields → refused → fix → hand back again. Identical recorded hand-back → no-op.'] : [])], kind };
+      S[id] = { id, lane, title, plain, copy, act, src: src(...files, ...(!['principal', 'program'].includes(lane) ? [role(lane)] : []), ...(!['principal', 'program'].includes(lane) && lane !== 'pm' ? [F.seat] : [])), facts: [...facts, ...(!['principal', 'program'].includes(lane) && lane !== 'pm' ? ['All seats: missing must-read pages or invalid fields → refused → fix → hand back again. Identical recorded hand-back → no-op.'] : [])], kind };
     }
     const hb = 'mp seat <id> handback --stdin';
     step('message', 'principal', 'Talk to the PM', 'Each message becomes W-n', 'The principal speaks in plain sentences to the only PM, the session on their screen. The PM records every message verbatim before other work; the harness may provide an optional hook.', 'mp pm say "<message, verbatim>"', [F.contract, F.handbook, F.cli]);
@@ -485,7 +513,7 @@
     step('progress', 'principal', 'Ask how it is going', 'One query; depth on demand', 'Status returns layer 0 and subtasks whose changedRev advanced since the last ask. Record changes include late hand-backs that were not accepted, even if the task state stayed the same. Blocked gives block reasons; show expands the requested item; leaf gives evidence.', 'mp read status · mp read blocked · mp read show <kind> <id> · mp read leaf <id>', [F.handbook, F.read, F.layers, F.status]);
     step('halt', 'principal', 'Stop or withdraw', 'The PM records a stop at once', 'A stop is written directly before propagation or landing recovery. New dispatches, accepted hand-backs and landing authorizations in scope are refused. The PM ends running seats through the harness and reports what it confirmed.', 'mp pm stop "<words>" --words W-n', [F.contract, F.pm, F.seat, F.land]);
     step('audit-consent', 'principal', 'Request legalization', 'See the audit plan; agree to start', 'Only a user request initiates legalization. The program first lists the backfills and seat count. The principal sees that plan before agreeing to start. This can happen before or after closing.', 'mp pm legalize request <mission> <endpoint> --words W-n · mp pm legalize start <mission> <legalization> --words W-n', [F.contract, F.audit, F.cli]);
-    step('session', 'pm', 'Session', 'One PM, any harness', 'At session start the PM records its filler, reads the handbook core and asks for notices and ready steps. The PM launches seats using the sub-agent feature of its own harness.', 'mp pm session --filled-by "<harness>/<model>" · mp pm next', [F.pm, F.cli, F.handbook]);
+    step('session', 'pm', 'Session', 'One PM, any harness', 'At session start the PM records its model and harness, reads the handbook core and asks for notices and ready steps. The PM launches seats using the sub-agent feature of its own harness.', 'mp pm session --filled-by "<harness>/<model>" · mp pm next', [F.pm, F.cli, F.handbook]);
     step('words', 'pm', 'Record the words', 'Verbatim, append-only W-n', 'Each message is an anchored words entry. Repeating the latest identical message is a no-op. A requirement sourced from words must quote that W-n verbatim; a derived item instead names a recorded authorization.', 'mp pm say "<message>"', [F.pm, F.cli, F.contract]);
     step('requirements', 'pm', 'Mission + requirements', 'Quote or recorded authorization', 'Open a mission and record individually versioned goal, limit, acceptance, authorization or decision items. Each item either quotes W-n verbatim or derives from a recorded authorization item. Withdrawn items stay withdrawn; a return uses a new id. Long-term constraints are separate.', 'mp pm mission open <mission> · mp pm requirement add <mission> <item> --type <type> --text "<text>" (--quote "<quote>" --words W-n | --authorization <item>) · mp pm constraint add', [F.pm, F.cli, 'engine/src/flow/requirements.ts']);
     step('batch', 'pm', 'PM plan batch', 'Results, provenance, mode', 'The PM submits a batch of requirement and result-level plan changes. Each element names its provenance. Explorations are defined here; tasks beyond an exploration that has not stood are not decomposed yet.', 'mp pm plan template <mission> · mp pm plan submit <mission> --file <plan.json> --words W-n --mode stable|fast', [F.planning, F.cli, F.carried]);
@@ -546,6 +574,36 @@
     step('worktree-mismatch','program','Landed, worktree differs','WI-04 after target reaches D','A ref at D records landing done. A worktree that differs from D is reported separately under WI-04; it is not silently overwritten.','mp pm land <delivery> --words W-n',[F.land,wiFile('WI-04')]);
     step('close-intent','pm','Close landing intent','Fresh check under landing lock','PM may close an open intent as not landed. A fresh check at D records landed instead; a held landing lock reports in progress. Otherwise close the intent and keep the delivery ref.','mp pm land <delivery> --close-not-landed',[F.land,F.cli,wiFile('WI-06')]);
     step('intent-result','program','Intent result','Not landed / at D / in progress','Only after the locked fresh check: close as not landed while retaining the delivery ref, record done if already at D, or leave an in-progress landing untouched.','mp pm land <delivery> --close-not-landed',[F.land,F.cli]);
+    const NODE_SEATS = {
+      session: ['PM'], words: ['PM'], requirements: ['PM'], batch: ['PM'], 'pm-decision': ['PM'], read: ['PM'],
+      cal1: ['Calibrator'], decompose: ['Architect'], feasibility: ['Architect'], cal2: ['Calibrator'],
+      dispatch: ['PM'], renew: ['PM'], release: ['PM'], build: ['Constructors · execution'], review: ['Reviewer'],
+      author: ['Researcher'], attack: ['Crititor'], disposition: ['Researcher'], stabilize: ['Stabilizer'],
+      experiment: ['Constructors · exploration'], reading: ['Researcher'], interpret: ['Researcher'], secretary: ['Secretary'],
+      deliver: ['PM'], land: ['PM'], close: ['PM'], legalize: ['PM'], 'audit-node': ['Auditor'], 'audit-chain': ['Auditor'],
+      stop: ['PM'], drain: ['PM'], 'fix-constructor': ['Constructors · execution'], 'fix-researcher': ['Researcher'],
+      'stop-release': ['PM'], 'mission-open': ['PM'], 'copy-recover': ['PM'], 'confirm-copy': ['PM'], 'close-intent': ['PM']
+    };
+    const CHIP_AT = { batch: 'inside', cal1: 'below', decompose: 'inside', cal2: 'below', dispatch: 'inside',
+      build: 'inside', review: 'inside', author: 'inside', attack: 'inside', stabilize: 'inside', secretary: 'inside',
+      deliver: 'inside', close: 'below', 'audit-node': 'above' };
+    function chip(model, title) {
+      const c = document.createElement('span'); c.className = 'mchip ' + model; c.textContent = MODELS[model].label;
+      if (title) c.title = title;
+      return c;
+    }
+    function seatModelFacts(seats) {
+      return seats.map(seat => `${seat}: ${MODELS[SEAT_MODEL[seat]].full}.`);
+    }
+    function addModelChips(b, id, at = CHIP_AT[id] || 'above') {
+      if (!NODE_SEATS[id]) return;
+      const box = document.createElement('span'); box.className = 'mchips ' + at;
+      const byModel = new Map();
+      for (const seat of NODE_SEATS[id]) byModel.set(SEAT_MODEL[seat], [...(byModel.get(SEAT_MODEL[seat]) || []), seat]);
+      for (const [model, seats] of byModel) box.appendChild(chip(model, `${seats.join(', ')}: ${MODELS[model].full}`));
+      b.appendChild(box);
+      if (at === 'inside') b.classList.add('has-inside');
+    }
     // Fixed coordinates, rendered from data and scaled to fit, as in the historical atlas.
     const DETAIL_PW = 1400, DETAIL_PH = 1400, DETAIL_NW = 166, DETAIL_NH = 86;
     const DETAIL_PN = [];
@@ -567,7 +625,7 @@
     function edge(id, a, b, text, files, opts = {}) { DETAIL_PE[id] = { id, a, b, text, src: src(...files), ...opts }; }
     const planSrc = [F.planning], execSrc = [F.execution], xpSrc = [F.xflow, F.machine, F.xstep];
     edge('speak','message','words','The PM records every user message as W-n.',[F.handbook,F.pm]);
-    edge('start','session','words','The session identifies the PM filler; user messages are recorded verbatim.',[F.handbook,F.cli]);
+    edge('start','session','words','The session identifies the PM model and harness; user messages are recorded verbatim.',[F.handbook,F.cli]);
     edge('quote','words','requirements','A requirement quotes W-n verbatim, or derives from a recorded authorization item.',[F.pm,F.cli,'engine/src/flow/requirements.ts']);
     edge('plan','requirements','batch','Items and changed/dependent items become a PM alignment batch.',planSrc);
     edge('batch-cal1','batch','cal1','Calibrator ① audits each PM batch.',planSrc,{ p:[[759,236],[759,272],[97,272],[97,324]] });
@@ -880,7 +938,7 @@
     let theme = 'auto';
     try { theme=localStorage.getItem('mp-workflow-theme')||'auto'; } catch (_) {}
     if (['light','dark','auto'].includes(params.get('theme'))) theme=params.get('theme');
-    let view='pipeline',selTask='T2',detailTask='T2',scenario='normal',showFillers=false,frame=0;
+    let view='pipeline',selTask='T2',detailTask='T2',scenario='normal',frame=0;
     let focus={kind:'step',id:'batch'},inspectorOpen=false;
     const variantOf = t => t.type==='exploration'?'exploration':t.type==='execution'?'execution':'decision';
     function applyTheme() {
@@ -889,17 +947,19 @@
       $('#theme-btn').textContent='Theme · '+theme[0].toUpperCase()+theme.slice(1);
     }
     $('#theme-btn').addEventListener('click',()=>{theme={auto:'light',light:'dark',dark:'auto'}[theme]||'auto';try{localStorage.setItem('mp-workflow-theme',theme);}catch(_){}applyTheme();});
-    function fillerText(lane, id) { const key=lane==='constructor'&&id==='experiment'?'experiment':lane; return FILLERS[key] ? (showFillers ? FILLERS[key].model+(FILLERS[key].harness==='Codex'?'':' / '+FILLERS[key].harness) : '') : ''; }
-    function laneFillerText(lane) { return showFillers&&lane==='constructor' ? 'Execution: '+fillerText(lane,'build')+'; blind experiments: '+fillerText(lane,'experiment') : fillerText(lane); }
-    function roleText(s) { return laneName(s.lane)+(showFillers&&FILLERS[s.lane]?' · '+fillerText(s.lane,s.id):''); }
     function laneName(id) {return LANES.find(l=>l.id===id).name;}
     function tooltip(d) { return d.copy+'\nCommand: '+d.act+'\nSource: '+d.src.map(s=>s.text).join(', '); }
     function select(kind,id) {focus={kind,id};inspectorOpen=true;markPipe();markLanes();renderInspector();}
-    $('#fillers-btn').addEventListener('click',()=>{
-      showFillers=!showFillers;$('#fillers-note').hidden=!showFillers;$('#fillers-btn').setAttribute('aria-pressed',String(showFillers));
-      updatePipeFillers();
-      document.querySelectorAll('#inventory .pnode .p-role').forEach(el=>{const s=S[el.parentElement.dataset.id];el.textContent=roleText(s);});
-      renderLanes();renderInspector();schedule();
+    let showModels = false;
+    try { showModels = localStorage.getItem('mp-workflow-models') === 'on'; } catch (_) {}
+    function applyModels() {
+      document.body.classList.toggle('show-models', showModels);
+      $('#model-btn').setAttribute('aria-pressed', String(showModels));
+    }
+    $('#model-btn').addEventListener('click', () => {
+      showModels = !showModels;
+      try { localStorage.setItem('mp-workflow-models', showModels ? 'on' : 'off'); } catch (_) {}
+      applyModels(); renderInspector();
     });
     function svgHost(host) {const svg=document.createElementNS(NS,'svg');svg.setAttribute('class','wires');svg.setAttribute('aria-hidden','true');host.appendChild(svg);return svg;}
     function path(svg,pts,cls,hot,id,edges=DETAIL_PE,edgeKind='detail-edge') {
@@ -912,7 +972,7 @@
       const d=S[id],b=document.createElement('button');b.type='button';b.className=[cls,d.kind,d.lane==='principal'?'principal':''].filter(Boolean).join(' ');b.dataset.id=id;b.title=tooltip(d);
       if(cls==='pnode'){
         b.innerHTML='<span class="p-role"></span><span class="p-title"></span><span class="p-note"></span>';
-        b.querySelector('.p-role').textContent=roleText(d);
+        b.querySelector('.p-role').textContent=laneName(d.lane);
         b.querySelector('.p-title').textContent=d.title;b.querySelector('.p-note').textContent=note;
       }else{
         b.innerHTML='<span class="num"></span><span class="s-title"></span><span class="s-plain"></span><span class="s-act"></span>';
@@ -920,6 +980,7 @@
         const short=d.act.match(/^mp (?:pm|read) [a-z-]+(?: (?:submit|request|start|open))?|^mp seat <id> [a-z-]+/);
         b.querySelector('.s-act').textContent=(short?short[0]:d.act)+(d.act.includes(' · ')?' …':'');
       }
+      addModelChips(b, id, 'inside');
       b.addEventListener('click',()=>select('step',id));return b;
     }
     function makeRail(host,isLanes=false) {
@@ -1017,8 +1078,9 @@
         b.className = ['pnode', n.kind || ''].filter(Boolean).join(' ');
         b.title = tooltip(S[n.steps[0]]);
         Object.assign(b.style, { left: n.x + 'px', top: n.y + 'px', width: n.w + 'px', height: n.h + 'px' });
-        b.innerHTML = '<span class="p-role"></span><span class="p-title"></span><span class="p-note"></span><span class="p-filler" hidden></span>';
+        b.innerHTML = '<span class="p-role"></span><span class="p-title"></span><span class="p-note"></span>';
         b.querySelector('.p-role').textContent = n.role; b.querySelector('.p-title').textContent = n.title; b.querySelector('.p-note').textContent = n.note;
+        addModelChips(b, n.id);
         b.addEventListener('click', () => select(n.kind === 'principal' ? 'principal' : 'pnode', n.id)); pipe.appendChild(b);
       }
       for (const l of LOOPS) {
@@ -1033,21 +1095,7 @@
         b.querySelector('.n').textContent = l.num; b.querySelector('strong').textContent = l.name; b.querySelector('span:last-child').textContent = l.text;
         b.addEventListener('click', () => select('loop', l.id)); return b;
       }));
-      updatePipeFillers(); markPipe();
-    }
-    function updatePipeFillers() {
-      const metrics = document.createElement('canvas').getContext?.('2d');
-      for (const n of PN) {
-        const line = $('#pn-' + n.id + ' .p-filler'), lane = S[n.steps[0]].lane;
-        line.hidden = !showFillers || n.kind === 'principal' || !FILLERS[lane];
-        line.textContent = showFillers && n.kind !== 'principal' ? fillerText(lane, n.id) : '';
-        line.title = line.textContent;
-        if (!line.hidden) {
-          if (metrics) metrics.font = '8px ' + getComputedStyle(line).fontFamily;
-          const width = metrics ? metrics.measureText(line.textContent).width : line.textContent.length * 4.8;
-          line.style.fontSize = Math.min(8, 8 * (n.w - (n.kind === 'major' ? 28 : 22)) / width) + 'px';
-        }
-      }
+      markPipe();
     }
     // Bridge only principal drops. Shared endpoints on the acceptance bus are junctions.
     function principalGaps() {
@@ -1137,7 +1185,7 @@
       const primary=v==='decision'?['pm-decision']:v==='exploration'?PRIMARY_XP:PRIMARY_EXEC;
       const cells=v==='exploration'?explorationCells:executionCells;
       const ids=[...new Set([...primary,...sc.nodes])];
-      LANES.forEach((lane,i)=>{const band=document.createElement('div');band.className='band';band.style.gridRow=i+1;band.dataset.lane=lane.id;const name=document.createElement('span');name.className='band-name';name.textContent=lane.name;const small=document.createElement('small');small.textContent=(showFillers&&FILLERS[lane.id]?laneFillerText(lane.id)+' · ':'')+lane.note;name.appendChild(small);band.appendChild(name);if(!ids.some(id=>S[id].lane===lane.id)){const none=document.createElement('span');none.className='inactive-lane';none.textContent='No step in this cycle';band.appendChild(none);}host.appendChild(band);});
+      LANES.forEach((lane,i)=>{const band=document.createElement('div');band.className='band';band.style.gridRow=i+1;band.dataset.lane=lane.id;const name=document.createElement('span');name.className='band-name';name.textContent=lane.name;const small=document.createElement('small');small.textContent=lane.note;name.appendChild(small);const laneSeat=lane.id==='constructor'?(v==='exploration'?'Constructors · exploration':'Constructors · execution'):lane.name;const laneModel=SEAT_MODEL[laneSeat];if(laneModel)name.appendChild(chip(laneModel,MODELS[laneModel].full));band.appendChild(name);if(!ids.some(id=>S[id].lane===lane.id)){const none=document.createElement('span');none.className='inactive-lane';none.textContent='No step in this cycle';band.appendChild(none);}host.appendChild(band);});
       const groups=new Map();for(const id of ids){const s=S[id],col=cells[id]??8,key=s.lane+':'+col;let cell=groups.get(key);if(!cell){cell=document.createElement('div');cell.className='lane-cell';cell.style.gridColumn=col+1;cell.style.gridRow=LANES.findIndex(l=>l.id===s.lane)+1;groups.set(key,cell);host.appendChild(cell);}const b=makeNode(id,'step');b.id='step-'+id;cell.appendChild(b);}
       makeRail(host,true);renderScenarioBar();markLanes();schedule();}
     function markLanes(){const sc=currentScenario(),nums={};sc.nodes.forEach((id,i)=>{(nums[id]??=[]).push(i+1);});document.querySelectorAll('#lanes .step').forEach(b=>{const id=b.dataset.id,on=id in nums;b.classList.toggle('on',on);b.classList.toggle('dim',!on);b.classList.toggle('sel',focus.kind==='step'&&focus.id===id);b.querySelector('.num').textContent=on?nums[id].join(' · '):'';});schedule();}
@@ -1149,11 +1197,13 @@
       else if(focus.kind==='edge'||focus.kind==='detail-edge'){const e=(focus.kind==='edge'?PE:DETAIL_PE)[focus.id];d={title:e.text,copy:e.text,act:S[e.b].act,src:e.src,plain:'Process edge'};}
       else if(focus.kind==='graph-edge'){d={title:focus.id,copy:focus.id.includes('X1')||focus.id.includes('D1')?'Earlier-round exploration → recorded decision → next plan: provenance and direction, rather than a task scheduling dependency. The current tasks have already been planned from that settled result.':'Illustrative scheduling dependency. It needs the accepted prerequisite product; stable mode additionally requires proof. These sample ids are not records from a real mission.',act:'mp read show task <id>',src:GRAPH_SRC,plain:'Example plan edge'};}
       else if(focus.kind==='exception'){const e=EXCEPTIONS.find(e=>e.id===focus.id);d={...e,plain:e.short,facts:e.wis.map(id=>id+': '+WI[id])};}
-      else {const s=S[focus.id]||S.batch;d={...s,plain:laneName(s.lane)+' · '+s.plain,facts:[...s.facts,...(showFillers&&FILLERS[s.lane]?['Filler: '+fillerText(s.lane,s.id)+' (information only)']:[])]};}
+      else {const s=S[focus.id]||S.batch;d={...s,plain:laneName(s.lane)+' · '+s.plain,facts:[...s.facts]};}
       const host=$('#inspector');host.replaceChildren();host.classList.toggle('open',inspectorOpen);
       const close=document.createElement('button');close.type='button';close.className='ins-close';close.textContent='Close details ×';close.addEventListener('click',()=>{inspectorOpen=false;renderInspector();});host.appendChild(close);
       const a=document.createElement('div'),b=document.createElement('div'),c=document.createElement('div');a.className='ins-a';b.className='ins-b';c.className='ins-c';host.append(a,b,c);
       const k=document.createElement('p');k.className='label';k.textContent='4.1.0 · source-backed detail';const h=document.createElement('h2');h.className='ins-title';h.textContent=d.title;const sub=document.createElement('p');sub.className='ins-sub';sub.textContent=d.plain;const copy=document.createElement('p');copy.className='ins-copy';copy.textContent=d.copy;a.append(k,h,sub,copy);
+      const seatsHere = ['pnode', 'step'].includes(focus.kind) ? NODE_SEATS[focus.id] : null;
+      if (showModels && seatsHere) d.facts = [...seatModelFacts(seatsHere), ...(d.facts || [])];
       if(d.facts?.length){const ul=document.createElement('ul');ul.className='ins-list';d.facts.forEach(f=>{const li=document.createElement('li');li.textContent=f;ul.appendChild(li);});b.appendChild(ul);}
       const cmd=document.createElement('p');cmd.className='ins-act';cmd.textContent=d.act;c.appendChild(cmd);const p=document.createElement('p');p.className='ins-src';p.append('Source files ');for(const source of d.src){const link=document.createElement('a');link.href=source.href;link.textContent=source.text;p.append(link,document.createElement('br'));}c.appendChild(p);
       for(const id of d.related||[]){const s=S[id],details=document.createElement('details');details.className='ins-related';
@@ -1169,9 +1219,9 @@
     function draw(){frame=0;fitPipe();fitCanvas('#inventory-wrap','#inventory',DETAIL_PW,DETAIL_PH);drawPipe();drawInventory();drawGraph();drawLanes();if(capture){let meta=$('meta[name="capture-height"]');if(!meta){meta=document.createElement('meta');meta.name='capture-height';document.head.appendChild(meta);}meta.content=String(Math.ceil(document.documentElement.scrollHeight));}}
     function schedule(){if(!frame)frame=requestAnimationFrame(draw);}
     if(capture)document.body.classList.add('capture');
-    applyTheme();renderInventory();renderPipe();renderGraph();renderTaskBar();renderLanes();renderInspector();setView('pipeline');
+    applyTheme();applyModels();renderInventory();renderPipe();renderGraph();renderTaskBar();renderLanes();renderInspector();setView('pipeline');
     new ResizeObserver(schedule).observe(document.body);
-    if(document.fonts?.ready)document.fonts.ready.then(()=>{updatePipeFillers();schedule();});
+    if(document.fonts?.ready)document.fonts.ready.then(schedule);
   })();
   </script>
 </body>
