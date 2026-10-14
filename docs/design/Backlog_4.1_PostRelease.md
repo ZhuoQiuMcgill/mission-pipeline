@@ -108,6 +108,23 @@ parked here and fixed after the release.
 - An older PM batch's escalations stay open until the newest batch passes Calibrator ①. Reads already
   treat them as history.
 
+## Promised by the docs, not done by the code (found while drawing the 4.1 workflow page)
+
+- **WI-07:** the page promises that a changed delivery version is registered and that verification and
+  re-acceptance steps are offered. The code only records the mismatch and sends a notice
+  (`src/delivery/delivery.ts`, `src/delivery/candidate.ts`). The continuation is missing.
+- **Integration tasks:** the carried contract (v51) promises them for a delivery whose versions
+  conflict. `mp pm deliver` reports the conflicts and asks for a new PM plan batch
+  (`src/cli/commands/pm.ts`). Ordinary detailed plans do check integration (`src/flow/mechanical.ts`).
+- **Exploration round budget:** v06 promises 3 attack rounds, but a discussion reply also counts as a
+  round (`src/flow/exploration/machine.ts`). Count discussions separately.
+- **WI-08:** the page promises a ready Secretary step when a loop is used up. When delivery rebuilds or
+  landing attempts are used up, only a notice is sent (`src/delivery/delivery.ts`, `src/git/land.ts`).
+  Raise the escalation.
+- **Closing with work in flight:** the contract (v51) promises a close that waits for running work. The
+  CLI has no option for it, and the API closes at once and only keeps accepting in-flight hand-backs
+  (`src/process/close.ts`).
+
 ## Command line (`src/cli`)
 
 - Operation-id replay:
