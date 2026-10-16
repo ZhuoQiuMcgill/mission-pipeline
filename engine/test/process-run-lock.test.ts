@@ -21,6 +21,9 @@ import { afterEach, describe, it } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { gitActions, pmDispatch, pmNext, readSteps, runOnCommit, type ProcessContext } from '../src/process/index.ts';
+import { appendRecords } from '../src/memory/index.ts';
+import { ENV_LINE } from '../src/evaluator/index.ts';
+import { RUN_FIELD } from '../src/evaluator/runs.ts';
 import { RunInProgress } from '../src/process/runs.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import { addDetailedPlan, CHECK_JS, ENV_A, handBack, processProject, readAll, readyOf, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
@@ -145,6 +148,92 @@ describe('the run lock: a declared run executes once while other processes advan
     assert.equal(executions(g.counter), 1, 'exactly one execution in all');
     assert.equal(evidenceOf(p.ctx, g.command).length, 1, 'one evidence record');
     assert.deepEqual(runCheckouts(p.ctx), [], 'the checkout is removed');
+  });
+
+  it('a declared command in a mixed group waits for its lock; sampled commands execute on each successful call', async () => {
+    p = processProject();
+    const commit = p.git('rev-parse', 'HEAD');
+    const g = gatedCommand(p);
+    const declared = { id: 'check', command: g.command };
+    const holder = verifyIn(p, commit, [declared]);
+    await waitFor('the declared command', () => executions(g.counter) === 1);
+    const mixed = [declared, { id: 'sample', command: 'node -e 0', sampled: true }];
+    await assert.rejects(runOnCommit(p.ctx, { mission: M, commit, commands: mixed, purpose: 'mixed', declaration: { by: 'mp', checkout: 'clean', declared: true } }), RunInProgress);
+    assert.equal(executions(g.counter), 1);
+    assert.equal(evidenceOf(p.ctx, 'node -e 0').length, 0);
+    writeFileSync(g.gate, '');
+    await holder.answer;
+    for (let i = 0; i < 2; i++) {
+      const done = await runOnCommit(p.ctx, { mission: M, commit, commands: mixed, purpose: 'mixed', declaration: { by: 'mp', checkout: 'clean', declared: true } });
+      assert.equal(done.runs[0]!.reused, true);
+    }
+    assert.equal(evidenceOf(p.ctx, g.command).length, 1, 'setup is never new evidence');
+    assert.equal(evidenceOf(p.ctx, 'node -e 0').length, 2, 'every sample executes');
+  });
+
+  it('partial reuse executes A then B in one checkout, but records only B; duplicate reuse keys record once', async () => {
+    p = processProject();
+    const commit = p.git('rev-parse', 'HEAD');
+    const setup = { id: 'A', command: `node -e "require('node:fs').writeFileSync('installed', 'yes')"` };
+    const check = { id: 'B', command: `node -e "if(require('node:fs').readFileSync('installed','utf8')!=='yes')process.exit(1)"` };
+    const a = await verifyHere(p.ctx, commit, [setup]);
+    assert.ok(a !== 'pending');
+    const ab = await verifyHere(p.ctx, commit, [setup, check, { ...check, id: 'B-again' }]);
+    assert.ok(ab !== 'pending');
+    assert.equal(ab[0]!.evidence, a[0]!.evidence);
+    assert.equal(ab[1]!.passed, true, 'setup populated the same checkout');
+    assert.equal(ab[2]!.evidence, ab[1]!.evidence);
+    assert.equal(evidenceOf(p.ctx, setup.command).length, 1);
+    assert.equal(evidenceOf(p.ctx, check.command).length, 1);
+    assert.deepEqual(await verifyHere(p.ctx, commit, [setup, check]), ab.slice(0, 2));
+    assert.deepEqual(runCheckouts(p.ctx), []);
+  });
+
+  it('a failing setup-only execution is a note, and later commands still run and record their results', async () => {
+    p = processProject();
+    const commit = p.git('rev-parse', 'HEAD');
+    const setup = { id: 'A', command: 'setup' };
+    const check = { id: 'B', command: 'check' };
+    const calls: string[] = [];
+    let fail = false;
+    const ctx = { ...p.ctx, runner: ({ command }: { command: string }) => {
+      calls.push(command);
+      return { exitCode: fail ? 1 : 0, signal: null, error: null, timedOut: false, output: Buffer.from(''), durationMs: 1 };
+    } };
+    const req = { mission: M, commit, purpose: 'partial', declaration: { by: 'mp' as const, checkout: 'clean' as const, declared: true } };
+    const first = await runOnCommit(ctx, { ...req, commands: [setup] });
+    fail = true;
+    const next = await runOnCommit(ctx, { ...req, commands: [setup, check] });
+    assert.deepEqual(calls, ['setup', 'setup', 'check']);
+    assert.equal(next.runs[0]!.evidence, first.runs[0]!.evidence);
+    assert.equal(next.runs[0]!.passed, true, 'recorded evidence stays in force');
+    assert.match(next.runs[0]!.setupFailure!, /Setup-only.*failed/);
+    assert.equal(next.runs[1]!.passed, false, 'later failure recorded as it came out');
+    assert.equal(evidenceOf(ctx, 'setup').length, 1);
+    assert.equal(evidenceOf(ctx, 'check').length, 1);
+    assert.deepEqual(runCheckouts(ctx), []);
+    const again = await runOnCommit(ctx, { ...req, commands: [setup, check] });
+    assert.equal(again.reused, true, 'failed evidence is reusable too; no stuck retry');
+    assert.equal(again.runs[0]!.setupFailure, undefined, 'a temporary failure is not evidence');
+  });
+
+  it('missing and v1 run methods execute again, v2 is reused, and old evidence stays intact', async () => {
+    p = processProject();
+    const commit = p.git('rev-parse', 'HEAD');
+    const env = p.ctx.environment();
+    for (const method of [undefined, 'v1']) {
+      const command = `node -e "console.log('${method ?? 'legacy'}')"`;
+      const fields = { candidate: commit, command, status: 'completed', exit: '0', ...(method === undefined ? {} : { [RUN_FIELD.method]: method }) };
+      p.ctx.memory.write({}, (tx) => appendRecords(tx, [{ kind: 'evidence', evidence: `old-${method ?? 'missing'}` as never, envLine: ENV_LINE, envSnapshot: env.identity, runClass: 'declared', fields }]));
+      const req = { mission: M, commit, commands: [{ id: 'A', command }], purpose: 'upgrade', declaration: { by: 'mp' as const, checkout: 'clean' as const, declared: true } };
+      const fresh = await runOnCommit(p.ctx, req);
+      assert.equal(fresh.reused, false);
+      assert.equal(fresh.runs[0]!.fields[RUN_FIELD.method], 'v2');
+      const again = await runOnCommit(p.ctx, req);
+      assert.equal(again.reused, true);
+      assert.equal(again.runs[0]!.evidence, fresh.runs[0]!.evidence);
+      assert.equal(evidenceOf(p.ctx, command).length, 2, 'old and v2 retained');
+    }
   });
 
   it('a sampling run (a rerun) of the same command still executes while the declared run holds the lock', async () => {

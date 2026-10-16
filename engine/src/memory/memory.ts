@@ -946,9 +946,12 @@ export class Memory implements Db {
     if (h !== null) throw new LedgerError('GIT_WRITES_HELD', `${what} writes to git, which is held since this folder was moved or copied: ${h.reason}. The PM confirms under the copy/move WI that this copy is the one in use`);
   }
 
-  /** The PM confirmed under the copy/move WI that this copy is the one in use: git writes are allowed again. */
+  /** Release a shared-repository hold after PM confirmation; pending link verification requires WI-31 and a retry. */
   confirmCopyInUse(req: { op: string; words?: string | null; filler?: Filler | null }): { released: boolean } {
     return this.write({ op: req.op, payload: { confirm: 'copy-in-use', words: req.words ?? null }, command: 'confirm-copy', filler: req.filler ?? null }, (tx) => {
+      if ((JSON.parse(getKey(tx, 'meta', 'move') ?? '{}') as { gitLinksPending?: boolean }).gitLinksPending) {
+        throw new LedgerError('GIT_WRITES_HELD', 'WI-31: copied worktree links still need verification. Fix the links and retry mp; confirm-copy cannot release this hold.');
+      }
       if (getKey(tx, 'meta', 'git_hold') === null) return { released: false };
       tx.append({ kind: 'memory.git-confirmed', words: req.words ?? null });
       deleteKey(tx, 'meta', 'git_hold');

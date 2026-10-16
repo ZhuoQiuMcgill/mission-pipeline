@@ -20,6 +20,8 @@
 // a new run id (`sampleRunId`), so repeated samples stay separate observations.
 
 import { randomBytes } from 'node:crypto';
+import type { Db } from '../memory/db.ts';
+import { ENV_LINE, RUN_METHOD } from './environment.ts';
 import type { RunClass } from '../common/records.ts';
 
 /** What a run's card declares about it, at the moment it is recorded. */
@@ -54,7 +56,7 @@ export function runClassOf(d: RunDeclaration): RunClass {
  * '.'), which with the environment identity are the reuse key of a declared
  * run (§6.5) and what `mp pm renew` reruns.
  */
-export const RUN_FIELD = Object.freeze({ candidate: 'candidate', command: 'command', cwd: 'cwd' });
+export const RUN_FIELD = Object.freeze({ candidate: 'candidate', command: 'command', cwd: 'cwd', method: 'runMethod' });
 
 /** A run's working directory as its fields record it: missing reads as the project root, '.'. */
 export function runCwdOf(fields: Readonly<Record<string, string>>): string {
@@ -89,4 +91,16 @@ export function rerunMismatch(original: Readonly<Record<string, string>>, rerun:
   const [a, b] = [runCwdOf(original), runCwdOf(rerun)];
   if (a !== b) return `the new run is not a rerun of the original: its working directory differs (${JSON.stringify(b)}, not ${JSON.stringify(a)})`;
   return null;
+}
+
+/** Current-method reuse key. Old evidence remains readable and usable by its seat's judgment,
+ * but cannot stand for an execution in a repository at the candidate. */
+export function reusableMethodRun(db: Db, key: { readonly candidate: string; readonly command: string; readonly cwd: string; readonly environment: string }): { readonly evidence: string; readonly fields: Readonly<Record<string, string>> } | null {
+  const r = db.stmt(`SELECT evidence, fields FROM lbl_evidence e
+    WHERE candidate = ? AND command = ? AND env_snapshot = ? AND env_line = ? AND run_class = 'declared'
+    AND COALESCE(json_extract(fields, '$.${RUN_FIELD.cwd}'), '.') = ?
+    AND json_extract(fields, '$.${RUN_FIELD.method}') = ?
+    AND NOT EXISTS (SELECT 1 FROM lbl_revoked v WHERE v.evidence = e.evidence)
+    ORDER BY rev DESC LIMIT 1`).get(key.candidate, key.command, key.environment, ENV_LINE, key.cwd, RUN_METHOD) as { evidence: string; fields: string } | undefined;
+  return r === undefined ? null : { evidence: r.evidence, fields: JSON.parse(r.fields) as Record<string, string> };
 }

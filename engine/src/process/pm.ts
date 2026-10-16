@@ -23,9 +23,13 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
-import type { ContentHash, MissionId, StopId } from '../common/ids.ts';
+import type { ContentHash, EvidenceId, MissionId, StopId } from '../common/ids.ts';
 import type { EvidenceRecord, LoopKind } from '../common/records.ts';
 import { drain, labelBatch, labelStatus, recordRenewedRun, renewalCandidates, type DrainReport, type RenewalJudgment } from '../evaluator/index.ts';
+import { replacementFollowsOriginal } from '../evaluator/renew.ts';
+import { reusableMethodRun } from '../evaluator/runs.ts';
+import { effectiveEvidence } from '../evaluator/semantics.ts';
+import { StoredIndex } from '../evaluator/store.ts';
 import { deliver, type ClosingCheck, type DeliveryResult } from '../delivery/delivery.ts';
 import type { DeliveryTarget } from '../delivery/proofView.ts';
 import { land, recoverLandings, type LandingResult, type RecoveryReport } from '../git/land.ts';
@@ -51,6 +55,7 @@ import {
   latestUserWords,
   recordWords,
   flowEvents,
+  flowEventExists,
   type Db,
   type DispatchInfo,
   type Filler,
@@ -75,7 +80,7 @@ import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
-import { closingRunner, runCwd, runOnCommit } from './runs.ts';
+import { closingRunner, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { heldByClose } from './close.ts';
 import { materialLeaf } from './seat.ts';
 
@@ -483,48 +488,90 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
   const c = ctx.memory.read((db) => renewalCandidates(db));
   const reruns: Array<Renewed['reruns'][number]> = [];
   const skipped: Array<{ evidence: string; why: string }> = [];
-  for (const cand of c.candidates) {
+  // The log, rather than evidence-id order, preserves legacy command groups and
+  // includes setup commands that no judgment cites. New runs carry the full group,
+  // including setup commands reused from a different recording write.
+  const recorded = ctx.memory.read((db) => (db.stmt("SELECT record FROM log WHERE kind = 'evidence' ORDER BY rev").all() as Array<{ record: string }>).map((r) => JSON.parse(r.record) as EvidenceRecord));
+  const byEvidence = new Map(recorded.map((r) => [r.evidence as string, r]));
+  const candidates = new Map(c.candidates.map((cand) => [cand.evidence as string, cand]));
+  const groups = new Map<string, Array<(typeof c.candidates)[number]>>();
+  for (const rec of recorded) {
+    const cand = candidates.get(rec.evidence);
+    if (cand === undefined) continue;
     if (cand.candidate === null || cand.command === null) {
       skipped.push({ evidence: cand.evidence, why: 'the run recorded no candidate or command: a Reviewer judges again' });
       continue;
     }
-    const original = cand.evidence;
-    let result: { renewed: readonly string[]; refused: ReadonlyArray<{ judgment: string; reason: string }> } = { renewed: [], refused: [] };
+    const key = canonicalJson([cand.candidate, rec.fields['group'] === undefined ? ['run', rec.fields['run'] ?? rec.evidence] : ['group', rec.fields['group']]]);
+    const group = groups.get(key) ?? [];
+    group.push(cand);
+    groups.set(key, group);
+  }
+  for (const originals of groups.values()) {
     try {
-      const r = await runOnCommit(ctx, {
-        mission: missionOfEvidence(ctx, original),
-        commit: cand.candidate,
-        // the same command in the same working directory (§6.5: a rerun of that run, not another one)
-        commands: [{ id: 'renew', command: cand.command, cwd: runCwd(evidenceFields(ctx, original)) }],
-        purpose: `renewal of ${original} under environment ${env.identity}`,
-        declaration: { by: 'mp', checkout: 'clean', declared: true },
-        fields: { renews: original },
-        op: `renew:${original}:${env.identity}`,
-        also: (tx, _runs, _run, records) => {
-          const rec = records[0] as EvidenceRecord;
-          const out = recordRenewedRun(tx, { original: original as never, run: rec });
-          result = { renewed: out.renewed, refused: out.refused.map((x) => ({ judgment: x.judgment, reason: x.reason })) };
-        },
-      });
-      const x = r.runs[0]!;
-      if (r.reused) {
-        // the same command was already rerun under this identity: record the renewal from that run
-        const rec: EvidenceRecord = { kind: 'evidence', evidence: x.evidence as never, envLine: 'env' as never, envSnapshot: env.identity, runClass: 'declared', fields: x.fields };
-        ctx.memory.write({ op: `renew:${original}:${x.evidence}`, payload: { original, run: x.evidence } }, (tx) => {
-          const out = recordRenewedRun(tx, { original: original as never, run: rec });
-          result = { renewed: out.renewed, refused: out.refused.map((y) => ({ judgment: y.judgment, reason: y.reason })) };
-        });
+      const first = originals[0]!;
+      const fields = byEvidence.get(first.evidence)!.fields;
+      const source: Array<Omit<DeclaredCommand, 'id'>> = fields['group'] === undefined
+        ? recorded.filter((rec) => rec.fields['candidate'] === first.candidate && (fields['run'] === undefined ? rec.evidence === first.evidence : rec.fields['run'] === fields['run']))
+          .map((rec) => ({ command: rec.fields['command']!, cwd: runCwd(rec.fields), sampled: rec.runClass === 'sampling', network: rec.runClass === 'other' }))
+        : JSON.parse(fields['group']) as Array<Omit<DeclaredCommand, 'id'>>;
+      if (!Array.isArray(source) || source.length === 0 || source.some((cmd) => typeof cmd?.command !== 'string' || (cmd.cwd !== undefined && typeof cmd.cwd !== 'string') || (cmd.sampled !== undefined && typeof cmd.sampled !== 'boolean') || (cmd.network !== undefined && typeof cmd.network !== 'boolean'))) {
+        throw new Error('the recorded verification group is invalid: a Reviewer judges again');
       }
-      reruns.push({ original, run: x.evidence, passed: x.passed, ...result });
+      const commands = source.map((cmd, i) => ({ ...cmd, id: `renew-${i + 1}` }));
+      if (originals.some((cand) => !commands.some((cmd) => cmd.command === cand.command && (cmd.cwd ?? '.') === cand.cwd && !cmd.sampled && !cmd.network))) {
+        throw new Error('the recorded verification group omits a declared run to renew: a Reviewer judges again');
+      }
+      const replacementFor = (runs: readonly RecordedRun[], cand: (typeof originals)[number]): RecordedRun => runs.find((r) => r.command.command === cand.command && runCwd(r.fields) === cand.cwd && !r.command.sampled && !r.command.network)!;
+      const renewGroup = (tx: WriteTx, runs: readonly RecordedRun[], records: readonly EvidenceRecord[] = []): Array<Renewed['reruns'][number]> => originals.map((cand) => {
+        const x = replacementFor(runs, cand);
+        const rec: EvidenceRecord = records.find((r) => r.evidence === x.evidence) ?? { kind: 'evidence', evidence: x.evidence as never, envLine: 'env' as never, envSnapshot: env.identity, runClass: 'declared', fields: x.fields };
+        const out = recordRenewedRun(tx, { original: cand.evidence, run: rec });
+        const ix = new StoredIndex(tx);
+        const renewed: string[] = [];
+        const refused = out.refused.map((f) => ({ judgment: f.judgment as string, reason: f.reason }));
+        for (const judgment of out.renewed) {
+          const j = ix.judgments.get(judgment)?.rec;
+          if (j !== undefined && j.evidence.some((e) => effectiveEvidence(ix, j, e as EvidenceId) === x.evidence)) renewed.push(judgment);
+          else refused.push({ judgment, reason: 'the renewal did not make the replacement effective for this judgment' });
+        }
+        return { original: cand.evidence, run: x.evidence, passed: x.passed, renewed, refused };
+      });
+      const doNotReuse = ctx.memory.read((db) => originals.flatMap((cand) => {
+        const reusable = reusableMethodRun(db, { candidate: cand.candidate!, command: cand.command!, cwd: cand.cwd, environment: env.identity });
+        return reusable !== null && !replacementFollowsOriginal(db, cand.evidence, reusable.evidence as EvidenceId) ? [reusable.evidence] : [];
+      }));
+      const r = await runOnCommit(ctx, {
+        mission: missionOfEvidence(ctx, first.evidence),
+        commit: first.candidate!,
+        commands,
+        purpose: `renewal of ${originals.map((cand) => cand.evidence).join(', ')} under environment ${env.identity}`,
+        declaration: { by: 'mp', checkout: 'clean', declared: true },
+        fields: { renews: canonicalJson(originals.map((cand) => cand.evidence)) },
+        doNotReuse,
+        also: (tx, runs, _run, records) => renewGroup(tx, runs, records),
+      });
+      let results = (r.result ?? []) as Array<Renewed['reruns'][number]>;
+      if (r.reused) {
+        // All pairs, including reused replacements, are renewed in one write.
+        const pairs = originals.flatMap((cand) => cand.judgments.map((j) => [j.judgment, cand.evidence, replacementFor(r.runs, cand).evidence])).sort((a, b) => canonicalJson(a) < canonicalJson(b) ? -1 : canonicalJson(a) > canonicalJson(b) ? 1 : 0);
+        const payload = { environment: env.identity, pairs };
+        results = ctx.memory.write({ op: `renew-pairs:${env.identity}:${sha256(canonicalJson(pairs))}`, payload }, (tx) => renewGroup(tx, r.runs));
+      }
+      reruns.push(...results);
     } catch (e) {
-      skipped.push({ evidence: original, why: (e as Error).message });
+      skipped.push(...originals.map((cand) => ({ evidence: cand.evidence, why: (e as Error).message })));
     }
   }
   // decision 18: what renew could not restore needs a new judgment of the same review position; the
-  // flow that owns the judged object dispatches it (execution: a Reviewer on the same candidate)
+  // flow that owns the judged object dispatches it (execution: a Reviewer on the same candidate).
+  // One request per (judgment, environment): the flow event's key is its identity. The causes found in
+  // this call (several refused reruns, run classes never renewed) are merged into one body, sorted, so a
+  // retry builds the same body. All requests go in one write; a request already recorded under its key
+  // stands, so a retry, or a later renew whose causes changed, appends nothing and cannot conflict.
   const env2 = env.identity;
   const byJudgment = new Map(c.candidates.flatMap((x) => x.judgments).map((j) => [j.judgment as string, j]));
-  const needed: ReviewNeededBody[] = [
+  const causes: ReviewNeededBody[] = [
     ...c.reviews.map((j) => ({ judgment: j.judgment as string, target: j.target, review: j.review, environment: env2, reason: j.reason ?? 'not renewable', rerun: null, passed: null })),
     ...reruns.flatMap((r) =>
       r.refused.flatMap((f) => {
@@ -533,12 +580,25 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
       }),
     ),
   ];
-  for (const b of needed) {
-    const mission = missionOfObject(ctx, b.target);
-    if (mission === null) continue;
-    ctx.memory.write({ op: `renew-review:${b.judgment}@${b.environment}`, payload: b, command: 'renew', filler: ctx.filler }, (tx) =>
-      appendRecords(tx, [{ kind: 'flow.event', mission: mission as MissionId, line: RENEW_LINE, event: REVIEW_NEEDED, key: `${b.judgment}@${b.environment}`, body: tx.data.put(canonicalJson(b)) as ContentHash }]),
-    );
+  const order = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  const byCause = new Map<string, ReviewNeededBody[]>();
+  for (const b of causes) byCause.set(b.judgment, [...(byCause.get(b.judgment) ?? []), b]);
+  const needed: Array<{ readonly mission: string; readonly body: ReviewNeededBody }> = [];
+  for (const [judgment, bodies] of [...byCause].sort(([a], [b]) => order(a, b))) {
+    const sorted = [...bodies].sort((a, b) => order(canonicalJson(a), canonicalJson(b)));
+    const first = sorted.find((b) => b.rerun !== null) ?? sorted[0]!;
+    const body: ReviewNeededBody = { judgment, target: first.target, review: first.review, environment: env2, reason: [...new Set(sorted.map((b) => b.reason))].join('; '), rerun: first.rerun, passed: first.passed };
+    const mission = missionOfObject(ctx, body.target);
+    if (mission !== null) needed.push({ mission, body });
+  }
+  if (needed.length > 0) {
+    ctx.memory.write({ op: `renew-review:${env2}:${sha256(canonicalJson(needed))}`, payload: needed, command: 'renew', filler: ctx.filler }, (tx) => {
+      for (const { mission, body } of needed) {
+        const key = `${body.judgment}@${body.environment}`;
+        if (flowEventExists(tx, { mission, line: RENEW_LINE, event: REVIEW_NEEDED, key })) continue;
+        appendRecords(tx, [{ kind: 'flow.event', mission: mission as MissionId, line: RENEW_LINE, event: REVIEW_NEEDED, key, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
+      }
+    });
   }
   await advance(ctx, undefined, { dispatch: null, task: null, step: `mp pm renew (environment ${env.identity.slice(0, 16)})` });
   return { environment: c.environment, reruns, reviews: c.reviews, skipped, reviewSteps: needed.length };
@@ -547,14 +607,6 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
 /** The mission of an object version, or null. */
 function missionOfObject(ctx: ProcessContext, object: string): string | null {
   return ctx.memory.read((db) => (db.stmt("SELECT json_extract(record, '$.mission') AS m FROM log WHERE kind = 'object.version' AND json_extract(record, '$.object') = ? LIMIT 1").get(object) as { m: string | null } | undefined)?.m ?? null);
-}
-
-/** A recorded run's fields ({} when it is not recorded). */
-function evidenceFields(ctx: ProcessContext, evidence: string): Readonly<Record<string, string>> {
-  return ctx.memory.read((db) => {
-    const r = db.stmt("SELECT json_extract(record, '$.fields') AS f FROM log WHERE kind = 'evidence' AND json_extract(record, '$.evidence') = ? LIMIT 1").get(evidence) as { f: string | null } | undefined;
-    return r?.f ? (JSON.parse(r.f) as Record<string, string>) : {};
-  });
 }
 
 /** The mission a run belongs to (its summary leaf goes under it): the mission of the product version its candidate is, else "project". */

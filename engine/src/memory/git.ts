@@ -11,8 +11,9 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { appendDurable } from './fsx.ts';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { withoutRepositoryLocators } from '../git/plainGit.ts';
+import { appendDurable, writeAtomic } from './fsx.ts';
 import { MEMORY_DIRNAME } from './paths.ts';
 
 export interface GitResult {
@@ -25,13 +26,12 @@ export interface GitResult {
 export type GitRunner = (args: readonly string[], opts: { readonly cwd: string; readonly input?: string }) => GitResult;
 
 /** Variables that would point git at another repository than the folder's own. */
-const LOCATOR_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES'];
 
 /** Plain `git` from PATH; never prompts, never fetches a missing object of a partial clone. */
 export function plainGit(gitPath = 'git'): GitRunner {
   return (args, opts) => {
-    const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', LC_ALL: 'C' };
-    for (const k of LOCATOR_VARS) delete env[k];
+    const env: NodeJS.ProcessEnv = { ...withoutRepositoryLocators(process.env), GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', LC_ALL: 'C' };
+    for (const k of Object.keys(env)) if ((process.platform === 'win32' ? k.toUpperCase() : k) === 'GIT_CEILING_DIRECTORIES') delete env[k];
     const r = spawnSync(gitPath, [...args], { cwd: opts.cwd, env, input: opts.input, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, windowsHide: true });
     if (r.error) return { code: -1, stdout: '', stderr: String(r.error.message) };
     return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -142,9 +142,81 @@ export function memoryWorktrees(worktreesDir: string): string[] {
   }
 }
 
-/** `git worktree repair` for the folder's worktrees (§3.3 step 2), run in the main worktree. */
-export function repairWorktrees(git: GitRunner, projectDir: string, worktrees: readonly string[]): GitResult {
-  return git(['worktree', 'repair', ...worktrees], { cwd: projectDir });
+/** Git stores slash paths even when the previous machine used Windows native paths. */
+function movedPath(path: string, relativeTo: string, from: string, to: string): string {
+  const source = from.replace(/\\/g, '/').replace(/\/+$/, '');
+  const candidate = path.replace(/\\/g, '/');
+  const fold = (s: string): string => /^[A-Za-z]:\//.test(source) || process.platform === 'win32' ? s.toLowerCase() : s;
+  if (fold(candidate).startsWith(`${fold(source)}/`)) return resolve(to, ...candidate.slice(source.length + 1).split('/'));
+  const absolute = resolve(relativeTo, path);
+  return inside(absolute, from) ? resolve(to, relative(from, absolute)) : absolute;
+}
+
+/** Live registered worktrees carried by a folder copy; absent .git links are prunable registrations. */
+export function copiedWorktrees(commonDir: string, from: string, to: string, prunable: string[] = []): string[] {
+  const result: string[] = [];
+  let names: string[];
+  try { names = readdirSync(join(commonDir, 'worktrees')); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw e;
+  }
+  for (const name of names) {
+    const admin = join(commonDir, 'worktrees', name);
+    const back = movedPath(readFileSync(join(admin, 'gitdir'), 'utf8').trim(), admin, from, to);
+    if (inside(back, to)) {
+      const worktree = dirname(back);
+      if (existsSync(join(worktree, '.git'))) result.push(worktree);
+      else prunable.push(worktree);
+    }
+  }
+  return result;
+}
+
+/** Repair and verify every link without reading/writing HEAD, the index or worktree contents.
+ * Older git can exit zero without repairing a copy: rewrite its two link files, then verify
+ * again. commondir is verified, never guessed. A partial rewrite is safe to retry on next open. */
+export function repairWorktrees(git: GitRunner, projectDir: string, worktrees: readonly string[], commonDir?: string, previousDir = projectDir): GitResult {
+  const common = commonDir ?? repositoryLayout(git, projectDir).commonDir;
+  if (common === null) return { code: 1, stdout: '', stderr: 'cannot identify the copied common git directory' };
+  const targets = [...new Set(worktrees)].sort();
+  const plans: Array<{ worktree: string; dotgit: string; admin: string }> = [];
+  try {
+    for (const worktree of targets) {
+      if (!inside(real(worktree), real(projectDir))) throw new Error(`worktree ${worktree} is outside the copied folder`);
+      const dotgit = join(worktree, '.git');
+      const line = readFileSync(dotgit, 'utf8').trim();
+      if (!line.startsWith('gitdir: ')) throw new Error(`${dotgit} is not a gitdir link`);
+      const admin = movedPath(line.slice('gitdir: '.length), worktree, previousDir, projectDir);
+      if (!inside(real(admin), real(join(common, 'worktrees'))) || real(admin) === real(join(common, 'worktrees'))) throw new Error(`${dotgit} does not name an admin directory in the copied common directory`);
+      plans.push({ worktree, dotgit, admin });
+    }
+    if (targets.length > 0) git(['worktree', 'repair', ...targets], { cwd: projectDir });
+    const linksValid = (): boolean => {
+      try {
+        return plans.every(({ worktree, dotgit, admin }) => {
+          const forward = readFileSync(dotgit, 'utf8').trim();
+          return forward.startsWith('gitdir: ') && real(resolve(worktree, forward.slice(8))) === real(admin)
+            && real(resolve(admin, readFileSync(join(admin, 'gitdir'), 'utf8').trim())) === real(dotgit)
+            && real(resolve(admin, readFileSync(join(admin, 'commondir'), 'utf8').trim())) === real(common);
+        });
+      } catch { return false; }
+    };
+    if (!linksValid()) {
+      for (const { dotgit, admin } of plans) {
+        // The commondir must already identify this copy; never write through an external path.
+        if (real(resolve(admin, readFileSync(join(admin, 'commondir'), 'utf8').trim())) !== real(common)) throw new Error(`${admin}/commondir does not resolve to the copied common directory`);
+        writeAtomic(dotgit, `gitdir: ${admin}\n`);
+        writeAtomic(join(admin, 'gitdir'), `${dotgit}\n`);
+      }
+    }
+    if (!linksValid()) throw new Error('worktree links still disagree after direct repair');
+    const listing = git(['-c', 'core.quotePath=false', 'worktree', 'list', '--porcelain', '-z'], { cwd: projectDir });
+    const listed = listing.stdout.split('\0').filter((line) => line.startsWith('worktree ')).map((line) => real(line.slice(9)));
+    if (listing.code !== 0 || targets.some((wt) => !listed.includes(real(wt)))) throw new Error('git worktree list does not register every worktree at its copied path');
+    return { code: 0, stdout: '', stderr: '' };
+  } catch (e) {
+    return { code: 1, stdout: '', stderr: `worktree link verification failed: ${(e as Error).message}` };
+  }
 }
 
 /**

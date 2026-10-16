@@ -296,7 +296,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
           declaration: { by: 'mp', checkout: 'clean', declared: true },
           fields: { object: req.object },
         });
-        return r.runs.map((x) => ({ evidence: x.evidence, command: x.command.command, summary: x.summary, passed: x.passed }));
+        return r.runs.map((x) => ({ evidence: x.evidence, command: x.command.command, summary: x.summary, passed: x.passed, ...(x.setupFailure === undefined ? {} : { setupFailure: x.setupFailure }) }));
       } catch (e) {
         // the same declared runs are executing in another mp process (their run lock is held):
         // nothing was run or recorded; the step waits, and its next pass reuses the recorded runs

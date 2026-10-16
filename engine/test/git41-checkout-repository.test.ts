@@ -6,14 +6,16 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { pathToFileURL } from 'node:url';
-import { attachCheckoutRepository } from '../src/git/checkoutRepository.ts';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
+import { lfsObjectPath, lfsClean } from '../src/git/lfs.ts';
+import { attachCheckoutRepository, lfsFilterProcess } from '../src/git/checkoutRepository.ts';
 import { discoverRepo, gitOid } from '../src/git/objects.ts';
-import { PlainGit } from '../src/git/plainGit.ts';
-import { readTransformDescription } from '../src/git/representation.ts';
+import { PlainGit, shellQuote } from '../src/git/plainGit.ts';
+import { AttributeEvaluator, readTransformDescription } from '../src/git/representation.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir, type GitContext } from '../src/git/workspace.ts';
 import { initMemory, openMemory, type Memory } from '../src/memory/index.ts';
 import { fixture, sh, write } from './git41-fixtures.ts';
@@ -36,6 +38,38 @@ function assertOwnRepository(dir: string): void {
   assert.equal(realpathSync(ok(dir, 'rev-parse', '--show-toplevel')), realpathSync(dir), 'the checkout is the top of its own repository');
   assert.equal(realpathSync(ok(dir, 'rev-parse', '--absolute-git-dir')), join(realpathSync(dir), '.git'));
 }
+
+test('attribute repository init ignores a global refusing reference-transaction hook', { skip: process.platform === 'win32' }, async () => {
+  const f = fixture();
+  const saved = process.env['GIT_CONFIG_GLOBAL'];
+  const scratch = tempDir('mp-attr-refuse-');
+  try {
+    const repo = await discoverRepo(f.ctx.git, f.dir);
+    const description = await readTransformDescription(f.ctx.git, repo, f.dir);
+    const hooks = join(scratch, 'hooks');
+    const marker = join(scratch, 'hook-called');
+    mkdirSync(hooks);
+    const hook = join(hooks, 'reference-transaction');
+    writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' "$1" >> '${marker}'\nexit 1\n`);
+    chmodSync(hook, 0o755);
+    const global = join(scratch, 'gitconfig');
+    writeFileSync(global, `[core]\n\thooksPath = ${JSON.stringify(hooks)}\n`);
+    process.env['GIT_CONFIG_GLOBAL'] = global;
+    const attributes = await AttributeEvaluator.create(f.ctx.git, repo, description, scratch);
+    try {
+      assert.equal(existsSync(marker), false, 'bare init ran no hook');
+      assert.notEqual(inCheckout(attributes.dir, '--git-dir', join(attributes.dir, 'attr.git'), 'config', '--local', 'core.hooksPath').code, 0, 'the shield is command-local');
+      const control = inCheckout(f.dir, 'update-ref', 'refs/heads/refusing-hook-control', f.base);
+      assert.notEqual(control.code, 0, 'the refusing hook is active for normal git commands');
+      assert.ok(existsSync(marker));
+    } finally { attributes.dispose(); }
+  } finally {
+    if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+    else process.env['GIT_CONFIG_GLOBAL'] = saved;
+    f.cleanup();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
 
 /** A project folder whose repository is a clone of `origin` (`args`: clone options), with its memory. */
 function cloneProject(origin: string, args: readonly string[]): { readonly dir: string; readonly ctx: GitContext; readonly m: Memory; cleanup(): void } {
@@ -126,7 +160,8 @@ test('mp runs no configured content filter while it builds the index; git runs i
     // git may judge a file written in the same timestamp tick as the index again by content (racy
     // git): then with the user's filter, which passes the raw bytes through
     assert.equal(ok(dir, 'status', '--porcelain'), '', 'the raw file is its blob: clean');
-    writeFileSync(join(dir, 'blob.dat'), 'changed\n');
+    writeFileSync(join(dir, 'blob.dat'), 'RAW\n');
+    assert.notEqual(ok(dir, 'hash-object', '--path=blob.dat', 'blob.dat'), ok(dir, 'rev-parse', 'HEAD:blob.dat'), 'force clean conversion of the changed content');
     assert.equal(ok(dir, 'status', '--porcelain'), 'M blob.dat');
     assert.ok(runs().includes('clean'), 'the filter is configured for the checkout: git runs it when a command asks');
   } finally {
@@ -224,5 +259,170 @@ test('the configuration holds a checkout path with quotes, backslashes and space
     await assert.rejects(attachCheckoutRepository(f.ctx.git, repo, { dir, commit: gitOid(f.base), description }), /already exists/);
   } finally {
     f.cleanup();
+  }
+});
+
+
+test('global hooks do not fire during setup, but declared git commands inherit them', { skip: process.platform === 'win32' }, async () => {
+  const f = fixture();
+  const saved = process.env['GIT_CONFIG_GLOBAL'];
+  try {
+    // checkoutCommit replaces its destination: keep the global config and hooks elsewhere.
+    const hooks = join(f.m.paths.tmp, 'global-hooks');
+    mkdirSync(hooks, { recursive: true });
+    const counter = join(hooks, 'calls');
+    for (const name of ['reference-transaction', 'post-index-change']) {
+      const hook = join(hooks, name);
+      writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' '${name}' >> ${shellQuote(counter)}\n`);
+      chmodSync(hook, 0o755);
+    }
+    const cfg = join(hooks, 'global-config');
+    writeFileSync(cfg, `[core]\n hooksPath = "${hooks}"\n`);
+    process.env['GIT_CONFIG_GLOBAL'] = cfg;
+    const dir = runCheckoutDir(f.m.paths, 'hooks');
+    await checkoutCommit(f.ctx, { commit: f.base, dir, repository: true });
+    for (const name of ['reference-transaction', 'post-index-change']) assert.ok(existsSync(join(hooks, name)), 'setup preserves the global hook files');
+    assert.equal(existsSync(counter), false, 'mp setup runs no hook');
+    assert.equal(inCheckout(dir, 'config', '--local', '--get', 'core.hooksPath').code, 1, 'override is never persisted');
+    assert.equal(ok(dir, 'config', '--get', 'core.hooksPath'), hooks, 'declared commands inherit the global setting');
+    ok(dir, 'update-ref', 'refs/probe', f.base);
+    assert.match(readFileSync(counter, 'utf8'), /reference-transaction/, 'git in a declared command uses the global hooks');
+    writeFileSync(join(dir, 'new.txt'), 'new\n');
+    ok(dir, 'add', 'new.txt');
+    assert.match(readFileSync(counter, 'utf8'), /post-index-change/);
+  } finally {
+    if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL']; else process.env['GIT_CONFIG_GLOBAL'] = saved;
+    f.cleanup();
+  }
+});
+
+test('a rejecting global reference hook cannot interrupt checkout preparation, including internal LFS conversion', { skip: process.platform === 'win32' }, async () => {
+  const content = Buffer.from('LFS payload\n');
+  const pointer = lfsClean(content);
+  const f = fixture({ files: { '.gitattributes': 'blob.dat filter=lfs -text\n', 'blob.dat': pointer.blob.toString('utf8') } });
+  const saved = process.env['GIT_CONFIG_GLOBAL'];
+  try {
+    const object = lfsObjectPath(join(f.dir, '.git'), pointer.object!.oid);
+    mkdirSync(join(object, '..'), { recursive: true });
+    writeFileSync(object, content);
+    const hooks = join(f.m.paths.tmp, 'rejecting-hooks');
+    mkdirSync(hooks);
+    const counter = join(hooks, 'calls');
+    const hook = join(hooks, 'reference-transaction');
+    writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' "$1" >> ${shellQuote(counter)}\nexit 1\n`);
+    chmodSync(hook, 0o755);
+    const cfg = join(hooks, 'global-config');
+    writeFileSync(cfg, `[core]\n hooksPath = "${hooks}"\n`);
+    process.env['GIT_CONFIG_GLOBAL'] = cfg;
+    // Both paths initialize a scratch attribute repository; only a run attaches its own .git.
+    const reading = runCheckoutDir(f.m.paths, 'hookless-reading');
+    await checkoutCommit(f.ctx, { commit: f.base, dir: reading });
+    assert.equal(existsSync(join(reading, '.git')), false);
+    const dir = runCheckoutDir(f.m.paths, 'hookless-lfs');
+    await checkoutCommit(f.ctx, { commit: f.base, dir, repository: true });
+    assert.deepEqual(readFileSync(join(dir, 'blob.dat')), content);
+    assert.equal(existsSync(counter), false, 'a refusing hook must never be invoked during either setup');
+    assert.equal(ok(dir, 'status', '--porcelain'), '');
+    assert.notEqual(inCheckout(dir, 'update-ref', 'refs/rejected', f.base).code, 0, 'declared commands still inherit the refusing hook');
+    assert.match(readFileSync(counter, 'utf8'), /prepared/);
+    assert.equal(inCheckout(dir, 'rev-parse', '--verify', '--quiet', 'refs/rejected').code, 1);
+  } finally {
+    if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL']; else process.env['GIT_CONFIG_GLOBAL'] = saved;
+    f.cleanup();
+  }
+});
+
+for (const scope of ['local', 'global'] as const) test(`project-${scope} LFS config: pristine content is clean through mp conversion, and changed content is modified`, async () => {
+  const content = Buffer.from('LFS payload\n');
+  const pointer = lfsClean(content).blob.toString('utf8');
+  const f = fixture({ files: { '.gitattributes': 'blob.dat filter=lfs -text\n', 'blob.dat': pointer } });
+  const saved = process.env['GIT_CONFIG_GLOBAL'];
+  try {
+    const oid = createHash('sha256').update(content).digest('hex');
+    const object = lfsObjectPath(join(f.dir, '.git'), oid);
+    mkdirSync(join(object, '..'), { recursive: true });
+    writeFileSync(object, content);
+    const counter = join(f.m.paths.tmp, 'project-filter-calls');
+    const forbidden = `echo project-filter >> ${shellQuote(counter)}; exit 93`;
+    if (scope === 'global') {
+      const cfg = join(f.m.paths.tmp, 'lfs-global-config');
+      writeFileSync(cfg, '');
+      process.env['GIT_CONFIG_GLOBAL'] = cfg;
+    }
+    for (const [key, value] of [['filter.lfs.clean', forbidden], ['filter.lfs.smudge', forbidden], ['filter.lfs.process', forbidden], ['filter.lfs.required', 'true']]) f.git('config', `--${scope}`, key!, value!);
+    const dir = runCheckoutDir(f.m.paths, 'lfs');
+    await checkoutCommit(f.ctx, { commit: f.base, dir, repository: true });
+    assert.deepEqual(readFileSync(join(dir, 'blob.dat')), content);
+    assert.equal(existsSync(counter), false, 'setup runs no project LFS program');
+    assert.equal(ok(dir, 'hash-object', '--path=blob.dat', 'blob.dat'), ok(dir, 'rev-parse', 'HEAD:blob.dat'), 'real Git uses the pointer conversion');
+    assert.equal(ok(dir, 'diff-files', '--name-only'), '', 'index refreshed with the built-in conversion, before status runs');
+    assert.equal(ok(dir, 'status', '--porcelain'), '');
+    writeFileSync(join(dir, 'blob.dat'), 'LFS changed\n');
+    assert.equal(ok(dir, 'status', '--porcelain'), 'M blob.dat');
+    writeFileSync(join(dir, 'blob.dat'), content);
+    assert.equal(ok(dir, 'status', '--porcelain'), '', 'restoring the original content is clean again');
+    assert.equal(existsSync(counter), false, 'declared Git commands also use only the engine conversion');
+    assert.match(ok(dir, 'config', 'filter.lfs.process'), /--lfs-filter-process/);
+    assert.equal(ok(dir, 'config', 'filter.lfs.required'), 'false');
+    assert.match(ok(dir, 'config', 'filter.lfs.clean'), /--lfs-clean/);
+  } finally {
+    if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL']; else process.env['GIT_CONFIG_GLOBAL'] = saved;
+    f.cleanup();
+  }
+});
+
+test('the internal LFS clean entry point uses the engine conversion for content, pointers and empty input', () => {
+  const file = fileURLToPath(new URL('../src/git/checkoutRepository.ts', import.meta.url));
+  const content = Buffer.from('some content\n');
+  for (const input of [content, lfsClean(content).blob, Buffer.alloc(0)]) {
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', file, '--lfs-clean'], { input, timeout: 10_000 });
+    assert.equal(result.status, 0, result.stderr.toString());
+    assert.deepEqual(result.stdout, lfsClean(input).blob);
+  }
+});
+
+test('the internal LFS filter process handles multiple clean requests, binary packets, pointers and empty input', () => {
+  const list = (...packets: Buffer[]): Buffer => Buffer.concat([
+    ...packets.flatMap((p) => [Buffer.from((p.length + 4).toString(16).padStart(4, '0')), p]), Buffer.from('0000'),
+  ]);
+  const lines = (...text: string[]): Buffer => list(...text.map((s) => Buffer.from(`${s}\n`)));
+  const binary = Buffer.alloc(100_000);
+  for (let i = 0; i < binary.length; ++i) binary[i] = i % 256;
+  const content = [binary, lfsClean(binary).blob, Buffer.alloc(0)];
+  function exchange(request: Buffer): Buffer {
+    const root = tempDir('mp-lfs-protocol-');
+    const input = join(root, 'input');
+    const output = join(root, 'output');
+    const fds: number[] = [];
+    try {
+      writeFileSync(input, request);
+      fds.push(openSync(input, 'r'));
+      fds.push(openSync(output, 'w'));
+      lfsFilterProcess(fds[0]!, fds[1]!);
+      return readFileSync(output);
+    } finally {
+      for (const fd of fds) closeSync(fd);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const hello = lines('git-filter-client', 'version=2');
+  const capabilities = lines('capability=clean', 'capability=smudge', 'capability=delay');
+  assert.deepEqual(exchange(Buffer.concat([
+      hello, capabilities,
+      ...content.flatMap((data) => [lines('command=clean', 'pathname=blob.dat'), list(...[data.subarray(0, 60_000), data.subarray(60_000)].filter((p) => p.length > 0))]),
+    ])), Buffer.concat([
+      lines('git-filter-server', 'version=2'), lines('capability=clean'),
+      ...content.flatMap((data) => [lines('status=success'), data.length === 0 ? list() : list(lfsClean(data).blob), list()]),
+    ]));
+  for (const [input, message] of [
+    [Buffer.from('zzzz'), /packet size/],
+    [Buffer.from('0002'), /packet size/],
+    [Buffer.from('0008ab'), /unexpected EOF/],
+    [lines('git-filter-client', 'version=1'), /unsupported.*protocol/],
+    [Buffer.concat([hello, lines('capability=smudge')]), /requires clean capability/],
+    [Buffer.concat([hello, capabilities, lines('command=smudge'), list()]), /unsupported.*command/],
+    [Buffer.concat([hello, capabilities, lines('command=clean'), Buffer.from('0008ab')]), /unexpected EOF/],
+  ] as const) {
+    assert.throws(() => exchange(input), message, 'malformed input terminates the filter instead of waiting for another request');
   }
 });

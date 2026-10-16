@@ -24,6 +24,7 @@ import {
   tryLock,
   type Memory,
 } from '../src/memory/index.ts';
+import { plainGit, type GitRunner } from '../src/memory/git.ts';
 import { child, git, kinds, repo, tempDir, throwsCode } from './memory-fixtures.ts';
 import { BASE, C1, domainWorkload } from './memory-workload.ts';
 
@@ -324,4 +325,62 @@ test('the same path on another machine (WSL and Windows on one folder) is a move
   } finally {
     o.cleanup();
   }
+});
+
+test('real copied worktrees are directly repaired when an old-git runner returns zero without fixing either link', () => {
+  const base = tempDir('mp-old-repair-');
+  try {
+    const original = join(base, 'original');
+    const copied = join(base, 'copy');
+    mkdirSync(original);
+    repo(original);
+    initMemory(original);
+    // Include a normal project worktree outside mp's own worktrees directory.
+    for (const path of [join('.mission-pipeline', 'worktrees', 'D-1'), 'other-worktree']) git(original, 'worktree', 'add', '-q', '--detach', path);
+    cpSync(original, copied, { recursive: true });
+    const plain = plainGit();
+    const oldGit: GitRunner = (args, opts) => args[0] === 'worktree' && args[1] === 'repair' ? { code: 0, stdout: '', stderr: '' } : plain(args, opts);
+    const m = openMemory(copied, { git: oldGit });
+    try {
+      assert.equal(m.status().gitHold, null);
+      assert.equal(m.status().movePending, null);
+      assert.deepEqual(m.status().lastMove!.findings.git, { kind: 'repaired', worktrees: 2 });
+      for (const path of [join('.mission-pipeline', 'worktrees', 'D-1'), 'other-worktree']) {
+        const wt = join(copied, path);
+        assert.equal(realpathSync(git(wt, 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(copied, '.git')));
+        assert.equal(git(wt, 'status', '--porcelain'), '');
+        assert.equal(realpathSync(git(join(original, path), 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(original, '.git')));
+      }
+    } finally { m.close(); }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('a copy skips a deleted unpruned registration, reports it and verifies the live worktree', () => {
+  const base = tempDir('mp-prunable-');
+  try {
+    const original = join(base, 'original');
+    const copied = join(base, 'copy');
+    mkdirSync(original);
+    repo(original);
+    initMemory(original);
+    for (const name of ['deleted', 'live']) git(original, 'worktree', 'add', '-q', '--detach', name);
+    rmSync(join(original, 'deleted'), { recursive: true });
+    assert.match(git(original, 'worktree', 'list', '--porcelain'), /prunable/);
+    cpSync(original, copied, { recursive: true });
+    const m = openMemory(copied);
+    try {
+      const status = m.status();
+      assert.equal(status.gitHold, null);
+      assert.equal(status.movePending, null);
+      assert.deepEqual(status.lastMove!.findings.git, { kind: 'repaired', worktrees: 1 });
+      assert.ok(status.lastMove!.findings.layout.some((finding) => finding.includes('prunable') && finding.includes(join(copied, 'deleted'))));
+      const live = join(copied, 'live');
+      const admin = git(live, 'rev-parse', '--absolute-git-dir');
+      assert.equal(realpathSync(git(live, 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(copied, '.git')));
+      assert.equal(readFileSync(join(live, '.git'), 'utf8').trim(), `gitdir: ${admin}`);
+      assert.equal(readFileSync(join(admin, 'gitdir'), 'utf8').trim(), join(live, '.git'));
+      assert.ok(git(copied, 'worktree', 'list', '--porcelain').includes(`worktree ${live}`));
+      assert.equal(git(live, 'status', '--porcelain'), '');
+    } finally { m.close(); }
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });

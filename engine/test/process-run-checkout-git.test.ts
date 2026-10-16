@@ -59,7 +59,7 @@ const z = (s) => (s.startsWith('FAILED') ? [s] : s.split('\\0').filter((x) => x 
 const out = {
   cwd: process.cwd(),
   root,
-  env: ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'].filter((k) => process.env[k] !== undefined),
+  env: ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_SHALLOW_FILE'].filter((k) => process.env[k] !== undefined),
   toplevel: real(git('rev-parse', '--show-toplevel').trim()),
   prefix: git('rev-parse', '--show-prefix').trim(),
   head: git('rev-parse', 'HEAD').trim(),
@@ -184,13 +184,15 @@ describe('a run checkout is a git repository at its candidate', () => {
     const atRoot = probe(p, base);
     const inSrc = probe(p, base, 'src');
     const before = repositoryState(p);
-    const saved = { GIT_DIR: process.env['GIT_DIR'], GIT_INDEX_FILE: process.env['GIT_INDEX_FILE'], GIT_WORK_TREE: process.env['GIT_WORK_TREE'] };
+    const saved = { GIT_DIR: process.env['GIT_DIR'], GIT_INDEX_FILE: process.env['GIT_INDEX_FILE'], GIT_WORK_TREE: process.env['GIT_WORK_TREE'], GIT_SHALLOW_FILE: process.env['GIT_SHALLOW_FILE'] };
     let runs;
     try {
       // inherited variables that would point git at the project (a hook, a harness) never reach the commands
       process.env['GIT_DIR'] = join(p.dir, '.git');
       process.env['GIT_INDEX_FILE'] = join(p.dir, '.git', 'index');
       process.env['GIT_WORK_TREE'] = p.dir;
+      process.env['GIT_SHALLOW_FILE'] = join(p.dir, '.git', 'inherited-shallow');
+      writeFileSync(process.env['GIT_SHALLOW_FILE'], `${base}\n`);
       runs = await p.ctx.actions().verify({
         mission: M,
         object: 'prod.git-probe',

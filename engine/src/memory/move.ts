@@ -25,12 +25,13 @@
 // the log is the same in every copy; the place is not.
 
 import { hostname } from 'node:os';
-import { canonicalJson } from '../common/hash.ts';
+import { canonicalJson, sha256 } from '../common/hash.ts';
 import { inspectChain, type ChainReport } from './chain.ts';
-import { deleteKey, setKey, type Db } from './db.ts';
+import { deleteKey, getKey, setKey, type Db } from './db.ts';
+import { appendFact } from './domain/facts.ts';
 import { LedgerError } from './errors.ts';
 import type { GitStepOutcome, MoveFindings, Place } from './events.ts';
-import { memoryWorktrees, repairWorktrees, repositoryLayout, unreachableCommits } from './git.ts';
+import { copiedWorktrees, memoryWorktrees, repairWorktrees, repositoryLayout, unreachableCommits } from './git.ts';
 import { checkAllLeaves } from './leaves.ts';
 import { lock } from './locks.ts';
 import type { Memory } from './memory.ts';
@@ -83,14 +84,26 @@ function recover(m: Memory, from: Place, here: Place): void {
   const hook = m.hooks?.afterMoveStep;
   // 2. git
   let gitStep: GitStepOutcome;
+  let linksFailed = false;
+  const prunable: string[] = [];
   const layout = repositoryLayout(m.git, m.projectDir);
-  if (m.git === null || !layout.repository) gitStep = { kind: 'no-repository' };
+  const awaitingLinks = (JSON.parse(m.getMeta('move') ?? '{}') as { gitLinksPending?: boolean }).gitLinksPending === true;
+  if (awaitingLinks && (m.git === null || !layout.repository || layout.commonDirOutside)) {
+    linksFailed = true;
+    gitStep = { kind: 'held', reason: m.gitHold()?.reason ?? 'WI-31: copied worktree links still need verification; restore the copied repository and retry mp.' };
+  } else if (m.git === null || !layout.repository) gitStep = { kind: 'no-repository' };
   else if (layout.commonDirOutside) {
     gitStep = { kind: 'held', reason: `the repository's common git directory ${layout.commonDir} lies outside the folder, so this copy may share it with the original` };
   } else {
-    const worktrees = memoryWorktrees(m.paths.worktrees);
-    const r = worktrees.length === 0 ? { code: 0, stdout: '', stderr: '' } : repairWorktrees(m.git, m.projectDir, worktrees);
-    gitStep = r.code === 0 ? { kind: 'repaired', worktrees: worktrees.length } : { kind: 'held', reason: `git worktree repair failed: ${r.stderr.trim().slice(0, 500)}` };
+    try {
+      const worktrees = [...new Set([...memoryWorktrees(m.paths.worktrees), ...copiedWorktrees(layout.commonDir!, from.path, m.projectDir, prunable)])];
+      const r = repairWorktrees(m.git, m.projectDir, worktrees, layout.commonDir!, from.path);
+      if (r.code !== 0) throw new Error(r.stderr.trim().slice(0, 500));
+      gitStep = { kind: 'repaired', worktrees: worktrees.length };
+    } catch (e) {
+      linksFailed = true;
+      gitStep = { kind: 'held', reason: `WI-31: copied worktree links could not be verified: ${(e as Error).message}. Fix the links and retry mp; git writes remain held.` };
+    }
   }
   hook?.(2);
   // 3. the chain
@@ -113,10 +126,16 @@ function recover(m: Memory, from: Place, here: Place): void {
           commits === null
             ? { checked: 0, unreachable: [], unreachableCount: 0, skipped: 'no repository' }
             : { checked: named.length, unreachable: commits.slice(0, LIST_CAP), unreachableCount: commits.length, skipped: null },
-        layout: layout.warnings,
+        layout: [...layout.warnings, ...prunable.map((wt) => `Skipped prunable worktree registration (no .git in this copy): ${wt}`)],
       };
       hook?.(5);
-      if (chain.ok) tx.append({ kind: 'memory.moved', from, to: here, findings });
+      if (chain.ok && !linksFailed) tx.append({ kind: 'memory.moved', from, to: here, findings });
+      if (chain.ok && linksFailed && gitStep.kind === 'held') {
+        const notice = `move-links:${sha256(canonicalJson({ from, to: here, reason: gitStep.reason })).slice(0, 40)}`;
+        if (tx.stmt("SELECT 1 FROM log WHERE kind = 'notice' AND json_extract(record, '$.notice') = ?").get(notice) === undefined) {
+          appendFact(tx, { kind: 'notice', notice, audience: 'pm', body: tx.data.put(canonicalJson({ wi: 'WI-31', detail: gitStep.reason })), trigger: gitStep.reason, defaultAction: 'Git writes held; move pending. Follow WI-31, fix the copied links and retry mp.' });
+        }
+      }
       setKey(tx, 'meta', 'project_path', here.path);
       setKey(tx, 'meta', 'machine', here.machine);
       setKey(tx, 'meta', 'last_move', canonicalJson({ from, to: here, at: tx.at, findings }));
@@ -124,7 +143,8 @@ function recover(m: Memory, from: Place, here: Place): void {
       else deleteKey(tx, 'meta', 'git_hold');
       if (chain.ok) deleteKey(tx, 'meta', 'chain_broken');
       else setKey(tx, 'meta', 'chain_broken', canonicalJson(chain));
-      deleteKey(tx, 'meta', 'move');
+      if (linksFailed) setKey(tx, 'meta', 'move', canonicalJson({ ...JSON.parse(getKey(tx, 'meta', 'move') ?? '{}') as object, gitLinksPending: true }));
+      else deleteKey(tx, 'meta', 'move');
     },
     { chain: false },
   );
@@ -155,10 +175,10 @@ export function recoverIfMoved(m: Memory, here: Place): void {
       // 1. move pending
       m.maintenance((tx) => setKey(tx, 'meta', 'move', canonicalJson({ from, to: here, startedAt: tx.at })), { chain: false });
     } else {
-      const p = JSON.parse(pending) as { from: Place; to: Place };
+      const p = JSON.parse(pending) as { from: Place; to: Place; gitLinksPending?: boolean };
       from = p.from;
       // A recovery left unfinished at another place (copied again mid-recovery) restarts for this one.
-      if (p.to.path !== here.path || p.to.machine !== here.machine) m.maintenance((tx) => setKey(tx, 'meta', 'move', canonicalJson({ from, to: here, startedAt: tx.at })), { chain: false });
+      if (p.to.path !== here.path || p.to.machine !== here.machine) m.maintenance((tx) => setKey(tx, 'meta', 'move', canonicalJson({ ...p, from, to: here, startedAt: tx.at })), { chain: false });
     }
     m.hooks?.afterMoveStep?.(1);
     recover(m, from, here);
