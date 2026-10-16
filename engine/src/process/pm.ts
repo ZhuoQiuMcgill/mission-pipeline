@@ -1,3 +1,5 @@
+import { withdrawConstraint } from '../memory/domain/constraints.ts';
+import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 // The PM's dispatch loop and commands (design 4.1 §5.1, §5.4, §6.5, §6.6; decisions 8, 15, 18).
 //
 //   pmNext      one bounded label batch (A2), the landing recovery (A4), worktrees of finished
@@ -356,10 +358,11 @@ export interface Dispatched {
 
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
 export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Dispatched {
+  settleLabels(ctx);
   const filler = parseFiller(o.filledBy);
   const task = ctx.memory.read((db) => db.stmt('SELECT task, card, state, mission FROM tasks WHERE task = ?').get(step) as { task: string; card: string; state: string; mission: string } | undefined);
   if (task === undefined) throw new ProcessError('NOT_READY', `no step ${step} (mp pm next lists the ready steps)`);
-  const spec = specOf(ctx, task.card);
+  let spec = specOf(ctx, task.card);
   const entry = seatCardEntry(spec.card.seat);
   const prior = ctx.memory.read((db) => listDispatches(db, { task: step, limit: 1000 }).length);
   const out = pmWrite(
@@ -370,6 +373,8 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     (tx) => {
       // a closed mission's production steps are held (§6.7): checked in the claim's own write
       if (heldByClose(tx, spec)) throw new ProcessError('NOT_READY', `mission ${task.mission} is closed: step ${step} is production work and waits until the mission is opened again`);
+      spec = refreshDispatchCard(tx, tx.data, spec);
+      const refreshed = tx.data.put(canonicalJson(spec));
       const n = Number((tx.stmt('SELECT COUNT(*) AS n FROM dispatches').get() as { n: number }).n) + 1;
       const dispatch = `D-${n}`;
       const card = renderSeatCard(spec.card, { dispatch, projectDir: ctx.projectDir });
@@ -378,7 +383,7 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
       for (const r of spec.exclusive ?? []) acquireLease(tx, { resource: r, dispatch });
       // which step and which spec this dispatch took over (§3.2 item 1: the run chain)
-      appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: task.card, task: step, lineage: spec.lineage, dispatches: prior })) as ContentHash }]);
+      appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: refreshed, task: step, lineage: spec.lineage, dispatches: prior })) as ContentHash }]);
       return { dispatch, card, cardLeaf: claimed.card?.leaf ?? dispatchLeaf(task.mission, dispatch, 'card'), worktree: claimed.worktree };
     },
     filler,
@@ -703,10 +708,18 @@ export async function pmWithdrawRequirement(ctx: ProcessContext, req: { readonly
 }
 
 /** `mp pm constraint add <mission> <constraint> --kind object|instruction --text ... [--paths] [--task-types]`. */
-export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope }): Promise<{ readonly version: string }> {
-  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope: req.scope });
-  await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm constraint' });
+export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string }): Promise<{ readonly version: string }> {
+  const scope: ConstraintScope = { ...req.scope, ...(req.missionScope !== undefined ? { mission: req.missionScope } : {}) };
+  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope });
+  await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint' });
   return { version };
+}
+
+/** Withdraw a constraint under the user's recorded words; never delete its record. */
+export async function pmWithdrawConstraint(ctx: ProcessContext, req: { readonly constraint: string; readonly words: string }): Promise<void> {
+  wordsText(ctx, req.words);
+  await withdrawConstraint(ctx.ports(), req);
+  await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint withdraw' });
 }
 
 /** `mp pm plan submit <mission> --file <plan.json> --words W-<n>...`: a PM plan batch; Calibrator ① checks it next. */

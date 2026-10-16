@@ -1,3 +1,4 @@
+import { constraintApplies as objectConstraintApplies } from '../memory/domain/constraints.ts';
 // Stored proof labels (design 4.1 §4.1; v51 5.2-5.5, 6.1): the labels
 // extension of the project memory.
 //
@@ -589,7 +590,7 @@ interface ScopeSet {
 }
 
 /**
- * The constraint scope matches the object (semantics.ts `constraintApplies`):
+ * The constraint scope matches the object (memory/domain/constraints.ts `constraintApplies`):
  * one of its paths has a candidate pattern (itself, an ancestor's "dir/**",
  * "**") in the scope. The same answer for every valid object scope (concrete,
  * normalized paths), at a cost that does not depend on the number of patterns.
@@ -1138,7 +1139,7 @@ function scanPaths(ev: Evaluation, target: string, row: ScanRow): boolean {
       ev.w.step();
       return true;
     }
-    const scope = ev.w.metered(ev.w.left() - 2, () => ev.ix.objects.get(list[pos]! as ObjectVersionId)?.scope ?? null);
+    const scope = ev.w.metered(ev.w.left() - 2, () => { const o = ev.ix.objects.get(list[pos]! as ObjectVersionId); return o === undefined ? null : { ...o.scope, mission: o.mission }; });
     if (scope === METER_FULL) break;
     if (scope === null || sub >= scope.paths.length) {
       pos++;
@@ -1149,7 +1150,7 @@ function scanPaths(ev: Evaluation, target: string, row: ScanRow): boolean {
       continue;
     }
     const path = scope.paths[sub]!;
-    const covered = ev.w.metered(ev.w.left() - 2, () => pathCovered(ev, target, path, scope.taskType));
+    const covered = ev.w.metered(ev.w.left() - 2, () => pathCovered(ev, target, path, scope.taskType, scope.mission));
     if (covered === METER_FULL) break;
     ev.w.spend(1);
     moved = true;
@@ -1171,14 +1172,13 @@ function scanPaths(ev: Evaluation, target: string, row: ScanRow): boolean {
  * same as `covered` in semantics.ts, path by path. The index lists only the
  * active constraints under each pattern of their current scope
  * (`lbl_patterns`), and a line found under one of the path's candidate
- * patterns matches the path: its cost does not grow with withdrawn
- * constraints or with the size of a scope.
+ * patterns matches the path. The shared object predicate then checks its
+ * mission, task type and paths. Withdrawn constraints are absent from the index.
  */
-function pathCovered(ev: Evaluation, target: string, path: string, taskType: string): boolean {
+function pathCovered(ev: Evaluation, target: string, path: string, taskType: string, mission: string): boolean {
   for (const line of ev.ix.constraintsFor({ paths: [path], taskType })) {
     const c = ev.ix.constraints.get(line);
-    if (c === undefined || ev.ix.withdrawn.has(line) || c.scope === null) continue;
-    if (c.scope.taskTypes.length > 0 && !c.scope.taskTypes.includes(taskType)) continue;
+    if (c === undefined || ev.ix.withdrawn.has(line) || c.scope === null || !objectConstraintApplies({ scope: c.scope }, { scope: { paths: [path], taskType }, mission })) continue;
     ev.w.meter.tick();
     if (!ev.tx.stmt('SELECT 1 FROM lbl_scan_reviewed WHERE target = ? AND version = ? AND path = ?').get(target, c.latest, path)) return false;
   }

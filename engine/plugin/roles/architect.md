@@ -34,10 +34,10 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
   - the verdict: `return` when any finding is blocking, `feasible` otherwise.
 
 Rules for the plan: tasks that can run in parallel never have overlapping write scopes; nothing waits for an exploration that has not stood, and nothing is planned for the goals beyond it; a user-specified order is kept, and if it cannot work you say so in the risks instead of changing it. On a revision, fix exactly what the card says came back, and carry everything else over unchanged:
-- A task's fields are its card. Any change to a task's card, however small (a reworded goal or standard, a re-estimate, a reordered list), restarts that task at a new attempt, and the work already accepted for it is no longer used.
+- A task's fields are its card. Any change to a task's card, however small (a reworded goal or standard, a re-estimate, a reordered list), restarts that task at a new attempt; its earlier records remain, and the new attempt continues from its previous candidate.
 - So every task the revision does not need to change is copied from the previous plan as it is: the same id and the same value in every field. Keep the modules and interfaces those tasks use as they are too.
-- Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require, and what such a change forces. A new task gets an id no task of the previous plan has.
-- Never rebuild the plan from scratch, and never reconstruct the previous plan from anything but your card and its material.
+- Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require, and what such a change forces. Guidance (Proposal, pending ruling): prefer an id absent from the previous plan for a new task.
+- Guidance (Proposal, pending ruling): revise the supplied plan in place where practical, using your card and its material as the source for unchanged tasks.
 
 ## Your commands
 - `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`, `mp seat <id> checkout`.

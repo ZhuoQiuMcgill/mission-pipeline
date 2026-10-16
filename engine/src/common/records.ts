@@ -87,6 +87,8 @@ export interface ConstraintScopeRecord {
  * "**" for everything. Empty `taskTypes` means every task type.
  */
 export interface ConstraintScope {
+  /** Absent: project-wide. Explicit scope never changes the recording mission. */
+  readonly mission?: string;
   readonly paths: readonly string[];
   readonly taskTypes: readonly string[];
 }

@@ -1,3 +1,6 @@
+import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
+import { constraintsForTask } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -34,8 +37,7 @@
 // later, are not carried out on the new card). An acceptance is per attempt, and a new spec of a
 // started task starts the next attempt, so nothing accepted under the old card counts for the new.
 
-import { encodeConstraintCheck, type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVersionRecord, type ReviewContract } from '../common/records.ts';
-import { requiredRange } from '../evaluator/semantics.ts';
+import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVersionRecord, type ReviewContract } from '../common/records.ts';
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import type { ConstructorResult, ReviewerResult } from '../seat/results.ts';
 import {
@@ -58,9 +60,8 @@ import {
   type FlowCtx,
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
-import { scopesOverlap } from './mechanical.ts';
 import { DetailedTask, PLAN_LINE, RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, taskIdProblems, taskLine, type DetailedPlanDoc, type ReviewNeededBody } from './plandoc.ts';
-import { detailedPlanOf, internalError, latestEffective, standardLine, type EffectiveBody } from './planning.ts';
+import { detailedPlanOf, internalError, latestEffective, standardLine, planAnswersReplan, contestedProduction, type EffectiveBody } from './planning.ts';
 import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
 import { carryOut, closing, commitCarrying, decisionFor, escalateToUser, markApplied, openEscalations, raiseEscalation, type DecisionBody, type EscalationBody } from './secretary.ts';
@@ -517,7 +518,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const reworkRevisions = line.events.filter((e) => e.event === 'rework').map((e) => e.revision);
   const pending = waits.filter((w) => !reworkRevisions.some((r) => r > w.revision));
   for (const w of pending) {
-    if (w.body.dplan === eff.dplan) return;
+    if (w.body.dplan === eff.dplan || !(await planAnswersReplan(ctx, eff.dplan, w.body.escalation))) return;
     // the new plan kept this task's card: start the next attempt anyway (the re-plan was decided for it)
     await commit(ctx, `flow:replanned:${ctx.mission}:task:${idPart(t.id)}:${w.key}`, { events: [ev(ctx, lineName, 'rework', String(line.k + 1), { k: line.k + 1, reason: 'replan', issues: [], instructions: [`Re-planned (${w.key}).`] } satisfies ReworkBody)] });
     return;
@@ -577,6 +578,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     });
     return;
   }
+
+  if (eff.mode === 'fast' && await contestedProduction(ctx, eff, plan, t)) return;
 
   // gate: dependencies accepted; stable mode: proven
   const deps: string[] = [];
@@ -1079,9 +1082,7 @@ async function actionRefused(ctx: FlowCtx, key: string, e: unknown): Promise<voi
 
 /** The contract's basis lines of a product (10.1): the task's standards and the items that exist. */
 function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typeof basisIndex>>): string[] {
-  const std = t.standards.map((s) => standardLine(ctx.mission, t.id, s.id));
-  const items = t.requirementItems.filter((l) => ix.current.has(l) && !ix.withdrawn.has(l));
-  return [...std, ...items];
+  return reviewContractLines(ctx.mission, t, ix);
 }
 
 /** A Reviewer rework: counted (initial + 2); exhausted → WI-08 and the Secretary. */
@@ -1334,22 +1335,12 @@ function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{
  * superseded, is history: never quoted as a decision in force).
  */
 async function decisionQuotes(ctx: FlowCtx, t: DetailedTask): Promise<string[]> {
-  const items = await currentItems(ctx);
-  const out = items.filter((i) => i.type === 'decision' && (t.requirementItems.includes(i.line) || i.source.kind === 'authorization')).map((i) => i.text);
-  const specRev = (await readLine(ctx, t.id)).all('spec').at(-1)?.revision ?? 0;
-  for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
-    if (e.body.subject !== `task:${t.id}` || e.revision <= specRev) continue;
-    const applied = await eventOf<{ readonly what?: { readonly option?: unknown } }>(ctx, SECRETARY_LINE, 'applied', e.body.id);
-    if (applied === null || applied.body.what?.option !== 'answer') continue;
-    const d = await decisionFor(ctx, e.body.id);
-    if (d !== null && d.option === 'answer' && d.instructions !== '') out.push(d.instructions);
-  }
-  return out;
+  return taskDecisionQuotes(await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, constraintsForTask(await currentConstraints(ctx), t, ctx.mission));
 }
 
 async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet<'object' | 'instruction'>): Promise<Array<{ id: string; text: string; kind: 'object' | 'instruction' }>> {
-  return (await currentConstraints(ctx))
-    .filter((c) => kinds.has(c.kind) && (c.scope.taskTypes.length === 0 || c.scope.taskTypes.includes(t.kind)) && scopesOverlap(c.scope.paths, t.writeScope).length > 0)
+  return constraintsForTask(await currentConstraints(ctx), t, ctx.mission)
+    .filter((c) => kinds.has(c.kind))
     .map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
 }
 
@@ -1401,7 +1392,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     workspace,
     goal: t.goal,
     standards: t.standards.map((s) => ({ id: s.id, text: s.text })),
-    requirementItems: t.requirementItems.map((l) => ({ id: l, text: items.find((i) => i.line === l)?.text ?? '(this item is not in force)' })),
+    requirementItems: taskRequirementItems(items, t),
     readableFiles: [...t.readableFiles],
     interpreter: t.interpreter,
     verificationCommands: t.verificationCommands.map((c) => ({ ...c })),
@@ -1475,7 +1466,7 @@ async function submitReviewer(
     ...(obj.source.origin !== undefined ? { origin: obj.source.origin } : {}),
   })).changedPaths;
   const scope = obj?.scope ?? { paths: [...changedPaths], taskType: t.kind };
-  const { checks, list: cardConstraintsList } = await objectConstraints(ctx, scope);
+  const { checks, list: cardConstraintsList } = await objectConstraints(ctx, scope, obj?.mission ?? ctx.mission);
   // the Constructor's gaps (8.1: answer every one)
   const conView = await ctx.ports.scheduler.status(product.task);
   const cr = (conView?.handBack?.result ?? null) as ConstructorResult | null;
@@ -1505,13 +1496,12 @@ async function submitReviewer(
     }
   }
   const m = line.all('reanswer').filter((x) => x.key.startsWith(`${k}:`)).length;
-  const answers = line.all<{ decision: string }>('reanswer').filter((x) => x.key.startsWith(`${k}:`)).map((x) => x.body.decision);
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
       duties: o.duties ?? `Judge the candidate of task ${t.id} (attempt ${k}${m > 0 ? `, review ${m + 1} after a decision` : ''}) against each standard, independently.`,
-      decisionQuotes: [...(await decisionQuotes(ctx, t)), ...answers],
-      constraints: cardConstraintsList,
+      decisionQuotes: reviewerDecisionQuotes(ctx.mission, await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, await currentConstraints(ctx), k),
+      constraints: [...cardConstraintsList, ...await cardConstraints(ctx, t, new Set(['instruction']))],
     }),
     seat: 'reviewer',
     workspace: { snapshot: product.snapshot, writablePaths: [] },
@@ -1526,7 +1516,7 @@ async function submitReviewer(
     openIssues,
     binding: {
       judgment: `j.${task}`,
-      bases: c.putList(currentVersions(ix, contractLines(ctx, t, ix))),
+      bases: c.putList(currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')))),
       constraints: c.putList([...new Set(checks)].sort()),
       // the objects the version's contract relies on (v51 §5.2: a judgment conforms to the contract fixed with
       // its target), which for a version recorded under an earlier plan is that plan, not the one in effect
@@ -1566,14 +1556,6 @@ function reliedPlans(obj: ObjectVersionRecord | null, eff: EffectiveBody): strin
 }
 
 /** The object constraints that apply to a version's scope now (v51 §5.2, 9.5): the checks a judgment binds, and the card's list. */
-async function objectConstraints(ctx: FlowCtx, scope: ObjectScope): Promise<{ readonly checks: string[]; readonly list: Array<{ id: string; text: string; kind: 'object' | 'instruction' }> }> {
-  const checks: string[] = [];
-  const list: Array<{ id: string; text: string; kind: 'object' | 'instruction' }> = [];
-  for (const x of (await currentConstraints(ctx)).filter((y) => y.kind === 'object')) {
-    const range = requiredRange(x.scope, scope);
-    if (range.length === 0) continue;
-    checks.push(encodeConstraintCheck({ version: x.version, paths: range }));
-    list.push({ id: x.line, text: `${x.text} (applies to: ${range.join(', ')})`, kind: 'object' });
-  }
-  return { checks: [...new Set(checks)].sort(), list };
+async function objectConstraints(ctx: FlowCtx, scope: ObjectScope, mission: string = ctx.mission): Promise<{ readonly checks: string[]; readonly list: Array<{ id: string; text: string; kind: 'object' | 'instruction' }> }> {
+  return reviewObjectConstraints(await currentConstraints(ctx), { scope, mission });
 }
