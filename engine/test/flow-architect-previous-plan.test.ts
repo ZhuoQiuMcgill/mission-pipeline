@@ -169,10 +169,11 @@ describe('flow: a revision that carries the unchanged tasks over keeps their acc
     assert.ok(copied);
     assert.equal((await labelsOf(ports, ['dplan.m1.2.1']))['dplan.m1.2.1'], 'proven');
     for (const t of ['iface', 'impl']) {
-      assert.ok(!ran.some((x) => x.startsWith(`con.m1.${t}.`) || x.startsWith(`rev.m1.${t}.`)), `${t} is neither rebuilt nor judged again: ${ran.join(', ')}`);
+      assert.ok(!ran.some((x) => x.startsWith(`con.m1.${t}.`)), `${t} is not rebuilt: ${ran.join(', ')}`);
+      assert.ok(ran.includes(`rev.m1.${t}.1.b1`), `${t}'s new version is judged by a Reviewer`);
       assert.equal((await lineEvents(ports, t, 'spec')).length, 1, `${t} keeps its card`);
       assert.deepEqual(await lineEvents(ports, t, 'rework'), [], `${t} is not restarted`);
-      assert.deepEqual((await lineEvents<{ how: string }>(ports, t, 'rebind')).map((e) => e.body.how), ['carried'], `${t} is re-bound without a seat`);
+      assert.deepEqual((await lineEvents<{ how: string }>(ports, t, 'rebind')).map((e) => e.body.how), ['review'], `${t} is re-bound for a Reviewer`);
     }
     const iface = (await current(ports, 'iface'))!;
     const impl = (await current(ports, 'impl'))!;

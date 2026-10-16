@@ -278,6 +278,8 @@ export interface ProductVersion {
  * A kept product version re-bound under the plan in effect (design 4.1 Appendix J): a successor of
  * `of` with the same content and source (commit, write scope, transform description and origin),
  * so it brings exactly the change `of` brings, and its own prerequisites and review contracts.
+ * Replaying an id must match every immutable field. A new version requires a Reviewer judgment
+ * in stable mode; no judgment is carried over by the program (maintainer ruling 1, 2026-10-13).
  */
 export interface RebindRequest {
   readonly mission: MissionId;

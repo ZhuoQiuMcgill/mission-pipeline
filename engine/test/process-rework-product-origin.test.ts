@@ -396,6 +396,8 @@ describe('a product version accepted after a rework brings every attempt’s cha
     // idempotent; another version under the same id is refused
     assert.deepEqual(await ctx.actions().rebind({ mission: M, of: prod('impl', 3), object: 'rebound.impl.3', prerequisites: [prod('base', 1)], reviews }), r);
     await assert.rejects(ctx.actions().rebind({ mission: M, of: prod('impl', 2), object: 'rebound.impl.3', prerequisites: [], reviews }), (e: { code?: string }) => e.code === 'conflict');
+    await assert.rejects(ctx.actions().rebind({ mission: M, of: prod('impl', 3), object: 'rebound.impl.3', prerequisites: [], reviews }), (e: { code?: string }) => e.code === 'conflict');
+    await assert.rejects(ctx.actions().rebind({ mission: M, of: prod('impl', 3), object: 'rebound.impl.3', prerequisites: [prod('base', 1)], reviews: [{ ...reviews[0]!, reliesOn: ['dplan.other' as ObjectVersionId] }] }), (e: { code?: string }) => e.code === 'conflict');
     const snap = await ctx.actions().snapshot({ mission: M, purpose: 'test', products: ['rebound.impl.3'] });
     assert.deepEqual(filesOf(p, snap.commit, ALL_PATHS), expectedFiles());
 

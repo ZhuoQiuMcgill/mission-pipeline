@@ -249,12 +249,8 @@ export function gitActions(ctx: ProcessContext): GitActions {
     async rebind(req: RebindRequest): Promise<{ readonly object: string; readonly commit: string }> {
       const from = productRecord(req.of);
       if (from === null || from.source === undefined) throw new ActionError('unknown-product', `product version ${req.of} is not recorded with a commit`, { product: req.of });
+      if (req.mission !== from.mission) throw new ActionError('conflict', `product version ${req.of} belongs to another mission`, { object: req.of });
       const source = from.source;
-      const known = productRecord(req.object);
-      if (known !== null) {
-        if (known.predecessor !== req.of || known.source?.commit !== source.commit) throw new ActionError('conflict', `product version ${req.object} is recorded as another version`, { object: req.object });
-        return { object: req.object, commit: source.commit };
-      }
       // the same change as its predecessor: the same commit, taken against the same origin (Appendix H);
       // a predecessor recorded before origins were recorded has it derived now, and the new version records it
       let origin: GitOid | null;
@@ -278,6 +274,11 @@ export function gitActions(ctx: ProcessContext): GitActions {
         predecessor: req.of as ObjectVersionId,
       };
       validateRecord(rec);
+      const known = productRecord(req.object);
+      if (known !== null) {
+        if (canonicalJson(known) !== canonicalJson(rec)) throw new ActionError('conflict', `product version ${req.object} is recorded with different immutable inputs`, { object: req.object });
+        return { object: req.object, commit: source.commit };
+      }
       ctx.memory.write({ op: `flow:product-rebind:${req.mission}:${req.object}`, payload: { object: req.object, of: req.of } }, (tx) => appendRecords(tx, [rec]));
       return { object: req.object, commit: source.commit };
     },
