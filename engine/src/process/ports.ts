@@ -17,6 +17,8 @@
 //              call after the environment identity was observed (§6.5).
 
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { noticeAlertId } from '../flow/context.ts';
+export { noticeAlertId } from '../flow/context.ts';
 import type { AlertId, ContentHash, MissionId } from '../common/ids.ts';
 import type { BaseRecord, BaseRecordKind, Committed, JudgmentRecord, ListRef, LoopKind, ObjectVersionRecord, TaskHandover } from '../common/records.ts';
 import { decidingViews, decisionLabels, judgmentStates, labelStatus, opStates } from '../evaluator/index.ts';
@@ -32,6 +34,7 @@ import {
   LedgerError,
   listDispatches,
   loopState,
+  markNotice,
   queueTask,
   raiseAlert,
   recordsByKind,
@@ -219,12 +222,6 @@ function planLeaves(tx: WriteTx, records: readonly BaseRecord[]): void {
   }
 }
 
-/** The alert id of a flow notice: one per (mission, category, key) (3.9: notices are idempotent by category and key). */
-export function noticeAlertId(n: Pick<FlowNotice, 'mission' | 'category' | 'key'>): string {
-  const cat = n.category.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 60);
-  return `flow:${n.mission}:${cat}:${sha256(canonicalJson([n.mission, n.category, n.key])).slice(0, 24)}`;
-}
-
 /** Raise a notice inside a write (once per id): the alert record and its journal entry in the mission's notices.md. */
 export function raiseNotice(tx: WriteTx, n: FlowNotice): boolean {
   const alert = noticeAlertId(n);
@@ -267,7 +264,8 @@ export class MemoryFlowLedger implements FlowLedgerPort {
     this.memory.write({ op, payload }, (tx) => {
       // the append's precondition, inside its own write (nothing is written when it fails)
       if (guard !== undefined && guard.absent.some((g) => flowEventExists(tx, g))) throw Object.assign(new Error(guard.message), { code: guard.code });
-      appendRecords(tx, [...events.map((e) => flowRecord(tx.data, e)), ...records]);
+      appendRecords(tx, [...events.map((e) => flowRecord(tx.data, e)), ...records.filter((r) => r.kind !== 'notice.delivery')]);
+      for (const r of records) if (r.kind === 'notice.delivery') markNotice(tx, r);
       leavesOf(tx, events);
       planLeaves(tx, records);
     });

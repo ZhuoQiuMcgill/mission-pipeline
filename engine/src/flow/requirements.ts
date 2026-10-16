@@ -246,14 +246,16 @@ export async function recordConstraint(
  * one line per constraint whichever mission recorded it, so a version or scope recorded from one
  * mission is in force for all; each card takes them by the constraint's own scope.
  */
-async function projectEvents<B>(ctx: FlowCtx, event: 'constraint' | 'constraint-scope'): Promise<FlowEvent<B>[]> {
+async function projectEvents<B>(ctx: ConstraintContext, event: 'constraint' | 'constraint-scope'): Promise<FlowEvent<B>[]> {
   const missions = new Set<MissionId>([ctx.mission, ...(await ctx.ports.ledger.missions())]);
   const all = await Promise.all([...missions].map((m) => ctx.ports.ledger.events<B>({ mission: m, line: REQUIREMENTS_LINE, event })));
   return all.flat().sort((a, b) => a.revision - b.revision);
 }
 
+type ConstraintContext = Pick<FlowCtx, 'mission'> & { ports: Pick<FlowCtx['ports'], 'ledger'> };
+
 /** The project constraints in force (9.5, recorded from any mission): the latest content version of each line, with its latest scope. */
-export async function currentConstraints(ctx: FlowCtx): Promise<ConstraintBody[]> {
+export async function currentConstraints(ctx: ConstraintContext): Promise<ConstraintBody[]> {
   return resolveConstraints(await basisIndex(ctx), [...await projectEvents(ctx, 'constraint'), ...await projectEvents(ctx, 'constraint-scope')].sort((a, b) => a.revision - b.revision));
 }
 

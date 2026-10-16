@@ -268,7 +268,7 @@ describe('P3: recovery and guidance regressions', () => {
     await commitCarrying(ctx, 'test:carry-retry', [], [carry]);
     assert.equal(await isApplied(ctx, 'test-context'), true);
     assert.equal((await decisionFor(ctx, 'test-context'))?.instructions, 'Use the replacement');
-    const quotes = taskDecisionQuotes(await currentItems(ctx), await w.ledger.events({ mission: M }), { id: 'impl', requirementItems: [] }, []);
+    const quotes = taskDecisionQuotes(await currentItems(ctx), await w.ledger.events({ mission: M }), { id: 'impl', requirementItems: [] }, [], undefined);
     assert.ok(quotes.includes('Use the replacement'));
     assert.ok(!quotes.includes('Continue'), 'a rejected earlier Secretary round is not quoted as the carried answer');
   });

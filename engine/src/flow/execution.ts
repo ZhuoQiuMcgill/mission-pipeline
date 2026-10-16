@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -108,6 +108,8 @@ interface ReviewBody {
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
 export const taskLineage = (mission: string, task: string): string => safeId(`task.${mission}.${idPart(task)}`);
+/** A task's card identity under a plan: a spec records it, and a different one is a re-plan of the task (taskStep). */
+export const taskCardHash = (t: DetailedTask): string => shortHash(DetailedTask.parse(t));
 const conTask = (mission: string, task: string, k: number): string => safeId(`con.${mission}.${idPart(task)}.${k}`);
 const revTask = (mission: string, task: string, k: number, m: number): string => safeId(`rev.${mission}.${idPart(task)}.${k}${m > 0 ? `.r${m}` : ''}`);
 
@@ -478,7 +480,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   let line = await readLine(ctx, t.id);
 
   // the task's card under this plan; a changed card (re-plan) restarts it at the next attempt
-  const hash = shortHash(DetailedTask.parse(t));
+  const hash = taskCardHash(t);
   const specs = line.all<SpecBody>('spec');
   const last = specs.at(-1);
   const droppedAfter = line.all<{ dplan: string }>('dropped').some((d) => last === undefined || d.revision > last.revision);
@@ -908,24 +910,37 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   for (const d of t.dependsOn) {
     const p = await acceptedProduct(ctx, d);
     if (p !== null) deps.add(p);
+    // A dependency's accepted closure still describes the old plan while its new version is
+    // being judged. Compare only after that pending re-bind settles, avoiding a false stale notice.
+    const dep = await readLine(ctx, d);
+    const rb = dep.all<RebindBody>('rebind').filter((r) => r.body.k === dep.k).at(-1);
+    if (rb !== undefined && rb.body.dplan === eff.dplan && rb.body.from === p && dep.one('rebound', rb.key) === null) return 'held';
   }
-  const stale = mapped.filter((x) => !deps.has(x));
-  if (stale.length > 0) {
+  // Stable mode: a dependency's accepted version not yet under the plan in effect is re-bound by its
+  // own step first (whatever the plan's task order), or that step tells the PM why it cannot be; the
+  // closures are compared only once the direct dependencies are settled, never on a passing state.
+  // Fast mode re-binds nothing, so no such wait could end: the closures are compared as they are.
+  if (eff.mode === 'stable') {
+    const depLabels = (await ctx.ports.evaluator.labels([...deps])).labels;
+    if ([...deps].some((x) => depLabels[x] === 'recomputing')) return 'held';
+    for (const x of deps) if (await awaitsPlan(ctx, eff, depLabels, x)) return 'held';
+  }
+  const have = await ctx.ports.scheduler.composition(mapped);
+  const want = await ctx.ports.scheduler.composition([...deps]);
+  const stale = have.filter((x) => !want.includes(x)).sort();
+  const missing = want.filter((x) => !have.includes(x)).sort();
+  if (stale.length > 0 || missing.length > 0) {
     await notify(ctx, {
       category: 'kept-product-not-rebound',
       wi: null,
-      key: `${t.id}:${cur.product}:${eff.dplan}:prerequisites`,
-      trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} was built on ${stale.join(', ')}, which its dependencies no longer have accepted (their work was redone): it cannot be re-bound to the plan`,
+      key: `${t.id}:${cur.product}:${eff.dplan}:prerequisites:${shortHash({ stale, missing })}`,
+      trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} has stale prerequisites [${stale.join(', ')}] and missing prerequisites [${missing.join(', ')}] compared with its dependencies' accepted closure: it cannot be re-bound to the plan`,
       defaultAction: `task ${t.id} stays accepted with a product that is not fully proven (stable mode holds the work that depends on it); a re-plan that changes its card rebuilds it on its dependencies' current work`,
-      detail: { task: t.id, product: cur.product, dplan: eff.dplan, stale },
+      detail: { task: t.id, product: cur.product, dplan: eff.dplan, stale, missing },
     });
     return 'none';
   }
-  for (const x of mapped) {
-    if (labels[x] === 'proven') continue;
-    const reliedX: readonly string[] = (await objectRecord(ctx, x))?.reviews.find((r) => r.review === 'reviewer')?.reliesOn ?? [];
-    if (!reliedX.includes(eff.dplan)) return 'held';
-  }
+  // fast mode: told once, then the re-review paths run (an environment re-review is still answered)
   if (eff.mode !== 'stable') {
     await notify(ctx, {
       category: 'kept-product-not-rebound',
@@ -937,6 +952,8 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     });
     return 'none';
   }
+  // every prerequisite is re-bound to the plan in effect, or proven, before this version is (stable mode only)
+  for (const x of mapped) if (await awaitsPlan(ctx, eff, labels, x)) return 'held';
   // a re-review of this version that a Reviewer is judging now ends first (its hand-back is preserved)
   const rounds = openRounds(line, k, cur);
   for (const r of rounds) if (['running', 'waiting-evidence'].includes((await ctx.ports.scheduler.status(r))?.state ?? '')) return 'held';
@@ -945,17 +962,24 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const object = safeId(`${cur.original}.b${n}`);
   const contract: ReviewContract = { review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx)) as never, reliesOn: [eff.dplan] as never };
   try {
-    await ctx.ports.scheduler.rebind({ mission: ctx.mission, of: cur.product, object, prerequisites: mapped, reviews: [contract] });
+    await ctx.ports.scheduler.rebind({ mission: ctx.mission, of: cur.product, object, prerequisites: have, reviews: [contract] });
   } catch (e) {
     await actionRefused(ctx, `${cur.product}:rebind`, e);
     return 'held';
   }
   const why = ['the new version has a Reviewer contract under the plan in effect (maintainer ruling 1, 2026-10-13)'];
-  const body: RebindBody = { k, n, from: cur.product, product: object, dplan: eff.dplan, prerequisites: mapped, how: 'review', carries: null, why };
+  const body: RebindBody = { k, n, from: cur.product, product: object, dplan: eff.dplan, prerequisites: have, how: 'review', carries: null, why };
   await commit(ctx, `flow:rebind:${ctx.mission}:task:${idPart(t.id)}:${key}`, { events: [ev(ctx, taskLine(t.id), 'rebind', key, body)] });
   for (const r of rounds) await ctx.ports.scheduler.cancel(r);
   kept.review.push({ task: t.id, from: cur.product, product: object, why });
   return 'held';
+}
+
+/** A version neither proven nor judged under the plan in effect: its own task's kept step re-binds it, or says why it cannot. */
+async function awaitsPlan(ctx: FlowCtx, eff: EffectiveBody, labels: Readonly<Record<string, unknown>>, x: string): Promise<boolean> {
+  if (labels[x] === 'proven') return false;
+  const relied: readonly string[] = (await objectRecord(ctx, x))?.reviews.find((r) => r.review === 'reviewer')?.reliesOn ?? [];
+  return !relied.includes(eff.dplan);
 }
 
 /** The Reviewer tasks of re-review rounds of the accepted version that have not handed back. */
@@ -1335,7 +1359,8 @@ function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{
  * superseded, is history: never quoted as a decision in force).
  */
 async function decisionQuotes(ctx: FlowCtx, t: DetailedTask): Promise<string[]> {
-  return taskDecisionQuotes(await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, constraintsForTask(await currentConstraints(ctx), t, ctx.mission));
+  const events = await ctx.ports.ledger.events({ mission: ctx.mission });
+  return taskDecisionQuotes(await currentItems(ctx), events, t, constraintsForTask(await currentConstraints(ctx), t, ctx.mission), taskReferencePlan(events));
 }
 
 async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet<'object' | 'instruction'>): Promise<Array<{ id: string; text: string; kind: 'object' | 'instruction' }>> {
@@ -1419,7 +1444,6 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   });
 }
 
-/** Latest real work under this spec, even when intervening attempts produced no product. */
 /** The lineage's latest recorded product under the current spec before attempt k, at the version its last Reviewer judged (a re-bound version included). */
 async function latestRecordedProduct(ctx: FlowCtx, line: Line, k: number): Promise<ProductBody | null> {
   const spec = line.all('spec').at(-1)?.revision ?? 0;
@@ -1500,7 +1524,7 @@ async function submitReviewer(
     ...cardBase(ctx, task, {
       module: t.module,
       duties: o.duties ?? `Judge the candidate of task ${t.id} (attempt ${k}${m > 0 ? `, review ${m + 1} after a decision` : ''}) against each standard, independently.`,
-      decisionQuotes: reviewerDecisionQuotes(ctx.mission, await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, await currentConstraints(ctx), k),
+      decisionQuotes: reviewerDecisionQuotes(ctx.mission, await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, await currentConstraints(ctx), k, taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'))),
       constraints: [...cardConstraintsList, ...await cardConstraints(ctx, t, new Set(['instruction']))],
     }),
     seat: 'reviewer',

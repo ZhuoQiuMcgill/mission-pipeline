@@ -5,6 +5,19 @@ import type { DecisionBody, EscalationBody } from '../../flow/secretary.ts';
 import { scopesOverlap } from '../../flow/mechanical.ts';
 import { canonicalJson } from '../../common/hash.ts';
 import { materialPageCount, type MaterialRef } from './common.ts';
+import type { ReviewContract } from '../../common/records.ts';
+import type { DecidingView } from '../../evaluator/semantics.ts';
+import type { EffectiveBody } from '../../flow/planning.ts';
+
+/** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
+export function planInEffect(events: readonly FlowEvent[]): EffectiveBody | undefined {
+  return events.filter((e) => e.line === 'plan' && e.event === 'effective').at(-1)?.body as EffectiveBody | undefined;
+}
+
+/** A review uses its target's fixed contract; production uses the plan in effect. */
+export function taskReferencePlan(events: readonly FlowEvent[], contract?: ReviewContract): string | undefined {
+  return contract === undefined ? planInEffect(events)?.dplan : contract.reliesOn.find((id) => id.startsWith('dplan.'));
+}
 
 /** Instructions are seat context; object constraints retain their proof scope semantics. */
 export function constraintsForTask(constraints: readonly ConstraintBody[], task: Pick<DetailedTask, 'kind' | 'writeScope'>, mission: string): ConstraintBody[] {
@@ -18,10 +31,9 @@ export function constraintsForTask(constraints: readonly ConstraintBody[], task:
 }
 
 /** Shared selection for queued and dispatched cards, including answers under the current spec only. */
-export function taskDecisionQuotes(items: readonly CurrentItem[], events: readonly FlowEvent[], task: Pick<DetailedTask, 'id' | 'requirementItems'>, constraints: readonly ConstraintBody[]): string[] {
+export function taskDecisionQuotes(items: readonly CurrentItem[], events: readonly FlowEvent[], task: Pick<DetailedTask, 'id' | 'requirementItems'>, constraints: readonly ConstraintBody[], referencePlan: string | undefined): string[] {
   const spec = events.filter((e) => e.line === `task:${task.id}` && e.event === 'spec').at(-1);
-  const dplan = (spec?.body as { dplan?: string } | undefined)?.dplan;
-  const effective = events.find((e) => e.line === 'plan' && e.event === 'effective' && (e.body as { dplan: string }).dplan === dplan)?.revision ?? events.filter((e) => e.line === 'plan' && e.event === 'effective').at(-1)?.revision ?? 0;
+  const effective = events.find((e) => e.line === 'plan' && e.event === 'effective' && (e.body as { dplan: string }).dplan === referencePlan)?.revision ?? 0;
   const related = new Set(task.requirementItems);
   for (const i of items) if (related.has(i.line) && i.source.kind === 'authorization') related.add(i.source.line);
   for (const c of constraints) related.add(c.line);
@@ -52,9 +64,9 @@ export function taskRequirementItems(items: readonly CurrentItem[], task: Pick<D
   return task.requirementItems.map((line) => ({ id: line, text: items.find((i) => i.line === line)?.text ?? '(this item is not in force)' }));
 }
 
-export function reviewerDecisionQuotes(mission: string, items: readonly CurrentItem[], events: readonly FlowEvent[], task: DetailedTask, constraints: readonly ConstraintBody[], attempt: number) {
+export function reviewerDecisionQuotes(mission: string, items: readonly CurrentItem[], events: readonly FlowEvent[], task: DetailedTask, constraints: readonly ConstraintBody[], attempt: number, referencePlan: string | undefined) {
   const answers = events.filter((e) => e.line === `task:${task.id}` && e.event === 'reanswer' && e.key.startsWith(`${attempt}:`)).map((e) => (e.body as { decision: string }).decision);
-  return [...taskDecisionQuotes(items, events, task, constraintsForTask(constraints, task, mission)), ...answers];
+  return [...taskDecisionQuotes(items, events, task, constraintsForTask(constraints, task, mission), referencePlan), ...answers];
 }
 
 export function secretaryRoundInputs(esc: EscalationBody, events: readonly FlowEvent[]) {
@@ -90,6 +102,20 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('current-facts', 'Current escalation facts', canonicalJson({ escalation: e, items: selectedItems, authorizations: auths, constraints, decisions: decisionQuotes, task: task ?? null, taskState: task === undefined ? [] : events.filter((x) => x.line === `task:${task.id}`).map((x) => ({ event: x.event, key: x.key, body: x.body })) }), 'record'),
     ],
   };
+}
+
+/**
+ * Ruling 3 (maintainer, 2026-10-13): whether fast production of `task` under the plan in effect rests on a
+ * contested or negated element. The flow's gate (`contestedProduction`) and the dispatch refresh both decide
+ * here, each from the same records: the PM plan of the plan in effect, its deciding view, the Calibrator ①
+ * outcomes in ledger order, and the detailed plan in effect (its dependency graph).
+ */
+export function productionDisputed(mission: string, items: readonly CurrentItem[], pm: import('../../flow/plandoc.ts').PmPlanDoc, view: DecidingView | null | undefined, cal1: readonly { readonly judgment: string | null; readonly contested: readonly string[] }[], plan: import('../../flow/plandoc.ts').DetailedPlanDoc, task: DetailedTask): boolean {
+  if (view === null || view === undefined) return true;
+  const pos = view.positions.find((p) => p.review === 'calibrator-1');
+  const negated = pos?.state === 'fail' || pos?.state === 'undecided';
+  const failure = negated ? cal1.find((c) => c.judgment === pos.by) : undefined;
+  return taskUsesDispute(mission, items, pm, plan, task, negated ? failure?.contested.length ? failure.contested : null : []);
 }
 
 /** Null means a negation whose reach cannot be bounded. */

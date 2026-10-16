@@ -16,6 +16,7 @@ import { missionIdProblem, type MissionId } from '../common/ids.ts';
 import { flowCtx, type FlowCtx } from './context.ts';
 import { executionStep } from './execution.ts';
 import { planningStep } from './planning.ts';
+import { planConstraintStep } from './plan-constraints.ts';
 import type { FlowPorts } from './ports.ts';
 import { secretaryStep } from './secretary.ts';
 import { WI } from './wi.ts';
@@ -52,6 +53,7 @@ export class FlowEngine {
     const out = [
       { name: 'secretary', step: secretaryStep },
       { name: 'planning', step: planningStep },
+      { name: 'plan-constraints', step: planConstraintStep },
       { name: 'execution', step: executionStep },
       ...REGISTERED,
       ...this.extra,

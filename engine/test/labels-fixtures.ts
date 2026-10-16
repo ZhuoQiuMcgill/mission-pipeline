@@ -4,8 +4,7 @@
 // derived state with the reference semantics (fullCompute).
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { revision, type Revision } from '../src/common/ids.ts';
@@ -32,7 +31,7 @@ let mirrors = 0;
 /** A project folder with its memory and the labels extension (no git). */
 export function labelProject(opts: OpenOptions = {}): { readonly m: Memory; readonly dir: string; reopen(o?: OpenOptions): Memory; cleanup(): void } {
   const dir = join(baseDir(), `p${++projects}`);
-  execFileSync('mkdir', ['-p', dir]);
+  mkdirSync(dir, { recursive: true });
   const o: OpenOptions = { git: null, extensions: [LABELS_EXTENSION], ...opts };
   initMemory(dir, o);
   let m = openMemory(dir, o);

@@ -1,6 +1,6 @@
 import { reviewInputVersions, objectConstraints, boundObjectConstraints, changedPlanningInputs, planningContext, type PlanningInputs, withdrawnPlanReason, standardLine } from '../seat/cards/inputs.ts';
 export { standardLine } from '../seat/cards/inputs.ts';
-import { taskUsesDispute } from '../seat/cards/dynamic.ts';
+import { productionDisputed } from '../seat/cards/dynamic.ts';
 // The decision layer (design 3.1–3.10): PM plan → Calibrator ① → Architect (decomposition) →
 // program mechanical checks → feasibility review → Calibrator ② → the plan's tasks released;
 // Secretary escalations on the way; the plan grows by rounds.
@@ -407,10 +407,8 @@ export async function contestedProduction(ctx: FlowCtx, eff: EffectiveBody, plan
   if ((await ctx.ports.evaluator.labels([eff.pmPlan])).labels[eff.pmPlan] === 'recomputing') return true;
   const view = (await ctx.ports.evaluator.deciding([eff.pmPlan])).views[eff.pmPlan];
   if (view === null || view === undefined) return true;
-  const pos = view.positions.find((p) => p.review === 'calibrator-1');
-  const negated = pos?.state === 'fail' || pos?.state === 'undecided';
-  const failure = negated ? (await eventsOf<Cal1Body>(ctx, PLAN_LINE, 'cal1')).find((e) => e.body.judgment === pos.by)?.body : undefined;
-  return taskUsesDispute(ctx.mission, await currentItems(ctx), doc, plan, task, negated ? failure?.contested.length ? failure.contested : null : []);
+  // one decision with the dispatch refresh (seat/cards/refresh.ts), from the same records
+  return productionDisputed(ctx.mission, await currentItems(ctx), doc, view, (await eventsOf<Cal1Body>(ctx, PLAN_LINE, 'cal1')).map((e) => e.body), plan, task);
 }
 
 // ---------------------------------------------------------------- Calibrator ① (3.3)

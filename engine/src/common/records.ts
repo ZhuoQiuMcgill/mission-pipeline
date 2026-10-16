@@ -765,11 +765,11 @@ export interface MissionBlockRecord {
 
 /**
  * The PM's work instructions of 4.1 (design 4.1 §6.9): WI-01..08, 13, 16, 19..21, 23..26 carried
- * from 4.0, and WI-28..33 (interrupted dispatches, a broken event chain, missing or edited leaves and
+ * from 4.0, and WI-28..34 (interrupted dispatches, a broken event chain, missing or edited leaves and
  * unreachable commits, a repository outside the folder, labels that keep recomputing, an
- * exploration awaiting a ruling). Numbers of retired WIs are not reused.
+ * exploration awaiting a ruling, a plan constraint-coverage gap). Numbers of retired WIs are not reused.
  */
-export const WI_CATALOG: ReadonlySet<string> = new Set(['01', '02', '03', '04', '05', '06', '07', '08', '13', '16', '19', '20', '21', '23', '24', '25', '26', '28', '29', '30', '31', '32', '33'].map((n) => `WI-${n}`));
+export const WI_CATALOG: ReadonlySet<string> = new Set(['01', '02', '03', '04', '05', '06', '07', '08', '13', '16', '19', '20', '21', '23', '24', '25', '26', '28', '29', '30', '31', '32', '33', '34'].map((n) => `WI-${n}`));
 
 /**
  * A system alert (3.9). An exception carries the PM work instruction for it

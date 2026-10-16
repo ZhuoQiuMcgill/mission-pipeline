@@ -1,5 +1,5 @@
 // The exploration's cards (design 4.1 §6.3, §5.4; 4.0 4.3, 8.2, 6.2): built from the state alone
-// (machine.ts), so a restarted flow builds the same card. Every card carries what the memory
+// (machine.ts) and an explicit selection of current object constraints for review cards. Every card carries what the memory
 // knows (the product's current version, every finding with its disposition and the Stabilizer's
 // verdict, the evidence executions, the discussion, the rulings), so a seat that continues after
 // evidence loses only its conversation, never the facts: its new card carries its notes and the
@@ -10,10 +10,13 @@ import type { CrititorCard, EvidenceItemT, NewVersionT, PriorFindingT } from '..
 import type { ExperimentCard } from '../../seat/cards/experiment.ts';
 import type { AuthorCard, InterpreterCard, ReaderCard, RegisteredAttemptT } from '../../seat/cards/researcher.ts';
 import type { StabilizerCard } from '../../seat/cards/stabilizer.ts';
+import type { objectConstraints } from '../../seat/cards/inputs.ts';
 import { SEAT_CAPABILITIES } from '../context.ts';
 import type { FlowContent } from '../ports.ts';
 import { xid } from './definition.ts';
 import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, type FindingState, type XState } from './machine.ts';
+
+type ObjectConstraints = ReturnType<typeof objectConstraints>;
 
 /** A continuation after async evidence (§5.4): the task that asked, its notes (a data value) and the evidence in words. */
 export interface Resume {
@@ -229,7 +232,7 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
   };
 }
 
-export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null): CrititorCard {
+export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null, constraints: ObjectConstraints): CrititorCard {
   const { d, def } = defined(s);
   const m = new Materials(content);
   const target = s.version;
@@ -246,6 +249,7 @@ export function attackerCard(s: XState, n: number, task: string, content: FlowCo
   return {
     ...common(s, task, 'Attack the version adversarially and re-check every finding marked awaiting-recheck.', resume, true, [], m),
     seat: 'crititor',
+    constraints: mode === 'attack' ? [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list] : [...def.constraints],
     workspace: readOnlyWorkspace(s),
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
@@ -267,7 +271,7 @@ export function attackerCard(s: XState, n: number, task: string, content: FlowCo
         ? {
             judgment: xid.judgment(def.mission, def.exploration, n),
             bases: content.putList([d.basisVersion]),
-            constraints: content.putList([]),
+            constraints: content.putList(constraints.checks),
             // the contract's objects (a research interpretation: its method version)
             reliesOn: content.putList(versionReliesOn(s)),
             revokes: s.negations.get(target.id) ?? null,
@@ -353,7 +357,7 @@ export function executorCard(
  * dispositions, earlier in-scope findings still open, the first and the current version, the
  * earlier rounds' judgments and the rulings. Its judgment binds the attack judgment's contract.
  */
-export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent): StabilizerCard {
+export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent, constraints: ObjectConstraints): StabilizerCard {
   const { d, def: current0 } = defined(s);
   const st = s.stabilizing;
   if (st === null) throw new Error('no round to stabilize');
@@ -376,6 +380,7 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
   return {
     ...common(s, task, 'Judge this round of the attack against the definition and the user\'s words: which findings bind the author, which shift the direction, and whether the work drifts.', null, false, [], m),
     seat: 'stabilizer',
+    constraints: [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list],
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
     attackScope: def.attackScope,
@@ -394,7 +399,7 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
     binding: {
       judgment: xid.judgment(def.mission, def.exploration, n),
       bases: content.putList([basis]),
-      constraints: content.putList([]),
+      constraints: content.putList(constraints.checks),
       reliesOn: content.putList(versionReliesOn(s)),
       revokes: s.negations.get(st.target) ?? null,
       extends: null,

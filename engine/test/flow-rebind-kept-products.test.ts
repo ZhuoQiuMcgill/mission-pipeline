@@ -20,6 +20,8 @@ import { recordConstraint, recordItem } from '../src/flow/requirements.ts';
 import { answerEscalation, raiseEscalation } from '../src/flow/secretary.ts';
 import { cal1Fail, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { gitActions } from '../src/process/actions.ts';
+import { dispatchView } from '../src/process/seat.ts';
+import { pmDispatch } from '../src/process/pm.ts';
 import { pmClose } from '../src/process/close.ts';
 import { renderCard, renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
 import type { SecretaryCard } from '../src/seat/cards/secretary.ts';
@@ -302,12 +304,15 @@ describe('flow: products of kept tasks re-bound to a new plan version (Appendix 
     assert.ok(ran.includes('con.m1.docs.1'), `fast mode: the dependent goes on: ${ran.join(', ')}`);
     assert.ok(!ran.some((x) => /^rev\.m1\.(iface|impl)\./.test(x)), ran.join(', '));
     assert.deepEqual(await lineEvents(ports, 'iface', 'rebind'), []);
-    assert.deepEqual(await lineEvents(ports, 'impl', 'rebind'), [], 'its prerequisite is not re-bound: nothing to carry it over onto');
+    assert.deepEqual(await lineEvents(ports, 'impl', 'rebind'), [], 'fast mode re-binds nothing');
+    // each kept product that lost its proof is told, the one resting on a kept prerequisite too (maintainer ruling 1)
     const n = ports.ledger.notices.filter((x) => x.category === 'kept-product-not-rebound');
-    assert.equal(n.length, 1);
-    assert.equal(n[0]!.wi, null);
-    assert.match(n[0]!.trigger, /task iface/);
-    assert.match(n[0]!.trigger, /lost its proof/);
+    assert.deepEqual(n.map((x) => (x.detail as { task: string }).task).sort(), ['iface', 'impl']);
+    for (const x of n) {
+      assert.equal(x.wi, null);
+      assert.match(x.key, /:fast$/);
+      assert.match(x.trigger, /lost its proof/);
+    }
     assert.deepEqual(await labelsOf(ports, [old.iface, old.impl]), { [old.iface]: 'not-fully-proven', [old.impl]: 'not-fully-proven' });
   });
 
@@ -325,7 +330,9 @@ describe('flow: products of kept tasks re-bound to a new plan version (Appendix 
     assert.deepEqual(await lineEvents(ports, 'impl', 'rebind'), []);
     const n = ports.ledger.notices.find((x) => x.category === 'kept-product-not-rebound');
     assert.ok(n !== undefined && n.wi === null);
-    assert.match(n.trigger, new RegExp(`built on ${old.iface.replace(/\./g, '\\.')}`));
+    assert.match(n.trigger, /stale prerequisites/);
+    assert.ok((n.detail as { stale: string[]; missing: string[] }).stale.includes(old.iface));
+    assert.ok(Array.isArray((n.detail as { missing: string[] }).missing));
     assert.ok(!ports.scheduler.tasks.has('con.m1.docs.1'), 'stable mode: its dependent waits');
     // P2: the notice's documented exit must not carry the incompatible old implementation again.
     const conflict = new Error('old implementation conflicts with the rebuilt dependency') as Error & { code: string; detail: unknown };
@@ -1142,4 +1149,258 @@ describe('Stabilizer r3: close, then release an obsolete seat', () => {
       assert.deepEqual(await labelsOf(ports, [accepted]), { [accepted]: 'proven' });
     });
   }
+});
+
+describe('integration: prerequisite closures and dispatch plans', () => {
+  for (const legacy of [false, true]) it(`a kept three-level stack re-binds its closure (${legacy ? 'legacy direct pins' : 'closure pins'})`, async () => {
+    const { ports, engine } = await setup();
+    let checked = false;
+    if (legacy) {
+      const product = ports.scheduler.product.bind(ports.scheduler);
+      ports.scheduler.product = (r) => product(r.task === 'con.m1.docs.1' ? { ...r, prerequisites: ['prod.con.m1.impl.1'] } : r);
+      ports.scheduler.knobs.actions.startHolds = async (id) => { if (id === 'prod.con.m1.docs.1') checked = true; return { holds: true, missing: [] }; };
+    }
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    if (legacy) {
+      const events = ports.ledger.events.bind(ports.ledger);
+      ports.ledger.events = (async (q) => (await events(q)).map((e) => {
+        if (e.event !== 'dispatched' || e.key !== 'con.m1.docs.1') return e;
+        const { prerequisites, ...body } = e.body as { prerequisites?: string[] };
+        return { ...e, body } as typeof e;
+      })) as typeof ports.ledger.events;
+    }
+    assert.ok(await current(ports, 'docs'));
+    const w = await laterDecision(ports);
+    await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [w], changedItems: ['d1'] });
+    const base = happyScript(M, keeps);
+    await drive(engine, ports.scheduler, (t, s) => t.task === 'rev.m1.docs.1.b1' ? null : base(t, s));
+    const doc = await ports.ledger.objectVersion('prod.con.m1.docs.1.b1');
+    assert.ok(doc, 'docs has a re-bound version and a stable Reviewer exit');
+    assert.deepEqual([...ports.ledger.content.getList(doc.prerequisites)].sort(), ['prod.con.m1.iface.1.b1', 'prod.con.m1.impl.1.b1']);
+    assert.ok(ports.scheduler.queued('reviewer').some((t) => t.task === 'rev.m1.docs.1.b1' && t.mode === 'stable'));
+    assert.ok(!ports.ledger.notices.some((n) => n.category === 'kept-product-not-rebound'), JSON.stringify(ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound')));
+    if (legacy) assert.ok(checked, 'the legacy accepted start is checked before closure comparison');
+    await drive(engine, ports.scheduler, base);
+    assert.equal((await labelsOf(ports, ['prod.con.m1.docs.1.b1']))['prod.con.m1.docs.1.b1'], 'proven');
+  });
+
+  it('a rebuilt transitive dependency is named in the stale closure notice', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    const w = await laterDecision(ports);
+    await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [w], changedItems: ['d1'] });
+    const changed = () => ({ ...keeps(), tasks: keeps().tasks.map((t) => t.id === 'iface' || t.id === 'impl' ? { ...t, goal: `${t.goal}; expose a new interface` } : t) });
+    await drive(engine, ports.scheduler, happyScript(M, changed));
+    assert.equal(await ports.ledger.objectVersion('prod.con.m1.docs.1.b1'), null);
+    const notices = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'docs');
+    assert.ok(notices.length > 0);
+    assert.ok(notices.some((n) => (n.detail as { stale: string[] }).stale.includes('prod.con.m1.iface.1')));
+    assert.ok(notices.every((n) => Array.isArray((n.detail as { missing: string[] }).missing)));
+    const count = notices.length; await engine.reconcile(M);
+    assert.equal(ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'docs').length, count);
+  });
+
+  it('a queued re-bind Reviewer refreshes constraints and decisions against its fixed contract', async () => {
+    const { ports, engine, base } = await waitingRebind();
+    await recordConstraint(ports, { mission: M, constraint: 'late-api', kind: 'object', text: 'The API contains no secrets', scope: { paths: ['src/parser/api.ts'], taskTypes: [] } });
+    const words = say(ports, 'Use stable public names.');
+    await raiseEscalation(flowCtx(ports, M), { id: 'late-api-answer', source: 'constructor-decision', lineage: taskLineage(M, 'iface'), subject: 'task:iface', summary: 'Which API names?', reasons: ['Choose public names'], options: ['answer', 'ask-user'] });
+    await answerEscalation(ports, { mission: M, escalation: 'late-api-answer', option: 'answer', words, instructions: 'Use stable public names' });
+    await engine.reconcile(M);
+    const d = pmDispatch(ports.ctx, 'rev.m1.iface.1.b1');
+    const card = dispatchView(ports.ctx, d.dispatch).card as unknown as ReviewerCard;
+    const obj = (await ports.ledger.objectVersion(card.target))!;
+    assert.deepEqual(ports.memory.data.getList(card.binding.reliesOn as never), obj.reviews[0]!.reliesOn);
+    assert.ok(ports.memory.data.getList(card.binding.constraints as never).some((c) => c.includes('constraint.late-api')));
+    assert.ok(card.decisionQuotes.includes('Use stable public names'));
+    assert.deepEqual(card.candidate.changedPaths, obj.scope.paths);
+    assert.deepEqual(await ports.scheduler.run(card.task, { handBack: reviewer(card, 'pass') }), []);
+    assert.equal((await labelsOf(ports, [card.target]))[card.target], 'proven', 'the dispatched Reviewer passes the current checks under the fixed contract');
+    await drive(engine, ports.scheduler, base);
+    const judgment = (await ports.ledger.judgment(`j.${card.task}`))!;
+    assert.deepEqual(ports.ledger.content.getList(judgment.constraints), ports.memory.data.getList(card.binding.constraints as never));
+    assert.equal((await labelsOf(ports, [card.target]))[card.target], 'proven');
+  });
+
+  it('a kept task rework Constructor dates quotes against the plan in effect at dispatch', async () => {
+    const { ports, engine } = await setup();
+    const old = await acceptedThenStale(ports, engine);
+    const decision = 'Use a strict parser';
+    await recordItem(ports, { mission: M, item: 'strict', type: 'decision', text: decision, source: { kind: 'authorization', line: 'item.m1.a1' } });
+    await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [old.w], changedItems: ['d1', 'strict'] });
+    const base = happyScript(M, keeps);
+    await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'reviewer' ? null : base(t, s));
+    const c = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1');
+    await ports.scheduler.run(c.task, { handBack: reviewer(c, 'rework') });
+    await engine.reconcile(M);
+    const words = say(ports, 'Also preserve line endings.');
+    await recordItem(ports, { mission: M, item: 'lines', type: 'decision', text: 'Preserve line endings', source: { kind: 'words', words, quote: 'preserve line endings' } });
+    const d = pmDispatch(ports.ctx, 'con.m1.iface.2');
+    const card = dispatchView(ports.ctx, d.dispatch).card as unknown as ConstructorCard;
+    assert.ok(card.decisionQuotes.includes(decision), 'the authorized decision predates plan2');
+    assert.ok(!card.decisionQuotes.includes(`${decision} (recorded after the plan)`));
+    assert.ok(card.decisionQuotes.includes('Preserve line endings (recorded after the plan)'));
+    const outcome = base(ports.scheduler.tasks.get(card.task)!.spec, ports.scheduler);
+    assert.ok(outcome);
+    assert.deepEqual(await ports.scheduler.run(card.task, outcome), []);
+    await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [words], changedItems: ['lines'] });
+    await drive(engine, ports.scheduler, base);
+  });
+});
+
+for (const mode of ['stable', 'fast'] as const) it(`integration: an invalid legacy accepted start precedes kept-card re-binding in ${mode} mode`, async () => {
+  const { ports, engine } = await setup();
+  const old = await acceptedThenStale(ports, engine);
+  const events = ports.ledger.events.bind(ports.ledger);
+  ports.ledger.events = (async (q) => (await events(q)).map((e) => {
+    if (e.event !== 'dispatched' || e.key !== 'con.m1.impl.1') return e;
+    const { prerequisites, ...body } = e.body as { prerequisites?: string[] };
+    return { ...e, body } as typeof e;
+  })) as typeof ports.ledger.events;
+  ports.scheduler.knobs.actions.startHolds = async (id) => ({ holds: id !== 'prod.con.m1.impl.1', missing: id === 'prod.con.m1.impl.1' ? [{ prerequisite: old.iface, path: 'src/parser/api.ts' }] : [] });
+  await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [old.w], changedItems: ['d1'], mode });
+  const script = happyScript(M, keeps);
+  await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'constructor' ? null : script(t, s));
+  assert.ok(ports.ledger.notices.some((n) => n.category === 'legacy-prerequisites-restarted' && (n.detail as { task: string }).task === 'impl'));
+  assert.deepEqual(await lineEvents(ports, 'impl', 'rebind'), [], 'invalid start takes the restart exit before keptStep');
+  assert.ok((await lineEvents<{ reason: string }>(ports, 'impl', 'rework')).some((e) => e.body.reason === 'program'));
+  assert.ok(ports.scheduler.queued('constructor').some((t) => t.task === 'con.m1.impl.2'), 'a pinned Constructor exit remains actionable');
+});
+
+it('integration: changing only iface holds docs and names the transitive old version in the blocked stack notice', async () => {
+  const { ports, engine } = await setup();
+  await drive(engine, ports.scheduler, happyScript(M, keeps));
+  const w = await laterDecision(ports);
+  await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [w], changedItems: ['d1'] });
+  const changed = () => ({ ...keeps(), tasks: keeps().tasks.map((t) => t.id === 'iface' ? { ...t, goal: `${t.goal}; expose a new interface` } : t) });
+  await drive(engine, ports.scheduler, happyScript(M, changed));
+  assert.equal(await ports.ledger.objectVersion('prod.con.m1.docs.1.b1'), null);
+  assert.ok(ports.ledger.notices.some((n) => n.category === 'kept-product-not-rebound' && (n.detail as { stale: string[] }).stale.includes('prod.con.m1.iface.1')));
+});
+
+describe('Stabilizer INT r1: closure comparison waits for the direct dependencies in any task order', () => {
+  const ordered = (reversed: boolean, plan: () => DetailedPlanDoc) => (): DetailedPlanDoc => {
+    const p = plan();
+    return reversed ? { ...p, tasks: p.tasks.toReversed() } : p;
+  };
+  for (const reversed of [false, true]) {
+    it(`a kept iface→impl→docs stack re-binds without a transient stale notice (${reversed ? 'docs, impl, iface' : 'iface, impl, docs'})`, async () => {
+      const { ports, engine } = await setup();
+      const plan = ordered(reversed, keeps);
+      await drive(engine, ports.scheduler, happyScript(M, plan));
+      const w = await laterDecision(ports);
+      await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [w], changedItems: ['d1'] });
+      await drive(engine, ports.scheduler, happyScript(M, plan));
+      assert.deepEqual(ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound'), [], 'no notice that the final state contradicts');
+      const doc = await ports.ledger.objectVersion('prod.con.m1.docs.1.b1');
+      assert.ok(doc);
+      assert.deepEqual([...ports.ledger.content.getList(doc.prerequisites)].sort(), ['prod.con.m1.iface.1.b1', 'prod.con.m1.impl.1.b1']);
+      assert.equal(await current(ports, 'docs'), 'prod.con.m1.docs.1.b1');
+      assert.equal((await labelsOf(ports, ['prod.con.m1.docs.1.b1']))['prod.con.m1.docs.1.b1'], 'proven');
+    });
+
+    it(`a dependency that cannot be re-bound holds its dependent under its own notice (${reversed ? 'docs, impl, iface' : 'iface, impl, docs'})`, async () => {
+      const { ports, engine } = await setup();
+      await drive(engine, ports.scheduler, happyScript(M, ordered(reversed, keeps)));
+      const w = await laterDecision(ports);
+      await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [w], changedItems: ['d1'] });
+      const changed = ordered(reversed, () => ({ ...keeps(), tasks: keeps().tasks.map((t) => t.id === 'iface' ? { ...t, goal: `${t.goal}; expose a new interface` } : t) }));
+      await drive(engine, ports.scheduler, happyScript(M, changed));
+      assert.equal(await ports.ledger.objectVersion('prod.con.m1.docs.1.b1'), null);
+      const blocked = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound');
+      assert.ok(blocked.some((n) => (n.detail as { task: string; stale: string[] }).task === 'impl' && (n.detail as { stale: string[] }).stale.includes('prod.con.m1.iface.1')), JSON.stringify(blocked));
+      assert.match(blocked.find((n) => (n.detail as { task: string }).task === 'impl')!.defaultAction, /holds the work that depends on it/);
+      const head = ports.ledger.head; await engine.reconcile(M);
+      assert.equal(ports.ledger.head, head, 'the hold is stable: nothing is rewritten');
+    });
+  }
+});
+
+describe('Stabilizer INT r2: fast mode compares closures as they are and keeps the re-review exits', () => {
+  const ordered = (reversed: boolean) => (): DetailedPlanDoc => {
+    const p = keeps();
+    return reversed ? { ...p, tasks: p.tasks.toReversed() } : p;
+  };
+  /** A kept-card fast re-plan, driven with no Constructor, Reviewer or Secretary seat running. */
+  async function fastReplan(ports: World, engine: FlowEngine, plan: () => DetailedPlanDoc): Promise<void> {
+    const w = await laterDecision(ports);
+    await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [w], changedItems: ['d1'], mode: 'fast' });
+    const base = happyScript(M, plan);
+    await drive(engine, ports.scheduler, (t, s) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : base(t, s));
+  }
+  /** The recorded environment re-review request is answered: a round on impl's accepted version and its Reviewer queued. */
+  async function answeredRereview(ports: World, engine: FlowEngine, plan: () => DetailedPlanDoc, impl: string): Promise<void> {
+    const request = (await ports.ledger.events<ReviewNeededBody>({ mission: M, line: RENEW_LINE, event: REVIEW_NEEDED })).filter((e) => e.body.target === impl).at(-1)!;
+    const rounds = await lineEvents<{ request: string; rev: string; product?: string }>(ports, 'impl', 'rereview');
+    assert.equal(rounds.length, 1, 'one re-review round');
+    assert.equal(rounds[0]!.body.request, request.key);
+    assert.ok(ports.scheduler.queued('reviewer').some((t) => t.task === 'rev.m1.impl.1.e1'), 'the re-review Reviewer is queued');
+    const head = ports.ledger.head; await engine.reconcile(M);
+    assert.equal(ports.ledger.head, head, 'settled: nothing is rewritten');
+    // its pass keeps the task accepted; it cannot make a version proven whose contract relies on the old plan
+    await drive(engine, ports.scheduler, happyScript(M, plan));
+    assert.equal((await lineEvents(ports, 'impl', 'reaccepted')).length, 1);
+    assert.equal(await current(ports, 'impl'), impl);
+    assert.equal((await labelsOf(ports, [impl]))[impl], 'not-fully-proven');
+    assert.deepEqual(await lineEvents(ports, 'impl', 'rebind'), [], 'fast mode re-binds nothing');
+  }
+
+  for (const reversed of [false, true]) {
+    const order = reversed ? 'docs, impl, iface' : 'iface, impl, docs';
+    it(`a closure mismatch is told and the environment re-review runs (${order})`, async () => {
+      const { ports, engine } = await setup();
+      const plan = ordered(reversed);
+      await drive(engine, ports.scheduler, happyScript(M, plan));
+      // iface's environment re-review sends it back; iface.2 is accepted under the first plan, impl rests on iface.1
+      await requestEnvironmentReview(ports, 'iface');
+      await drive(engine, ports.scheduler, (t) => t.card.seat === 'reviewer' && t.task.startsWith('rev.m1.iface.') ? { handBack: reviewer(t.card as ReviewerCard, 'rework') } : null);
+      await drive(engine, ports.scheduler, happyScript(M, plan));
+      assert.equal(await current(ports, 'iface'), 'prod.con.m1.iface.2');
+      await fastReplan(ports, engine, plan);
+      const impl = (await current(ports, 'impl'))!;
+      await requestEnvironmentReview(ports, 'impl');
+      await engine.reconcile(M);
+      const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'impl');
+      assert.equal(told.length, 1, JSON.stringify(told));
+      assert.deepEqual((told[0]!.detail as { stale: string[] }).stale, ['prod.con.m1.iface.1']);
+      assert.deepEqual((told[0]!.detail as { missing: string[] }).missing, ['prod.con.m1.iface.2']);
+      await answeredRereview(ports, engine, plan, impl);
+    });
+
+    it(`a kept product resting on a kept prerequisite is told and its environment re-review runs (${order})`, async () => {
+      const { ports, engine } = await setup();
+      const plan = ordered(reversed);
+      await drive(engine, ports.scheduler, happyScript(M, plan));
+      await fastReplan(ports, engine, plan);
+      const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound');
+      assert.deepEqual(told.map((n) => (n.detail as { task: string }).task).sort(), ['docs', 'iface', 'impl']);
+      assert.ok(told.every((n) => n.key.endsWith(':fast')), JSON.stringify(told.map((n) => n.key)));
+      const impl = (await current(ports, 'impl'))!;
+      await requestEnvironmentReview(ports, 'impl');
+      await engine.reconcile(M);
+      await answeredRereview(ports, engine, plan, impl);
+      assert.equal(ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound').length, 3, 'told once each');
+    });
+  }
+
+  it('a legacy direct-only record is checked at its start and compared through the same closure in fast mode', async () => {
+    const { ports, engine } = await setup();
+    let checked = false;
+    const product = ports.scheduler.product.bind(ports.scheduler);
+    ports.scheduler.product = (r) => product(r.task === 'con.m1.docs.1' ? { ...r, prerequisites: ['prod.con.m1.impl.1'] } : r);
+    ports.scheduler.knobs.actions.startHolds = async (id) => { if (id === 'prod.con.m1.docs.1') checked = true; return { holds: true, missing: [] }; };
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    assert.deepEqual(ports.ledger.content.getList((await ports.ledger.objectVersion('prod.con.m1.docs.1'))!.prerequisites), ['prod.con.m1.impl.1'], 'direct-only record');
+    const events = ports.ledger.events.bind(ports.ledger);
+    ports.ledger.events = (async (q) => (await events(q)).map((e) => {
+      if (e.event !== 'dispatched' || e.key !== 'con.m1.docs.1') return e;
+      const { prerequisites, ...body } = e.body as { prerequisites?: string[] };
+      return { ...e, body } as typeof e;
+    })) as typeof ports.ledger.events;
+    await fastReplan(ports, engine, keeps);
+    assert.ok(checked, 'the legacy accepted start is checked first');
+    const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'docs');
+    assert.deepEqual(told.map((n) => n.key), ['docs:prod.con.m1.docs.1:dplan.m1.2.1:fast'], 'no stale or missing member: only the fast-mode notice');
+    assert.equal(await current(ports, 'docs'), 'prod.con.m1.docs.1');
+  });
 });

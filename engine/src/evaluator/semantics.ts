@@ -763,26 +763,37 @@ export function composite(ix: IndexView, target: string, reviews: readonly Revie
  * target is covered by the union of the paths the deciding judgments reviewed
  * against its current content version.
  */
-function covered(ix: IndexView, scopes: readonly (ObjectScope & { mission: string })[], deciding: readonly JudgmentInfo[]): boolean {
+export function uncoveredConstraintRanges<T extends ConstraintCheck>(required: readonly T[], checked: readonly ConstraintCheck[]): T[] {
   const reviewed = new Map<string, Set<string>>(); // content version -> paths reviewed
+  for (const c of checked) {
+    let set = reviewed.get(c.version);
+    if (!set) reviewed.set(c.version, (set = new Set()));
+    for (const p of c.paths) set.add(p);
+  }
+  return required.flatMap((c) => {
+    const paths = c.paths.filter((p) => !reviewed.get(c.version)?.has(p));
+    return paths.length === 0 ? [] : [{ ...c, paths }];
+  });
+}
+
+function covered(ix: IndexView, scopes: readonly (ObjectScope & { mission: string })[], deciding: readonly JudgmentInfo[]): boolean {
+  const required: ConstraintCheck[] = [];
+  const checked: ConstraintCheck[] = [];
   for (const d of deciding) {
     for (const enc of d.rec.constraints) {
       const c = ix.check(enc);
       if (!c) continue;
-      let set = reviewed.get(c.version);
-      if (!set) reviewed.set(c.version, (set = new Set()));
-      for (const p of c.paths) set.add(p);
+      checked.push(c);
     }
   }
   for (const s of scopes) {
     for (const line of ix.constraintsFor(s)) {
       const c = ix.constraints.get(line)!;
       if (ix.withdrawn.has(line) || c.scope === null || !objectConstraintApplies({ scope: c.scope }, { scope: s, mission: s.mission })) continue;
-      const have = reviewed.get(c.latest);
-      for (const p of requiredRange(c.scope, s)) if (!have?.has(p)) return false;
+      required.push({ version: c.latest, paths: requiredRange(c.scope, s) });
     }
   }
-  return true;
+  return uncoveredConstraintRanges(required, checked).length === 0;
 }
 
 /** 5.3 label priority. A deciding judgment of any verdict whose basis line was withdrawn gives "basis-withdrawn". */

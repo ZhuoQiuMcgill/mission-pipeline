@@ -5,13 +5,13 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { taskLineage } from '../../flow/execution.ts';
+import { taskCardHash, taskLineage } from '../../flow/execution.ts';
 import { DetailedPlanDoc, PmPlanDoc, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
 import type { EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
-import { constraintsForTask, taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, taskUsesDispute } from './dynamic.ts';
+import { constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed } from './dynamic.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
 import type { ArchitectDecomposeCard, ArchitectFeasibilityCard } from './architect.ts';
@@ -32,15 +32,16 @@ function pages<T extends { revision: number }>(read: (after: number) => readonly
 
 export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc): TaskSpecDoc {
   const card = structuredClone(spec.card) as DispatchCard;
-  // Exploration inputs belong to the versioned definition. Blind cards exclude intent (§4.3).
+  // Exploration definition inputs stay fixed. Its review constraints are selected below (§9.5).
+  // Blind cards exclude intent (§4.3).
   switch (card.seat) {
     case 'researcher-author':
     case 'researcher-reader':
     case 'researcher-interpreter':
     case 'constructor-experiment':
+      return spec;
     case 'crititor':
     case 'stabilizer':
-      return spec;
     case 'constructor':
     case 'reviewer':
     case 'secretary':
@@ -64,30 +65,50 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
   const items = resolveItems(ix, events);
   const constraints = resolveConstraints(ix, constraintEvents);
   const object = (id: string) => factById(db, 'object.version', id)?.record as ObjectVersionRecord | undefined;
+  // The task's card in force: its latest spec. A plan that keeps the card writes no newer spec, so the
+  // spec's plan can be older than the plan in effect; only the card is read from it, never plan-level inputs.
   let task: DetailedTask | undefined;
-  let detailed: StoredDetailedPlan | undefined;
+  let cardHash: string | undefined;
   for (const e of events.filter((e) => e.line.startsWith('task:') && e.event === 'spec').toReversed()) {
     const id = e.line.slice('task:'.length);
     const subject = card.seat === 'secretary' ? card.request.subject : undefined;
     if (taskLineage(mission, id) !== spec.lineage && subject !== `task:${id}`) continue;
     const obj = object((e.body as { dplan: string }).dplan);
-    if (obj !== undefined) { detailed = JSON.parse(data.text(obj.content)) as StoredDetailedPlan; task = DetailedPlanDoc.parse(detailed.plan).tasks.find((t) => t.id === id); }
+    if (obj !== undefined) task = DetailedPlanDoc.parse((JSON.parse(data.text(obj.content)) as StoredDetailedPlan).plan).tasks.find((t) => t.id === id);
+    cardHash = (e.body as { hash: string }).hash;
     break;
   }
   switch (card.seat) {
+    case 'crititor':
+    case 'stabilizer': {
+      if (card.binding === null || card.target === null) break;
+      const obj = object(card.target);
+      if (obj === undefined) break;
+      const input = objectConstraints(constraints, obj);
+      card.binding.constraints = data.putList(input.checks);
+      card.constraints = [...card.constraints.filter((c) => c.kind !== 'object'), ...input.list];
+      break;
+    }
     case 'constructor': {
-      if (task === undefined) break;
-      if (spec.mode === 'fast' && detailed !== undefined) {
-        const view = decidingViews(db, [detailed.pmPlan]).views.get(detailed.pmPlan);
-        const pos = view?.positions.find((p) => p.review === 'calibrator-1');
-        const negated = pos?.state === 'fail' || pos?.state === 'undecided';
-        const failure = events.find((e) => e.line === 'plan' && e.event === 'cal1' && (e.body as { judgment: string }).judgment === pos?.by)?.body as { contested: string[] } | undefined;
-        const pm = object(detailed.pmPlan);
-        if (labelStatus(db).recomputing || view == null || pm === undefined || taskUsesDispute(mission, items, PmPlanDoc.parse(JSON.parse(data.text(pm.content))), detailed.plan, task, negated ? failure?.contested.length ? failure.contested : null : [])) throw new ProcessError('NOT_READY', `Task ${task.id} waits: its production inputs include contested or negated elements, or their labels are recomputing.`);
+      // Production is built under the plan in effect (taskReferencePlan, as submitConstructor queued it), so
+      // ruling 3 is decided under that plan's PM plan and dependency graph, by the flow gate's own decision
+      // (productionDisputed, as contestedProduction). A step queued in fast mode never passed the stable
+      // gate, so it is checked under a stable plan in effect too. A card the plan in effect no longer holds
+      // is superseded: the flow's next pass cancels the step (re-planned or dropped).
+      const eff = planInEffect(events);
+      const stored = eff === undefined ? undefined : object(eff.dplan);
+      const plan = stored === undefined ? undefined : DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan);
+      const current = task === undefined ? undefined : plan?.tasks.find((t) => t.id === task!.id);
+      if (eff === undefined || plan === undefined || current === undefined || taskCardHash(current) !== cardHash) throw new ProcessError('NOT_READY', `Constructor step ${spec.task} was superseded: the plan in effect${eff === undefined ? '' : ` (${eff.dplan})`} does not hold its card; run mp pm next.`);
+      task = current;
+      if (eff.mode === 'fast' || spec.mode === 'fast') {
+        const pm = object(eff.pmPlan);
+        const cal1 = events.filter((e) => e.line === 'plan' && e.event === 'cal1').map((e) => e.body as { judgment: string | null; contested: string[] });
+        if (labelStatus(db).recomputing || pm === undefined || productionDisputed(mission, items, PmPlanDoc.parse(JSON.parse(data.text(pm.content))), decidingViews(db, [eff.pmPlan]).views.get(eff.pmPlan), cal1, plan, task)) throw new ProcessError('NOT_READY', `Task ${task.id} waits: its production inputs include contested or negated elements, or their labels are recomputing. It can be dispatched once the dispute is ruled; run mp pm next.`);
       }
       const applicable = constraintsForTask(constraints, task, mission);
       card.constraints = applicable.map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
-      card.decisionQuotes = taskDecisionQuotes(items, events, task, applicable);
+      card.decisionQuotes = taskDecisionQuotes(items, events, task, applicable, taskReferencePlan(events));
       card.requirementItems = taskRequirementItems(items, task);
       break;
     }
@@ -104,7 +125,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       card.constraints = [...input.list, ...(task === undefined ? [] : constraintsForTask(constraints, task, mission).filter((c) => c.kind === 'instruction').map((c) => ({ id: c.line, text: c.text, kind: c.kind })))];
       if (task !== undefined) {
         const product = events.find((e) => e.line === `task:${task!.id}` && ((e.event === 'product' && (e.body as { object: string }).object === card.target) || (e.event === 'rebind' && (e.body as { product: string }).product === card.target)))?.body as { k: number } | undefined;
-        if (product !== undefined) card.decisionQuotes = reviewerDecisionQuotes(mission, items, events, task, constraints, product.k);
+        if (product !== undefined) card.decisionQuotes = reviewerDecisionQuotes(mission, items, events, task, constraints, product.k, taskReferencePlan(events, fixed));
       }
       break;
     }
