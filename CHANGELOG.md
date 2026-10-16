@@ -6,7 +6,7 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
-## [4.1.1] - unreleased
+## [4.1.1] - 2026-10-16
 
 4.1.1 takes in the field's stacked PRs #8–#15, revised per the maintainer's seven rulings of
 2026-10-13 (design contract U-15 to U-21). It also fixes five serious problems that the review of
