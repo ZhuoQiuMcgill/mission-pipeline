@@ -27,7 +27,11 @@
 //   under `.mission-pipeline/tmp/` (a verification run's `tmp/<run>/`, a seat's
 //   `tmp/<dispatch>/checkout/`) from the commit's objects alone: no worktree is
 //   registered and no untracked or ignored file of any worktree is in it.
-//   Removed after use.
+//   Removed after use. A run's checkout is also a git repository of its own,
+//   positioned at the commit, that borrows the project's objects
+//   (checkoutRepository.ts): the commands run there ask git about the candidate,
+//   never about the enclosing project's work tree. A seat's reading checkout is
+//   plain files.
 
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
@@ -36,6 +40,7 @@ import { inWriteScope } from '../delivery/writeScope.ts';
 import { LedgerError, PATH_ID, type Memory, type MemoryPaths } from '../memory/index.ts';
 import { decodePath, discoverRepo, gitOid, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
 import { GitError, GitExitError, type PlainGit } from './plainGit.ts';
+import { attachCheckoutRepository, checkoutSetupGit } from './checkoutRepository.ts';
 import { linkedGitDirs } from './worktreeRecord.ts';
 import {
   AttributeEvaluator,
@@ -534,9 +539,11 @@ function insideDir(child: string, parent: string): boolean {
  * `.mission-pipeline/tmp/`, replaced if it exists, holding exactly the commit's
  * files under the repository's transform description, from its objects alone
  * (nothing of any worktree, no registered worktree, no fetch). A missing object
- * is MissingObjectsError (representation.ts).
+ * is MissingObjectsError (representation.ts). `repository`: the checkout is also
+ * a git repository at the commit (a run's checkout: checkoutRepository.ts),
+ * removed with it; nothing is written to the project's repository.
  */
-export async function checkoutCommit(ctx: GitContext, req: { readonly commit: string; readonly dir: string; readonly description?: TransformDescription }): Promise<Checkout> {
+export async function checkoutCommit(ctx: GitContext, req: { readonly commit: string; readonly dir: string; readonly description?: TransformDescription; readonly repository?: boolean }): Promise<Checkout> {
   const tmp = ctx.memory.paths.tmp;
   if (!insideDir(req.dir, tmp)) throw new LedgerError('BAD_REQUEST', `a checkout goes under ${tmp}, not ${req.dir}`);
   mkdirSync(tmp, { recursive: true });
@@ -544,10 +551,14 @@ export async function checkoutCommit(ctx: GitContext, req: { readonly commit: st
   const scratch = mkdtempSync(join(tmp, 'checkout-attr-'));
   let attributes: AttributeEvaluator | null = null;
   try {
-    const repo: RepoLayout = await discoverRepo(ctx.git, ctx.memory.projectDir);
-    const description = req.description ?? (await readTransformDescription(ctx.git, repo, ctx.memory.projectDir));
-    attributes = await AttributeEvaluator.create(ctx.git, repo, description, scratch);
-    const manifest = await materializeSnapshot({ git: ctx.git, repo, commit: req.commit, attributes, dest: req.dir });
+    // AttributeEvaluator also initializes a repository, before the run's .git exists.
+    // Suppress its hooks too; the temporary override disappears with this scratch directory.
+    const git = checkoutSetupGit(ctx.git, join(scratch, '.git'));
+    const repo: RepoLayout = await discoverRepo(git, ctx.memory.projectDir);
+    const description = req.description ?? (await readTransformDescription(git, repo, ctx.memory.projectDir));
+    attributes = await AttributeEvaluator.create(git, repo, description, scratch);
+    const manifest = await materializeSnapshot({ git, repo, commit: req.commit, attributes, dest: req.dir });
+    if (req.repository === true) await attachCheckoutRepository(ctx.git, repo, { dir: req.dir, commit: manifest.commit, description });
     return { dir: req.dir, commit: manifest.commit, manifest, unsupported: manifest.unsupported };
   } catch (e) {
     rmSync(req.dir, { recursive: true, force: true });
@@ -558,7 +569,7 @@ export async function checkoutCommit(ctx: GitContext, req: { readonly commit: st
   }
 }
 
-/** Remove a checkout after use (its run, or the seat's dispatch, is over). Only directories under `tmp/`. */
+/** Remove a checkout after use (its run, or the seat's dispatch, is over), its own `.git` included. Only directories under `tmp/`. */
 export function removeCheckout(ctx: GitContext, dir: string): { readonly removed: boolean } {
   if (!insideDir(dir, ctx.memory.paths.tmp)) throw new LedgerError('BAD_REQUEST', `only checkouts under ${ctx.memory.paths.tmp} are removed, not ${dir}`);
   if (!existsSync(dir)) return { removed: false };

@@ -187,8 +187,8 @@ const label = async (p: ProcessProject): Promise<string> => (await resolveSubtas
 const treeState = (p: ProcessProject, m: string): string | null => buildGraph(p.ctx, { mission: m }).nodes.get(`exploration:${m}/${X}`)?.state ?? null;
 
 /** A close with risk, and its snapshot document. */
-function closeSnapshot(p: ProcessProject, m: string): { unfinished: { explorations: string[] }; risks: string[]; proof: Array<{ object: string; kind: string }> } {
-  const c = pmClose(p.ctx, m, { mode: 'with-risk' });
+async function closeSnapshot(p: ProcessProject, m: string): Promise<{ unfinished: { explorations: string[] }; risks: string[]; proof: Array<{ object: string; kind: string }> }> {
+  const c = await pmClose(p.ctx, m, { mode: 'with-risk' });
   return JSON.parse(p.ctx.memory.data.text(c.snapshot)) as { unfinished: { explorations: string[] }; risks: string[]; proof: Array<{ object: string; kind: string }> };
 }
 
@@ -352,7 +352,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
     assert.ok(escalationIds(p, 'm4').includes(`explore.m4.${X}.s2`), JSON.stringify(escalationIds(p, 'm4')));
     assert.match(await label(p), /^concluded: no-conclusion \(budget\); replaces the conclusion recorded before an environment change: conclusion \(converged\)/);
     // the closing snapshot reads the current settle
-    const doc = closeSnapshot(p, 'm4');
+    const doc = await closeSnapshot(p, 'm4');
     assert.deepEqual(doc.unfinished.explorations, []);
     assert.ok(doc.risks.includes(`exploration ${X} ended without a conclusion (budget)`), JSON.stringify(doc.risks));
   });
@@ -362,7 +362,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
     await convergedOnExperiment(p, 'm10', { rounds: 3 });
     p.reopen(ENV_B);
     await assertExits(p, 'm10', 'reopened');
-    const doc = closeSnapshot(p, 'm10');
+    const doc = await closeSnapshot(p, 'm10');
     assert.deepEqual(doc.unfinished.explorations, [X]);
     assert.ok(!doc.proof.some((o) => o.kind === 'exploration'), JSON.stringify(doc.proof));
   });

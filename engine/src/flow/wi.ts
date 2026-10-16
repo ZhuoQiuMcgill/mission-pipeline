@@ -1,5 +1,5 @@
 // The work instructions the decision-layer and execution flows name in their notices (design
-// 4.1 §6.9; the 4.1 set: WI-01..08, 13, 16, 19..21, 23..26, 28..33). Every exception these flows
+// 4.1 §6.9; the 4.1 set: WI-01..08, 13, 16, 19..21, 23..26, 28..34). Every exception these flows
 // can emit takes its WI from here; a notice with `wi: null` is a normal branch of the flow (3.9:
 // Secretary notices, a Calibrator ① return, the user's decision needed by 3.2).
 
@@ -26,4 +26,6 @@ export const WI = {
   recomputing: 'WI-32',
   /** 4.1 §6.3: an exploration awaits a ruling: the Stabilizer found a shift of direction or a drift. */
   explorationRuling: 'WI-33',
+  /** Current plan judgments leave newly applicable object constraints uncovered. */
+  planConstraintGap: 'WI-34',
 } as const;

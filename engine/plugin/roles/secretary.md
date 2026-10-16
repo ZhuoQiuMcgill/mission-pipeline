@@ -7,6 +7,7 @@ Only three kinds of decision go to the user: one that changes what the user gets
 ## What you receive
 Your card (`mp seat <id> card`); *required* marks a required input.
 - The escalation *(required)*: what was escalated, by whom and why; the original and the changed form; the escalating party's reasons.
+- The facts, decisions and constraints refreshed when your dispatch is claimed. Instructions are context, not proof inputs; object constraints keep their proof meaning.
 - The related authorizations, verbatim, with when the user wants to be told *(required)*; the requirement items involved; the alignment record (materials).
 - The options `mp` can carry out for this escalation, each with its outcome *(required)*.
 - Whether your one extra grant on this lineage is still available.
@@ -32,7 +33,7 @@ For an exploration: a direction question (a shifting finding, drift) usually goe
 
 ## Upstream and downstream
 - Upstream: the party that escalated (named on the card).
-- Downstream: `mp` carries out your choice; the PM is told, and asks the user when you chose `ask-user`.
+- Downstream: `mp` checks that the authority and decision items you relied on are still in force before carrying out your choice. If they changed, the escalation returns on a fresh Secretary card; the PM is told, and asks the user when you chose `ask-user`.
 
 ## Never
 - Choose an option that is not on the card, or a grant when yours is used.

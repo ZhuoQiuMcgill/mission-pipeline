@@ -1,3 +1,4 @@
+import { secretaryInputs, secretaryRoundInputs } from '../seat/cards/dynamic.ts';
 // Escalations to the Secretary (design 3.8, 3.2, 3.9, 6.5) for every flow.
 //
 // A flow raises an escalation with the options the program can carry out for it; this module
@@ -20,10 +21,10 @@ import type { BaseRecord, JudgmentRecord, ListRef } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import type { CardBinding } from '../seat/cards/common.ts';
 import type { DecisionOption, EscalationSource, SecretaryCard, SecretaryResult } from '../seat/cards/secretary.ts';
-import { cardBase, commit, currentVersions, basisIndex, ev, eventOf, eventsOf, flowCtx, judgmentRecordOf, material, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
-import { PLAN_LINE, SECRETARY_LINE } from './plandoc.ts';
+import { cardBase, commit, currentVersions, basisIndex, ev, eventOf, eventsOf, flowCtx, judgmentRecordOf, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
+import { DetailedPlanDoc, PLAN_LINE, SECRETARY_LINE, type StoredDetailedPlan } from './plandoc.ts';
 import type { AppendGuard, FlowEventInput, FlowPorts } from './ports.ts';
-import { currentItems } from './requirements.ts';
+import { currentItems, currentConstraints } from './requirements.ts';
 import { WI } from './wi.ts';
 
 export interface EscalationSpec {
@@ -66,6 +67,7 @@ export interface DecisionBody {
   readonly grantExtra: number;
   readonly notice: string;
   readonly mayMatter: boolean;
+  readonly inputs?: readonly { line: string; version: string; type: string }[];
 }
 
 /** What an option means, for the card. */
@@ -125,20 +127,13 @@ async function submitSecretary(ctx: FlowCtx, e: EscalationBody): Promise<void> {
 
 async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<SecretaryCard> {
   const items = await currentItems(ctx);
-  const auths = items.filter((i) => i.type === 'authorization');
-  const involved = items.filter((i) => (e.items ?? []).includes(i.line) || i.type === 'decision');
-  const grantAvailable = !(await ctx.ports.ledger.loop(e.lineage, 'env-retry')).secretaryGrantUsed;
-  const batches = await eventsOf<{ batch: string; userWords: string[]; summary?: string }>(ctx, PLAN_LINE, 'pm-batch');
-  const request = [
-    `Escalation ${e.id} from ${e.source} on ${e.subject}`,
-    e.summary,
-    e.original ? `Original:\n${e.original}` : '',
-    e.changed ? `Changed:\n${e.changed}` : '',
-    e.reasons.length > 0 ? `Reasons:\n${e.reasons.map((r) => `- ${r}`).join('\n')}` : '',
-    e.facts !== undefined ? `Facts:\n${JSON.stringify(e.facts, null, 2)}` : '',
-  ]
-    .filter((s) => s !== '')
-    .join('\n\n');
+  const allConstraints = await currentConstraints(ctx);
+  const taskId = e.subject.startsWith('task:') ? e.subject.slice('task:'.length) : null;
+  const spec = taskId === null ? undefined : (await eventsOf<{ dplan: string }>(ctx, `task:${taskId}`, 'spec')).at(-1)?.body;
+  const obj = spec === undefined ? null : await ctx.ports.ledger.objectVersion(spec.dplan);
+  const detailed = obj === null ? null : JSON.parse(ctx.ports.ledger.content.get(obj.content)) as StoredDetailedPlan;
+  const task = detailed === null ? undefined : DetailedPlanDoc.parse(detailed.plan).tasks.find((t) => t.id === taskId);
+  const inputs = secretaryInputs(ctx.mission, e, items, allConstraints, await ctx.ports.ledger.events({ mission: ctx.mission }), task, !(await ctx.ports.ledger.loop(e.lineage, 'env-retry')).secretaryGrantUsed, (text) => ctx.ports.ledger.content.put(text));
   let position: SecretaryCard['position'] = null;
   if (e.position) {
     const neg = await judgmentRecordOf(ctx, e.position.revokes);
@@ -147,19 +142,11 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
   return {
     ...cardBase(ctx, e.task, {
       duties: 'Decide this one escalation within the recorded authority, pick one option, classify it, and write the notice for the PM.',
-      decisionQuotes: involved.filter((i) => i.type === 'decision').map((i) => i.text),
     }),
     seat: 'secretary',
     request: { id: e.id, source: e.source, lineage: e.lineage, subject: e.subject, summary: e.summary, original: e.original ?? '', changed: e.changed ?? '', reasons: [...e.reasons] },
-    authorizations: auths.map((a) => ({ id: a.line, quote: a.source.kind === 'words' ? a.source.quote : a.text, notifyCondition: a.notifyCondition })),
-    items: involved.map((i) => ({ id: i.line, text: i.text })),
-    materials: [
-      material(ctx, 'request', 'The escalated question and its facts', request, true, 'record'),
-      material(ctx, 'authorizations', 'Authorizations in force (verbatim)', auths.map((a) => `[${a.line}] ${a.text}${a.source.kind === 'words' ? ` — "${a.source.quote}"` : ''}`).join('\n') || '(none)', true, 'authorizations'),
-      material(ctx, 'alignment', 'Alignment record (PM batches)', batches.map((b) => `${b.key}: user messages ${b.body.userWords.join(', ') || 'none'}`).join('\n') || '(none)', true, 'record'),
-    ],
+    ...inputs,
     options: e.options.map((o) => ({ id: o, ...OPTION_TEXT[o] })),
-    grantAvailable,
     position,
   };
 }
@@ -179,18 +166,23 @@ function rulingBinding(neg: JudgmentRecord, judgment: string): CardBinding {
   };
 }
 
+async function secretaryRound(ctx: FlowCtx, esc: EscalationBody): Promise<{ esc: EscalationBody; key: string; round: number }> {
+  return secretaryRoundInputs(esc, await ctx.ports.ledger.events({ mission: ctx.mission }));
+}
+
 /** Process every open escalation of the mission: start its Secretary, record its decision, tell the PM. */
 export async function secretaryStep(ctx: FlowCtx): Promise<void> {
   for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
-    const esc = e.body;
+    const round = await secretaryRound(ctx, e.body);
+    const esc = round.esc;
     // closed before its Secretary decided (its owner left scope: superseded), or decided by the user
     // first: the Secretary step is moot. Before the task view: a cancelled step must not read as a
     // Secretary that could not decide (that would ask the user, WI-24). No decision, no notice.
-    if ((await closedEscalation(ctx, esc.id)) !== null || ((await eventOf(ctx, SECRETARY_LINE, 'user-answer', esc.id)) !== null && (await eventOf(ctx, SECRETARY_LINE, 'decision', esc.id)) === null)) {
+    if ((await closedEscalation(ctx, esc.id)) !== null || ((await eventOf(ctx, SECRETARY_LINE, 'user-answer', esc.id)) !== null && (await eventOf(ctx, SECRETARY_LINE, 'decision', round.key)) === null)) {
       await cancelSecretarySteps(ctx, [esc.id]);
       continue;
     }
-    const decided = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', esc.id);
+    const decided = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', round.key);
     if (decided !== null) {
       // the notices a decision calls for are sent until marked told (code review r1 #14)
       if (decided.body.by === 'program') await tellUndecided(ctx, esc, decided.body.reason);
@@ -219,11 +211,14 @@ export async function secretaryStep(ctx: FlowCtx): Promise<void> {
         notice: `The Secretary could not decide escalation ${esc.id} (${esc.summary}); please decide with the user.`,
         mayMatter: false,
       };
-      await commit(ctx, `flow:decision:${ctx.mission}:${esc.id}`, { events: [ev(ctx, SECRETARY_LINE, 'decision', esc.id, d)] });
+      await commit(ctx, `flow:decision:${ctx.mission}:${round.key}`, { events: [ev(ctx, SECRETARY_LINE, 'decision', round.key, d)] });
       await tellUndecided(ctx, esc, d.reason);
       continue;
     }
     const r = view.result as SecretaryResult;
+    const dispatch = view.status.handBack?.dispatch;
+    const claimed = dispatch === undefined ? null : await eventOf<{ spec: string }>(ctx, `dispatch:${dispatch}`, 'claimed', 'spec');
+    const dispatched = claimed === null ? null : JSON.parse(ctx.ports.ledger.content.get(claimed.body.spec)) as { card: SecretaryCard };
     const d: DecisionBody = {
       escalation: esc.id,
       by: 'secretary',
@@ -235,8 +230,9 @@ export async function secretaryStep(ctx: FlowCtx): Promise<void> {
       grantExtra: r.grantExtra,
       notice: r.notice,
       mayMatter: r.mayMatter,
+      ...(dispatched?.card.contextItems !== undefined ? { inputs: dispatched.card.contextItems } : {}),
     };
-    await commit(ctx, `flow:decision:${ctx.mission}:${esc.id}`, { events: [ev(ctx, SECRETARY_LINE, 'decision', esc.id, d)] });
+    await commit(ctx, `flow:decision:${ctx.mission}:${round.key}`, { events: [ev(ctx, SECRETARY_LINE, 'decision', round.key, d)] });
     await tellPm(ctx, esc, d);
   }
 }
@@ -277,7 +273,8 @@ async function tellPm(ctx: FlowCtx, esc: EscalationBody, d: DecisionBody): Promi
 /** The "in effect" notice of a Secretary decision the flow carried out (sent at apply; again until told). */
 async function tellApplied(ctx: FlowCtx, id: string): Promise<void> {
   const esc = await escalation(ctx, id);
-  const d = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', id);
+  const key = esc === null ? id : (await secretaryRound(ctx, esc)).key;
+  const d = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', key);
   if (esc !== null && d !== null && d.body.by === 'secretary') await tellPm(ctx, esc, d.body);
 }
 
@@ -300,16 +297,44 @@ async function tellToUser(ctx: FlowCtx, id: string, why: string, wi: string | nu
   });
 }
 
-/**
- * The decision to carry out, or null while there is none (no decision yet, or waiting for the
- * user). A user's answer, once recorded, overrides.
- */
+/** Reject and queue a fresh card in the same retry path, without recovering old inputs. */
+async function rejectDecision(ctx: FlowCtx, esc: EscalationBody, round: { key: string; round: number }, d: DecisionBody, why: string): Promise<false> {
+  const n = round.round + 1;
+  const id = esc.id;
+  const key = `${id}#${n}`;
+  const original = await escalation(ctx, id);
+  const task = `${original!.task}.retry${n}`;
+  const inputs = (d.inputs ?? []).filter((i) => i.type === 'decision' || i.type === 'decision-authority' || i.line === d.authorization);
+  await commit(ctx, `flow:secretary-retry:${ctx.mission}:${key}`, { events: [ev(ctx, SECRETARY_LINE, 'decision-rejected', round.key, { id, why, authorization: d.authorization, inputs }), ev(ctx, SECRETARY_LINE, 'secretary-retry', key, { id, task, why })] });
+  await submitSecretary(ctx, { ...esc, task, reasons: [...esc.reasons, why] });
+  return false;
+}
+
+async function decisionAuthorityCurrent(ctx: FlowCtx, esc: EscalationBody, round: { key: string; round: number }, d: DecisionBody): Promise<boolean> {
+  if (d.by === 'secretary') {
+    if (round.round === 0 && d.inputs === undefined) return rejectDecision(ctx, esc, round, d, 'The Secretary decided on a card from before 4.1.1, which kept no versions of what it relied on. Review the current facts and decide again.');
+    const items = await currentItems(ctx);
+    const relied = (d.inputs ?? []).filter((i) => i.type === 'decision' || i.type === 'decision-authority' || i.line === d.authorization);
+    const authority = d.authorization === null || items.some((i) => i.line === d.authorization && i.type === 'authorization' && i.state === 'valid');
+    const current = relied.every((i) => items.some((now) => now.line === i.line && now.version === i.version && now.state === 'valid'));
+    if (!authority || !current) {
+      const why = `The Secretary decision was not carried out: its authorization or a cited decision is no longer in force. Review the current facts and decide again.`;
+      return rejectDecision(ctx, esc, round, d, why);
+    }
+  }
+  return true;
+}
+
+/** The decision to carry out, or null while waiting. A user's answer overrides. */
 export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBody | null> {
   const answer = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'user-answer', id);
   if (answer !== null) return answer.body;
   if ((await eventOf(ctx, SECRETARY_LINE, 'to-user', id)) !== null) return null;
-  const d = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', id);
+  const esc = await escalation(ctx, id);
+  const round = esc === null ? null : await secretaryRound(ctx, esc);
+  const d = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', round?.key ?? id);
   if (d === null || d.body.classification === 'needs-user') return null;
+  if (round !== null && !(await isApplied(ctx, id)) && !(await decisionAuthorityCurrent(ctx, round.esc, round, d.body))) return null;
   return d.body;
 }
 
@@ -331,7 +356,8 @@ export function supersededEvent(ctx: FlowCtx, id: string, why: string): FlowEven
 /** Cancel the queued Secretary steps of these escalations (one in flight is refused at its hand-back: process/seat.ts). */
 export async function cancelSecretarySteps(ctx: FlowCtx, ids: readonly string[]): Promise<void> {
   for (const id of ids) {
-    const t = escalationTask(id);
+    const esc = await escalation(ctx, id);
+    const t = esc === null ? escalationTask(id) : (await secretaryRound(ctx, esc)).esc.task;
     if ((await ctx.ports.scheduler.status(t))?.state === 'queued') await ctx.ports.scheduler.cancel(t);
   }
 }
@@ -376,8 +402,12 @@ export interface Carry {
 }
 
 export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, unknown>): Promise<Carry> {
-  const esc = await escalation(ctx, id);
+  const original = await escalation(ctx, id);
+  const round = original === null ? null : await secretaryRound(ctx, original);
+  const esc = round?.esc ?? null;
   const d = await decisionFor(ctx, id);
+  if (d === null) throw Object.assign(new Error('The decision is not carried out: it awaits a current Secretary choice or the user.'), { code: 'NOT_READY' });
+  if (esc !== null && round !== null && !(await decisionAuthorityCurrent(ctx, esc, round, d))) throw Object.assign(new Error('The decision is not carried out: its authority changed.'), { code: 'STALE_REQUEST' });
   const records: BaseRecord[] = [];
   let ruling: string | null = null;
   const accepting = (o: unknown): boolean => o === 'accept' || o === 'accept-risk';
@@ -404,6 +434,7 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
     records,
     absent: [
       { mission: ctx.mission, line: SECRETARY_LINE, event: 'applied', key: id },
+      ...(d?.by === 'secretary' ? (d.inputs ?? []).filter((i) => i.type === 'decision' || i.type === 'decision-authority' || i.line === d.authorization).flatMap((i) => [{ mission: ctx.mission, line: 'requirements', event: 'withdrawn', key: i.line }, { mission: ctx.mission, line: 'requirements', event: 'item', key: i.version.replace(/\.v(\d+)$/, (_, n: string) => `.v${Number(n) + 1}`) }]) : []),
       // a decision not the user's is the one in force only while the user has not answered (nor been handed it)
       ...(d === null || d.by !== 'user' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'user-answer', key: id }, { mission: ctx.mission, line: SECRETARY_LINE, event: 'to-user', key: id }] : []),
     ],

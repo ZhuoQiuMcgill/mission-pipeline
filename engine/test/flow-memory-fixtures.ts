@@ -13,11 +13,13 @@ import { canonicalJson, sha256 } from '../src/common/hash.ts';
 import { idPart, type ContentHash, type EvidenceId, type MissionId } from '../src/common/ids.ts';
 import type { BaseRecord, LoopKind, ObjectVersionRecord } from '../src/common/records.ts';
 import { validateRecord } from '../src/common/validate.ts';
+import { memoryProofView } from '../src/delivery/memoryView.ts';
+import { compose } from '../src/process/actions.ts';
 import '../src/evaluator/index.ts';
 import { ENV_LINE, forgetObservedEnvironment, runClassOf, type EnvironmentParts } from '../src/evaluator/index.ts';
-import type { FlowNotice, FlowTask, ProductRequest, ProductVersion, VerificationRun, VerifyRequest } from '../src/flow/ports.ts';
+import type { FlowNotice, FlowTask, ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../src/flow/ports.ts';
 import type { ScriptedOutcome, ScriptedScheduler } from '../src/flow/scripted.ts';
-import { appendRecords, initMemory, LedgerError, listDispatches, openMemory, recordWords, type Memory } from '../src/memory/index.ts';
+import { appendRecords, factById, initMemory, LedgerError, listDispatches, openMemory, recordWords, type Memory } from '../src/memory/index.ts';
 import {
   DISPATCH_LINE,
   MemoryFlowEvaluator,
@@ -56,7 +58,7 @@ export interface FakeKnobs {
   /** Symbols the snapshot has, as "file#symbol" (null: every symbol exists). */
   symbols: ReadonlySet<string> | null;
   /** Program actions instead of the fakes (e.g. a test's own snapshot). */
-  actions: Partial<Pick<GitActions, 'snapshot' | 'product' | 'verify'>>;
+  actions: Partial<Pick<GitActions, 'startHolds' | 'snapshot' | 'product' | 'verify'>>;
   /** The candidate collection at a Constructor's hand-back (default: a candidate commit). */
   collect: WorkspaceOps['collect'] | null;
   /** The files of a snapshot commit that file: pointers are checked against (default null: no repository here, not checked). */
@@ -66,12 +68,27 @@ export interface FakeKnobs {
 function fakeActions(ctx: ProcessContext, k: FakeKnobs): GitActions {
   const verified = new Map<string, readonly VerificationRun[]>();
   const calls = new Map<string, number>();
+  const composition: GitActions['composition'] = async (products) => {
+    const view = memoryProofView(ctx.memory, { revision: ctx.memory.head(), recomputing: false, recomputingIn: () => false, labelOf: () => 'unaccepted', decidingRuns: () => [] });
+    // Fake products have no git placement; supply it only to the composition view.
+    const manifest = compose({ ...view, object(id) {
+      const v = view.object(id);
+      return v === null || v.kind !== 'product' || v.tree !== null ? v : { ...v, tree: { commit: fakeCommit(id) as never, writeScope: v.paths, transform: v.content } };
+    } }, products);
+    return manifest.entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
+  };
   return {
+    composition,
+    async startHolds(product) {
+      if (k.actions.startHolds !== undefined) return k.actions.startHolds(product);
+      // The default products have no repository trees. Provenance tests supply real tree responses.
+      return { holds: true, missing: [] };
+    },
     async snapshot(req) {
       if (k.actions.snapshot !== undefined) return k.actions.snapshot(req);
-      const products = [...new Set(req.products ?? [])].sort();
+      const products = await composition(req.carry?.products ?? req.products ?? []);
       const commit = products.length === 0 ? (req.commit ?? FAKE_BASE) : fakeCommit(req.commit ?? FAKE_BASE, ...products);
-      return { path: commit, commit, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
+      return { path: commit, commit, products, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
     },
     async product(req: ProductRequest): Promise<ProductVersion> {
       if (k.actions.product !== undefined) return k.actions.product(req);
@@ -95,6 +112,30 @@ function fakeActions(ctx: ProcessContext, k: FakeKnobs): GitActions {
       validateRecord(rec);
       ctx.memory.write({ op: `flow:product-version:${req.mission}:${object}`, payload: { object, candidate: req.candidate } }, (tx) => appendRecords(tx, [rec]));
       return pv;
+    },
+    async rebind(req: RebindRequest) {
+      // the same content as its predecessor, its own prerequisites and contracts (Appendix J)
+      const from = ctx.memory.read((db) => factById(db, 'object.version', req.of))?.record as ObjectVersionRecord | undefined;
+      if (from === undefined) throw Object.assign(new Error(`product version ${req.of} is not recorded`), { code: 'unknown-product' });
+      const commit = from.source?.commit ?? fakeCommit('candidate-of', req.of);
+      const exists = ctx.memory.read((db) => Boolean(db.stmt("SELECT 1 FROM facts WHERE kind = 'object.version' AND id = ?").get(req.object)));
+      if (exists) return { object: req.object, commit };
+      const rec: ObjectVersionRecord = {
+        kind: 'object.version',
+        object: req.object as never,
+        objectKind: from.objectKind,
+        mission: from.mission,
+        module: from.module,
+        content: from.content,
+        prerequisites: ctx.memory.data.putList(req.prerequisites),
+        scope: from.scope,
+        reviews: [...req.reviews],
+        ...(from.source !== undefined ? { source: from.source } : {}),
+        predecessor: req.of as never,
+      };
+      validateRecord(rec);
+      ctx.memory.write({ op: `flow:product-rebind:${req.mission}:${req.object}`, payload: { object: req.object, of: req.of } }, (tx) => appendRecords(tx, [rec]));
+      return { object: req.object, commit };
     },
     async verify(req: VerifyRequest) {
       if (k.actions.verify !== undefined) return k.actions.verify(req);

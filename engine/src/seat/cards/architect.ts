@@ -20,7 +20,7 @@ import type { BaseRecord, JudgmentRecord, ListRef, ObjectVersionRecord, ReviewCo
 import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
 import { DetailedPlanDoc, DetailedTask, feasibilityRequired, planIdProblems, type StoredDetailedPlan } from '../../flow/plandoc.ts';
-import { Binding, Item, ReadOnlyWorkspace, commonCardFields, list, renderCommon } from './common.ts';
+import { Binding, Item, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
@@ -62,6 +62,12 @@ export const ArchitectDecomposeCardSchema = z.object({
       instructions: z.array(z.string()),
     })
     .nullable(),
+  /**
+   * Must-read materials: on a revision, the previous detailed plan in full (PREVIOUS_PLAN_MATERIAL),
+   * read page by page. Absent on a first decomposition, and on cards queued before it existed (their
+   * body then shows the previous plan inline).
+   */
+  materials: z.array(Material).optional(),
   /** What the program records the hand-back as (the seat never sees ids it could change). */
   output: z.object({
     object: z.string().min(1),
@@ -150,12 +156,65 @@ export type ArchitectFeasibilityResult = z.infer<typeof ArchitectFeasibilityResu
 
 
 
+// ---------------------------------------------------------------- the previous plan on a revision
+
+/** The material that holds the previous detailed plan on a revision card. */
+export const PREVIOUS_PLAN_MATERIAL = 'plan-old';
+
+/**
+ * The carry rule of a revision (§6.2: a task whose card changes restarts at a new attempt, and the
+ * next attempt starts from the mission base plus its dependencies' current accepted work, without
+ * the earlier attempts' work (ruling 6); its earlier records remain; a task whose card is unchanged keeps it).
+ */
+export const REVISION_CARRY_RULE =
+  'Carry over every task the revision does not need to change exactly as it is in the previous detailed plan: the same id and the same value in every field (goal, standards, requirement items, write scope, files to read, interpreter, verification commands, interfaces, dependencies, exclusive resources, estimate, provenance). ' +
+  "A task's fields are its card, and any change to its card, however small, restarts the task at a new attempt that starts from the mission base plus its dependencies' current accepted work, without the earlier attempts' work (ruling 6); its earlier records remain. " +
+  'Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require (and what such a change forces, such as a dependency on a new task); as guidance (Proposal, pending ruling), prefer a fresh id for a new task. ' +
+  'Keep the modules and interfaces the unchanged tasks use as they are too.';
+
+/**
+ * The previous detailed plan as a seat reads it on a revision: in full, as the very fields of a
+ * decomposition hand-back, one task (interface, module, risk) per line, so that a task carried over
+ * is copied as it is, not retyped.
+ */
+export function previousPlanText(id: string | null, plan: DetailedPlanDoc): string {
+  const doc = DetailedPlanDoc.parse(plan);
+  const fields = Object.entries(doc).map(([k, xs]: [string, readonly unknown[]]) => `  ${JSON.stringify(k)}: [${xs.length === 0 ? ']' : `\n${xs.map((x) => `    ${JSON.stringify(x)}`).join(',\n')}\n  ]`}`);
+  return (
+    `Detailed plan ${id ?? '(previous)'}: the plan this revision revises, in full, in the form of your hand-back's fields, one task (interface, module, risk) per line (${doc.tasks.length} task${doc.tasks.length === 1 ? '' : 's'}: ${doc.tasks.map((t) => t.id).join(', ')}).\n\n` +
+    `${REVISION_CARRY_RULE}\n\n` +
+    `\`\`\`json\n{\n${fields.join(',\n')}\n}\n\`\`\`\n`
+  );
+}
+
 // ---------------------------------------------------------------- render
 
 const prov = (p: z.infer<typeof DetailedTask>['provenance']): string => (p === 'architect' ? 'architect' : `plan element ${p.planElement}`);
 
+function renderRevision(c: ArchitectDecomposeCard): string {
+  const r = c.revision;
+  if (r === null) return '';
+  const prev = r.previousPlan;
+  const material = (c.materials ?? []).find((m) => m.id === PREVIOUS_PLAN_MATERIAL);
+  let previous = '';
+  if (prev !== null) {
+    const what = `Previous detailed plan: ${r.previous ?? '(not recorded)'}, ${prev.tasks.length} task${prev.tasks.length === 1 ? '' : 's'} (${prev.tasks.map((t) => t.id).join(', ')})`;
+    previous = material !== undefined ? `${what}, in full in material ${material.id} (must read: every page).\n\n` : `${what}. It is shown in full at the end of this card.\n\n`;
+  } else if (r.previous !== null) previous = `Previous detailed plan: ${r.previous} (its content could not be read; plan from the PM plan and say so in the risks).\n\n`;
+  return (
+    '## This is a revision\n' +
+    previous +
+    `### What to carry over\n${REVISION_CARRY_RULE}\n\n` +
+    list('Mechanical check failures to fix', r.mechanicalFailures) +
+    list('Feasibility findings to answer', r.feasibilityFindings) +
+    list('Instructions', r.instructions)
+  );
+}
+
 export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
   const r = c.revision;
+  // a revision card queued before the previous plan became a material: the plan inline, in full
+  const inline = r !== null && r.previousPlan !== null && !(c.materials ?? []).some((m) => m.id === PREVIOUS_PLAN_MATERIAL) ? `## The previous detailed plan, in full\n${previousPlanText(r.previous, r.previousPlan)}\n` : '';
   return (
     renderCommon(c) +
     `## PM plan version ${c.pmPlan.object} (round ${c.pmPlan.round}; order: ${c.pmPlan.order === 'user' ? 'specified by the user: keep it' : 'free'})\n` +
@@ -167,13 +226,9 @@ export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
     list('Settled exploration conclusions to plan from', c.explorationConclusions.map((x) => `[${x.exploration}] ${x.summary}`)) +
     `## Git history (exported)\n${c.history.gitLog || '(none)'}\n\n` +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms, ${h.costMicros} micro-dollars`)) +
-    (r === null
-      ? ''
-      : '## This is a revision\n' +
-        (r.previous !== null ? `Previous detailed plan: ${r.previous} (its tasks: ${(r.previousPlan?.tasks ?? []).map((t) => t.id).join(', ') || 'none'})\n` : '') +
-        list('Mechanical check failures to fix', r.mechanicalFailures) +
-        list('Feasibility findings to answer', r.feasibilityFindings) +
-        list('Instructions', r.instructions))
+    renderRevision(c) +
+    renderMaterials(c.materials ?? []) +
+    inline
   );
 }
 

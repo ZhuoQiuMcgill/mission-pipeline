@@ -1,3 +1,6 @@
+import { reviewInputVersions, objectConstraints, boundObjectConstraints, changedPlanningInputs, planningContext, type PlanningInputs, withdrawnPlanReason, standardLine } from '../seat/cards/inputs.ts';
+export { standardLine } from '../seat/cards/inputs.ts';
+import { productionDisputed } from '../seat/cards/dynamic.ts';
 // The decision layer (design 3.1–3.10): PM plan → Calibrator ① → Architect (decomposition) →
 // program mechanical checks → feasibility review → Calibrator ② → the plan's tasks released;
 // Secretary escalations on the way; the plan grows by rounds.
@@ -11,6 +14,12 @@
 //                            works with the user present). A continuation review extends the
 //                            previous plan version's pass (5.2 part 5); "needs full review" or a
 //                            refused continuation runs a full review instead (a normal branch).
+//   re-check (3.3, 5.2 p. 5) a batch whose plan document is the plan in effect, unchanged (only the
+//                            requirement items or the user's words moved): no new version and no
+//                            Architect; Calibrator ① judges the SAME plan version again, as a
+//                            continuation of its deciding pass focused on the changed items. A pass
+//                            makes the plan current on the new requirement set, and restores indirect dependents whose own inputs remain current (5.2 part 5: "M2 and the
+//                            detailed plan recover"); a fail goes back to the PM like any batch.
 //   Architect (3.4)          attempt k on PM plan version n; its hand-back is the detailed plan
 //                            version dplan.<mission>.<n>.<k>.
 //   mechanical checks (3.5)  fail → back to the Architect (mechanical-return, cap 3, no-progress);
@@ -33,7 +42,7 @@
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId, ObjectVersionId } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
 import type { BaseRecord, JudgmentRecord, ObjectVersionRecord, UserWordsRecord } from '../common/records.ts';
-import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectFeasibilityResult } from '../seat/cards/architect.ts';
+import { PREVIOUS_PLAN_MATERIAL, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult } from '../seat/cards/architect.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
 import {
@@ -64,6 +73,7 @@ import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
 import {
   DetailedPlanDoc,
+  DetailedTask,
   PLAN_LINE,
   PM_PLAN_EFFECTIVE,
   PmPlanDoc,
@@ -73,9 +83,10 @@ import {
   type ExplorationSettledBody,
   type PmPlanEffectiveBody,
   type StoredDetailedPlan,
+  taskLine,
 } from './plandoc.ts';
 import type { FlowEventInput, FlowPorts } from './ports.ts';
-import { currentItems, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
+import { currentItems, currentConstraints, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
 import { cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 import { currentSettle, settledArtifactProven } from './exploration/step.ts';
@@ -93,6 +104,39 @@ export interface PmBatchBody {
   readonly dependentItems: readonly string[];
   /** The mission's default (4.1, maintainer: one default per task, exceptions by goal). */
   readonly mode: 'stable' | 'fast';
+  readonly requirementSet?: string;
+}
+
+/**
+ * A re-check of the PM plan in effect (3.3, 5.2 part 5): the PM submitted the plan document in
+ * effect unchanged with a new batch of words or changed items. Calibrator ① judges the same plan
+ * version again (task cal1.<mission>.<n>.c<m>); no new version, no Architect attempt.
+ */
+export interface RecheckBody {
+  /** "b<n>.c<m>": what `mp pm plan submit` reports. */
+  readonly batch: string;
+  readonly plan: string;
+  /** The plan's batch number. */
+  readonly n: number;
+  readonly m: number;
+  readonly requirementSet?: string;
+  readonly mode?: 'stable' | 'fast';
+  readonly userWords: readonly string[];
+  readonly changedItems: readonly string[];
+  readonly dependentItems: readonly string[];
+}
+
+export const CAL1_RECHECK = 'cal1-recheck';
+
+/** Shared by the hand-back gate, which checks supersession inside its write. */
+export function supersededRecheck(task: string, batches: readonly PmBatchBody[], requests: readonly RecheckBody[]): string | null {
+  const r = requests.find((r) => {
+    const prefix = `cal1.${r.plan.slice('pmplan.'.length)}.c${r.m}`;
+    return task === prefix || task.startsWith(`${prefix}.`);
+  });
+  if (r === undefined) return null;
+  return batches.at(-1)?.plan !== r.plan || requests.filter((x) => x.plan === r.plan).at(-1)?.m !== r.m
+    ? `re-check ${r.batch} was superseded by a newer request` : null;
 }
 
 interface Cal1Body {
@@ -154,6 +198,7 @@ const PM_PLAN_PATH = 'plans/pm-plan.json';
 export const planLineage = (mission: string, n: number): string => safeId(`plan.${mission}.${n}`);
 const pmPlanObject = (mission: string, n: number): string => safeId(`pmplan.${mission}.${n}`);
 const cal1Task = (mission: string, n: number, full: boolean): string => safeId(`cal1.${mission}.${n}${full ? '.full' : ''}`);
+const recheckTask = (mission: string, n: number, m: number, full: boolean): string => safeId(`cal1.${mission}.${n}.c${m}${full ? '.full' : ''}`);
 const archTask = (mission: string, n: number, k: number): string => safeId(`arch.${mission}.${n}.${k}`);
 const dplanObject = (mission: string, n: number, k: number): string => safeId(`dplan.${mission}.${n}.${k}`);
 const feasTask = (dplan: string): string => safeId(`feas.${dplan}`);
@@ -163,12 +208,14 @@ const cal2Task = (dplan: string, full: boolean): string => safeId(`cal2.${dplan}
 
 /**
  * The PM records one alignment batch (3.3): the new PM plan version and what the batch touched.
- * Idempotent: the same plan and words again return the batch already recorded.
+ * Idempotent: the same plan and words again return the batch already recorded. A batch whose
+ * plan document is the plan in effect, unchanged, is a re-check of that version (no new version,
+ * `recheck: true`), unless it changes the mission's mode.
  */
 export async function submitPmBatch(
   ports: FlowPorts,
   req: { readonly mission: MissionId; readonly plan: unknown; readonly userWords: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' },
-): Promise<{ readonly batch: string; readonly plan: string }> {
+): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
   const ctx = flowCtx(ports, req.mission);
   const doc = PmPlanDoc.parse(req.plan);
   if (doc.mission !== req.mission) throw new Error(`the plan names mission ${doc.mission}, not ${req.mission}`);
@@ -181,7 +228,25 @@ export async function submitPmBatch(
   const lineOf = (item: string): string => itemLine(req.mission, item);
   const changed = (req.changedItems ?? []).map(lineOf);
   const dependent = (req.dependentItems ?? []).map(lineOf);
-  if (last !== null && last.doc === docHash && canonicalJson(last.userWords) === canonicalJson(req.userWords) && canonicalJson(last.changedItems) === canonicalJson(changed)) return { batch: last.batch, plan: last.plan };
+  const ix = await basisIndex(ctx);
+  const requirementSet = ix.current.get(requirementSetLine(req.mission)) ?? `${requirementSetLine(req.mission)}.v1`;
+  const mode = req.mode ?? last?.mode ?? 'stable';
+  if (last !== null && last.doc === docHash) {
+    // the plan document is the latest version's: a retry of the latest request about it, or (once
+    // that version took effect) a re-check of it on the requirement items as they are now (5.2 part 5)
+    const effective = (await eventOf(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, last.plan)) !== null;
+    const rechecks = effective ? (await eventsOf<RecheckBody>(ctx, PLAN_LINE, CAL1_RECHECK)).filter((e) => e.body.plan === last.plan).map((e) => e.body) : [];
+    const latestRequest: PmBatchBody | RecheckBody = rechecks.at(-1) ?? last;
+    if (latestRequest.requirementSet === requirementSet && (latestRequest.mode ?? last.mode) === mode && canonicalJson(latestRequest.dependentItems) === canonicalJson(dependent) && canonicalJson(latestRequest.userWords) === canonicalJson(req.userWords) && canonicalJson(latestRequest.changedItems) === canonicalJson(changed)) {
+      return { batch: latestRequest.batch, plan: last.plan, ...(latestRequest !== last ? { recheck: true } : {}) };
+    }
+    if (effective && (req.mode === undefined || req.mode === last.mode)) {
+      const m = rechecks.length + 1;
+      const body: RecheckBody = { batch: `${last.batch}.c${m}`, plan: last.plan, n: last.n, m, requirementSet, mode, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent };
+      await commit(ctx, `flow:cal1-recheck:${req.mission}:${last.plan}:${m}`, { events: [ev(ctx, PLAN_LINE, CAL1_RECHECK, `${last.plan}#c${m}`, body)] });
+      return { batch: body.batch, plan: last.plan, recheck: true };
+    }
+  }
   const n = (last?.n ?? 0) + 1;
   const plan = pmPlanObject(req.mission, n);
   const authLines = doc.authorizations.map(lineOf);
@@ -197,10 +262,9 @@ export async function submitPmBatch(
     reviews: [{ review: 'calibrator-1', basisLines: [requirementSetLine(req.mission), ...authLines] as BasisLineId[], reliesOn: [] }],
     ...(last !== null ? { predecessor: last.plan as ObjectVersionId } : {}),
   };
-  const body: PmBatchBody = { batch: `b${n}`, n, plan, predecessor: last?.plan ?? null, round: doc.round, doc: docHash, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent, mode: req.mode ?? last?.mode ?? 'stable' };
+  const body: PmBatchBody = { batch: `b${n}`, n, plan, predecessor: last?.plan ?? null, round: doc.round, doc: docHash, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent, mode, requirementSet };
   const records: BaseRecord[] = [rec];
   // the calibrator-1 contract needs a requirement-set version, even an empty one (v31 5.2)
-  const ix = await basisIndex(ctx);
   const setLine = requirementSetLine(req.mission);
   if (!ix.current.has(setLine)) {
     records.unshift({ kind: 'basis.version', basisKind: 'requirement-set', line: setLine as BasisLineId, version: safeId(`${setLine}.v1`) as BasisVersionId, mission: req.mission, scope: null, snapshot: ports.ledger.content.putList([]) });
@@ -287,10 +351,14 @@ export async function planningStep(ctx: FlowCtx): Promise<void> {
   const batches = await eventsOf<PmBatchBody>(ctx, PLAN_LINE, 'pm-batch');
   const latest = batches.at(-1);
   if (latest === undefined) return;
-  // a newer batch supersedes an older one's Calibrator ① that has not started
+  // a newer batch supersedes an older one's Calibrator ① that has not started (a re-check's too)
+  const rechecks = await eventsOf<RecheckBody>(ctx, PLAN_LINE, CAL1_RECHECK);
   for (const b of batches.slice(0, -1)) {
-    for (const full of [false, true]) {
-      const t = cal1Task(ctx.mission, b.body.n, full);
+    const tasks = [false, true].map((full) => cal1Task(ctx.mission, b.body.n, full));
+    for (const e of await eventsOf<{ m: number }>(ctx, PLAN_LINE, 'cal1-rerun')) if (e.key.startsWith(`${b.body.plan}#`)) tasks.push(safeId(`cal1.${ctx.mission}.${b.body.n}.re${e.body.m}`));
+    for (const r of rechecks) if (r.body.plan === b.body.plan) tasks.push(...await recheckTasks(ctx, r.body));
+    for (const e of await eventsOf<{ root: string; task: string }>(ctx, PLAN_LINE, 'review-rebuild')) if (tasks.includes(e.body.root)) tasks.push(e.body.task);
+    for (const t of tasks) {
       const s = await ctx.ports.scheduler.status(t);
       if (s?.state === 'queued') await ctx.ports.scheduler.cancel(t);
     }
@@ -310,7 +378,37 @@ export async function planningStep(ctx: FlowCtx): Promise<void> {
   }
   // a crash net for both closes (the batch write, the effective write)
   await closeLeftBehind(ctx, b, doc, batches.slice(0, -1).map((x) => x.body));
+  // a re-check of the plan in effect runs beside its decomposition: the plan does not change
+  await recheckStep(ctx, b, batches.map((x) => x.body));
   await decompositionStep(ctx, b, doc);
+}
+
+/** A waiting task resumes under the revision that answers its own request (or a descendant). */
+export async function planAnswersReplan(ctx: FlowCtx, dplan: string, escalation: string): Promise<boolean> {
+  const routed = (await eventsOf<{ escalation?: string; attempt: number; dplan?: string }>(ctx, PLAN_LINE, 'replan-routed')).filter((e) => e.body.escalation === escalation || e.key === escalation).at(-1) ?? null;
+  if (routed === null) return false;
+  const attempts = await eventsOf<AttemptBody>(ctx, PLAN_LINE, 'attempt');
+  const routeAttempt = attempts.filter((a) => a.body.k === routed.body.attempt && a.revision < routed.revision).at(-1);
+  const target = routed.body.dplan ?? (routeAttempt === undefined ? null : `dplan.${routeAttempt.key.slice('pmplan.'.length).replace('#', '.')}`);
+  const parents = new Map(attempts.map((a) => [`dplan.${a.key.slice('pmplan.'.length).replace('#', '.')}`, a.body.previous]));
+  const seen = new Set<string>();
+  for (let at: string | null = dplan; at !== null && !seen.has(at); at = parents.get(at) ?? null) {
+    if (at === target) return true;
+    seen.add(at);
+  }
+  return false;
+}
+
+/** Per ruling 3, fast production uses only elements outside the current dispute. */
+export async function contestedProduction(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, task: DetailedTask): Promise<boolean> {
+  const batch = (await eventsOf<PmBatchBody>(ctx, PLAN_LINE, 'pm-batch')).find((b) => b.body.plan === eff.pmPlan)?.body;
+  if (batch === undefined) return true;
+  const doc = pmDoc(ctx, batch);
+  if ((await ctx.ports.evaluator.labels([eff.pmPlan])).labels[eff.pmPlan] === 'recomputing') return true;
+  const view = (await ctx.ports.evaluator.deciding([eff.pmPlan])).views[eff.pmPlan];
+  if (view === null || view === undefined) return true;
+  // one decision with the dispatch refresh (seat/cards/refresh.ts), from the same records
+  return productionDisputed(ctx.mission, await currentItems(ctx), doc, view, (await eventsOf<Cal1Body>(ctx, PLAN_LINE, 'cal1')).map((e) => e.body), plan, task);
 }
 
 // ---------------------------------------------------------------- Calibrator ① (3.3)
@@ -319,23 +417,88 @@ async function cal1Outcome(ctx: FlowCtx, task: string): Promise<Cal1Body | null>
   return (await eventOf<Cal1Body>(ctx, PLAN_LINE, 'cal1', task))?.body ?? null;
 }
 
-/** The deciding pass of a PM plan version's calibrator-1 position, from the flow's own record. */
-async function cal1PassOf(ctx: FlowCtx, batches: readonly PmBatchBody[], plan: string): Promise<string | null> {
-  const b = batches.find((x) => x.plan === plan);
-  if (b === undefined) return null;
-  for (const full of [true, false]) {
-    const o = await cal1Outcome(ctx, cal1Task(ctx.mission, b.n, full));
-    if (o !== null && o.outcome === 'pass') return o.judgment;
-    if (o !== null && o.outcome !== 'needs-full-review') return null;
+/**
+ * The deciding pass of a PM plan version's calibrator-1 position, from the flow's own record: the
+ * latest decided Calibrator ① on it (its batch's, a rerun's, or a re-check's before re-check
+ * `beforeRecheck`), when that one passed. An undecided or failing position is no pass to extend.
+ */
+async function cal1PassOf(ctx: FlowCtx, plan: string): Promise<string | null> {
+  const view = (await ctx.ports.evaluator.deciding([plan])).views[plan];
+  const position = view?.positions.find((p) => p.review === 'calibrator-1');
+  return position?.state === 'pass' ? position.by : null;
+}
+
+/** A pass counts only while the actual deciding position is current and in force. */
+async function cal1PassState(ctx: FlowCtx, plan: string): Promise<'pass' | 'stale' | 'negated' | 'pending'> {
+  if ((await ctx.ports.evaluator.labels([plan])).labels[plan] === 'recomputing') return 'pending';
+  const view = (await ctx.ports.evaluator.deciding([plan])).views[plan];
+  if (view === null || view === undefined) return 'pending';
+  const position = view.positions.find((p) => p.review === 'calibrator-1');
+  if (position?.state !== 'pass') return 'negated';
+  const deciding = view.deciding.find((j) => j.judgment === position.by);
+  return view.inEffect && deciding?.current === true ? 'pass' : 'stale';
+}
+
+async function rememberReviewInputs(ctx: FlowCtx, task: string, card: { target?: string; binding?: import('../seat/cards/common.ts').CardBinding }): Promise<void> {
+  const c = ctx.ports.ledger.content;
+  const checks = card.binding === undefined ? [] : c.getList(card.binding.constraints as import('../common/records.ts').ListRef);
+  const inputs: PlanningInputs = {
+    task, ...(card.target !== undefined ? { target: card.target } : {}),
+    bases: card.binding === undefined ? [] : reviewInputVersions(c.getList(card.binding.bases as import('../common/records.ts').ListRef), c.getList(card.binding.constraints as import('../common/records.ts').ListRef)),
+    constraints: boundObjectConstraints(await basisIndex(ctx), checks),
+    context: planningContext(await currentItems(ctx)),
+  };
+  const key = `${task}#${shortHash(inputs)}`;
+  await commit(ctx, `flow:review-inputs:${ctx.mission}:${key}`, { events: [ev(ctx, PLAN_LINE, 'review-inputs', key, inputs)] });
+}
+
+/** Cancel obsolete queued inputs and use the original builder for the replacement, restartably. */
+async function currentReviewTask(ctx: FlowCtx, root: string): Promise<string> {
+  const rebuilt = (await eventsOf<{ root: string; task: string }>(ctx, PLAN_LINE, 'review-rebuild')).filter((e) => e.body.root === root);
+  const task = rebuilt.at(-1)?.body.task ?? root;
+  for (const e of rebuilt) {
+    const previous = (e.body as { previous?: string }).previous;
+    if (previous !== undefined && (await ctx.ports.scheduler.status(previous))?.state === 'queued') await ctx.ports.scheduler.cancel(previous);
   }
-  return null;
+  const inputs = (await eventsOf<PlanningInputs>(ctx, PLAN_LINE, 'review-inputs')).filter((e) => e.body.task === task).at(-1)?.body;
+  const status = await ctx.ports.scheduler.status(task);
+  if (inputs === undefined && status?.state !== 'queued') return task;
+  const obj = inputs?.target === undefined ? null : await objectRecord(ctx, inputs.target);
+  const changed = inputs === undefined ? ['queued inputs predate the builder snapshot'] : changedPlanningInputs(inputs, await basisIndex(ctx), await currentItems(ctx), await currentConstraints(ctx), obj ?? undefined);
+  const replacement = safeId(`${root}.rf${rebuilt.length + 1}`);
+  const key = `${root}#${rebuilt.length + 1}`;
+  if (changed.length > 0 && status?.state === 'queued') {
+    // Save the replacement before cancelling: a crash retries the cancellation below.
+    await commit(ctx, `flow:review-rebuild:${ctx.mission}:${key}`, { events: [ev(ctx, PLAN_LINE, 'review-rebuild', key, { root, task: replacement, previous: task, changed })] });
+    await ctx.ports.scheduler.cancel(task);
+    return replacement;
+  }
+  return task;
+}
+
+async function cancelPlanReviews(ctx: FlowCtx, b: PmBatchBody): Promise<void> {
+  const roots = [cal1Task(ctx.mission, b.n, false), cal1Task(ctx.mission, b.n, true)];
+  for (const e of await eventsOf<{ m: number }>(ctx, PLAN_LINE, 'cal1-rerun')) if (e.key.startsWith(`${b.plan}#`)) roots.push(safeId(`cal1.${ctx.mission}.${b.n}.re${e.body.m}`));
+  for (const e of await eventsOf<RecheckBody>(ctx, PLAN_LINE, CAL1_RECHECK)) if (e.body.plan === b.plan) roots.push(...await recheckTasks(ctx, e.body));
+  for (const e of await eventsOf<{ root: string; task: string }>(ctx, PLAN_LINE, 'review-rebuild')) if (roots.includes(e.body.root)) roots.push(e.body.task);
+  for (const task of roots) if ((await ctx.ports.scheduler.status(task))?.state === 'queued') await ctx.ports.scheduler.cancel(task);
+}
+
+async function returnWithdrawnPlan(ctx: FlowCtx, b: PmBatchBody, recheck: RecheckBody | null = null): Promise<boolean> {
+  const obj = await objectRecord(ctx, b.plan);
+  const reason = obj === null ? null : withdrawnPlanReason(obj, await basisIndex(ctx));
+  if (reason === null) return false;
+  await cancelPlanReviews(ctx, b);
+  await tellOnce(ctx, PLAN_LINE, { category: 'calibrator-1-returned', wi: null, key: `${b.plan}:withdrawn:${recheck?.batch ?? b.batch}`, trigger: reason, defaultAction: reason, detail: { plan: b.plan, reason } });
+  return true;
 }
 
 async function calibrator1Step(ctx: FlowCtx, b: PmBatchBody, batches: readonly PmBatchBody[]): Promise<'pending' | 'pass' | 'returned'> {
+  if (await returnWithdrawnPlan(ctx, b)) return 'returned';
   // released once: from then on the plan's proof degrades through the evaluator's labels
   if ((await eventOf(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, b.plan)) !== null) return 'pass';
-  const primary = cal1Task(ctx.mission, b.n, false);
-  const full = cal1Task(ctx.mission, b.n, true);
+  const primary = await currentReviewTask(ctx, cal1Task(ctx.mission, b.n, false));
+  const full = await currentReviewTask(ctx, cal1Task(ctx.mission, b.n, true));
   const p = await cal1Outcome(ctx, primary);
   let active = primary;
   if (p?.outcome === 'needs-full-review') active = full;
@@ -346,16 +509,26 @@ async function calibrator1Step(ctx: FlowCtx, b: PmBatchBody, batches: readonly P
   // a pass whose judgment went stale before the release is reviewed again in full (code review r1 #12)
   const reruns = (await eventsOf<{ m: number }>(ctx, PLAN_LINE, 'cal1-rerun')).filter((e) => e.key.startsWith(`${b.plan}#`));
   const forceFull = reruns.length > 0 || active === full;
-  if (reruns.length > 0) active = safeId(`cal1.${ctx.mission}.${b.n}.re${reruns.length}`);
+  if (reruns.length > 0) active = await currentReviewTask(ctx, safeId(`cal1.${ctx.mission}.${b.n}.re${reruns.length}`));
   const done = await cal1Outcome(ctx, active);
   if (done !== null) {
     if (done.outcome === 'needs-full-review') return 'pending';
+    if (done.outcome !== 'pass' && await cal1PassState(ctx, b.plan) === 'pass') {
+      for (const i of await currentItems(ctx)) if (i.state === 'contested') await setContested(ctx, i.line, false, `PM plan ${b.plan}: its deciding ruling is current and in force`);
+      return 'pass';
+    }
     if (done.outcome === 'pass') {
-      for (const i of await currentItems(ctx)) if (i.state === 'contested') await setContested(ctx, i.line, false, `PM plan ${b.plan} passed Calibrator ①`);
-      const j = done.judgment as string;
-      const cur = (await ctx.ports.evaluator.judgments([j])).current[j] ?? null;
-      if (cur === true) return 'pass';
-      if (cur === null) return 'pending'; // the evaluator has not published the judgment yet
+      const state = await cal1PassState(ctx, b.plan);
+      if (state === 'pass') {
+        for (const i of await currentItems(ctx)) if (i.state === 'contested') await setContested(ctx, i.line, false, `PM plan ${b.plan} passed Calibrator ①`);
+        return 'pass';
+      }
+      if (state === 'pending') return 'pending';
+      if (state === 'negated') {
+        await returnedToPm(ctx, b, { ...done, reasons: ['The pass did not revoke the deciding negation; a valid ruling or a revised plan is required.'] });
+        return 'returned';
+      }
+      const j = done.judgment;
       const m = reruns.length + 1;
       await commit(ctx, `flow:cal1-rerun:${ctx.mission}:${b.plan}:${m}`, { events: [ev(ctx, PLAN_LINE, 'cal1-rerun', `${b.plan}#${m}`, { m, stale: j, reason: 'the judgment is not current any more (a basis changed while Calibrator ① ran)' })] });
       return 'pending';
@@ -363,30 +536,35 @@ async function calibrator1Step(ctx: FlowCtx, b: PmBatchBody, batches: readonly P
     await returnedToPm(ctx, b, done); // idempotent: contested marks and the PM's notice survive a crash (r1 #14)
     return 'returned';
   }
+  await cal1TaskStep(ctx, b, active, () => submitCalibrator1(ctx, b, batches, active, forceFull), 'the plan does not take effect; record a new batch to audit it again');
+  return 'pending'; // the next pass checks the pass's currency, or returns the plan to the PM
+}
+
+/**
+ * One Calibrator ① task on the plan's position (a batch's, a rerun's or a re-check's): queue it,
+ * wait for it, carry out a seat failure, or record its outcome on the plan line ("cal1").
+ */
+async function cal1TaskStep(ctx: FlowCtx, b: PmBatchBody, active: string, submit: () => Promise<void>, givenUp: string): Promise<void> {
   const view = await taskView(ctx, active);
-  if (view.kind === 'absent') {
-    await submitCalibrator1(ctx, b, batches, active, forceFull);
-    return 'pending';
-  }
-  if (view.kind === 'pending' || view.kind === 'evidence') return 'pending';
+  if (view.kind === 'absent') return submit();
+  if (view.kind === 'pending' || view.kind === 'evidence') return;
   if (view.kind === 'failed') {
     const f = await handleFailure(ctx, { task: active, lineage: planLineage(ctx.mission, b.n), subject: `plan:${b.plan}`, view, canAbandon: false, canReplan: false });
     if (f.kind === 'abandoned' || f.kind === 'decided') {
-      await notify(ctx, { category: 'calibrator-1-unavailable', wi: WI.attemptFailed, key: active, trigger: `the Calibrator ① task ${active} for PM plan ${b.plan} was given up`, defaultAction: 'the plan does not take effect; record a new batch to audit it again', detail: { task: active } });
+      await notify(ctx, { category: 'calibrator-1-unavailable', wi: WI.attemptFailed, key: active, trigger: `the Calibrator ① task ${active} for PM plan ${b.plan} was given up`, defaultAction: givenUp, detail: { task: active } });
     }
-    return 'pending';
+    return;
   }
   const r = view.result as Calibrator1Result;
   const verdict = calibrator1Verdict(r);
-  const doc = pmDoc(ctx, b);
   if (verdict === null) {
     await commit(ctx, `flow:cal1:${ctx.mission}:${active}`, { events: [ev(ctx, PLAN_LINE, 'cal1', active, { task: active, outcome: 'needs-full-review', judgment: null, contested: [], questions: [], reasons: [] } satisfies Cal1Body)] });
-    return 'pending';
+    return;
   }
   const judgment = `j.${active}`;
   if (!view.status.handBack?.records.some((x) => x.kind === 'judgment' && x.judgment === judgment)) {
     await internalError(ctx, active, `the accepted Calibrator ① hand-back of ${active} has no judgment ${judgment}`);
-    return 'pending';
+    return;
   }
   const bad = r.elements.filter((e) => e.finding === 'ask-user' || e.finding === 'contradicts-user').map((e) => e.element);
   const errorEls = r.errors.flatMap((e) => e.elements);
@@ -399,65 +577,162 @@ async function calibrator1Step(ctx: FlowCtx, b: PmBatchBody, batches: readonly P
   ];
   const body: Cal1Body = { task: active, outcome, judgment, contested: contestedEls, questions: r.questions, reasons };
   await commit(ctx, `flow:cal1:${ctx.mission}:${active}`, { events: [ev(ctx, PLAN_LINE, 'cal1', active, body)] });
-  void doc;
-  return 'pending'; // the next pass checks the pass's currency, or returns the plan to the PM
+}
+
+/**
+ * A re-check of the plan in effect (3.3, 5.2 part 5): the latest one asked for its version runs
+ * (an earlier one not started yet is superseded). A pass makes the plan current again on the
+ * requirement set as it is now; indirect dependents recover when their own inputs remain current; a fail or an undecided
+ * outcome goes back to the PM like any batch (the plan stays in effect; its proof does not come back).
+ */
+async function recheckTasks(ctx: FlowCtx, r: RecheckBody): Promise<string[]> {
+  const tasks = [false, true].map((full) => recheckTask(ctx.mission, r.n, r.m, full));
+  for (const e of await eventsOf<{ m: number }>(ctx, PLAN_LINE, 'cal1-recheck-rerun')) {
+    if (e.key.startsWith(`${r.plan}#c${r.m}#`)) tasks.push(safeId(`${recheckTask(ctx.mission, r.n, r.m, false)}.re${e.body.m}`));
+  }
+  for (const e of await eventsOf<{ root: string; task: string }>(ctx, PLAN_LINE, 'review-rebuild')) if (tasks.includes(e.body.root)) tasks.push(e.body.task);
+  return tasks;
+}
+
+async function recheckStep(ctx: FlowCtx, b: PmBatchBody, batches: readonly PmBatchBody[]): Promise<void> {
+  const all = (await eventsOf<RecheckBody>(ctx, PLAN_LINE, CAL1_RECHECK)).filter((e) => e.body.plan === b.plan).map((e) => e.body);
+  const r = all.at(-1);
+  if (r === undefined) return;
+  for (const o of all.slice(0, -1)) {
+    for (const t of await recheckTasks(ctx, o)) {
+      if ((await ctx.ports.scheduler.status(t))?.state === 'queued') await ctx.ports.scheduler.cancel(t);
+    }
+  }
+  if (await returnWithdrawnPlan(ctx, b, r)) return;
+  const primaryRoot = recheckTask(ctx.mission, r.n, r.m, false);
+  const primary = await currentReviewTask(ctx, primaryRoot);
+  const full = await currentReviewTask(ctx, recheckTask(ctx.mission, r.n, r.m, true));
+  const p = await cal1Outcome(ctx, primary);
+  let active = primary;
+  if (p?.outcome === 'needs-full-review') active = full;
+  else if (p === null) {
+    const v = await taskView(ctx, primary);
+    if (v.kind === 'failed' && v.why === 'full-review') active = full; // the evaluator refused the continuation (5.2 part 5)
+  }
+  const reruns = (await eventsOf<{ m: number }>(ctx, PLAN_LINE, 'cal1-recheck-rerun')).filter((e) => e.key.startsWith(`${b.plan}#c${r.m}#`));
+  if (reruns.length > 0) active = await currentReviewTask(ctx, safeId(`${primaryRoot}.re${reruns.length}`));
+  const done = await cal1Outcome(ctx, active);
+  if (done !== null) {
+    if (done.outcome === 'needs-full-review') return;
+    if (done.outcome !== 'pass' && await cal1PassState(ctx, b.plan) === 'pass') {
+      for (const i of await currentItems(ctx)) if (i.state === 'contested') await setContested(ctx, i.line, false, `PM plan ${b.plan}: its deciding ruling is current and in force`);
+      return;
+    }
+    if (done.outcome === 'pass') {
+      const state = await cal1PassState(ctx, b.plan);
+      if (state === 'pass') {
+        for (const i of await currentItems(ctx)) if (i.state === 'contested') await setContested(ctx, i.line, false, `PM plan ${b.plan} passed Calibrator ① again (${r.batch})`);
+      } else if (state === 'stale') {
+        const m = reruns.length + 1;
+        await commit(ctx, `flow:cal1-recheck-rerun:${ctx.mission}:${b.plan}:${r.m}:${m}`, { events: [ev(ctx, PLAN_LINE, 'cal1-recheck-rerun', `${b.plan}#c${r.m}#${m}`, { m, stale: done.judgment })] });
+      } else if (state === 'negated') {
+        await returnedToPm(ctx, b, { ...done, reasons: ['The pass did not revoke the deciding negation; a valid ruling or a revised plan is required.'] }, r);
+      }
+      return;
+    }
+    await returnedToPm(ctx, b, done, r);
+    return;
+  }
+  await cal1TaskStep(ctx, b, active, () => submitCalibrator1(ctx, b, batches, active, (active === full || reruns.length > 0), r), `the plan in effect is not checked again; record a new batch to check it`);
 }
 
 /** 3.3: back to the PM with the reasons (a normal branch: no WI); the involved items are contested until a new version passes. */
-async function returnedToPm(ctx: FlowCtx, b: PmBatchBody, done: Cal1Body): Promise<void> {
+async function returnedToPm(ctx: FlowCtx, b: PmBatchBody, done: Cal1Body, recheck: RecheckBody | null = null): Promise<void> {
   const doc = pmDoc(ctx, b);
   const contestedItems = [...new Set(doc.elements.filter((e) => done.contested.includes(e.id)).flatMap((e) => e.items.map((i) => itemLine(ctx.mission, i))))];
   for (const line of contestedItems) await setContested(ctx, line, true, `Calibrator ① on PM plan ${b.plan}`);
+  const batch = recheck?.batch ?? b.batch;
   await tellOnce(ctx, PLAN_LINE, {
     category: 'calibrator-1-returned',
     wi: null,
     key: done.task,
-    trigger: `Calibrator ① did not pass PM plan ${b.plan} (batch ${b.batch}): ${done.reasons.length} finding(s)${done.questions.length > 0 ? `, ${done.questions.length} question(s) for the user` : ''}`,
-    defaultAction: `the plan does not take effect and the Architect does not start; the contested elements (${done.contested.join(', ') || 'none'}) are not used downstream until a new plan version passes or the user decides`,
-    detail: { plan: b.plan, batch: b.batch, judgment: done.judgment, reasons: done.reasons, questions: done.questions, contested: done.contested },
+    trigger: `Calibrator ① did not pass PM plan ${b.plan} (batch ${batch}${recheck !== null ? ', a re-check of the plan in effect' : ''}): ${done.reasons.length} finding(s)${done.questions.length > 0 ? `, ${done.questions.length} question(s) for the user` : ''}`,
+    defaultAction:
+      recheck !== null
+        ? `the plan stays in effect without its proof (what relies on it stays not fully proven); the contested elements (${done.contested.join(', ') || 'none'}) are not used downstream until a new plan version passes or the user decides`
+        : `the plan does not take effect and the Architect does not start; the contested elements (${done.contested.join(', ') || 'none'}) are not used downstream until a new plan version passes or the user decides`,
+    detail: { plan: b.plan, batch, judgment: done.judgment, reasons: done.reasons, questions: done.questions, contested: done.contested },
     ...(done.questions.length > 0 ? { askUser: true } : {}),
   });
 }
 
-async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly PmBatchBody[], task: string, forceFull: boolean): Promise<void> {
+async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly PmBatchBody[], task: string, forceFull: boolean, recheck: RecheckBody | null = null): Promise<void> {
   const doc = pmDoc(ctx, b);
   const ix = await basisIndex(ctx);
+  const obj = await objectRecord(ctx, b.plan);
+  if (obj === null) throw new Error(`Missing plan object ${b.plan}`);
+  const constraints = objectConstraints(await currentConstraints(ctx), obj);
   const items = await currentItems(ctx);
   const contractLines = [requirementSetLine(ctx.mission), ...doc.authorizations.map((a) => itemLine(ctx.mission, a))];
-  const prevBatch = b.predecessor === null ? null : (batches.find((x) => x.plan === b.predecessor) ?? null);
-  const j0 = forceFull || prevBatch === null ? null : await cal1PassOf(ctx, batches, prevBatch.plan);
+  // the pass a continuation extends: the previous version's, or (a re-check) the plan's own before it
+  const prevBatch = recheck !== null ? b : b.predecessor === null ? null : (batches.find((x) => x.plan === b.predecessor) ?? null);
+  const j0 = forceFull || prevBatch === null ? null : await cal1PassOf(ctx, prevBatch.plan);
   const j0rec: JudgmentRecord | null = j0 === null ? null : await judgmentRecordOf(ctx, j0);
+  const asked = recheck ?? b;
+  const touched = new Set([...asked.changedItems, ...asked.dependentItems]);
   // focus: the changed elements and those resting on changed items (5.2 part 5)
   let focus = doc.elements.map((e) => e.id);
   let changedLines: string[] = [];
   let mode: Calibrator1Card['mode'] = { kind: 'full' };
   let oldDoc: PmPlanDoc | null = null;
+  let withdrawnSince: string[] = [];
+  let itemDiff = '';
   if (j0rec !== null && prevBatch !== null) {
-    oldDoc = pmDoc(ctx, prevBatch);
-    const oldEls = new Map(oldDoc.elements.map((e) => [e.id, canonicalJson(e)]));
-    const touched = new Set([...b.changedItems, ...b.dependentItems]);
-    const f = doc.elements.filter((e) => oldEls.get(e.id) !== canonicalJson(e) || e.items.some((i) => touched.has(itemLine(ctx.mission, i)))).map((e) => e.id);
     const j0Bases = ctx.ports.ledger.content.getList(j0rec.bases);
     const j0Lines = j0Bases.map((v) => ix.lineOf.get(v)).filter((l): l is string => l !== undefined);
     changedLines = [...new Set([...j0Lines.filter((l) => !j0Bases.includes(ix.current.get(l) ?? '')), ...contractLines.filter((l) => !j0Lines.includes(l))])];
-    if (f.length > 0) {
-      focus = f;
+    const diff = requirementSetChanges(ctx, ix, j0Bases);
+    for (const l of diff.changed) touched.add(l);
+    withdrawnSince = diff.withdrawn;
+    const versions = new Map((await eventsOf<import('./requirements.ts').ItemVersionBody>(ctx, 'requirements', 'item')).map((e) => [e.body.version, e.body]));
+    const versionText = (line: string, version: string): string => {
+      const item = versions.get(version);
+      return item === undefined ? `[${line}] (${version}; item text is not recorded)` : renderItems([{ ...item, state: 'valid' }]);
+    };
+    itemDiff = diff.entries.map(({ line, old, current }) => `[${line}]\nOld: ${old === undefined ? '(not present)' : versionText(line, old)}\nNew: ${current === undefined ? '(withdrawn)' : versionText(line, current)}`).join('\n\n');
+    if (recheck !== null) {
+      // the same document: what changed is the requirement set since the pass, item by item
+      const gone = new Set(withdrawnSince);
+      const f = doc.elements.filter((e) => e.items.some((i) => touched.has(itemLine(ctx.mission, i)) || gone.has(itemLine(ctx.mission, i)))).map((e) => e.id);
+      // no element rests on a changed item: every element is judged against it (left out? gone against?)
+      const mapped = new Set(doc.elements.flatMap((e) => e.items.map((i) => itemLine(ctx.mission, i))));
+      if (f.length > 0 && [...touched, ...gone].every((l) => mapped.has(l))) focus = f;
       mode = { kind: 'continuation', extends: j0rec.judgment };
+    } else {
+      oldDoc = pmDoc(ctx, prevBatch);
+      const oldEls = new Map(oldDoc.elements.map((e) => [e.id, canonicalJson(e)]));
+      const f = doc.elements.filter((e) => oldEls.get(e.id) !== canonicalJson(e) || e.items.some((i) => touched.has(itemLine(ctx.mission, i)))).map((e) => e.id);
+      if (f.length > 0) {
+        const mapped = new Set(doc.elements.flatMap((e) => e.items.map((i) => itemLine(ctx.mission, i))));
+        if ([...touched, ...withdrawnSince].every((l) => mapped.has(l))) focus = f;
+        mode = { kind: 'continuation', extends: j0rec.judgment };
+      }
     }
   }
   const j0Lines = j0rec === null ? [] : ctx.ports.ledger.content.getList(j0rec.bases).map((v) => ix.lineOf.get(v)).filter((l): l is string => l !== undefined);
-  const touchedItems = mode.kind === 'full' ? items : items.filter((i) => b.changedItems.includes(i.line) || b.dependentItems.includes(i.line) || doc.elements.some((e) => focus.includes(e.id) && e.items.some((x) => itemLine(ctx.mission, x) === i.line)));
-  const words = mode.kind === 'full' ? [...new Set([...b.userWords, ...items.flatMap((i) => (i.source.kind === 'words' ? [i.source.words] : []))])] : [...b.userWords];
+  const touchedItems = mode.kind === 'full' ? items : items.filter((i) => touched.has(i.line) || doc.elements.some((e) => focus.includes(e.id) && e.items.some((x) => itemLine(ctx.mission, x) === i.line)));
+  const itemWords = (xs: readonly CurrentItem[]): string[] => xs.flatMap((i) => (i.source.kind === 'words' ? [i.source.words] : []));
+  const words = mode.kind === 'full' ? [...new Set([...b.userWords, ...asked.userWords, ...itemWords(items)])] : recheck !== null ? [...new Set([...asked.userWords, ...itemWords(items.filter((i) => touched.has(i.line)))])] : [...b.userWords];
   const auths = items.filter((i) => i.type === 'authorization');
   const materials = [
     material(ctx, 'words', "The user's words (verbatim)", await userWordsText(ctx, words), true, 'user-words'),
-    material(ctx, 'items', mode.kind === 'full' ? 'Requirement items in force' : 'Changed and dependent requirement items', renderItems(touchedItems) || '(none)', true, 'requirements'),
-    material(ctx, 'plan', `PM plan ${b.plan} (full text)`, renderPmPlan(doc), true, 'plan'),
+    material(ctx, 'items', mode.kind === 'full' ? 'Requirement items in force' : 'Changed and dependent requirement items', `${renderItems(touchedItems) || '(none)'}${withdrawnSince.length > 0 ? `\n\nWithdrawn since the plan last passed: ${withdrawnSince.join(', ')}` : ''}`, true, 'requirements'),
+    ...(itemDiff !== '' ? [material(ctx, 'item-diff', 'Requirement changes: old and new text, including withdrawals', itemDiff, true, 'requirements')] : []),
+    material(ctx, 'plan', `PM plan ${b.plan} (full text${recheck !== null ? ', unchanged: the plan in effect' : ''})`, renderPmPlan(doc), true, 'plan'),
     ...(mode.kind === 'continuation' && oldDoc !== null ? [material(ctx, 'plan-old', `PM plan ${b.predecessor} (the previous version, full text)`, renderPmPlan(oldDoc), true, 'plan')] : []),
     material(ctx, 'authorizations', 'Authorizations (verbatim)', renderItems(auths) || '(none)', true, 'authorizations'),
   ];
+  const duties =
+    recheck !== null
+      ? `Re-check the PM plan in effect (${b.plan}, unchanged) against the requirement items as they are now (batch ${recheck.batch}): judge whether each focus element still holds against the changed items and the user's words; report every item the plan now leaves out or goes against; ask what only the user can decide.`
+      : "Audit the direction of this PM plan batch against the user's words; report every finding; ask what only the user can decide.";
   const card: Calibrator1Card = {
-    ...cardBase(ctx, task, { duties: 'Audit the direction of this PM plan batch against the user\'s words; report every finding; ask what only the user can decide.' }),
+    ...cardBase(ctx, task, { duties, constraints: constraints.list }),
     seat: 'calibrator-1',
     target: b.plan,
     review: 'calibrator-1',
@@ -469,10 +744,12 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
     binding: binding(ctx, {
       judgment: `j.${task}`,
       bases: currentVersions(ix, [...new Set([...contractLines, ...j0Lines])]),
+      constraints: constraints.checks,
       reliesOn: [],
       extends: mode.kind === 'continuation' ? mode.extends : null,
     }),
   };
+  await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({
     task,
     lineage: planLineage(ctx.mission, b.n),
@@ -486,6 +763,25 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
     ...(mode.kind === 'continuation' ? { changedLines } : {}),
   });
   ctx.progressed = true;
+}
+
+/**
+ * The requirement items that changed between the requirement-set version among `bases` (a
+ * judgment's) and the current one: added or revised lines, and lines no longer in force.
+ */
+function requirementSetChanges(ctx: FlowCtx, ix: Awaited<ReturnType<typeof basisIndex>>, bases: readonly string[]): { readonly changed: string[]; readonly withdrawn: string[]; readonly entries: Array<{ line: string; old: string | undefined; current: string | undefined }> } {
+  const line = requirementSetLine(ctx.mission);
+  const then = bases.find((v) => ix.lineOf.get(v) === line);
+  const nowV = ix.current.get(line);
+  const snapshot = (v: string | undefined): Map<string, string> => {
+    const rec = v === undefined ? undefined : ix.records.get(v);
+    const out = new Map<string, string>();
+    if (rec?.basisKind === 'requirement-set') for (const iv of ctx.ports.ledger.content.getList(rec.snapshot)) out.set(ix.lineOf.get(iv) ?? iv, iv);
+    return out;
+  };
+  const a = snapshot(then);
+  const b = snapshot(nowV);
+  return { changed: [...b].filter(([l, v]) => a.get(l) !== v).map(([l]) => l).sort(), withdrawn: [...a.keys()].filter((l) => !b.has(l)).sort(), entries: [...new Set([...a.keys(), ...b.keys()])].filter((l) => a.get(l) !== b.get(l)).sort().map((line) => ({ line, old: a.get(line), current: b.get(line) })) };
 }
 
 // ---------------------------------------------------------------- decomposition and checks (3.4–3.7)
@@ -634,11 +930,13 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
         if ((await escalation(ctx, esc)) !== null && !(await isApplied(ctx, esc))) carries.push(await carryOut(ctx, esc, { option: 'accept' }));
       }
     }
-    await newAttempt(ctx, b, { reason: 'initial', previous: prev?.dplan ?? null, mechanicalFailures: [], feasibilityFindings: [], instructions: prev !== null ? [`The PM plan changed to version ${b.plan}; revise the previous detailed plan to it.`] : [], conclusions: [] }, 1, routedNow, carries);
+    const instructions = prev !== null ? [`The PM plan changed to version ${b.plan}; revise the previous detailed plan to it.${await changedElements(ctx, prev.pmPlan, doc)}`] : [];
+    const replans = await replanRouting(ctx, b, 1, prev?.dplan ?? null);
+    await newAttempt(ctx, b, { reason: 'initial', previous: prev?.dplan ?? null, mechanicalFailures: [], feasibilityFindings: [], instructions: [...instructions, ...replans.instructions], conclusions: [] }, 1, [...routedNow, ...replans.events], carries);
     return;
   }
   const a = list.at(-1) as AttemptBody;
-  const task = archTask(ctx.mission, b.n, a.k);
+  const task = await currentReviewTask(ctx, archTask(ctx.mission, b.n, a.k));
   const dplan = dplanObject(ctx.mission, b.n, a.k);
   const arch = (await eventOf<ArchBody>(ctx, PLAN_LINE, 'arch', task))?.body ?? null;
   if (arch === null) {
@@ -665,7 +963,10 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
     mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }) });
     await commit(ctx, `flow:mechanical:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'mechanical-check', dplan, mc)] });
+    // before its reviews, the PM learns which work the plan would restart once in effect (told once, with the check)
+
   }
+  if (mc.ok) await restartNotice(ctx, dplan, plan);
   if (!mc.ok) {
     await planReturn(ctx, b, a, dplan, 'mechanical', { mechanicalFailures: mc.failures }, `mech:${shortHash([...mc.failures].sort())}`, 'mechanical');
     return;
@@ -697,7 +998,7 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   const fRequired = (await objectRecord(ctx, dplan))?.reviews.some((r) => r.review === 'feasibility') ?? feasibilityRequired(plan);
   const risks: string[] = [...plan.risks];
   if (fRequired) {
-    const ft = feasTask(dplan);
+    const ft = await currentReviewTask(ctx, feasTask(dplan));
     let fb = (await eventOf<FeasBody>(ctx, PLAN_LINE, 'feasibility', ft))?.body ?? null;
     if (fb === null) {
       const view = await taskView(ctx, ft);
@@ -784,7 +1085,6 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   await roundsStep(ctx, b, doc, a, dplan);
 }
 
-export const standardLine = (mission: string, task: string, standard: string): string => safeId(`std.${mission}.${idPart(task)}.${idPart(standard)}`);
 
 /** A return to the Architect counted on the mechanical-return loop; exhausted → WI-08 and the Secretary. */
 async function planReturn(
@@ -840,8 +1140,8 @@ async function planReturn(
 
 async function calibrator2Step(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody, dplan: string, plan: DetailedPlanDoc): Promise<'pending' | 'pass'> {
   const lineage = planLineage(ctx.mission, b.n);
-  const primary = cal2Task(dplan, false);
-  const full = cal2Task(dplan, true);
+  const primary = await currentReviewTask(ctx, cal2Task(dplan, false));
+  const full = await currentReviewTask(ctx, cal2Task(dplan, true));
   let p = (await eventOf<Cal2Body>(ctx, PLAN_LINE, 'cal2', primary))?.body ?? null;
   let active = primary;
   if (p?.outcome === 'needs-full-review') active = full;
@@ -950,13 +1250,29 @@ async function roundsStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: Attem
     }
     await commitCarrying(ctx, `flow:exploration-routed:${ctx.mission}:${c.route}`, [routed(d.option)], [await carryOut(ctx, esc, { option: d.option })]);
   }
-  // re-plan requests from execution (a Secretary's or the user's "re-plan")
-  for (const r of await eventsOf<{ escalation: string; task: string; instructions: string }>(ctx, PLAN_LINE, 'replan-request')) {
-    if ((await eventOf(ctx, PLAN_LINE, 'replan-routed', r.key)) !== null) continue;
-    await newAttempt(ctx, b, { reason: 'replan', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [`Re-plan task ${r.body.task}: ${r.body.instructions}`], conclusions: [] }, k, [ev(ctx, PLAN_LINE, 'replan-routed', r.key, { attempt: k })]);
+  const replans = await replanRouting(ctx, b, k, dplanObject(ctx.mission, b.n, a?.k ?? 1));
+  if (replans.events.length > 0) {
+    await newAttempt(ctx, b, { reason: 'replan', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: replans.instructions, conclusions: [] }, k, replans.events);
     return;
   }
   void doc;
+}
+
+/** Route unanswered requests into the next attempt, versioning every superseded route. */
+async function replanRouting(ctx: FlowCtx, b: PmBatchBody, k: number, current: string | null): Promise<{ instructions: string[]; events: FlowEventInput[] }> {
+  const instructions: string[] = [];
+  const events: FlowEventInput[] = [];
+  for (const r of await eventsOf<{ escalation: string; task: string; instructions: string }>(ctx, PLAN_LINE, 'replan-request')) {
+    const routes = (await eventsOf<{ escalation?: string }>(ctx, PLAN_LINE, 'replan-routed')).filter((e) => e.key === r.key || e.body.escalation === r.key);
+    if (routes.length > 0) {
+      const effective = await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective');
+      if ((current !== null && await planAnswersReplan(ctx, current, r.key)) || (await Promise.all(effective.map((e) => planAnswersReplan(ctx, e.body.dplan, r.key)))).some(Boolean)) continue;
+    }
+    const routing = routes.length + 1;
+    instructions.push(`Re-plan task ${r.body.task}: ${r.body.instructions}`);
+    events.push(ev(ctx, PLAN_LINE, 'replan-routed', `${r.key}#${routing}`, { escalation: r.key, routing, attempt: k, dplan: dplanObject(ctx.mission, b.n, k) }));
+  }
+  return { instructions, events };
 }
 
 // ---------------------------------------------------------------- cards
@@ -972,8 +1288,13 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const previous = a.previous === null ? null : await detailedPlanOf(ctx, a.previous);
   const conclusions = [...a.conclusions];
   for (const [id, s] of ex.settled) if (!ex.unsettled.has(id) && !conclusions.some((c) => c.exploration === id)) conclusions.push({ exploration: id, summary: s.body.summary });
+  const revision = !(a.k === 1 && a.previous === null);
   const card: ArchitectDecomposeCard = {
-    ...cardBase(ctx, task, { duties: 'Decompose the approved PM plan into a detailed plan for this round; trace every element; fix exactly what a revision asks.' }),
+    ...cardBase(ctx, task, {
+      duties: revision
+        ? 'Revise the previous detailed plan for this round: change exactly what this revision asks, and carry every other task over unchanged (the same id, every field the same), since a changed task card starts a new attempt from the mission base plus its dependencies\' current accepted work, without the earlier attempts\' work (ruling 6); its earlier records remain; trace every element.'
+        : 'Decompose the approved PM plan into a detailed plan for this round; trace every element; fix exactly what a revision asks.',
+    }),
     seat: 'architect-decompose',
     workspace: { snapshot: snap.path, writablePaths: [] },
     pmPlan: {
@@ -987,10 +1308,9 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
     unsettledExplorations: [...ex.unsettled],
     explorationConclusions: conclusions,
     history: { gitLog: history.gitLog, runs: [...history.runs] },
-    revision:
-      a.k === 1 && a.previous === null
-        ? null
-        : { previous: a.previous, previousPlan: previous?.plan ?? null, mechanicalFailures: [...a.mechanicalFailures], feasibilityFindings: [...a.feasibilityFindings], instructions: [...a.instructions] },
+    revision: !revision ? null : { previous: a.previous, previousPlan: previous?.plan ?? null, mechanicalFailures: [...a.mechanicalFailures], feasibilityFindings: [...a.feasibilityFindings], instructions: [...a.instructions] },
+    // the previous plan in full, read page by page (a long plan would not fit in the card's body)
+    ...(revision && previous !== null ? { materials: [material(ctx, PREVIOUS_PLAN_MATERIAL, `Detailed plan ${a.previous} (the plan this revision revises, in full)`, previousPlanText(a.previous, previous.plan), true, 'plan')] } : {}),
     output: {
       object: dplan,
       predecessor: a.previous,
@@ -1002,6 +1322,7 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   };
   // the elements tab must not be empty (a plan with only explorations has nothing to decompose yet)
   if (card.pmPlan.elements.length === 0) return;
+  await rememberReviewInputs(ctx, task, {});
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 1_000_000, binds: [dplan] });
   ctx.progressed = true;
 }
@@ -1010,8 +1331,11 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
   const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'feasibility' });
   const history = await ctx.ports.scheduler.history(ctx.mission);
   const ix = await basisIndex(ctx);
+  const obj = await objectRecord(ctx, dplan);
+  if (obj === null) throw new Error(`Missing plan object ${dplan}`);
+  const constraints = objectConstraints(await currentConstraints(ctx), obj);
   const card: ArchitectFeasibilityCard = {
-    ...cardBase(ctx, task, { duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
+    ...cardBase(ctx, task, { constraints: constraints.list, duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
     seat: 'architect-feasibility',
     workspace: { snapshot: snap.path, writablePaths: [] },
     target: dplan,
@@ -1019,14 +1343,18 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
     plan,
     history: { gitLog: history.gitLog, runs: [...history.runs] },
     earlierFindings: [...a.feasibilityFindings],
-    binding: binding(ctx, { judgment: `j.${task}`, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'feasibility', b.plan) }),
+    binding: binding(ctx, { judgment: `j.${task}`, constraints: constraints.checks, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'feasibility', b.plan) }),
   };
+  await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });
   ctx.progressed = true;
 }
 
 async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody, dplan: string, plan: DetailedPlanDoc, task: string, forceFull: boolean): Promise<void> {
   const ix = await basisIndex(ctx);
+  const obj = await objectRecord(ctx, dplan);
+  if (obj === null) throw new Error(`Missing plan object ${dplan}`);
+  const constraints = objectConstraints(await currentConstraints(ctx), obj);
   const items = await currentItems(ctx);
   // continuation: the predecessor detailed plan's deciding calibrator-2 pass (same PM plan version only)
   let mode: Calibrator2Card['mode'] = { kind: 'full' };
@@ -1051,7 +1379,7 @@ async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a
     material(ctx, 'authorizations', 'Authorizations (verbatim)', renderItems(items.filter((i) => i.type === 'authorization')) || '(none)', true, 'authorizations'),
   ];
   const card: Calibrator2Card = {
-    ...cardBase(ctx, task, { duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
+    ...cardBase(ctx, task, { constraints: constraints.list, duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
     seat: 'calibrator-2',
     target: dplan,
     review: 'calibrator-2',
@@ -1060,10 +1388,72 @@ async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a
     materials,
     elements: elements.map((e) => ({ id: e.id, text: e.text, provenance: e.mapsTo === null ? 'architect' : `plan element ${e.mapsTo}`, mapsTo: e.mapsTo })),
     focus,
-    binding: binding(ctx, { judgment: `j.${task}`, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'calibrator-2', b.plan), extends: mode.kind === 'continuation' ? mode.extends : null }),
+    binding: binding(ctx, { judgment: `j.${task}`, constraints: constraints.checks, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'calibrator-2', b.plan), extends: mode.kind === 'continuation' ? mode.extends : null }),
   };
+  await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });
   ctx.progressed = true;
+}
+
+/**
+ * The elements a new PM plan version added, changed and removed against the version of the plan
+ * in effect, for the Architect's instruction (" Elements against <version>: …", or "" when that
+ * version cannot be read): the revision changes the tasks these elements need, and only those.
+ */
+async function changedElements(ctx: FlowCtx, oldPlan: string, doc: PmPlanDoc): Promise<string> {
+  const old = await pmPlanDoc(ctx, oldPlan).catch(() => null);
+  if (old === null) return '';
+  const before = new Map(old.elements.map((e) => [e.id, canonicalJson(e)]));
+  const now = new Set(doc.elements.map((e) => e.id));
+  const added = doc.elements.filter((e) => !before.has(e.id)).map((e) => e.id);
+  const changed = doc.elements.filter((e) => before.has(e.id) && before.get(e.id) !== canonicalJson(e)).map((e) => e.id);
+  const removed = old.elements.filter((e) => !now.has(e.id)).map((e) => e.id);
+  const parts = [added.length > 0 ? `added ${added.join(', ')}` : '', changed.length > 0 ? `changed ${changed.join(', ')}` : '', removed.length > 0 ? `removed ${removed.join(', ')}` : ''].filter((x) => x !== '');
+  return ` Elements against ${oldPlan}: ${parts.length > 0 ? `${parts.join('; ')}; every other element is unchanged` : 'none changed'}.`;
+}
+
+/**
+ * What a detailed plan would restart once in effect (§6.2: a task whose card changes is re-specced
+ * and restarts at a new attempt; a task the plan drops leaves it): the tasks of the plan in effect
+ * whose card it changes or drops, with those that have accepted work or work under way (read from
+ * the task lines as the execution flow keeps them). Told to the PM as a notice before the plan's
+ * reviews; nothing is held.
+ */
+async function restartNotice(ctx: FlowCtx, dplan: string, plan: DetailedPlanDoc): Promise<void> {
+  if ((await eventOf(ctx, PLAN_LINE, 'told', `plan-revision-restarts-work:${dplan}`)) !== null) return;
+  const effective = await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective');
+  const own = effective.findIndex((e) => e.body.dplan === dplan);
+  const eff = own < 0 ? effective.at(-1)?.body : effective[own - 1]?.body;
+  const cutoff = own < 0 ? Number.POSITIVE_INFINITY : effective[own]!.revision;
+  if (eff === undefined) return;
+  const stored = await detailedPlanOf(ctx, eff.dplan);
+  if (stored === null) return;
+  const next = new Map(plan.tasks.map((t) => [t.id, shortHash(DetailedTask.parse(t))]));
+  const changed: string[] = [];
+  const dropped: string[] = [];
+  const accepted: string[] = [];
+  const underWay: string[] = [];
+  for (const t of stored.plan.tasks) {
+    const h = next.get(t.id);
+    if (h === shortHash(DetailedTask.parse(t))) continue;
+    (h === undefined ? dropped : changed).push(t.id);
+    const events = (await eventsOf(ctx, taskLine(t.id))).filter((e) => e.revision < cutoff);
+    const specAt = events.filter((e) => e.event === 'spec').at(-1)?.revision ?? 0;
+    if (events.some((e) => e.event === 'abandoned' && e.revision > specAt)) continue;
+    const k = 1 + events.filter((e) => e.event === 'rework').length;
+    if (events.some((e) => e.event === 'accepted' && e.key === String(k))) accepted.push(t.id);
+    else if (events.some((e) => e.event === 'dispatched' && e.revision > specAt)) underWay.push(t.id);
+  }
+  if (accepted.length === 0 && underWay.length === 0) return;
+  const kept = stored.plan.tasks.length - changed.length - dropped.length;
+  await tellOnce(ctx, PLAN_LINE, {
+    category: 'plan-revision-restarts-work',
+    wi: null,
+    key: dplan,
+    trigger: `detailed plan ${dplan} changes the card of ${changed.length} and drops ${dropped.length} of the ${stored.plan.tasks.length} tasks of the plan in effect (${eff.dplan}), keeping ${kept}; accepted work it would restart or drop: ${accepted.join(', ') || 'none'}; work under way: ${underWay.join(', ') || 'none'}`,
+    defaultAction: `nothing is held: the plan goes on to its reviews; once it takes effect, each task whose card changed restarts at a new attempt that starts from the mission base plus its dependencies' current accepted work, without the earlier attempts' work (ruling 6); its earlier records remain, work under way is cancelled, and each dropped task leaves the plan. Expected when the revision had to change those tasks; otherwise the Architect rewrote cards it should have carried over unchanged`,
+    detail: { dplan, inEffect: eff.dplan, tasks: stored.plan.tasks.length, kept, changed, dropped, accepted, underWay },
+  });
 }
 
 /** What a review position's contract on the plan relies on (fixed with the object, 10.1): the judgment binds at least that. */

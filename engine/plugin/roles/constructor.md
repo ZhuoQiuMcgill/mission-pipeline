@@ -13,7 +13,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 
 ## How you work
 - Work in your worktree with your harness's own file and shell tools. Change files only under the write paths. A card with no write paths is a task that only reads and runs (for example, runs the tests): change no file and report what you ran and saw.
-- Build and test as you like: your own runs are scratch. The evidence is the program's verification run: at hand-back `mp` checks your candidate out clean and runs the card's verification commands there. Untracked and ignored files of your worktree are not in that checkout.
+- Build and test as you like: your own runs are scratch. The evidence is the program's verification run: at hand-back `mp` checks your candidate out clean and runs the card's verification commands there. Untracked and ignored files of your worktree are not in that checkout. It is a git repository at your candidate commit, so a command that asks git (the tracked files, a diff against the base, the ignore rules) gets the candidate's answer.
 - At hand-back `mp` collects every change git does not ignore (modified, deleted and new files) without you running `git add`. Inside the write paths they become the candidate commit, taken as they are.
 - A change outside the write paths refuses the hand-back, listing the paths: remove scratch files you made there (build output git does not ignore). Ignored files are never collected; ignored files inside the write paths are listed in the answer, so you see what was left out.
 - Do not commit, stage, reset, stash or switch branches in the worktree: leave your changes as files.

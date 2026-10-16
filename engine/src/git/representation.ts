@@ -382,9 +382,11 @@ export class AttributeEvaluator {
     }
     const dir = mkdtempSync(join(scratchParent, 'mp-attr-'));
     const gitDir = join(dir, 'attr.git');
+    const hooks = join(dir, 'empty-hooks');
+    mkdirSync(hooks);
     // The scratch repository is named explicitly (never discovered, 6.6 v37).
     const own = { gitDir };
-    await git.ok(['init', '--bare', '--quiet', '--template=', `--object-format=${description.objectFormat}`, gitDir], { cwd: dir, locators: own });
+    await git.ok(['init', '--bare', '--quiet', '--template=', `--object-format=${description.objectFormat}`, gitDir], { cwd: dir, locators: own, config: [['core.hooksPath', hooks]] });
     mkdirSync(join(gitDir, 'info'), { recursive: true });
     mkdirSync(join(gitDir, 'objects', 'info'), { recursive: true });
     writeFileSync(join(gitDir, 'info', 'attributes'), description.attributes.info ?? '');

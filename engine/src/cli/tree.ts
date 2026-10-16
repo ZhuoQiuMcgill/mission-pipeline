@@ -431,6 +431,17 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
             // the acceptance names its judgment; the judgment names its Reviewer dispatch and the runs it cites
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
           }
+        } else if (f.event === 'rebind' && typeof b['product'] === 'string' && typeof b['from'] === 'string') {
+          // a kept product re-bound to a later plan (design 4.1 Appendix J): the same candidate, a new version
+          // (its predecessor and the plan it relies on are the version record's own edges)
+          const n = objNode(b['product'], f.rev);
+          n.by = b['how'] === 'carried' ? `the program, re-binding ${b['from']} (nothing its review judged had changed)` : `the program, re-binding ${b['from']} (a Reviewer judges it)`;
+        } else if (f.event === 'rebound' && typeof b['product'] === 'string') {
+          const n = nodes.get(objKey(b['product']));
+          if (n !== undefined) {
+            addCheck(n, `accepted (${String(b['judgment'] ?? '')}${b['how'] === 'carried' ? ', the judgment carried over' : ''})`);
+            if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
+          }
         }
       } else if (f.line === SECRETARY_LINE) {
         const id = `${f.mission}/${f.key}`;

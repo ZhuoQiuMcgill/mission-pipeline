@@ -4,11 +4,12 @@
 // not applicable, labels resting on it drop to not fully proven; nothing in the
 // history changes).
 //
-// - The identity's parts: operating system and version, architecture, and the
+// - The identity binds the run method (RUN_METHOD) as well as the machine's parts:
+//   operating system and version, architecture, and the
 //   output of each version command the project declares in
 //   `.mission-pipeline/config.json` under ENVIRONMENT_CONFIG_KEY (for example
 //   `node --version`, `python3 --version`, the test runner's version). The
-//   identity is the sha256 of the parts' canonical JSON; the parts are kept for
+//   identity is the sha256 of the run method and parts' canonical JSON; the parts are kept for
 //   reading (env.snapshot `parts`): each output shortened, with the sha256 of
 //   the whole output (`digests`), so the identity covers all of it.
 // - `mp` observes the current identity at most once per process
@@ -39,6 +40,10 @@ export type { EnvironmentParts } from '../common/records.ts';
 /** The environment line every 4.1 run is bound to (evidence `envLine`). */
 export const ENV_LINE = 'env' as EnvLineId;
 
+/** Run method v2: the checkout is its own repository at the candidate. Part of
+ * the identity so old proof needs renewal; records and seat judgments stay intact. */
+export const RUN_METHOD = 'v2';
+
 /** The key of `.mission-pipeline/config.json` this module reads: `{ "versionCommands": ["node --version", ...] }`. */
 export const ENVIRONMENT_CONFIG_KEY = 'environment';
 
@@ -48,7 +53,7 @@ export interface EnvironmentConfig {
 }
 
 export interface EnvironmentIdentity {
-  /** sha256 of the parts' canonical JSON: the env.snapshot id evidence binds to. */
+  /** sha256 of the run method and parts' canonical JSON: the env.snapshot id evidence binds to. */
   readonly identity: EnvSnapshotId;
   readonly parts: EnvironmentParts;
 }
@@ -144,7 +149,7 @@ export function observeEnvironment(projectDir: string, config: EnvironmentConfig
 }
 
 export function environmentIdentity(parts: EnvironmentParts): EnvSnapshotId {
-  return sha256(canonicalJson(parts)) as string as EnvSnapshotId;
+  return sha256(canonicalJson({ runMethod: RUN_METHOD, parts })) as string as EnvSnapshotId;
 }
 
 /**

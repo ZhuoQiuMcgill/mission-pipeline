@@ -1,3 +1,4 @@
+import { constraintApplies as objectConstraintApplies } from '../memory/domain/constraints.ts';
 // Reference semantics of the derived state (design v35: 5.2–5.3, 5.6, 6.1, 8.1).
 //
 // `fullCompute` is the definition of "the derived state at revision R": it
@@ -155,10 +156,6 @@ export function pathMatches(pattern: string, path: string): boolean {
     return path === dir || path.startsWith(dir + '/');
   }
   return pattern === path;
-}
-
-export function constraintApplies(scope: ConstraintScope, obj: ObjectScope): boolean {
-  return requiredRange(scope, obj).length > 0;
 }
 
 /** v33 5.2: the constraint's required range on an object: the object's paths inside its current scope. */
@@ -410,6 +407,7 @@ export class Index implements IndexView {
         }
         return true;
       case 'judgment': {
+        if (r.executor === 'program') return false;
         if (this.judgments.has(r.judgment)) return false;
         const info: JudgmentInfo = { rev: c.revision, rec: r };
         this.judgments.set(r.judgment, info);
@@ -766,26 +764,37 @@ export function composite(ix: IndexView, target: string, reviews: readonly Revie
  * target is covered by the union of the paths the deciding judgments reviewed
  * against its current content version.
  */
-function covered(ix: IndexView, scopes: readonly ObjectScope[], deciding: readonly JudgmentInfo[]): boolean {
+export function uncoveredConstraintRanges<T extends ConstraintCheck>(required: readonly T[], checked: readonly ConstraintCheck[]): T[] {
   const reviewed = new Map<string, Set<string>>(); // content version -> paths reviewed
+  for (const c of checked) {
+    let set = reviewed.get(c.version);
+    if (!set) reviewed.set(c.version, (set = new Set()));
+    for (const p of c.paths) set.add(p);
+  }
+  return required.flatMap((c) => {
+    const paths = c.paths.filter((p) => !reviewed.get(c.version)?.has(p));
+    return paths.length === 0 ? [] : [{ ...c, paths }];
+  });
+}
+
+function covered(ix: IndexView, scopes: readonly (ObjectScope & { mission: string })[], deciding: readonly JudgmentInfo[]): boolean {
+  const required: ConstraintCheck[] = [];
+  const checked: ConstraintCheck[] = [];
   for (const d of deciding) {
     for (const enc of d.rec.constraints) {
       const c = ix.check(enc);
       if (!c) continue;
-      let set = reviewed.get(c.version);
-      if (!set) reviewed.set(c.version, (set = new Set()));
-      for (const p of c.paths) set.add(p);
+      checked.push(c);
     }
   }
   for (const s of scopes) {
     for (const line of ix.constraintsFor(s)) {
       const c = ix.constraints.get(line)!;
-      if (ix.withdrawn.has(line) || c.scope === null) continue;
-      const have = reviewed.get(c.latest);
-      for (const p of requiredRange(c.scope, s)) if (!have?.has(p)) return false;
+      if (ix.withdrawn.has(line) || c.scope === null || !objectConstraintApplies({ scope: c.scope }, { scope: s, mission: s.mission })) continue;
+      required.push({ version: c.latest, paths: requiredRange(c.scope, s) });
     }
   }
-  return true;
+  return uncoveredConstraintRanges(required, checked).length === 0;
 }
 
 /** 5.3 label priority. A deciding judgment of any verdict whose basis line was withdrawn gives "basis-withdrawn". */
@@ -847,7 +856,7 @@ export function ownStructure(ix: IndexView, x: string): OwnStructure | null {
     },
     get coverageOk(): boolean {
       // A path that is not concrete cannot be matched against constraint scopes, so coverage cannot hold.
-      coverageOk ??= ix.scanned?.(x)?.ok ?? (concreteScope(o.scope) && covered(ix, [o.scope], comp.deciding));
+      coverageOk ??= ix.scanned?.(x)?.ok ?? (concreteScope(o.scope) && covered(ix, [{ ...o.scope, mission: o.mission }], comp.deciding));
       return coverageOk;
     },
     get basisWithdrawn(): boolean {
@@ -886,7 +895,7 @@ export function unitAggregate(ix: IndexView, unit: Resolved<ProofUnitRecord>, co
   let conclusion = comp.conclusion;
   let bw = basisWithdrawnIn(ix, comp.all);
   let recordsOk = unit.members.length > 0;
-  const scopes: ObjectScope[] = [];
+  const scopes: Array<ObjectScope & { mission: string }> = [];
   const decidingAll: JudgmentInfo[] = [...comp.deciding];
   for (const m of unit.members) {
     const own = ownStructure(ix, m);
@@ -897,7 +906,8 @@ export function unitAggregate(ix: IndexView, unit: Resolved<ProofUnitRecord>, co
     }
     conclusion = worseConclusion(conclusion, own.conclusion);
     if (own.basisWithdrawn) bw = true;
-    scopes.push(ix.objects.get(m as ObjectVersionId)!.scope);
+    const object = ix.objects.get(m as ObjectVersionId)!;
+    scopes.push({ ...object.scope, mission: object.mission });
     decidingAll.push(...own.deciding);
   }
   // Coverage of the whole unit: the union over the unit's and its members' deciding judgments.

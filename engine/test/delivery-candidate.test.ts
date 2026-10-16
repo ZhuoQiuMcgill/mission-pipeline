@@ -50,7 +50,7 @@ async function world(): Promise<World> {
   const CA1 = rawCommit(fx, repo, { ...BASE, 'a/x.ts': 'export const x = 2;\n' }, M0, 'A1');
   const { 'b/gone.ts': _gone, ...withoutGone } = BASE;
   const CB1 = rawCommit(fx, repo, { ...withoutGone, 'b/y.ts': 'y 2\n', 'b/new.ts': 'new\n' }, M0, 'B1');
-  const CP1 = rawCommit(fx, repo, { ...BASE, 'p/main.ts': 'main 2\n' }, M0, 'P1');
+  const CP1 = rawCommit(fx, repo, { ...BASE, 'a/x.ts': 'export const x = 2;\n', 'p/main.ts': 'main 2\n' }, CA1, 'P1');
   const view = new FakeProofView().add(
     await productVersion(fx.git, layout, { id: 'a1', module: 'a', writeScope: ['a/**'], commit: CA1, transform: dh }),
     await productVersion(fx.git, layout, { id: 'b1', module: 'b', writeScope: ['b/**'], commit: CB1, transform: dh }),
@@ -208,15 +208,17 @@ test('proof units: members are not prerequisites of each other, and the unit evi
   const w = await world();
   try {
     const dh = transformDescriptionHash(w.d);
-    const CX = rawCommit(fx, w.repo, { ...BASE, 'x/f.ts': 'x\n', 'y/f.ts': 'y 0\n' }, w.M0, 'X');
-    const CY = rawCommit(fx, w.repo, { ...BASE, 'y/f.ts': 'y 1\n' }, w.M0, 'Y');
+    const integrated = { ...BASE, 'x/f.ts': 'x\n', 'y/f.ts': 'y 1\n' };
+    const start = rawCommit(fx, w.repo, integrated, w.M0, 'integrated unit start');
+    const CX = rawCommit(fx, w.repo, integrated, start, 'X');
+    const CY = rawCommit(fx, w.repo, integrated, start, 'Y');
     w.view.add(
       await productVersion(fx.git, w.layout, { id: 'x1', module: 'x', writeScope: ['x/**'], commit: CX, transform: dh, prerequisites: [obj('y1')] }),
       await productVersion(fx.git, w.layout, { id: 'y1', module: 'y', writeScope: ['y/**'], commit: CY, transform: dh, prerequisites: [obj('x1')] }),
     );
     w.view.unit(pu('u1'), [ov('x1'), ov('y1')]);
     w.view.setEvidence(unit('u1'), [{ evidence: evi('run-u1'), inputs: [{ path: 'docs/readme.md', sha256: sha256('stale\n') }] }]);
-    const M5 = rawCommit(fx, w.repo, { ...BASE, 'y/other.ts': 'user file in y\n' }, w.M0, 'user adds y/other.ts');
+    const M5 = rawCommit(fx, w.repo, { ...integrated, 'y/other.ts': 'user file in y\n' }, start, 'user adds y/other.ts');
     const manifest = manifestOf(w, obj('x1'));
     assert.deepEqual(manifest.entries.map((e) => e.object.id), ['x1', 'y1']);
     const c = await candidateOf(w, manifest, M5);
@@ -234,13 +236,15 @@ test('proof units: members are not prerequisites of each other, and the unit evi
 // review r1 #5: the test above gave every member the unit's stale evidence, which hid that one failing member did not
 // fail the others. These cases change one member or one prerequisite only.
 
-/** x1 and y1 (a proof unit or not), z1 -> x1, w1 -> z1; built from M0 like the others. */
+/** x1 and y1 (a proof unit or not), z1 -> x1, w1 -> z1; each start holds its prerequisites. */
 async function chain(w: World, asUnit: boolean): Promise<void> {
   const dh = transformDescriptionHash(w.d);
-  const CX = rawCommit(fx, w.repo, { ...BASE, 'x/f.ts': 'x\n' }, w.M0, 'X');
   const CY = rawCommit(fx, w.repo, { ...BASE, 'y/f.ts': 'y 1\n' }, w.M0, 'Y');
-  const CZ = rawCommit(fx, w.repo, { ...BASE, 'z/f.ts': 'z\n' }, w.M0, 'Z');
-  const CW = rawCommit(fx, w.repo, { ...BASE, 'w/f.ts': 'w\n' }, w.M0, 'W');
+  const CX = rawCommit(fx, w.repo, { ...BASE, ...(!asUnit ? { 'y/f.ts': 'y 1\n' } : {}), 'x/f.ts': 'x\n' }, asUnit ? w.M0 : CY, 'X');
+  const integrated = { ...BASE, 'x/f.ts': 'x\n', 'y/f.ts': 'y 1\n' };
+  const start = asUnit ? rawCommit(fx, w.repo, integrated, CX, 'integrated unit') : CX;
+  const CZ = rawCommit(fx, w.repo, { ...integrated, 'z/f.ts': 'z\n' }, start, 'Z');
+  const CW = rawCommit(fx, w.repo, { ...integrated, 'z/f.ts': 'z\n', 'w/f.ts': 'w\n' }, CZ, 'W');
   w.view.add(
     await productVersion(fx.git, w.layout, { id: 'x1', module: 'x', writeScope: ['x/**'], commit: CX, transform: dh, prerequisites: asUnit ? [] : [obj('y1')] }),
     await productVersion(fx.git, w.layout, { id: 'y1', module: 'y', writeScope: ['y/**'], commit: CY, transform: dh }),

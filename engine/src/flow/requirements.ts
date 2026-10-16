@@ -1,3 +1,4 @@
+import { resolveItems, resolveConstraints } from '../memory/domain/constraints.ts';
 // The requirement hub (design 3.1) and the important-decision routing (3.2).
 //
 // 3.1 (4.1 §6.1): the user's words are recorded by the PM (`mp pm say`) as words entries W-<n>.
@@ -106,17 +107,7 @@ const BASIS_KIND: Readonly<Record<ItemType, Exclude<BasisVersionRecord['basisKin
 
 /** The requirement items in force (latest version of each line, not withdrawn). */
 export async function currentItems(ctx: FlowCtx): Promise<CurrentItem[]> {
-  const ix = await basisIndex(ctx);
-  const latest = new Map<string, ItemVersionBody>();
-  for (const e of await eventsOf<ItemVersionBody>(ctx, REQUIREMENTS_LINE, 'item')) latest.set(e.body.line, e.body);
-  const contested = new Set<string>();
-  for (const e of await eventsOf<{ line: string; contested: boolean }>(ctx, REQUIREMENTS_LINE, 'contested')) {
-    if (e.body.contested) contested.add(e.body.line);
-    else contested.delete(e.body.line);
-  }
-  return [...latest.values()]
-    .filter((b) => !ix.withdrawn.has(b.line) && ix.current.get(b.line) === b.version)
-    .map((b) => ({ ...b, state: contested.has(b.line) ? ('contested' as const) : ('valid' as const) }));
+  return resolveItems(await basisIndex(ctx), await eventsOf(ctx, REQUIREMENTS_LINE));
 }
 
 /** The requirement set's new version: a snapshot of the item versions in force (all five types). */
@@ -227,6 +218,7 @@ export async function recordConstraint(
   const ctx = flowCtx(ports, req.mission);
   const line = constraintLine(req.constraint);
   const ix = await basisIndex(ctx);
+  if (ix.withdrawn.has(line)) throw new Error(`Constraint ${req.constraint} was withdrawn and stays withdrawn; use a new id.`);
   checkKind(ix, line, 'a project constraint', new Set(['constraint', 'instruction']), null);
   const version = nextBasisVersion(ix, line, shortHash({ text: req.text, kind: req.kind }));
   if (version === null) {
@@ -254,24 +246,17 @@ export async function recordConstraint(
  * one line per constraint whichever mission recorded it, so a version or scope recorded from one
  * mission is in force for all; each card takes them by the constraint's own scope.
  */
-async function projectEvents<B>(ctx: FlowCtx, event: 'constraint' | 'constraint-scope'): Promise<FlowEvent<B>[]> {
+async function projectEvents<B>(ctx: ConstraintContext, event: 'constraint' | 'constraint-scope'): Promise<FlowEvent<B>[]> {
   const missions = new Set<MissionId>([ctx.mission, ...(await ctx.ports.ledger.missions())]);
   const all = await Promise.all([...missions].map((m) => ctx.ports.ledger.events<B>({ mission: m, line: REQUIREMENTS_LINE, event })));
   return all.flat().sort((a, b) => a.revision - b.revision);
 }
 
+type ConstraintContext = Pick<FlowCtx, 'mission'> & { ports: Pick<FlowCtx['ports'], 'ledger'> };
+
 /** The project constraints in force (9.5, recorded from any mission): the latest content version of each line, with its latest scope. */
-export async function currentConstraints(ctx: FlowCtx): Promise<ConstraintBody[]> {
-  const ix = await basisIndex(ctx);
-  const latest = new Map<string, { body: ConstraintBody; revision: number }>();
-  for (const e of await projectEvents<ConstraintBody>(ctx, 'constraint')) {
-    if (ix.current.get(e.body.line) === e.body.version && !ix.withdrawn.has(e.body.line)) latest.set(e.body.line, { body: e.body, revision: e.revision });
-  }
-  for (const e of await projectEvents<{ line: string; version: string; scope: ConstraintScope }>(ctx, 'constraint-scope')) {
-    const l = latest.get(e.body.line);
-    if (l !== undefined && e.revision > l.revision) latest.set(e.body.line, { body: { ...l.body, scope: e.body.scope }, revision: e.revision });
-  }
-  return [...latest.values()].map((x) => x.body);
+export async function currentConstraints(ctx: ConstraintContext): Promise<ConstraintBody[]> {
+  return resolveConstraints(await basisIndex(ctx), [...await projectEvents(ctx, 'constraint'), ...await projectEvents(ctx, 'constraint-scope')].sort((a, b) => a.revision - b.revision));
 }
 
 // ---------------------------------------------------------------- 3.2 important design decisions

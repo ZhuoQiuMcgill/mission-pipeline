@@ -27,6 +27,8 @@ describe('a continuation refused by the labels → a full review (5.2 part 5)', 
     await engine.reconcile(M);
     const card = ports.scheduler.card<Calibrator1Card>('cal1.m1.2');
     assert.deepEqual(card.mode, { kind: 'continuation', extends: 'j.cal1.m1.1' });
+    // Dispatch pins the inputs; a change during the review must still refuse the continuation.
+    ports.scheduler.dispatchOf('cal1.m1.2');
     // meanwhile the goal item, outside the focus, gets a new version: the extended pass is no longer current outside the changes
     const w = say(ports, 'Build me a CSV parser that also writes CSV.');
     await recordItem(ports, { mission: M, item: 'g1', type: 'goal', text: 'A CSV parser and writer', source: { kind: 'words', words: w, quote: 'also writes CSV' } });

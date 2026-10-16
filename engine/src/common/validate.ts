@@ -1,3 +1,4 @@
+import { missionIdProblem } from './ids.ts';
 // Structural validation of records at the memory's boundary (6.1 "发布前复核":
 // a record that would make the derived state uncomputable, or a fact the
 // labels would read differently from its writer, never enters the log).
@@ -71,6 +72,7 @@ function scope(r: Obj, k: string, nullable: boolean): void {
   if (!isObj(v)) fail(String(r.kind), `${k} is not a scope`);
   strings(v, 'paths');
   strings(v, 'taskTypes');
+  if (v['mission'] !== undefined && missionIdProblem(v['mission']) !== null) fail(String(r.kind), 'scope.mission is not a mission id');
 }
 
 /** 4.1 §6.5: an environment identity's parts: bounded strings, at most 64 version commands. */
@@ -162,6 +164,7 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
         if (!isObj(src) || typeof src.commit !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(src.commit)) fail('object.version', 'source.commit is not a git object id');
         strings(src, 'writeScope');
         hash(src, 'transform');
+        if (src.origin !== undefined && (typeof src.origin !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(src.origin))) fail('object.version', 'source.origin is not a git object id');
       }
       return;
     }
@@ -181,7 +184,7 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
         fail('judgment', 'issues is malformed');
       }
       for (const x of r.issues as Obj[]) {
-        if (x.response === 'deferred' && (typeof x.owner !== 'string' || x.owner.length === 0 || typeof x.reason !== 'string' || !HEX64.test(x.reason))) {
+        if (x.response === 'deferred' && (typeof x.owner !== 'string' || x.owner.trim().length === 0 || typeof x.reason !== 'string' || !HEX64.test(x.reason))) {
           fail('judgment', 'a deferred issue response needs an owner and a reason (5.6)');
         }
       }

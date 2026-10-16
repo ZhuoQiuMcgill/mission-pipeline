@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 export const INSTALLED_PM_DIR = fileURLToPath(new URL('../../plugin/pm/', import.meta.url)).replace(/[\\/]$/, '');
 
 /** The 4.1 work instructions (numbers of retired WIs are not reused). */
-export const WI_41: readonly string[] = ['01', '02', '03', '04', '05', '06', '07', '08', '13', '16', '19', '20', '21', '23', '24', '25', '26', '28', '29', '30', '31', '32', '33'].map((n) => `WI-${n}`);
+export const WI_41: readonly string[] = ['01', '02', '03', '04', '05', '06', '07', '08', '13', '16', '19', '20', '21', '23', '24', '25', '26', '28', '29', '30', '31', '32', '33', '34'].map((n) => `WI-${n}`);
 
 const WI_SET: ReadonlySet<string> = new Set(WI_41);
 

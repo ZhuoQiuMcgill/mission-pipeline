@@ -24,6 +24,9 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-28: A dispatch is interrupted: its seat ended without a hand-back, or nobody knows (release --ended / --abandoned)
 - WI-29: The memory's event chain is broken: all writes are stopped
 - WI-30: A leaf is missing or edited by hand, or a commit the memory names is not reachable here
-- WI-31: The repository lives outside the folder, or a copy shares one repository with another copy
+- WI-31: The repository lives outside the folder, a copy shares one repository with another copy, or a copy's worktree links cannot be verified
 - WI-32: Recomputing the labels does not finish (mp pm drain)
 - WI-33: An exploration awaits a ruling: the Stabilizer found a shift of direction or a drift
+- WI-34: A plan’s current pass judgments leave applicable object constraints uncovered; re-check the PM plan or submit an agreed changed plan
+
+Constraint maintenance: `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` (project-wide by default); `mp pm constraint withdraw <id> --words W-n` keeps the record and removes its force.

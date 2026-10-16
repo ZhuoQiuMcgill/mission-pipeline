@@ -1,7 +1,7 @@
 // The exploration flow's driver (design 4.3, 6.2, 8.2, 3.11): reads the exploration's events,
 // takes finished seat tasks into account, and takes the next step. Every step has a fixed
 // identity (task ids and op ids derive from the exploration id and the step number), and the
-// card of a step is built from the folded state alone, so a driver restarted at any point
+// card of a step is built from the folded state and explicit constraint selection, so a driver restarted at any point
 // repeats nothing and loses nothing: submitting a task again is a no-op, appending an op again
 // is a no-op, and notices are idempotent by (category, key).
 //
@@ -10,6 +10,8 @@
 // unnecessary to send again (a crash in between sends the same notice again: a no-op).
 
 import { canonicalJson, sha256 } from '../../common/hash.ts';
+import { currentConstraints } from '../requirements.ts';
+import { objectConstraints } from '../../seat/cards/inputs.ts';
 import type { MissionId } from '../../common/ids.ts';
 import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord } from '../../common/records.ts';
 import { attackOutcome, crititorEvidence, crititorFindingDocument, crititorFindingIds, versionId, type CrititorCard, type CrititorResult } from '../../seat/cards/crititor.ts';
@@ -456,6 +458,11 @@ async function submitQueued(p: ExplorationPorts, mission: MissionId, x: string, 
 
 const asCard = (c: object): AnyCard => c as unknown as AnyCard;
 
+async function constraintsForVersion(p: ExplorationPorts, mission: MissionId, target: string | null) {
+  const obj = target === null ? null : await p.ledger.objectVersion(target);
+  return obj === null ? { applicable: [], checks: [], list: [] } : objectConstraints(await currentConstraints({ ports: p, mission }), obj);
+}
+
 async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XState, a: Exclude<Action, { kind: 'none' }>): Promise<void> {
   const lineage = xid.lineage(mission, x);
   const n = s.seq + 1;
@@ -476,14 +483,14 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
     }
     case 'attacker': {
       const task = xid.task(mission, x, n, 'attacker');
-      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null);
+      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null, await constraintsForVersion(p, mission, s.version?.id ?? null));
       await submitQueued(p, mission, x, s, { ...base, task, role: 'attacker', purpose: a.mode, fresh: a.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), null);
       return;
     }
     case 'stabilizer': {
       // a new instance each round (4.1 §6.3)
       const task = xid.task(mission, x, n, 'stabilizer');
-      const card = stabilizerCard(s, n, task, p.ledger.content);
+      const card = stabilizerCard(s, n, task, p.ledger.content, await constraintsForVersion(p, mission, s.stabilizing?.target ?? null));
       await submitQueued(p, mission, x, s, { ...base, task, role: 'stabilizer', purpose: 'stabilize', target: card.target, judgment: card.binding.judgment }, asCard(card), null);
       return;
     }
@@ -584,7 +591,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
         await submitQueued(p, mission, x, s, { ...common, purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, resume)), a.requester);
       } else if (rq.role === 'attacker') {
         const mode = rq.purpose === 'discuss' ? 'discuss' : 'attack';
-        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume);
+        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume, await constraintsForVersion(p, mission, s.version?.id ?? null));
         await submitQueued(p, mission, x, s, { ...common, purpose: mode, fresh: rq.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), a.requester);
       } else {
         // interpreters and executors cannot ask for evidence; nothing to continue
@@ -754,4 +761,3 @@ export async function explorationState(p: Pick<ExplorationPorts, 'ledger'>, miss
   const events = await p.ledger.events({ mission, line: line(x) });
   return fold(events.map((e) => ({ event: e.event, key: e.key, body: e.body })));
 }
-

@@ -143,6 +143,7 @@ export const commonCardFields = {
   duties: z.string(),
   /** Verbatim decisions that bear on the task. */
   decisionQuotes: z.array(z.string()),
+  authorizations: z.array(z.object({ id: z.string(), quote: z.string(), version: z.string().optional(), notifyCondition: z.string().nullable() })).optional(),
   /** Project constraints filtered for the task (9.5): object constraints and execution instructions. */
   constraints: z.array(z.object({ id: z.string(), text: z.string(), kind: z.enum(['object', 'instruction']) })),
   /** Async evidence allowed for this seat (exploration, v51 4.3, 6.2): `mp seat <id> request-evidence`. */
@@ -156,15 +157,16 @@ export function list(title: string, items: readonly string[]): string {
 }
 
 /** The common head of every card body. */
-export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string }[]; decisionQuotes: readonly string[]; continuation?: ContinuationT | undefined }): string {
+export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string; kind?: string }[]; decisionQuotes: readonly string[]; seat?: string; authorizations?: readonly { id: string; quote: string; notifyCondition: string | null }[]; continuation?: ContinuationT | undefined }): string {
   const k = c.continuation;
   return (
     (c.duties.trim() !== '' ? `## Your duties on this task\n${c.duties.trim()}\n\n` : '') +
     (k !== undefined
       ? `## This card continues task ${k.previous}\nYou asked for evidence; here is what came back. Your previous notes${k.notes !== null ? ` are material ${k.notes}` : ' were not saved'}.\n\n${k.evidence.trim()}\n\n`
       : '') +
-    list('Project constraints', c.constraints.map((x) => `[${x.id}] ${x.text}`)) +
-    list('Relevant decisions (verbatim)', c.decisionQuotes)
+    list('Project constraints', c.constraints.map((x) => `[${x.id}] ${x.kind === 'instruction' ? 'Instruction (context only; not a proof input): ' : ''}${x.text}`)) +
+    list('Relevant decisions (verbatim)', c.decisionQuotes) +
+    (c.seat === 'secretary' ? '' : list('Authorizations currently in force (verbatim)', (c.authorizations ?? []).map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition === null ? '' : ` (tell the user when: ${a.notifyCondition})`}`)))
   );
 }
 

@@ -138,6 +138,14 @@ export function renewalCandidates(db: Db): RenewalCandidates {
 
 export type RenewalOutcome = { readonly renewed: true } | { readonly renewed: false; readonly reason: string; readonly field?: string };
 
+/** Proposal, pending ruling: renewal edges advance in log order, so no chain can return to an ancestor. */
+export function replacementFollowsOriginal(db: Db, original: EvidenceId, replacement: EvidenceId): boolean {
+  const ix = new StoredIndex(db);
+  const a = ix.evidenceRev.get(original);
+  const b = ix.evidenceRev.get(replacement);
+  return a !== undefined && b !== undefined && b > a;
+}
+
 /**
  * Inside a write: record that `replacement` stands for `original` in
  * `judgment` (v51 5.3 with "declared"), when the rule holds; otherwise nothing
@@ -149,6 +157,7 @@ export function recordRenewal(tx: WriteTx, req: { readonly judgment: JudgmentId;
   const a = ix.evidence.get(req.original);
   const b = ix.evidence.get(req.replacement);
   if (j === undefined || a === undefined || b === undefined) return { renewed: false, reason: 'the judgment and both runs must be recorded first' };
+  if (!replacementFollowsOriginal(tx, req.original, req.replacement)) return { renewed: false, reason: 'the replacement must be recorded after the evidence it replaces' };
   const current = recordedEnvironment(tx)?.identity ?? null;
   if (b.envLine === ENV_LINE && b.envSnapshot !== current) return { renewed: false, reason: 'the new run was not recorded under the current environment identity' };
   // §6.5: the new run reran the same candidate content and the same full command; only then the 5.3 field rule.

@@ -41,9 +41,9 @@ function exists([group, name]: [string, string]): boolean {
   return COMMANDS.some((c) => c.group === group && c.name[0] === name);
 }
 
-test('the 4.1 set: the catalog, the CLI and the index agree (01-08, 13, 16, 19-21, 23-26, 28-33)', () => {
+test('the 4.1 set: the catalog, the CLI and the index agree (01-08, 13, 16, 19-21, 23-26, 28-34)', () => {
   assert.deepEqual([...WI_CATALOG].sort(), [...WI_41].sort());
-  assert.equal(WI_41.length, 23);
+  assert.equal(WI_41.length, 24);
   const idx = readFileSync(join(dir, 'INDEX.md'), 'utf8');
   const lines = idx.split('\n').filter((l) => /^- WI-\d\d: /.test(l));
   assert.deepEqual(lines.map((l) => l.slice(2, 7)), [...WI_41]);
@@ -99,7 +99,7 @@ test('every WI the program can name is a 4.1 page: the flows and the memory\'s r
 
 test('the Claude Code plugin is an optional adapter of 4.1', () => {
   const manifest = JSON.parse(readFileSync(join(PLUGIN, '.claude-plugin', 'plugin.json'), 'utf8')) as { name: string; version: string; description: string };
-  assert.deepEqual([manifest.name, manifest.version], ['mission-pipeline', '4.1.0']);
+  assert.deepEqual([manifest.name, manifest.version], ['mission-pipeline', '4.1.1']);
   assert.match(manifest.description, /Optional/i);
   const hooks = readFileSync(join(PLUGIN, 'hooks', 'hooks.json'), 'utf8');
   assert.match(hooks, /claude-code\.mjs/);

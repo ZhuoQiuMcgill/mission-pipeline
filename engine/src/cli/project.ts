@@ -217,7 +217,7 @@ export function actionArgs(x: unknown): unknown {
  * Begin a PM action (its op receipt carries the command and the PM's filler, §3.2 item 13). An
  * action already done under this id with these arguments returns its recorded result instead.
  */
-export function beginAction(memory: Memory, a: { readonly op: string; readonly command: string; readonly args: unknown; readonly filler: Filler | null; readonly wi?: string | null }): Recorded | null {
+export function beginAction(memory: Memory, a: { readonly op: string; readonly command: string; readonly args: unknown; readonly filler: Filler | null; readonly wi?: string | null; readonly stop?: boolean }): Recorded | null {
   const prior = memory.read((db) => pmAction(db, a.op));
   const argsHash = sha256(canonicalJson({ command: a.command, args: a.args ?? null }));
   if (prior !== null) {
@@ -231,7 +231,8 @@ export function beginAction(memory: Memory, a: { readonly op: string; readonly c
       }
     }
   }
-  memory.write({ op: `pm:${a.op}`, payload: { command: a.command, args: a.args ?? null }, command: a.command, filler: a.filler }, (tx) => {
+  // A stop's action records also skip beforeWrite, so recording the command never runs label work.
+  memory.write({ op: `pm:${a.op}`, payload: { command: a.command, args: a.args ?? null }, command: a.command, filler: a.filler, stop: a.stop }, (tx) => {
     recordPmAction(tx, { action: a.op, command: a.command, args: a.args, wi: a.wi ?? null, state: 'started' });
     return { started: a.op };
   });
@@ -239,12 +240,12 @@ export function beginAction(memory: Memory, a: { readonly op: string; readonly c
 }
 
 /** End a PM action with its result (best effort: the command's own records are already committed). */
-export function endAction(memory: Memory, a: { readonly op: string; readonly command: string; readonly args: unknown; readonly wi?: string | null }, r: Recorded, failed: boolean): void {
+export function endAction(memory: Memory, a: { readonly op: string; readonly command: string; readonly args: unknown; readonly wi?: string | null; readonly stop?: boolean }, r: Recorded, failed: boolean): void {
   const bounded = (s: string): string => (s.length <= 16_000 ? s : `${s.slice(0, 16_000)}…`);
   const json = JSON.stringify(r.json ?? null);
   const result = { exitCode: r.exitCode, text: bounded(r.text), json: json.length <= 64_000 ? r.json : { truncated: true } };
   try {
-    memory.write({}, (tx) => {
+    memory.write({ stop: a.stop }, (tx) => {
       recordPmAction(tx, { action: a.op, command: a.command, args: a.args, wi: a.wi ?? null, state: failed ? 'failed' : 'done', result });
     });
   } catch {

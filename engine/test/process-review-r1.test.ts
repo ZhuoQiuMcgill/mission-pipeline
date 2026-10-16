@@ -140,7 +140,7 @@ describe('review r1 #8: closing a mission', () => {
     p = await toConstructor();
     const ctx = p.ctx;
     const con = await readyOf(ctx, 'constructor');
-    const c = pmClose(ctx, M, { mode: 'with-risk' });
+    const c = await pmClose(ctx, M, { mode: 'with-risk' });
     assert.equal(c.version, 1);
     assert.equal(ctx.memory.read((db) => missionState(db, M)), 'closed');
     const closes = ctx.memory.read((db) => missionCloses(db, M));
@@ -165,7 +165,7 @@ describe('review r1 #8: closing a mission', () => {
     const ctx = p.ctx;
     const con = await readyOf(ctx, 'constructor');
     const d = pmDispatch(ctx, con.step);
-    const c = pmClose(ctx, M, { mode: 'post-audit' });
+    const c = await pmClose(ctx, M, { mode: 'post-audit' });
     assert.deepEqual(c.inFlight.map((x) => x.dispatch), [d.dispatch]);
     assert.match(c.message, /Stop them in your harness/);
     write(join(p.dir, d.worktree!), 'src/add.js', 'exports.add = (a, b) => a + b;\n');
@@ -178,7 +178,7 @@ describe('review r1 #8: closing a mission', () => {
     // opened again: a new dispatch; closed with wait-running: its hand-back is accepted
     pmMission(ctx, M, 'open');
     const d2 = pmDispatch(ctx, (await readyOf(ctx, 'constructor')).step);
-    pmClose(ctx, M, { mode: 'with-risk', waitRunning: true });
+    await pmClose(ctx, M, { mode: 'with-risk', waitRunning: true });
     write(join(p.dir, d2.worktree!), 'src/add.js', 'exports.add = (a, b) => a + b;\n');
     write(join(p.dir, d2.worktree!), 'src/check.js', CHECK_JS);
     const ok = await handBack(ctx, d2.dispatch, { done: 'implemented add', unmet_standards: [], unfixed_problems: [], decisions_needed: [] });
@@ -189,7 +189,7 @@ describe('review r1 #8: closing a mission', () => {
   it('a full close is refused while an output is not proven or work is unfinished; audits are post-close work', async () => {
     p = await toConstructor();
     const ctx = p.ctx;
-    assert.throws(() => pmClose(ctx, M, { mode: 'full' }), (e: Error) => e instanceof ProcessError && e.code === 'NOT_READY' && /full close/.test(e.message));
+    await assert.rejects(() => pmClose(ctx, M, { mode: 'full' }), (e: Error) => e instanceof ProcessError && e.code === 'NOT_READY' && /full close/.test(e.message));
     assert.equal(ctx.memory.read((db) => missionState(db, M)), 'open', 'nothing written');
     assert.equal(allowedAfterClose({ card: { seat: 'auditor-node' } }), true);
     assert.equal(allowedAfterClose({ card: { seat: 'reviewer' }, afterClose: 'audit' }), true, 'a re-review after an environment change');
@@ -202,17 +202,17 @@ describe('review r1 #9: every state change is its own operation', () => {
     p = processProject();
     const ctx = p.ctx;
     assert.equal(pmMission(ctx, 'm-reopen', 'open').changed, true);
-    assert.equal(pmMission(ctx, 'm-reopen', 'closed').state, 'closed');
+    assert.equal((await pmMission(ctx, 'm-reopen', 'closed')).state, 'closed');
     const reopened = pmMission(ctx, 'm-reopen', 'open');
     assert.equal(reopened.changed, true);
     assert.equal(ctx.memory.read((db) => missionState(db, 'm-reopen')), 'open', 'the reviewer\'s repro left it closed');
     assert.equal(pmMission(ctx, 'm-reopen', 'open').changed, false, 'already open: nothing written');
     // a request id names the request: its retry replays the receipt; a new request closes again
-    const a = pmClose(ctx, 'm-reopen', { mode: 'with-risk', request: 'op-1' });
-    const b = pmClose(ctx, 'm-reopen', { mode: 'with-risk', request: 'op-1' });
+    const a = await pmClose(ctx, 'm-reopen', { mode: 'with-risk', request: 'op-1' });
+    const b = await pmClose(ctx, 'm-reopen', { mode: 'with-risk', request: 'op-1' });
     assert.equal(b.repeated, true);
     assert.equal(b.version, a.version);
-    const c = pmClose(ctx, 'm-reopen', { mode: 'with-risk', request: 'op-2' });
+    const c = await pmClose(ctx, 'm-reopen', { mode: 'with-risk', request: 'op-2' });
     assert.equal(c.version, a.version + 1, 'a new snapshot version');
   });
 });

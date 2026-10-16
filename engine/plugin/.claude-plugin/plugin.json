@@ -1,6 +1,6 @@
 {
   "name": "mission-pipeline",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "Optional Claude Code adapter for Mission Pipeline 4.1: puts `mp` on the PATH, prints the PM handbook core and `mp pm next` at session start, and records each user message with `mp pm say`. Mission Pipeline itself needs only the `mp` command; any harness can be the PM without this plugin.",
   "author": { "name": "Zhuo Qiu" },
   "homepage": "https://github.com/ZhuoQiuMcgill/mission-pipeline",

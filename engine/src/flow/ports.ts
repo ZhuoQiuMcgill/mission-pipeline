@@ -252,13 +252,16 @@ export interface ProductRequest {
   readonly dispatch: string;
   /** The candidate commit (§5.3). */
   readonly candidate: string;
-  /** The base commit the Constructor's worktree was created at. */
+  /** The base commit the Constructor's worktree was created at (the candidate's parent; a rework's: the previous attempt's candidate, or its change laid over its dependencies' current products, Appendix M). */
   readonly base: string;
   readonly writeScope: readonly string[];
   readonly taskType: string;
   readonly prerequisites: readonly string[];
   readonly reviews: readonly ReviewContract[];
+  /** The latest recorded product under this spec whose work was carried (including a re-bound version); null for a new spec. */
   readonly predecessor: string | null;
+  /** The snapshot the version's own change is taken against: inherited while an attempt continues, replaced when the work is carried onto a new start. Supplied for a new carried start, otherwise derived (versionOrigin). */
+  readonly origin?: string;
 }
 
 export interface ProductVersion {
@@ -267,7 +270,25 @@ export interface ProductVersion {
   readonly commit: string;
   /** What the Reviewer and the verification runs read: the candidate commit. */
   readonly snapshot: string;
+  /** The write-scope paths changed since the origin: the snapshot the version's own change is taken against, inherited while an attempt continues, replaced when the work is carried onto a new start (Appendices H, M). */
   readonly changedPaths: readonly string[];
+}
+
+/**
+ * A kept product version re-bound under the plan in effect (design 4.1 Appendix J): a successor of
+ * `of` with the same content and source (commit, write scope, transform description and origin),
+ * so it brings exactly the change `of` brings, and its own prerequisites and review contracts.
+ * Replaying an id must match every immutable field. A new version requires a Reviewer judgment
+ * in stable mode; no judgment is carried over by the program (maintainer ruling 1, 2026-10-13).
+ */
+export interface RebindRequest {
+  readonly mission: MissionId;
+  /** The recorded product version it re-binds (its predecessor). */
+  readonly of: string;
+  /** The new version's id. */
+  readonly object: string;
+  readonly prerequisites: readonly string[];
+  readonly reviews: readonly ReviewContract[];
 }
 
 export interface VerifyRequest {
@@ -286,6 +307,10 @@ export interface VerificationRun {
 }
 
 export interface FlowSchedulerPort {
+  /** Whether the product's origin holds its recorded prerequisite composition; unreadable git is a refusal. */
+  startHolds(product: string): Promise<{ readonly holds: boolean; readonly missing: readonly { readonly prerequisite: string; readonly path: string }[] }>;
+  /** Exact product closure (whole proof units included) sorted by id; the overlay uses prerequisite order. Confers no proof. */
+  composition(products: readonly string[]): Promise<readonly string[]>;
   /** Queue a seat task (idempotent by task id): a ready step for `mp pm next`. */
   submit(task: FlowTask): Promise<void>;
   /** The task's state, or null when the memory does not know it. */
@@ -310,14 +335,37 @@ export interface FlowSchedulerPort {
     readonly products?: readonly string[];
     /** The seat's write paths (kept on the card as they are; nothing is prepared in 4.1). */
     readonly writable?: readonly string[];
-  }): Promise<{ readonly path: string; readonly commit: string; readonly writable?: readonly string[] }>;
+    /**
+     * A later attempt's start (design 4.1 Appendix M): `commit` is the latest recorded candidate under the current spec,
+     * of product version `version`, and `products` are the task's dependencies' accepted products
+     * now. When the snapshot of those products over the mission base is not what that version's
+     * work started from (its origin), the version's whole change since its origin is laid over that
+     * snapshot instead (three-way; a conflict is an ActionError 'conflict' with `carried: true` in
+     * its detail) and `origin` names that snapshot; otherwise the result is `commit` itself.
+     */
+    readonly carry?: { readonly version: string; readonly products: readonly string[] };
+  }): Promise<{
+    readonly path: string;
+    readonly commit: string;
+    readonly writable?: readonly string[];
+    /** Exact product versions composing the start, including their prerequisite closure. */
+    readonly products?: readonly string[];
+    /** Set when a carried change was laid over a new start: the snapshot the attempt's work now starts from (its product's origin). */
+    readonly origin?: string;
+  }>;
   /** 3.5: whether a file of a snapshot exists and contains a symbol (the interface check; read-only, no model). */
   findSymbol(req: { readonly snapshot: string; readonly file: string; readonly symbol: string }): Promise<boolean>;
   /** 3.4: git history and run durations, exported into the Architect's card. */
   history(mission: MissionId): Promise<{ readonly gitLog: string; readonly runs: ReadonlyArray<{ readonly task: string; readonly seat: string; readonly durationMs: number; readonly costMicros: number }> }>;
   /** 4.2: the product version of an accepted Constructor candidate (idempotent per dispatch). */
   product(req: ProductRequest): Promise<ProductVersion>;
-  /** 4.1 §5.3: the program's declared runs on a candidate's clean checkout (idempotent: reused; 'pending' never in 4.1). */
+  /** Appendix J: the re-bound version of a kept product (idempotent per object id). */
+  rebind(req: RebindRequest): Promise<{ readonly object: string; readonly commit: string }>;
+  /**
+   * 4.1 §5.3: the program's declared runs on a candidate's clean checkout (idempotent: reused).
+   * 'pending': the same runs are executing in another `mp` process; nothing was run or recorded,
+   * and the step waits for a later pass, which reuses them once they are recorded.
+   */
   verify(req: VerifyRequest): Promise<readonly VerificationRun[] | 'pending'>;
 }
 

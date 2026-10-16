@@ -1,3 +1,4 @@
+import { resolveBases } from '../memory/domain/constraints.ts';
 // Shared helpers of the flows: the context of one reconciliation pass, deterministic ids, card
 // defaults, contract bindings, notices with their WI, and reading basis versions.
 
@@ -65,6 +66,12 @@ export async function commit(ctx: FlowCtx, op: string, entries: { readonly event
 
 // ---------------------------------------------------------------- notices (3.9, 3.11)
 
+/** Shared identity for raising and closing a flow notice. */
+export function noticeAlertId(n: Pick<FlowNotice, 'mission' | 'category' | 'key'>): string {
+  const cat = n.category.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 60);
+  return `flow:${n.mission}:${cat}:${sha256(canonicalJson([n.mission, n.category, n.key])).slice(0, 24)}`;
+}
+
 export async function notify(ctx: FlowCtx, n: Omit<FlowNotice, 'mission'>): Promise<void> {
   await ctx.ports.ledger.notify({ ...n, mission: ctx.mission });
 }
@@ -99,20 +106,8 @@ export interface BasisIndex {
   readonly withdrawn: ReadonlySet<string>;
 }
 
-export async function basisIndex(ctx: FlowCtx): Promise<BasisIndex> {
-  const current = new Map<string, string>();
-  const lineOf = new Map<string, string>();
-  const records = new Map<string, BasisVersionRecord>();
-  // not filtered by mission: project-wide constraints and standards name none
-  for (const c of await ctx.ports.ledger.records(['basis.version'])) {
-    const r = c.record as BasisVersionRecord;
-    current.set(r.line, r.version);
-    lineOf.set(r.version, r.line);
-    records.set(r.version, r);
-  }
-  const withdrawn = new Set<string>();
-  for (const c of await ctx.ports.ledger.records(['basis.withdrawn'])) withdrawn.add((c.record as { line: string }).line);
-  return { current, lineOf, records, withdrawn };
+export async function basisIndex(ctx: { ports: Pick<FlowPorts, 'ledger'> }): Promise<BasisIndex> {
+  return resolveBases((await ctx.ports.ledger.records(['basis.version', 'basis.withdrawn'])).map((c) => c.record));
 }
 
 /**

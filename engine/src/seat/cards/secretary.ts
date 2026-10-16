@@ -57,8 +57,9 @@ export const SecretaryCardSchema = z.object({
     reasons: z.array(z.string()),
   }),
   /** Required: the related authorizations verbatim (with their notify conditions), the items involved, the alignment record. */
-  authorizations: z.array(z.object({ id: z.string().min(1), quote: z.string().min(1), notifyCondition: z.string().nullable() })),
+  authorizations: z.array(z.object({ id: z.string().min(1), version: z.string().optional(), quote: z.string().min(1), notifyCondition: z.string().nullable() })),
   items: z.array(Item),
+  contextItems: z.array(z.object({ line: z.string(), version: z.string(), type: z.string() })).optional(),
   materials: z.array(Material).min(1),
   /** The choices the program can carry out for this escalation. */
   options: z.array(z.object({ id: z.enum(DECISION_OPTIONS), label: z.string().min(1), outcome: z.string().min(1) })).min(1),

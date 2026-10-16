@@ -1,3 +1,4 @@
+import { auditPositionInputs, auditBasisTexts, auditNodeConstraints, auditChainInputs } from '../../seat/cards/inputs.ts';
 // Legalization (design 11.1, 5.2 part 3, 6.1, 10.1): an independent unit of work, started only
 // when the user asks (through the PM). The program first computes the backfill list and the
 // number of seats it will start, and the user sees it before the audit starts. Then:
@@ -25,16 +26,16 @@
 
 import { canonicalJson } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, OpId } from '../../common/ids.ts';
-import { encodeConstraintCheck, type EvidenceRecord, type JudgmentRecord, type ObjectVersionRecord, type ProofUnitRecord, type ReviewContract } from '../../common/records.ts';
-import { constraintApplies, requiredRange, type Label } from '../../evaluator/semantics.ts';
+import { type EvidenceRecord, type JudgmentRecord, type ObjectVersionRecord, type ProofUnitRecord, type ReviewContract } from '../../common/records.ts';
+import { type Label } from '../../evaluator/semantics.ts';
 import { SEAMS_ON_CARD, seamTable, type AuditChainCard, type AuditChainResult, type AuditNodeCard, type AuditNodeResult, type AuditPositionT } from '../../seat/cards/auditor.ts';
 import { CARD_FORMAT, materialPageCount, type MaterialRef } from '../../seat/cards/common.ts';
 import { SEAT_CAPABILITIES, basisIndex, flowCtx, idPart, type FlowCtx } from '../context.ts';
 import type { AnyCard, FlowPorts, FlowTaskStatus } from '../ports.ts';
 import { handleFailure } from '../failures.ts';
-import { detailedPlanOf, standardLine, type EffectiveBody } from '../planning.ts';
+import { detailedPlanOf, type EffectiveBody } from '../planning.ts';
 import { PLAN_LINE, REQUIREMENTS_LINE } from '../plandoc.ts';
-import { currentConstraints, currentItems, requirementSetLine, type ItemVersionBody } from '../requirements.ts';
+import { currentConstraints, currentItems, requirementSetLine } from '../requirements.ts';
 import { cancelSecretarySteps, carryGuard, closing, markApplied, openEscalations } from '../secretary.ts';
 import { lineageSource, nextGeneration, walkLineage, type Lineage, type LineageNode } from './lineage.ts';
 
@@ -346,7 +347,17 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
         continue;
       }
       const c = s.consumed.get(prior.task);
-      if (c === undefined) continue; // still running
+      if (c === undefined) {
+        // a node Auditor not yet dispatched whose contract basis is gone can never be dispatched
+        // (the claim refuses it): it ends through the builder's own exit, never waits for good
+        const missing = (await ports.scheduler.status(prior.task))?.state === 'queued' ? await queuedNodeMissingBasis(ctx, node, JSON.parse(ports.ledger.content.get(prior.card)) as AuditNodeCard) : null;
+        if (missing !== null) {
+          // cancel first: after a crash in between, the cancelled Auditor still ends it (as given up)
+          await ports.scheduler.cancel(prior.task);
+          return end(ports, mission, l, 'not-legalized', `the text of ${missing} that ${node} must be judged against is not recorded, so no Auditor can judge it honestly (5.2: every basis of the contract, current)`, [node]);
+        }
+        continue; // still running
+      }
       return end(ports, mission, l, 'not-legalized', `the backfill of ${node} did not prove it (${Object.entries(c.verdicts).map(([k, v]) => `${k}: ${v}`).join(', ') || 'no verdict'}; label ${lab.labels[node] ?? 'unknown'})`, [node]);
     }
     if (next === null) return running.length > 0 ? 'node Auditors are running' : `waiting for ${gen.join(', ')}`;
@@ -580,38 +591,19 @@ async function evidenceFor(ctx: FlowCtx, targets: ReadonlySet<string>, extra: re
  * exploration definitions (the user's acceptance goal). A line with no known text is missing.
  */
 async function basisTexts(ctx: FlowCtx): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  const itemsByVersion = new Map<string, { line: string; type: string; text: string; quote: string | null }>();
-  for (const e of await ctx.ports.ledger.events<ItemVersionBody>({ mission: ctx.mission, line: REQUIREMENTS_LINE, event: 'item' })) {
-    itemsByVersion.set(e.body.version, { line: e.body.line, type: e.body.type, text: e.body.text, quote: e.body.source.kind === 'words' ? e.body.source.quote : null });
-  }
-  for (const i of await currentItems(ctx)) out.set(i.line, `${i.type}: ${i.text}${i.source.kind === 'words' ? ` — the user's words: "${i.source.quote}"` : ''}`);
-  for (const e of await ctx.ports.ledger.events<EffectiveBody>({ mission: ctx.mission, line: PLAN_LINE, event: 'effective' })) {
-    const d = await detailedPlanOf(ctx, e.body.dplan);
-    if (d === null) continue;
-    for (const t of d.plan.tasks) for (const st of t.standards) out.set(standardLine(ctx.mission, t.id, st.id), `acceptance standard ${st.id} of task ${t.id}: ${st.text}`);
-  }
-  const ix = await basisIndex(ctx);
-  const reqset = requirementSetLine(ctx.mission);
-  const v = ix.current.get(reqset);
-  const rec = v !== undefined ? ix.records.get(v) : undefined;
-  if (rec !== undefined && rec.basisKind === 'requirement-set') {
-    const members = ctx.ports.ledger.content.getList(rec.snapshot).map((iv) => itemsByVersion.get(iv));
-    if (members.every((m) => m !== undefined)) {
-      out.set(reqset, `the mission's requirement set (${members.length} item(s) in force): ${members.map((m) => `[${m?.line}] ${m?.type}: ${m?.text}${m?.quote !== null && m?.quote !== undefined ? ` ("${m.quote}")` : ''}`).join('; ')}`);
-    }
-  }
-  for (const e of await ctx.ports.ledger.events<{ definition: { goal: string; exploration: string }; basisLine?: string }>({ mission: ctx.mission, event: 'defined' })) {
-    if (!e.line.startsWith('exploration:') || e.body.basisLine === undefined) continue;
-    const re = (await ctx.ports.ledger.events<{ definition: { goal: string } }>({ mission: ctx.mission, line: e.line, event: 'redefined' })).at(-1);
-    out.set(e.body.basisLine, `the definition of exploration ${e.body.definition.exploration}; the user's acceptance goal, verbatim: "${(re?.body.definition ?? e.body.definition).goal}"`);
-  }
-  return out;
+  const missions = new Set([ctx.mission, ...await ctx.ports.ledger.missions()]);
+  const events = (await Promise.all([...missions].map((mission) => ctx.ports.ledger.events({ mission })))).flat().sort((a, b) => a.revision - b.revision);
+  const objects = new Map((await ctx.ports.ledger.records(['object.version'])).map((r) => [r.record.object as string, r.record as ObjectVersionRecord]));
+  return auditBasisTexts(await basisIndex(ctx), events, ctx.ports.ledger.content, (id) => objects.get(id));
 }
 
-/** The plan task whose accepted product is this object (execution's "accepted" events), with its verification commands. */
+/** The plan task whose accepted product is this object (execution's "accepted" events, and "rebound" ones for a version re-bound to a later plan), with its verification commands. */
 async function taskOfProduct(ctx: FlowCtx, object: string): Promise<{ readonly task: string; readonly commands: ReadonlyArray<{ id: string; command: string; cwd?: string }> } | null> {
-  for (const e of await ctx.ports.ledger.events<{ product?: string }>({ mission: ctx.mission, event: 'accepted' })) {
+  const accepted = [
+    ...(await ctx.ports.ledger.events<{ product?: string }>({ mission: ctx.mission, event: 'accepted' })),
+    ...(await ctx.ports.ledger.events<{ product?: string }>({ mission: ctx.mission, event: 'rebound' })),
+  ];
+  for (const e of accepted) {
     if (e.body.product !== object || !e.line.startsWith('task:')) continue;
     const task = e.line.slice('task:'.length);
     let commands: Array<{ id: string; command: string; cwd?: string }> = [];
@@ -651,6 +643,28 @@ function contentMaterials(ctx: FlowCtx, objects: readonly ObjectVersionRecord[])
   return out;
 }
 
+/** The basis a queued node Auditor's positions can no longer be given (the builder's missingBasis), or null. */
+async function queuedNodeMissingBasis(ctx: FlowCtx, node: string, card: AuditNodeCard): Promise<string | null> {
+  const ports = ctx.ports;
+  const objects = new Map((await ports.ledger.records(['object.version'])).map((c) => [c.record.object as string, c.record as ObjectVersionRecord]));
+  const unit = new Map((await ports.ledger.records(['proof.unit'])).map((c) => [c.record.unit as string, c.record as ProofUnitRecord])).get(node);
+  const obj = objects.get(node);
+  const members = unit === undefined ? [] : ports.ledger.content.getList(unit.members);
+  const memberObjects = members.flatMap((m) => (objects.get(m) !== undefined ? [objects.get(m) as ObjectVersionRecord] : []));
+  if (unit !== undefined && memberObjects.length !== members.length) return `members of ${node}`;
+  const bound = obj !== undefined ? [obj] : memberObjects;
+  const ix = await basisIndex(ctx);
+  const texts = await basisTexts(ctx);
+  const constraints = await currentConstraints(ctx);
+  for (const p of card.positions) {
+    const contract = (obj?.reviews ?? unit?.reviews ?? []).find((c) => c.review === p.review);
+    if (contract === undefined) return `the ${p.review} contract of ${node}`;
+    const inputs = auditPositionInputs(contract, bound, ix, texts, constraints);
+    if ('missingBasis' in inputs) return inputs.missingBasis;
+  }
+  return null;
+}
+
 /** The node Auditor's card: the positions it may fill (5.2 part 3), each with its contract's inputs. */
 async function nodeCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, n: number, task: string, node: string): Promise<AuditNodeCard | { readonly missingBasis: string } | { readonly recomputing: true } | null> {
   const ports = ctx.ports;
@@ -685,48 +699,27 @@ async function nodeCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, 
     eligible.push({ contract: c, reason: 'coverage', prior: view?.positions.find((x) => x.review === c.review)?.by ?? null });
   }
   if (eligible.length === 0) return null;
-  const scopeObj = obj?.scope ?? null;
-  const applying = scopeObj === null ? [] : constraints.filter((k) => constraintApplies(k.scope, scopeObj)).map((k) => ({ k, paths: requiredRange(k.scope, scopeObj) })).filter((x) => x.paths.length > 0);
   const content = ports.ledger.content;
-  const positions: AuditPositionT[] = [];
-  let i = 0;
-  for (const e of eligible) {
-    i++;
-    const bases: Array<{ id: string; text: string }> = [];
-    const versions: string[] = [];
-    for (const line of e.contract.basisLines) {
-      const v = ix.current.get(line);
-      if (v === undefined || ix.withdrawn.has(line)) return null; // a withdrawn basis cannot be bound (the node shows "basis withdrawn")
-      versions.push(v);
-      const text = texts.get(line);
-      // no placeholder: an Auditor judging a basis it cannot read would prove nothing (review r1 #3)
-      if (text === undefined) return { missingBasis: line };
-      bases.push({ id: line, text: `${text} (version ${v})` });
-    }
-    if (bases.length === 0) bases.push({ id: 'contract', text: `the contract of position "${e.contract.review}" names no basis item: judge the node against its stated purpose and the objects it relies on` });
-    positions.push({
-      review: e.contract.review,
-      reason: e.reason,
-      bases,
-      constraints: applying.map((x) => ({ id: x.k.line, version: x.k.version, text: x.k.text, paths: x.paths })),
-      prior: e.prior,
-      inheritedEvidence: [],
-      binding: {
-        judgment: aid.judgment(req.mission, req.legalization, n, i),
-        bases: content.putList([...new Set(versions)].sort()),
-        constraints: content.putList(applying.map((x) => encodeConstraintCheck({ version: x.k.version, paths: x.paths })).sort()),
-        reliesOn: content.putList([...new Set(e.contract.reliesOn as readonly string[])].sort()),
-        revokes: null,
-        extends: null,
-        evidenceUse: { fields: ['exit'], statisticalOrExternal: false },
-        superseded: [],
-      },
-    });
-  }
   const members = unit !== undefined ? content.getList(unit.members) : [];
   const memberObjects = members.flatMap((m) => (objects.get(m) !== undefined ? [objects.get(m) as ObjectVersionRecord] : []));
   if (unit !== undefined && memberObjects.length !== members.length) return { missingBasis: `members of ${node}` };
   const bound = obj !== undefined ? [obj] : memberObjects;
+  const positions: AuditPositionT[] = [];
+  let i = 0;
+  for (const e of eligible) {
+    const inputs = auditPositionInputs(e.contract, bound, ix, texts, constraints);
+    if ('missingBasis' in inputs) return inputs;
+    positions.push({
+      review: e.contract.review, reason: e.reason, prior: e.prior,
+      bases: inputs.bases, constraints: inputs.constraints, inheritedEvidence: [],
+      binding: {
+        judgment: aid.judgment(req.mission, req.legalization, n, ++i),
+        bases: content.putList(inputs.versions), constraints: content.putList(inputs.checks),
+        reliesOn: content.putList([...new Set(e.contract.reliesOn as readonly string[])].sort()),
+        revokes: null, extends: null, evidenceUse: { fields: ['exit'], statisticalOrExternal: false }, superseded: [],
+      },
+    });
+  }
   const snapshot = await auditSnapshot(ctx, req.legalization, `legalization-${req.legalization}-n${n}`, bound, null);
   const materials = contentMaterials(ctx, bound);
   const commands = obj !== undefined && obj.objectKind === 'product' ? ((await taskOfProduct(ctx, obj.object))?.commands ?? []) : [];
@@ -745,6 +738,7 @@ async function nodeCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, 
       paths: [...new Set(bound.flatMap((o) => o.scope.paths))],
     },
     positions,
+    constraints: auditNodeConstraints(positions),
     evidence: await evidenceFor(ctx, new Set([node, ...members]), []),
     // the task's verification commands, which the Auditor may have the program rerun (7.3)
     declaredCommands: [...commands],
@@ -756,17 +750,15 @@ async function nodeCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, 
 async function chainCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody, object: string, n: number, task: string): Promise<AuditChainCard> {
   const items = await currentItems(ctx);
   const ix = await basisIndex(ctx);
-  const reqset = requirementSetLine(req.mission);
-  const words = items.filter((i) => i.source.kind === 'words');
-  const quotes = (words.length > 0 ? words : items).map((i) => ({ id: i.line, text: i.source.kind === 'words' ? `"${i.source.quote}" (${i.type}: ${i.text})` : `${i.type}: ${i.text}` }));
-  if (quotes.length === 0) quotes.push({ id: 'request', text: `(no requirement item is recorded) the user's request: "${req.words}"` });
+  const obj = await ctx.ports.ledger.objectVersion(object);
+  if (obj === null) throw new Error(`Missing chain object ${object}`);
+  const inputs = auditChainInputs(items, ix, await currentConstraints(ctx), obj, req.words);
   const chain = new Set(plan.chain);
   const seams: Array<{ id: string; between: string[]; text: string }> = [];
   // every required edge inside the chain is a seam; none is dropped (review r1 #4): the card lists
   // the first ones, the complete table is a must-read material
   for (const node of plan.nodes) for (const p of node.parents) if (chain.has(p)) seams.push({ id: `seam-${seams.length + 1}`, between: [node.id, p], text: `${node.id} relies on ${p}: what one provides is what the other uses` });
   const content = ctx.ports.ledger.content;
-  const v = ix.current.get(reqset);
   // the actual candidate (review r1 #3): every product of the chain laid over the endpoint's commit, documents as materials
   const objects = new Map((await ctx.ports.ledger.records(['object.version'])).map((c) => [c.record.object as string, c.record as ObjectVersionRecord]));
   const units = new Map((await ctx.ports.ledger.records(['proof.unit'])).map((c) => [c.record.unit as string, c.record as ProofUnitRecord]));
@@ -788,15 +780,16 @@ async function chainCard(ctx: FlowCtx, req: LegalizationRequest, plan: PlanBody,
     workspace: { snapshot, writablePaths: [], scratchPaths: [] },
     legalization: req.legalization,
     chain: { object, endpoint: plan.endpoint, nodes: plan.nodes.map((x) => ({ id: x.id, kind: x.objectKind, label: 'proven' })), excluded: [...plan.excluded] },
-    quotes,
+    quotes: inputs.quotes,
+    constraints: inputs.list,
     seams,
     evidence: await evidenceFor(ctx, new Set<string>(), req.chainEvidence),
     declaredCommands: [],
     materials,
     binding: {
       judgment: aid.chainJudgment(req.mission, req.legalization, n),
-      bases: content.putList(v !== undefined && !ix.withdrawn.has(reqset) ? [v] : []),
-      constraints: content.putList([]),
+      bases: content.putList(inputs.bases),
+      constraints: content.putList(inputs.checks),
       reliesOn: content.putList([...plan.chain].sort()),
       revokes: null,
       extends: null,
