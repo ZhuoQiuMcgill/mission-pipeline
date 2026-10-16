@@ -411,7 +411,10 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       // "pending": another mp process advancing the flow is running these very runs; the hand-back
       // stays recorded once, nothing runs twice, and the result reaches the flow when they are recorded
       if (runs === 'pending') notes.push('the verification runs of this candidate are executing in another mp process; their result reaches the process when they are recorded (mp pm next)');
-      else verification = [...runs];
+      else {
+        verification = [...runs];
+        for (const r of runs) if ('setupFailure' in r && typeof r.setupFailure === 'string') notes.push(r.setupFailure);
+      }
     } catch (e) {
       notes.push(`the verification runs could not run now (${(e as Error).message}); mp runs them again on the next step`);
     }

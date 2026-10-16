@@ -4,7 +4,7 @@
 // the delivery ref; rebuilds on a moved base, counted, then the ref is left.
 
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { id, type ObjectVersionId, type StopId } from '../src/common/ids.ts';
@@ -13,10 +13,12 @@ import { deliver, rebuildDelivery, shellClosingRunner, type ClosingRunner, type 
 import type { LabelView } from '../src/delivery/memoryView.ts';
 import { writeScopeDocument } from '../src/delivery/writeScope.ts';
 import { land } from '../src/git/land.ts';
+import { shellQuote } from '../src/git/plainGit.ts';
 import { discoverRepo, lsTree } from '../src/git/objects.ts';
 import { readTransformDescription, transformDescriptionHash } from '../src/git/representation.ts';
 import { appendRecords, commitStop, deliveryInfo, loopState, openIntents } from '../src/memory/index.ts';
 import { commitOn, fixture, holdGitWrites, IDENT, M, words, write, type Fixture } from './git41-fixtures.ts';
+import { tempDir } from './memory-fixtures.ts';
 
 const POSIX = process.platform !== 'win32';
 const FILES = { 'src/a.txt': 'a\n', 'file2.txt': 'x\n', '.gitignore': '*.log\n' };
@@ -66,6 +68,40 @@ function advance(f: Fixture, name: string): string {
   f.git('merge', '-q', '--ff-only', c);
   return c;
 }
+
+test('delivery setup runs no global hooks and a closing check update-ref runs the hook normally', { skip: !POSIX }, async () => {
+  const f = fixture({ files: FILES });
+  const saved = process.env['GIT_CONFIG_GLOBAL'];
+  const scratch = tempDir('mp-deliver-hooks-');
+  try {
+    await product(f);
+    const hooks = join(scratch, 'hooks');
+    const marker = join(scratch, 'hook-calls');
+    mkdirSync(hooks);
+    const hook = join(hooks, 'reference-transaction');
+    writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' "$1" >> '${marker}'\ncat >> '${marker}'\n`);
+    chmodSync(hook, 0o755);
+    const global = join(scratch, 'gitconfig');
+    writeFileSync(global, `[core]\n\thooksPath = ${JSON.stringify(hooks)}\n`);
+    process.env['GIT_CONFIG_GLOBAL'] = global;
+    const closing: ClosingRunner = {
+      run(req) {
+        assert.equal(existsSync(marker), false, 'no reference transaction hook during attribute or checkout setup');
+        return shellClosingRunner.run(req);
+      },
+    };
+    const r = delivered(await deliver(f.ctx, request('hook-test', {
+      closingChecks: [{ id: 'hook', command: `test ! -e ${shellQuote(marker)} && git update-ref refs/heads/check-hook HEAD && test -s ${shellQuote(marker)}` }],
+    }), { labels: labels(f), closing }));
+    assert.equal(r.record.checks[0]!.passed, true);
+    assert.match(readFileSync(marker, 'utf8'), /refs\/heads\/check-hook/);
+  } finally {
+    if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+    else process.env['GIT_CONFIG_GLOBAL'] = saved;
+    f.cleanup();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
 
 test('a delivery: the candidate on main’s current commit, proven, its closing checks run in a clean checkout, the delivery ref created and recorded once', { skip: !POSIX }, async () => {
   const f = fixture({ files: FILES });

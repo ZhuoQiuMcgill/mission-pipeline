@@ -40,7 +40,7 @@ import { inWriteScope } from '../delivery/writeScope.ts';
 import { LedgerError, PATH_ID, type Memory, type MemoryPaths } from '../memory/index.ts';
 import { decodePath, discoverRepo, gitOid, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
 import { GitError, GitExitError, type PlainGit } from './plainGit.ts';
-import { attachCheckoutRepository } from './checkoutRepository.ts';
+import { attachCheckoutRepository, checkoutSetupGit } from './checkoutRepository.ts';
 import { linkedGitDirs } from './worktreeRecord.ts';
 import {
   AttributeEvaluator,
@@ -551,10 +551,13 @@ export async function checkoutCommit(ctx: GitContext, req: { readonly commit: st
   const scratch = mkdtempSync(join(tmp, 'checkout-attr-'));
   let attributes: AttributeEvaluator | null = null;
   try {
-    const repo: RepoLayout = await discoverRepo(ctx.git, ctx.memory.projectDir);
-    const description = req.description ?? (await readTransformDescription(ctx.git, repo, ctx.memory.projectDir));
-    attributes = await AttributeEvaluator.create(ctx.git, repo, description, scratch);
-    const manifest = await materializeSnapshot({ git: ctx.git, repo, commit: req.commit, attributes, dest: req.dir });
+    // AttributeEvaluator also initializes a repository, before the run's .git exists.
+    // Suppress its hooks too; the temporary override disappears with this scratch directory.
+    const git = checkoutSetupGit(ctx.git, join(scratch, '.git'));
+    const repo: RepoLayout = await discoverRepo(git, ctx.memory.projectDir);
+    const description = req.description ?? (await readTransformDescription(git, repo, ctx.memory.projectDir));
+    attributes = await AttributeEvaluator.create(git, repo, description, scratch);
+    const manifest = await materializeSnapshot({ git, repo, commit: req.commit, attributes, dest: req.dir });
     if (req.repository === true) await attachCheckoutRepository(ctx.git, repo, { dir: req.dir, commit: manifest.commit, description });
     return { dir: req.dir, commit: manifest.commit, manifest, unsupported: manifest.unsupported };
   } catch (e) {

@@ -48,6 +48,12 @@ const LOCATOR_VARS: readonly string[] = [
   'GIT_NAMESPACE',
   'GIT_CEILING_DIRECTORIES',
   'GIT_PREFIX',
+  'GIT_SHALLOW_FILE',
+  'GIT_GRAFT_FILE',
+  'GIT_REPLACE_REF_BASE',
+  'GIT_QUARANTINE_PATH',
+  'GIT_IMPLICIT_WORK_TREE',
+  'GIT_ATTR_SOURCE',
 ];
 
 /**
@@ -56,10 +62,10 @@ const LOCATOR_VARS: readonly string[] = [
  * search): the environment of a declared command in a run checkout, whose own repository is the
  * candidate's (checkoutRepository.ts). Windows variable names are case-insensitive.
  */
-export function withoutRepositoryLocators(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function withoutRepositoryLocators(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...env };
   for (const k of Object.keys(out)) {
-    const u = k.toUpperCase();
+    const u = platform === 'win32' ? k.toUpperCase() : k;
     if (LOCATOR_VARS.includes(u) && u !== 'GIT_CEILING_DIRECTORIES') delete out[k];
   }
   return out;
@@ -224,7 +230,7 @@ export class PlainGit implements GitExec {
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const k of Object.keys(env)) {
       // Windows variable names are case-insensitive.
-      if (LOCATOR_VARS.includes(k.toUpperCase())) delete env[k];
+      if (LOCATOR_VARS.includes(this.windows ? k.toUpperCase() : k)) delete env[k];
     }
     Object.assign(env, FIXED_ENV, this.baseEnv, opts.env ?? {});
     const loc = opts.locators ?? this.boundLocators ?? undefined;

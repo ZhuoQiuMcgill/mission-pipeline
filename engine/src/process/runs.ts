@@ -3,8 +3,8 @@
 // with the platform's shell, inside the `mp` command that needs them; the checkout is removed
 // afterwards. The checkout is a git repository of its own at the commit (checkoutRepository.ts),
 // and the commands get no variable that points git elsewhere (GIT_DIR, GIT_WORK_TREE,
-// GIT_INDEX_FILE, ...), so what they ask git is answered for the candidate. Each command becomes
-// one evidence record:
+// GIT_INDEX_FILE, ...), so what they ask git is answered for the candidate. Each command without reusable evidence becomes
+// one evidence record (reusable commands executed only as setup add none):
 //   - envLine ENV_LINE and the environment identity observed by this process (§6.5);
 //   - the run class fixed now, from the card (runClassOf): a declared run (`mp`, clean checkout,
 //     a declared command, no network, not sampled), or a sampling run (`mp seat <id> rerun`, an
@@ -18,7 +18,7 @@
 // command; the full output is not kept (U-13).
 //
 // Reuse (§6.5): a declared run is reused for the same candidate, command, working directory and
-// environment identity (findReusableRun's key); a sampling run never is: each one executes and gets
+// environment identity (reusableMethodRun's key); a sampling run never is: each one executes and gets
 // a new run id.
 //
 // Run locks (§4.1 "Process locks"): a declared run is recorded only after all its commands have
@@ -41,7 +41,9 @@ import type { EnvSnapshotId, EvidenceId, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord, RunClass } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
-import { ENV_LINE, findReusableRun, RUN_FIELD, runClassOf, sampleRunId, type RunDeclaration } from '../evaluator/index.ts';
+import { ENV_LINE, RUN_FIELD, runClassOf, sampleRunId, type RunDeclaration } from '../evaluator/index.ts';
+import { RUN_METHOD } from '../evaluator/environment.ts';
+import { reusableMethodRun } from '../evaluator/runs.ts';
 import { withoutRepositoryLocators } from '../git/plainGit.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir } from '../git/workspace.ts';
 import type { ClosingCheck, ClosingOutcome, ClosingRunner } from '../delivery/delivery.ts';
@@ -142,7 +144,7 @@ function tail(output: Buffer, lines = 40): string {
 
 /**
  * A declared run of the same reuse key (candidate, command, working directory, environment
- * identity) is executing in another `mp` process: its run lock is held. Nothing was run or
+ * identity, run method) is executing in another `mp` process: its run lock is held. Nothing was run or
  * recorded; once that run is recorded, the next call reuses it. A LOCKED refusal: busy, retry.
  */
 export class RunInProgress extends LedgerError {
@@ -160,9 +162,9 @@ function runLocksDir(ctx: ProcessContext): string {
   return join(ctx.memory.paths.locks, 'runs');
 }
 
-/** The name of the run lock of one reuse key (findReusableRun's): the candidate, the command, its normalized working directory, the environment identity. */
+/** The name of the run lock of one reuse key (reusableMethodRun's): the candidate, the command, its normalized working directory, the environment identity. */
 function runLockName(key: { readonly candidate: string; readonly command: string; readonly cwd: string; readonly environment: string }): string {
-  return `run-${sha256(canonicalJson({ candidate: key.candidate, command: key.command, cwd: key.cwd, environment: key.environment })).slice(0, 40)}`;
+  return `run-${sha256(canonicalJson({ candidate: key.candidate, command: key.command, cwd: key.cwd, environment: key.environment, method: RUN_METHOD })).slice(0, 40)}`;
 }
 
 /** Take the run lock of every command without waiting (in name order); RunInProgress, with none kept, when another process holds one. */
@@ -193,8 +195,10 @@ export interface RecordedRun {
   readonly fields: Readonly<Record<string, string>>;
   /** The last lines of a failing command (not kept in the memory; the summary leaf has them). */
   readonly tail: string;
-  /** Reused from an earlier declared run (§6.5), not executed now. */
+  /** Reused from an earlier declared run (§6.5), possibly re-executed only as setup. */
   readonly reused: boolean;
+  /** Failure of this call's setup-only execution; never evidence. */
+  readonly setupFailure?: string;
 }
 
 /** A run id that names a directory and a leaf (letters, digits and "-"). */
@@ -237,7 +241,8 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
   ];
   for (const r of o.runs) {
     lines.push(`## ${r.command.id}: \`${r.command.command}\` (in ${runCwd(r.fields)})`, '');
-    lines.push(`- Evidence: ${r.evidence}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (the output itself is not kept)`);
+    if (r.setupFailure !== undefined) lines.push(`- Note: ${r.setupFailure}`);
+    lines.push(`- Evidence: ${r.evidence}${r.reused ? ' (reused; execution only as setup)' : ''}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (the output itself is not kept)`);
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
     if (!r.passed && r.tail !== '') lines.push('', 'Last lines of the output:', '', '```', r.tail, '```');
@@ -254,10 +259,12 @@ export function runLeaf(mission: string, run: string): string {
  * Run `commands` on a clean checkout of `commit` (§5.3) and record them in one write: an evidence
  * record per command, and the run summary leaf. `declaration`: what the card declares about the
  * runs (§6.5 classes). Reuse: a declared run is reused, with nothing executed, when every command
- * has a reusable run (same candidate, command, environment identity); a sampling run never is.
+ * has a reusable run (same candidate, command, cwd, environment identity and method); a sampling
+ * run never is. Otherwise all commands execute in order; reusable ones are setup only, with no
+ * new evidence. A setup failure is a note, and does not stop later commands.
  * A declared run executes only under its run locks (see the top of this file): RunInProgress,
  * with nothing run or recorded, while another process executes the same run.
- * `tx`: more records for the same write (e.g. a dispatch's flow event).
+ * `also`: more records for the same write (e.g. renewal pairs); `result` is that write's returned answer.
  */
 export async function runOnCommit(
   ctx: ProcessContext,
@@ -272,48 +279,35 @@ export async function runOnCommit(
     /** More fields on every run (e.g. the dispatch). */
     readonly fields?: Readonly<Record<string, string>>;
     /** More in the recording write (same transaction). */
-    readonly also?: (tx: WriteTx, runs: readonly RecordedRun[], run: string, records: readonly EvidenceRecord[]) => void;
+    readonly also?: (tx: WriteTx, runs: readonly RecordedRun[], run: string, records: readonly EvidenceRecord[]) => unknown;
+    /** These reusable evidence ids must be replaced by actual fresh executions under their run locks. */
+    readonly doNotReuse?: readonly string[];
     /** An op id for the recording write (journal-safe retries). */
     readonly op?: string;
   },
-): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null }> {
+): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
   const env = ctx.environment();
   const classOf = (c: DeclaredCommand): RunClass => runClassOf({ ...req.declaration, sampled: c.sampled === true, network: c.network === true });
-  // §6.5 reuse: only declared runs, every command reusable
-  if (req.commands.length > 0 && req.commands.every((c) => classOf(c) === 'declared')) {
-    const reused = reusableRuns(ctx, req.commit, req.commands, env.identity);
-    if (reused !== null) return reused;
-    // a declared run executes once: under its run locks, taken without waiting (RunInProgress while
-    // another process holds one); sampling runs take none, each one executes
-    const locks = takeRunLocks(ctx, req.commit, req.commands, env.identity);
-    try {
-      // the holder that released just before may have recorded it: reused, not run again
-      return reusableRuns(ctx, req.commit, req.commands, env.identity) ?? (await executeRuns(ctx, req, env, classOf));
-    } finally {
-      // released only after the recording write: the process that takes the lock next finds the run
-      for (const l of locks) l.release();
+  // Every declared command takes its own lock, including in a mixed group and when
+  // re-executed only as setup (per maintainer ruling 5, 2026-10-13).
+  const declared = req.commands.filter((c) => classOf(c) === 'declared');
+  const locks = takeRunLocks(ctx, req.commit, declared, env.identity);
+  try {
+    const reusable = ctx.memory.read((db) => req.commands.map((c): RecordedRun | null => {
+      if (classOf(c) !== 'declared') return null;
+      const r = reusableMethodRun(db, { candidate: req.commit, command: c.command, cwd: normalizeCwd(c.cwd), environment: env.identity });
+      if (r === null || req.doNotReuse?.includes(r.evidence)) return null;
+      return { evidence: r.evidence, command: c, passed: r.fields['status'] === 'completed' && r.fields['exit'] === '0', summary: summaryOf(r.fields), fields: r.fields, tail: '', reused: true };
+    }));
+    if (reusable.length > 0 && reusable.every((r) => r !== null)) {
+      const runs = reusable as RecordedRun[];
+      return { run: runs[0]!.fields['run'] ?? runs[0]!.evidence, runs, reused: true, leaf: null, result: undefined };
     }
+    return await executeRuns(ctx, req, env, classOf, reusable);
+  } finally {
+    // Including checkout, execution and write failures: every exit releases every lock.
+    for (const l of locks) l.release();
   }
-  return executeRuns(ctx, req, env, classOf);
-}
-
-/** Every command reusable (§6.5): the recorded runs, or null. */
-function reusableRuns(ctx: ProcessContext, commit: string, commands: readonly DeclaredCommand[], environment: string): { readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null } | null {
-  // the reuse key is the candidate, the command, the working directory and the identity (a run of
-  // the same command in another directory is another run: not reused, it executes)
-  const reused = ctx.memory.read((db) =>
-    commands.map((c) => {
-      const cwd = normalizeCwd(c.cwd);
-      const r = findReusableRun(db, { candidate: commit, command: c.command, cwd, environment });
-      return { c, r: r !== null && runCwd(r.fields) === cwd ? r : null };
-    }),
-  );
-  if (!reused.every((x) => x.r !== null)) return null;
-  const runs = reused.map(({ c, r }): RecordedRun => {
-    const fields = r!.fields;
-    return { evidence: r!.evidence, command: c, passed: fields['status'] === 'completed' && fields['exit'] === '0', summary: summaryOf(fields), fields, tail: '', reused: true };
-  });
-  return { run: runs[0]!.fields['run'] ?? runs[0]!.evidence, runs, reused: true, leaf: null };
 }
 
 /** Execute the commands on a clean checkout (a repository at the candidate) and record them in one write (runOnCommit, past reuse and the run locks). */
@@ -322,39 +316,52 @@ async function executeRuns(
   req: Parameters<typeof runOnCommit>[1],
   env: ReturnType<ProcessContext['environment']>,
   classOf: (c: DeclaredCommand) => RunClass,
-): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null }> {
+  reusable: readonly (RecordedRun | null)[],
+): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
   const run = newRunId(req.declaration.rerun === true ? 'rerun' : 'run');
   const dir = runCheckoutDir(ctx.memory.paths, run);
   const executed: RecordedRun[] = [];
   const records: EvidenceRecord[] = [];
+  const staged = new Map<string, RecordedRun>();
+  const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
   await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
   try {
-    for (const c of req.commands) {
+    for (const [i, c] of req.commands.entries()) {
       const rel = normalizeCwd(c.cwd);
       const cwd = rel === '.' ? dir : join(dir, ...rel.split('/'));
       mkdirSync(cwd, { recursive: true });
       const out = ctx.runner({ command: c.command, cwd, timeoutMs: ctx.commandTimeoutMs });
-      const fields = fieldsOf(out, { ...(req.fields ?? {}), [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: c.command, [CWD_FIELD]: rel, commandId: c.id.slice(0, 200), run, purpose: req.purpose.slice(0, 200) });
       const runClass = classOf(c);
+      const key = canonicalJson({ command: c.command, cwd: rel });
+      const prior = reusable[i] ?? (runClass === 'declared' ? staged.get(key) : undefined);
+      if (prior !== null && prior !== undefined) {
+        const failed = out.timedOut || out.error !== null || out.exitCode !== 0;
+        const setupFailure = failed ? `Setup-only execution of ${c.id} failed (${out.timedOut ? 'timeout' : out.error ?? out.signal ?? `exit ${out.exitCode}`}); evidence ${prior.evidence} is unchanged; later commands still ran.` : undefined;
+        executed.push({ ...prior, command: c, reused: true, ...(setupFailure === undefined ? {} : { setupFailure }) });
+        continue;
+      }
+      const fields = fieldsOf(out, { ...(req.fields ?? {}), group, [RUN_FIELD.method]: RUN_METHOD, [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: c.command, [CWD_FIELD]: rel, commandId: c.id.slice(0, 200), run, purpose: req.purpose.slice(0, 200) });
       const evidence = req.evidenceId?.(run, c) ?? (runClass === 'sampling' ? sampleRunId(`${run}.${idPart(c.id)}`) : `${run}.${idPart(c.id)}`);
       const rec: EvidenceRecord = { kind: 'evidence', evidence: evidence as EvidenceId, envLine: ENV_LINE, envSnapshot: env.identity as EnvSnapshotId, runClass, fields };
       validateRecord(rec);
       records.push(rec);
       const passed = fields['status'] === 'completed' && fields['exit'] === '0';
-      executed.push({ evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed ? '' : tail(out.output), reused: false });
+      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed ? '' : tail(out.output), reused: false };
+      executed.push(recorded);
+      if (runClass === 'declared') staged.set(key, recorded);
     }
   } finally {
     removeCheckout(ctx.gitCtx, dir);
   }
   const text = summaryLeaf({ run, mission: req.mission, commit: req.commit, purpose: req.purpose, runClass: records[0]?.runClass ?? 'other', environment: env, runs: executed });
   const leaf = runLeaf(req.mission, run);
-  ctx.memory.write({ op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
+  const result = ctx.memory.write({ op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
     if (records.length > 0) appendRecords(tx, records as BaseRecord[]);
     tx.leaves.writeDocument(leaf, text);
-    req.also?.(tx, executed, run, records);
+    return req.also?.(tx, executed, run, records);
   });
-  return { run, runs: executed, reused: false, leaf };
+  return { run, runs: executed, reused: false, leaf, result };
 }
 
 // ---------------------------------------------------------------- the delivery's closing checks
@@ -363,7 +370,8 @@ async function executeRuns(
  * The closing checks of a delivery (§6.7 step 5) as runs (A4's ClosingRunner): run by `mp` in the
  * candidate's clean checkout `deliver` made (a repository at the delivery candidate, like a run's
  * checkout: delivery.ts), each one recorded with its run summary leaf and a
- * flow event of the delivery (line `delivery:<d>`), never as an evidence record: a closing check
+ * flow event of the delivery (line `delivery:<d>`), outside reuse and the run lock,
+ * never as an evidence record: a closing check
  * is no judgment's evidence, and a label input written while the delivery is built would move the
  * labels under it (A4 checks that none arrived since it read them).
  */
