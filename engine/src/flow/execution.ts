@@ -63,7 +63,7 @@ import { handleFailure, type FailureOutcome } from './failures.ts';
 import { scopesOverlap } from './mechanical.ts';
 import { DetailedTask, PLAN_LINE, RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, taskIdProblems, taskLine, type DetailedPlanDoc, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, standardLine, type EffectiveBody } from './planning.ts';
-import type { ProductVersion, VerificationRun } from './ports.ts';
+import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
 import { carryOut, closing, commitCarrying, decisionFor, escalateToUser, markApplied, openEscalations, raiseEscalation, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
@@ -75,11 +75,14 @@ interface SpecBody {
 interface ReworkBody {
   /** The new attempt number. */
   readonly k: number;
-  readonly reason: 'reviewer' | 'secretary' | 'respec' | 'replan';
+  readonly reason: 'reviewer' | 'secretary' | 'respec' | 'replan' | 'program';
   readonly issues: readonly string[];
   readonly instructions: readonly string[];
 }
 interface DispatchedBody {
+  /** Exact products used to compose this attempt's start; absent in pre-upgrade dispatches. */
+  readonly prerequisites?: readonly string[];
+  readonly predecessor?: string | null;
   readonly k: number;
   readonly snapshot: string;
   readonly commit: string;
@@ -140,15 +143,111 @@ function abandonKey(line: Line): { readonly key: string; readonly op: string } {
   return n <= 1 ? { key: 'abandoned', op: '' } : { key: `abandoned#${n}`, op: `:${n}` };
 }
 
-async function readLine(ctx: FlowCtx, task: string): Promise<Line> {
-  return new Line(await eventsOf(ctx, taskLine(task)));
+async function readLine(ctx: FlowCtx, task: string, revision = Infinity): Promise<Line> {
+  return new Line((await eventsOf(ctx, taskLine(task))).filter((e) => e.revision <= revision));
 }
 
 /** The accepted product of a plan task at its current attempt (its latest re-bound version, Appendix J), or null. */
-export async function acceptedProduct(ctx: FlowCtx, task: string): Promise<string | null> {
-  const l = await readLine(ctx, task);
+export async function acceptedProduct(ctx: FlowCtx, task: string, revision = Infinity): Promise<string | null> {
+  const l = await readLine(ctx, task, revision);
   if (l.abandoned) return null;
-  return currentAcceptance(l, l.k)?.product ?? null;
+  const accepted = currentAcceptance(l, l.k);
+  if (accepted === null) return null;
+  const start = await acceptedStart(ctx, l, l.k, accepted.product);
+  if (start !== undefined && (start === null || !start.holds)) return null;
+  return accepted.product;
+}
+
+type StartHolds = Awaited<ReturnType<FlowSchedulerPort['startHolds']>>;
+/** A start check of an accepted product: its own start, and every pre-pin version it rests on (`rejected`). */
+type StartCheck = StartHolds & { readonly rejected?: readonly string[] };
+const acceptedStarts = new WeakMap<FlowSchedulerPort, Map<string, Promise<StartHolds>>>();
+const acceptedClosures = new WeakMap<FlowSchedulerPort, Map<string, StartCheck>>();
+
+/** Versions recorded or re-bound at an attempt whose dispatch has no prerequisite pin (pre-upgrade). */
+async function unpinnedVersions(ctx: FlowCtx): Promise<ReadonlySet<string>> {
+  const all = await ctx.ports.ledger.events<{ readonly k?: number; readonly prerequisites?: unknown; readonly object?: string; readonly product?: string }>({ mission: ctx.mission });
+  const pinned = new Map<string, boolean>();
+  for (const e of all) if (e.event === 'dispatched' && !pinned.has(`${e.line}\n${e.body.k}`)) pinned.set(`${e.line}\n${e.body.k}`, e.body.prerequisites !== undefined);
+  const out = new Set<string>();
+  for (const e of all) {
+    const version = e.event === 'product' ? e.body.object : e.event === 'rebind' || e.event === 'rebound' ? e.body.product : undefined;
+    if (version !== undefined && pinned.get(`${e.line}\n${e.body.k}`) === false) out.add(version);
+  }
+  return out;
+}
+
+/**
+ * Check each unpinned accepted object once; re-bound objects have their own recorded prerequisites.
+ * The delivery's fixed point, applied at acceptance: an unpinned product is valid only when every
+ * unpinned version in its recorded closure holds its own start too. Pinned products are composed
+ * only from products that passed this check, and the check is a content fact of a fixed record.
+ */
+async function acceptedStart(ctx: FlowCtx, line: Line, k: number, product: string): Promise<StartCheck | null | undefined> {
+  const dispatch = line.all<DispatchedBody>('dispatched').find((e) => e.body.k === k);
+  if (dispatch === undefined || dispatch.body.prerequisites !== undefined) return undefined;
+  const scheduler = ctx.ports.scheduler;
+  let checks = acceptedStarts.get(scheduler);
+  if (checks === undefined) acceptedStarts.set(scheduler, checks = new Map());
+  const memo = checks;
+  let closures = acceptedClosures.get(scheduler);
+  if (closures === undefined) acceptedClosures.set(scheduler, closures = new Map());
+  const known = closures.get(product);
+  if (known !== undefined) return known;
+  const holds = (id: string): Promise<StartHolds> => {
+    let check = memo.get(id);
+    if (check === undefined) {
+      check = scheduler.startHolds(id);
+      memo.set(id, check);
+    }
+    return check;
+  };
+  let at = product;
+  try {
+    const own = await holds(product);
+    const record = await objectRecord(ctx, product);
+    const recorded = record === null ? [] : ctx.ports.ledger.content.getList(record.prerequisites);
+    const rejected: string[] = [];
+    if (recorded.length > 0) {
+      const unpinned = await unpinnedVersions(ctx);
+      for (const member of await scheduler.composition(recorded)) {
+        if (member === product || !unpinned.has(member)) continue;
+        at = member;
+        if (!(await holds(member)).holds) rejected.push(member);
+      }
+    }
+    const result: StartCheck = rejected.length === 0 ? own : { holds: false, missing: own.missing, rejected };
+    closures.set(product, result);
+    return result;
+  } catch (e) {
+    // Missing history is not a content mismatch. Hold consumers and retry after the refusal.
+    memo.delete(at);
+    await notify(ctx, {
+      category: 'legacy-prerequisites-unavailable', wi: null, key: product,
+      trigger: `the recorded start of ${product} cannot be checked: ${(e as Error).message}`,
+      defaultAction: 'the product is excluded from current acceptance until its start can be checked; restore the local objects and retry',
+      detail: { product, error: (e as Error).message },
+    });
+    return null;
+  }
+}
+
+/** Unaccepted pre-upgrade dependent attempts still need a new pinned, verified start. */
+async function legacyPins(ctx: FlowCtx, line: Line, k: number): Promise<{ readonly recorded: readonly string[]; readonly product: string | null; readonly restart: true } | null> {
+  const spec = line.all('spec').at(-1)?.revision ?? 0;
+  const dispatches = line.all<DispatchedBody>('dispatched').filter((e) => e.revision > spec && e.body.k <= k);
+  const current = dispatches.find((e) => e.body.k === k);
+  if (current === undefined || current.body.prerequisites !== undefined) return null;
+  const start = current;
+  const stored = await detailedPlanOf(ctx, start.body.dplan);
+  // Dispatch ids encode the task injectively; the plan task is supplied by the line's dispatch.
+  const dispatchedTask = stored?.plan.tasks.find((t) => conTask(ctx.mission, t.id, start.body.k) === start.key);
+  if (dispatchedTask === undefined) throw new Error(`the dispatched plan ${start.body.dplan} has no task for ${start.key}`);
+  if (dispatchedTask.dependsOn.length === 0) return null;
+  const product = line.one<ProductBody>('product', String(k));
+  const record = product === null ? null : await objectRecord(ctx, product.object);
+  const recorded = record === null ? [] : ctx.ports.ledger.content.getList(record.prerequisites);
+  return { recorded, product: product?.object ?? null, restart: true };
 }
 
 export async function executionStep(ctx: FlowCtx): Promise<void> {
@@ -435,7 +534,27 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   }
 
   const k = line.k;
-  if (line.one('accepted', String(k)) !== null) {
+  const accepted = line.one('accepted', String(k)) !== null;
+  const current = accepted ? currentAcceptance(line, k) : null;
+  const start = current === null ? undefined : await acceptedStart(ctx, line, k, current.product);
+  if (start === null) return;
+  const legacy = accepted ? null : await legacyPins(ctx, line, k);
+  if (legacy?.restart === true || start?.holds === false) {
+    const product = current?.product ?? legacy?.product ?? null;
+    const record = product === null ? null : await objectRecord(ctx, product);
+    const missing = start?.missing ?? [];
+    const instructions = ['This pre-upgrade attempt has no reliable prerequisite pin. Carry its recorded work onto a pinned start and verify it again.'];
+    await cancelAttempt(ctx, t, k, 'restarted for legacy prerequisite pins');
+    await notify(ctx, {
+      category: 'legacy-prerequisites-restarted', wi: null, key: `${t.id}:${k}`,
+      trigger: `task ${t.id} attempt ${k} ${accepted ? `was accepted from a start lacking recorded prerequisite content (${missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')})${(start?.rejected ?? []).length > 0 ? `, or rests on ${start!.rejected!.join(', ')}, whose own start lacks its recorded prerequisites` : ''}` : 'has no dispatch prerequisite pin'}`,
+      defaultAction: `attempt ${k + 1} carries the latest recorded product onto a pinned start and is verified and reviewed again; old events remain`,
+      detail: { task: t.id, attempt: k, product, recorded: record === null ? [] : ctx.ports.ledger.content.getList(record.prerequisites), missing, rejected: start?.rejected ?? [] },
+    });
+    await commit(ctx, `flow:legacy-pins:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'rework', String(k + 1), { k: k + 1, reason: 'program', issues: [], instructions } satisfies ReworkBody)] });
+    return;
+  }
+  if (accepted) {
     // a card the plan in effect kept: its product re-bound to that plan first (Appendix J), then re-reviews
     if ((await keptStep(ctx, eff, plan, t, line, k, kept)) === 'held') return;
     return rereviewStep(ctx, eff, plan, t, line, k);
@@ -486,7 +605,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     const dispatched = line.one<DispatchedBody>('dispatched', con);
     if (hb === null || hb.candidate === null || dispatched === null) return internalError(ctx, con, `the accepted Constructor hand-back of ${con} has no candidate commit (or the flow lost its dispatch record)`);
     const ix = await basisIndex(ctx);
-    const prev = line.one<ProductBody>('product', String(k - 1));
+    const prev = latestRecordedProduct(line, k);
     let pv: ProductVersion;
     try {
       pv = await ctx.ports.scheduler.product({
@@ -498,9 +617,10 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       base: dispatched.commit,
       writeScope: t.writeScope,
       taskType: t.kind,
-      prerequisites: deps,
-      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, ix) as never, reliesOn: [eff.dplan] as never }],
-      predecessor: prev?.object ?? null,
+      // Old dispatches lack a trustworthy pin: keep the record conservative, never substitute current dependencies.
+      prerequisites: dispatched.prerequisites ?? [],
+      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, ix) as never, reliesOn: [dispatched.dplan] as never }],
+      predecessor: dispatched.predecessor !== undefined ? dispatched.predecessor : (prev?.object ?? null),
       ...(dispatched.origin !== undefined ? { origin: dispatched.origin } : {}),
       });
     } catch (e) {
@@ -1236,7 +1356,7 @@ async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet
 }
 
 async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number, task: string, deps: readonly string[]): Promise<void> {
-  const prev = line.one<ProductBody>('product', String(k - 1));
+  const prev = latestRecordedProduct(line, k);
   // A first attempt starts from the base with its dependencies' products. A later attempt (a rework,
   // or a respec after a re-plan) continues from the previous product's candidate while the snapshot
   // a first attempt would get now is the one that version's work started from (its origin). When
@@ -1247,12 +1367,14 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // the task's own work only. A carried change that conflicts with the new snapshot builds nothing:
   // the attempt waits with a notice (Appendix M).
   let snap: Awaited<ReturnType<typeof ctx.ports.scheduler.snapshot>>;
+  const recorded = line.one<DispatchedBody>('dispatched', task);
   try {
-    snap = await ctx.ports.scheduler.snapshot(
+    snap = recorded !== null ? { path: recorded.snapshot, commit: recorded.commit, products: recorded.prerequisites ?? [], ...(recorded.origin !== undefined ? { origin: recorded.origin } : {}) } : await ctx.ports.scheduler.snapshot(
       prev !== null
         ? { mission: ctx.mission, purpose: `constructor-${t.id}`, commit: prev.commit, carry: { version: prev.object, products: deps }, writable: t.writeScope }
         : { mission: ctx.mission, purpose: `constructor-${t.id}`, products: deps, writable: t.writeScope },
     );
+    if (recorded === null && snap.products === undefined) snap = { ...snap, products: await ctx.ports.scheduler.composition(deps) };
   } catch (e) {
     if (prev !== null && (e as { code?: string }).code === 'conflict' && (e as { detail?: { carried?: unknown } }).detail?.carried === true) {
       return notify(ctx, {
@@ -1289,7 +1411,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     ...(t.exclusive.length > 0 ? { exclusive: [...t.exclusive] } : {}),
   };
   await commit(ctx, `flow:dispatched:${ctx.mission}:${task}`, {
-    events: [ev(ctx, taskLine(t.id), 'dispatched', task, { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, ...(snap.origin !== undefined ? { origin: snap.origin } : {}) } satisfies DispatchedBody)],
+    events: [ev(ctx, taskLine(t.id), 'dispatched', task, recorded ?? { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, prerequisites: [...(snap.products ?? deps)], predecessor: prev?.object ?? null, ...(snap.origin !== undefined ? { origin: snap.origin } : {}) } satisfies DispatchedBody)],
   });
   await ctx.ports.scheduler.submit({
     task,
@@ -1306,6 +1428,15 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     // who hands it over (§3.2, U-13): the Architect that decomposed the plan, or the Reviewer that asked for the rework
     handover: handoverOfConstructor(ctx, eff, line, k, t),
   });
+}
+
+/** Latest real work under this spec, even when intervening attempts produced no product. */
+function latestRecordedProduct(line: Line, k: number): ProductBody | null {
+  const spec = line.all('spec').at(-1)?.revision ?? 0;
+  const product = line.all<ProductBody>('product').filter((e) => e.revision > spec && e.body.k < k).at(-1);
+  if (product === undefined) return null;
+  const rebound = line.all<RebindBody>('rebind').filter((e) => e.revision > product.revision && e.body.k === product.body.k).at(-1);
+  return rebound === undefined ? product.body : { ...product.body, object: rebound.body.product };
 }
 
 /** The handover of a Constructor attempt: the Architect dispatch and plan version (attempt 1), or the Reviewer that sent it back. */
@@ -1340,7 +1471,13 @@ async function submitReviewer(
   const ix = await basisIndex(ctx);
   const c = ctx.ports.ledger.content;
   const obj = await objectRecord(ctx, product.object);
-  const scope = obj?.scope ?? { paths: [...product.changedPaths], taskType: t.kind };
+  const changedPaths = obj?.source === undefined ? product.changedPaths : (await ctx.ports.scheduler.product({
+    mission: ctx.mission, module: t.module ?? t.id, task: product.task, dispatch: product.dispatch,
+    candidate: product.commit, base: product.commit, writeScope: obj.source.writeScope, taskType: t.kind,
+    prerequisites: c.getList(obj.prerequisites), reviews: obj.reviews, predecessor: obj.predecessor ?? null,
+    ...(obj.source.origin !== undefined ? { origin: obj.source.origin } : {}),
+  })).changedPaths;
+  const scope = obj?.scope ?? { paths: [...changedPaths], taskType: t.kind };
   const { checks, list: cardConstraintsList } = await objectConstraints(ctx, scope);
   // the Constructor's gaps (8.1: answer every one)
   const conView = await ctx.ports.scheduler.status(product.task);
@@ -1380,7 +1517,7 @@ async function submitReviewer(
     review: 'reviewer',
     standards: t.standards.map((s) => ({ id: s.id, text: s.text })),
     interfaces: [...interfaceDefs(plan, t.implements), ...interfaceDefs(plan, t.calls)],
-    candidate: { changedPaths: [...product.changedPaths] },
+    candidate: { changedPaths: [...changedPaths] },
     verificationRuns: runs.map((r) => ({ evidence: r.evidence, command: r.command, summary: r.summary })),
     declaredCommands: t.verificationCommands.map((x) => ({ ...x })),
     selfReportedGaps: gaps,

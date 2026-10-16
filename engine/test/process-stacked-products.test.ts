@@ -20,12 +20,17 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import type { MissionId, ObjectVersionId } from '../src/common/ids.ts';
 import type { ObjectVersionRecord } from '../src/common/records.ts';
+import { checkCandidateProofs, type Candidate } from '../src/delivery/candidate.ts';
 import { buildManifest } from '../src/delivery/manifest.ts';
+import { discoverRepo } from '../src/git/objects.ts';
+import { flowCtx } from '../src/flow/context.ts';
+import { acceptedProduct } from '../src/flow/execution.ts';
+import { DetailedPlanDoc } from '../src/flow/plandoc.ts';
 import { cal1Pass, cal2Pass, feasible } from '../src/flow/scripted.ts';
-import { factById } from '../src/memory/index.ts';
-import { pmDeliver, pmDispatch, pmNext, pmSay } from '../src/process/index.ts';
+import { appendRecords, factById } from '../src/memory/index.ts';
+import { pmDeliver, pmDispatch, pmLand, pmNext, pmPlan, pmRequirement, pmSay } from '../src/process/index.ts';
 import { FakeProofView, fakeObject, obj } from './delivery-fixtures.test.ts';
-import { handBack, processProject, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
+import { addPlan, handBack, processProject, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 
 const M = 'm1' as MissionId;
 const prod = (task: string, k = 1): ObjectVersionId => `prod.con.${M}.${task}.${k}` as ObjectVersionId;
@@ -77,7 +82,7 @@ function plan(): unknown {
       // the dependent may write what the task it depends on writes (they never run in parallel)
       task('zeta', 'implementation', 'lib', ['lib/**'], [], true),
       task('alpha', 'implementation', 'lib', ['lib/**'], ['zeta']),
-      task('use', 'integration', null, ['app/**'], ['zeta', 'alpha']),
+      task('use', 'integration', null, ['app/**'], ['alpha']),
     ],
     risks: [],
   };
@@ -191,10 +196,19 @@ describe('product versions stacked on each other compose', () => {
     assert.equal(p.git('rev-parse', `${u.start}^`), main, 'laid over the mission base');
     assert.equal(p.git('diff', '--name-only', main, u.start), ['lib/f.txt', 'lib/g.txt', 'lib/x.txt'].join('\n'), 'nothing else changed');
     // the program's snapshot action, the products in either order (an Auditor's snapshot of the chain takes the same path)
-    for (const products of [[prod('alpha'), prod('zeta')], [prod('zeta'), prod('alpha')]]) {
+    for (const products of [[prod('alpha')], [prod('alpha'), prod('zeta')], [prod('zeta'), prod('alpha')]]) {
       const snap = await p.ctx.actions().snapshot({ mission: M, purpose: 'test', products });
       assert.deepEqual(filesOf(p, snap.commit, PATHS), expected(ZETA, ALPHA));
     }
+  });
+
+  it('an Auditor snapshot expands a prerequisite proof unit whole', async () => {
+    p = await stackedPair();
+    const pp = p;
+    pp.ctx.memory.write({}, (tx) => appendRecords(tx, [{ kind: 'proof.unit', unit: 'stack-unit' as never, members: tx.data.putList([prod('alpha'), prod('zeta')]), reviews: record(pp, prod('zeta')).reviews }]));
+    const snap = await pp.ctx.actions().snapshot({ mission: M, purpose: 'auditor', products: ['stack-unit'] });
+    assert.deepEqual(filesOf(pp, snap.commit, PATHS), expected(ZETA, ALPHA));
+    assert.deepEqual([...(snap.products ?? [])].sort(), [prod('alpha'), prod('zeta')]);
   });
 
   it('a delivery of the chain has no conflict and every version is proven', async () => {
@@ -207,7 +221,9 @@ describe('product versions stacked on each other compose', () => {
     assert.equal(one.kind, 'delivered', JSON.stringify(one));
     if (one.kind !== 'delivered') return;
     assert.deepEqual(filesOf(p, one.record.commit, PATHS), expected(ZETA, ALPHA));
-    assert.deepEqual(one.record.proof?.notFullyProven, [], 'each version is read as it stands under the versions resting on it');
+    assert.deepEqual(one.record.proof?.notFullyProven, [], 'each path is checked on the final tree against its delivering version');
+    assert.ok(one.record.proof?.deliveredBy?.some((d) => d.version === prod('zeta') && d.path === 'lib/f.txt' && d.by === prod('alpha')));
+    assert.match(readFileSync(join(p.ctx.memory.paths.root, 'missions', M, 'deliveries', 'v1.md'), 'utf8'), /lib\/f\.txt is delivered by prod\.con\.m1\.alpha\.1/);
     assert.deepEqual([...(one.record.proof?.proven ?? [])].sort(), [prod('alpha'), prod('zeta')]);
     const all = await pmDeliver(p.ctx, { mission: M, delivery: 'v2', selected: [{ kind: 'object', id: prod('use') }], words });
     assert.equal(all.kind, 'delivered', JSON.stringify(all));
@@ -216,6 +232,116 @@ describe('product versions stacked on each other compose', () => {
     assert.equal(p.git('rev-parse', `${all.record.commit}^`), p.git('rev-parse', 'main'));
     assert.deepEqual(all.record.proof?.notFullyProven, []);
     assert.deepEqual([...(all.record.proof?.proven ?? [])].sort(), [prod('alpha'), prod('use'), prod('zeta')]);
+  });
+
+  // Integration dependency (F2): P4's keptStep must compare the pinned closure with
+  // scheduler.composition(direct dependencies' accepted products), including transitive re-binds.
+  it('a landed stack and its later re-binds support a dependent task and a fully proven second delivery', async () => {
+    p = await stackedPair();
+    await construct(p, 'use', USE);
+    const words = pmSay(p.ctx, 'Deliver and land the library, then continue with the application using an add function. The details are yours to decide.').words;
+    const first = await pmDeliver(p.ctx, { mission: M, delivery: 'first', selected: [{ kind: 'object', id: prod('use') }], words });
+    assert.equal(first.kind, 'delivered', JSON.stringify(first));
+    if (first.kind !== 'delivered') return;
+    assert.deepEqual(first.record.proof?.notFullyProven, []);
+    assert.deepEqual([...(first.record.proof?.proven ?? [])].sort(), [prod('alpha'), prod('use'), prod('zeta')]);
+    const landed = await pmLand(p.ctx, { mission: M, delivery: 'first', words });
+    assert.equal(landed.kind, 'landed', JSON.stringify(landed));
+    assert.equal(p.git('rev-parse', 'main'), first.record.commit);
+    // Changing only the PM plan leaves the old products proven, so no re-bind is needed.
+    // A new requirement makes their old plan stale without changing the kept task cards.
+    await pmRequirement(p.ctx, { mission: M, item: 'd1', type: 'decision', text: 'Continue with the application after landing the library', quote: 'continue with the application', words });
+    const old = [prod('alpha'), prod('use'), prod('zeta')];
+    assert.deepEqual((await p.ctx.ports().evaluator.labels(old)).labels, Object.fromEntries(old.map((id) => [id, 'not-fully-proven'])), 'the landed products need re-binding before the next plan');
+    const nextPm = addPlan(M, words) as { elements: Array<{ text: string; items: string[] }> };
+    nextPm.elements[0]!.text = 'An add function with a check and a follow-up application experiment';
+    nextPm.elements[0]!.items.push('d1');
+    await pmPlan(p.ctx, { mission: M, plan: { ...nextPm, round: 2 }, words: [words], changedItems: ['d1'] });
+    await step(p.ctx, 'calibrator-1', (c) => cal1Pass(c));
+    const next = DetailedPlanDoc.parse(plan());
+    // Keep use as the sole integration task (3.5); the follow-up experiment depends on its landed work.
+    next.tasks.push({ ...next.tasks.find((t) => t.id === 'use')!, id: 'later', kind: 'experiment', goal: 'Exercise the landed application in a follow-up experiment', dependsOn: ['use'] });
+    await step(p.ctx, 'architect-decompose', () => next);
+    if ((await pmNext(p.ctx)).ready.some((r) => r.kind === 'architect-feasibility')) await step(p.ctx, 'architect-feasibility', () => feasible());
+    await step(p.ctx, 'calibrator-2', (c) => cal2Pass(c));
+    // Kept products may require seat review under the current plan; answer those before use.
+    for (let i = 0; i < 8; i++) {
+      const ready = (await pmNext(p.ctx)).ready;
+      if (ready.some((r) => r.kind === 'constructor' && r.step.includes('.later.'))) break;
+      const rev = ready.find((r) => r.kind === 'reviewer');
+      assert.ok(rev, 'a waiting second round has an actionable review');
+      const d = pmDispatch(p.ctx, rev.step);
+      const { dispatchView } = await import('../src/process/seat.ts');
+      const { readAll } = await import('./process-fixtures.ts');
+      readAll(p.ctx, d.dispatch);
+      await handBack(p.ctx, d.dispatch, reviewerPass(dispatchView(p.ctx, d.dispatch).card as never));
+    }
+    const later = { 'app/main.txt': 'main4\n' };
+    const use = await construct(p, 'later', later);
+    assert.deepEqual(use.seen, expected(ZETA, ALPHA, USE));
+    assert.equal(p.git('rev-parse', `${use.start}^`), first.record.commit, 'the new task starts on the landed base');
+    const current = flowCtx(p.ctx.ports(), M);
+    const chain = await Promise.all(['alpha', 'use', 'zeta'].map((task) => acceptedProduct(current, task)));
+    assert.ok(chain.every((id) => id !== null), 'each delivered dependency remains accepted');
+    assert.deepEqual([...chain].sort(), [prod('alpha'), prod('use'), prod('zeta')].map((id) => `${id}.b1`).sort(), 'every delivered version is re-bound after landing');
+    assert.deepEqual(p.ctx.memory.data.getList(record(p, prod('later')).prerequisites).sort(), [...chain].sort(), 'the new attempt pins the delivered prerequisite closure');
+    const second = await pmDeliver(p.ctx, { mission: M, delivery: 'second', selected: [{ kind: 'object', id: prod('later') }], words });
+    assert.equal(second.kind, 'delivered', JSON.stringify(second));
+    if (second.kind !== 'delivered') return;
+    assert.equal(second.record.base, first.record.commit);
+    assert.equal(p.git('rev-parse', `${second.record.commit}^`), first.record.commit);
+    assert.deepEqual(second.record.proof?.notFullyProven, []);
+    assert.deepEqual(second.record.proof?.needsReverification, []);
+    assert.deepEqual([...(second.record.proof?.proven ?? [])].sort(), [...chain, prod('later')].sort(), 'the second delivery proves the new task and every delivered prerequisite');
+    assert.deepEqual(filesOf(p, second.record.commit, PATHS), expected(ZETA, ALPHA, USE, later));
+  });
+
+  it('a same-spec carry of a landed lower version does not replay it over the landed upper version', async () => {
+    p = await stackedPair();
+    const words = pmSay(p.ctx, 'Deliver and land the library.').words;
+    const delivery = await pmDeliver(p.ctx, { mission: M, delivery: 'carry-base', selected: [{ kind: 'object', id: prod('alpha') }], words });
+    assert.equal(delivery.kind, 'delivered', JSON.stringify(delivery));
+    const landed = await pmLand(p.ctx, { mission: M, delivery: 'carry-base', words });
+    assert.equal(landed.kind, 'landed', JSON.stringify(landed));
+    const snap = await p.ctx.actions().snapshot({ mission: M, purpose: 'landed-lower-rework', commit: record(p, prod('zeta')).source!.commit, carry: { version: prod('zeta'), products: [] }, writable: ['lib/**'] });
+    assert.deepEqual(filesOf(p, snap.commit, PATHS), expected(ZETA, ALPHA));
+    assert.deepEqual(snap.products, []);
+    assert.equal(snap.origin, p.git('rev-parse', 'main'));
+  });
+
+  it('same-placement re-binds of a landed stack compose and pass the final-tree proof check', async () => {
+    p = await stackedPair();
+    const base = p.git('rev-parse', 'main');
+    const words = pmSay(p.ctx, 'Deliver and land the library.').words;
+    const delivered = await pmDeliver(p.ctx, { mission: M, delivery: 'before-rebind', selected: [obj(prod('alpha'))], words });
+    assert.equal(delivered.kind, 'delivered', JSON.stringify(delivered));
+    const landed = await pmLand(p.ctx, { mission: M, delivery: 'before-rebind', words });
+    assert.equal(landed.kind, 'landed', JSON.stringify(landed));
+    const lower = `${prod('zeta')}.b1`;
+    const upper = `${prod('alpha')}.b1`;
+    await p.ctx.actions().rebind({ mission: M, of: prod('zeta'), object: lower, prerequisites: [], reviews: record(p, prod('zeta')).reviews });
+    await p.ctx.actions().rebind({ mission: M, of: prod('alpha'), object: upper, prerequisites: [lower], reviews: record(p, prod('alpha')).reviews });
+    // No flow rebind event is needed to identify the recorded placement.
+    const snap = await p.ctx.actions().snapshot({ mission: M, purpose: 'rebound-landed-stack', products: [upper] });
+    assert.deepEqual(await p.ctx.actions().startHolds(lower), { holds: true, missing: [] });
+    assert.deepEqual(await p.ctx.actions().startHolds(upper), { holds: true, missing: [] }, 'the original start still holds a same-content re-bound prerequisite after a landed skip');
+    assert.deepEqual(filesOf(p, snap.commit, PATHS), expected(ZETA, ALPHA));
+    // Products are reported by id; only the overlay must follow prerequisite order.
+    assert.deepEqual([...(snap.products ?? [])].sort(), [lower, upper].sort());
+    // On the pre-landing base neither re-bind is already laid. Replaying them must
+    // apply zeta.b1 before alpha.b1, although alpha.b1 sorts first by id.
+    const replay = await p.ctx.actions().snapshot({ mission: M, purpose: 'rebound-stack-order', commit: base, products: [upper] });
+    assert.deepEqual(filesOf(p, replay.commit, PATHS), expected(ZETA, ALPHA), 're-bound prerequisites are layered before their dependents');
+    const view = new FakeProofView().add(...[lower, upper].map((id) => {
+      const r = record(p!, id);
+      return { id: r.object, kind: r.objectKind, mission: r.mission, module: r.module, content: r.content, paths: r.scope.paths, prerequisites: p!.ctx.memory.data.getList(r.prerequisites).map(obj), tree: r.source!, predecessor: r.predecessor };
+    }));
+    const manifest = buildManifest(view, [obj(upper)]);
+    assert.equal(manifest.kind, 'manifest');
+    if (manifest.kind !== 'manifest') return;
+    const proof = await checkCandidateProofs({ git: p.ctx.git, repo: await discoverRepo(p.ctx.git, p.dir), view, manifest: manifest.manifest, candidate: { commit: snap.commit, snapshotDir: p.dir } as Candidate });
+    assert.deepEqual([...proof.proven].sort(), [lower, upper].sort());
+    assert.deepEqual(proof.notFullyProven, []);
   });
 
   it('the target branch changed the shared file after the work began: still a conflict, snapshot and delivery', async () => {

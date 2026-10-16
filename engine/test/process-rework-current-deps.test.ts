@@ -46,7 +46,7 @@ const BASE_FILES: Record<string, string> = {
 const PATHS = ['core/x.txt', 'ext/e.txt', 'lib/a.txt', 'lib/b.txt', 'lib/common.txt'];
 
 /** extra: none (round 1), in its own module ext/, or on lib/common.txt (a file of impl's write scope). */
-function plan(o: { extra?: 'ext' | 'common'; baseGoal?: string; implGoal?: string } = {}): unknown {
+function plan(o: { extra?: 'ext' | 'common'; baseGoal?: string; implGoal?: string; baseCommon?: boolean } = {}): unknown {
   const task = (id: string, module: string | null, writeScope: string[], dependsOn: string[], goal: string, implementsAdd = false) => ({
     id,
     kind: module === null ? 'integration' : 'implementation',
@@ -72,7 +72,7 @@ function plan(o: { extra?: 'ext' | 'common'; baseGoal?: string; implGoal?: strin
     newInterfaces: [{ name: 'add', definition: 'add(a: number, b: number): number', searched: 'searched the repository: no arithmetic helpers exist', provenance: { planElement: 'e1' } }],
     modules: modules.map((id) => ({ id, writeScope: [`${id}/**`], provenance: { planElement: 'e1' } })),
     tasks: [
-      task('base', 'core', ['core/**'], [], o.baseGoal ?? 'Task base', true),
+      task('base', 'core', o.baseCommon ? ['core/**', 'lib/common.txt'] : ['core/**'], [], o.baseGoal ?? 'Task base', true),
       ...extra,
       task('impl', 'lib', ['lib/**'], o.extra === undefined ? ['base'] : ['base', 'extra'], o.implGoal ?? 'Task impl'),
       task('use', null, ['app/**'], ['impl'], 'Task use'),
@@ -153,10 +153,10 @@ async function decompose(pp: ProcessProject, detailed: unknown): Promise<void> {
 }
 
 /** The mission planned (round 1: base → impl → use), base accepted, impl's first attempt handed back. */
-async function firstAttempt(): Promise<{ pp: ProcessProject; words: string; first: { start: string; candidate: string } }> {
+async function firstAttempt(baseCommon = false): Promise<{ pp: ProcessProject; words: string; first: { start: string; candidate: string } }> {
   const pp = processProject({ files: BASE_FILES });
   const words = await startAddMission(pp.ctx, M);
-  await decompose(pp, plan());
+  await decompose(pp, plan({ baseCommon }));
   await construct(pp, 'base', { 'core/x.txt': 'x1\n' });
   await reviewOf(pp, 'base', 'pass');
   const first = await construct(pp, 'impl', { 'lib/a.txt': 'a1\n', 'lib/common.txt': 'common1\n' });
@@ -171,39 +171,39 @@ async function replan(pp: ProcessProject, words: string, round: number, detailed
 }
 
 describe("a later attempt starts from its dependencies' current work", () => {
-  it("a re-plan adds a dependency: the next attempt holds it and the earlier attempt's change; its product's change is the task's own; a delivery composes", async () => {
+  it("a changed card adds a dependency: the new spec starts fresh; closure snapshots and delivery compose", async () => {
     const s = await firstAttempt();
     p = s.pp;
     await replan(p, s.words, 2, plan({ extra: 'ext' }));
     await construct(p, 'extra', { 'ext/e.txt': 'e1\n' });
     await reviewOf(p, 'extra', 'pass');
     const second = await construct(p, 'impl', { 'lib/b.txt': 'b2\n' });
-    // the worktree: the dependencies' current products with the first attempt's change laid over them
+    // A changed card starts a new spec on the dependencies without the old spec's work.
     assert.notEqual(second.start, s.first.candidate, 'not the previous candidate: a dependency was added since');
-    assert.deepEqual(filesOf(p, second.start), files({ 'core/x.txt': 'x1\n', 'ext/e.txt': 'e1\n', 'lib/a.txt': 'a1\n', 'lib/common.txt': 'common1\n' }));
+    assert.deepEqual(filesOf(p, second.start), files({ 'core/x.txt': 'x1\n', 'ext/e.txt': 'e1\n', 'lib/a.txt': 'a0\n', 'lib/common.txt': 'common0\n' }));
     const fresh = (await p.ctx.actions().snapshot({ mission: M, purpose: 'test', products: [prod('base', 1), prod('extra', 1)] })).commit;
-    assert.equal(p.git('rev-parse', `${second.start}^`), fresh, 'laid over the snapshot a first attempt would get now');
+    assert.equal(second.start, fresh, "a changed card starts without the old spec's work");
     const accepting = await reviewOf(p, 'impl', 'pass');
     await pmNext(p.ctx);
     const rec = record(p, prod('impl', 2));
-    assert.equal(rec.predecessor, prod('impl', 1));
+    assert.equal(rec.predecessor, undefined);
     assert.equal(rec.source?.origin, fresh, "the new snapshot is the version's origin");
-    assert.deepEqual(accepting.candidate.changedPaths, ['lib/a.txt', 'lib/b.txt', 'lib/common.txt'], 'every attempt’s change, nothing of the dependencies');
-    assert.equal(p.git('diff', '--name-only', fresh, second.candidate), 'lib/a.txt\nlib/b.txt\nlib/common.txt');
+    assert.deepEqual(accepting.candidate.changedPaths, ['lib/b.txt'], 'the new spec changes only b');
+    assert.equal(p.git('diff', '--name-only', fresh, second.candidate), 'lib/b.txt');
     // a delivery of the three composes without a conflict, all proven
     const words = pmSay(p.ctx, 'Deliver the library.').words;
     const del = await pmDeliver(p.ctx, { mission: M, delivery: 'v1', selected: [prod('base', 1), prod('extra', 1), prod('impl', 2)].map((id) => ({ kind: 'object' as const, id })), words });
     assert.equal(del.kind, 'delivered', JSON.stringify(del));
     if (del.kind !== 'delivered') return;
-    assert.deepEqual(filesOf(p, del.record.commit), files({ 'core/x.txt': 'x1\n', 'ext/e.txt': 'e1\n', 'lib/a.txt': 'a1\n', 'lib/b.txt': 'b2\n', 'lib/common.txt': 'common1\n' }));
+    assert.deepEqual(filesOf(p, del.record.commit), files({ 'core/x.txt': 'x1\n', 'ext/e.txt': 'e1\n', 'lib/a.txt': 'a0\n', 'lib/b.txt': 'b2\n', 'lib/common.txt': 'common0\n' }));
     assert.deepEqual(del.record.proof?.notFullyProven, []);
     assert.deepEqual([...(del.record.proof?.proven ?? [])].sort(), [prod('base', 1), prod('extra', 1), prod('impl', 2)]);
-    // a dependent's snapshot of the version (use depends on impl only): every attempt's change, none of extra's
+    // use depends on impl only; its snapshot also includes impl's complete prerequisite closure.
     const use = await ready(p, 'constructor', 'use');
     const d = pmDispatch(p.ctx, use.step);
-    assert.equal(readFileSync(join(p.dir, d.worktree!, 'lib', 'a.txt'), 'utf8'), 'a1\n');
+    assert.equal(readFileSync(join(p.dir, d.worktree!, 'lib', 'a.txt'), 'utf8'), 'a0\n');
     assert.equal(readFileSync(join(p.dir, d.worktree!, 'lib', 'b.txt'), 'utf8'), 'b2\n');
-    assert.ok(!existsSync(join(p.dir, d.worktree!, 'ext', 'e.txt')), "extra's change is extra's product, not impl's");
+    assert.equal(readFileSync(join(p.dir, d.worktree!, 'ext', 'e.txt'), 'utf8'), 'e1\n', 'the prerequisite closure includes extra');
   });
 
   it('a dependency accepted again at a newer version: the rework sees the newer version', async () => {
@@ -223,6 +223,29 @@ describe("a later attempt starts from its dependencies' current work", () => {
     assert.equal(record(p, prod('impl', 2)).source?.origin, fresh);
   });
 
+  it('hand-back pins the old dependency even when a new version is accepted while the attempt runs', async () => {
+    p = processProject({ files: BASE_FILES });
+    const words = await startAddMission(p.ctx, M);
+    await decompose(p, plan());
+    await construct(p, 'base', { 'core/x.txt': 'x1\n' });
+    await reviewOf(p, 'base', 'pass');
+    const con = await ready(p, 'constructor', 'impl');
+    const d = pmDispatch(p.ctx, con.step);
+    const wt = join(p.dir, d.worktree!);
+    assert.equal(readFileSync(join(wt, 'core/x.txt'), 'utf8'), 'x1\n');
+    await replan(p, words, 2, plan({ baseGoal: 'Base version two' }));
+    await construct(p, 'base', { 'core/x.txt': 'x2\n' });
+    await reviewOf(p, 'base', 'pass');
+    write(wt, 'lib/a.txt', 'a1\n');
+    const back = await handBack(p.ctx, d.dispatch, { done: 'done', unmet_standards: [], unfixed_problems: [], decisions_needed: [] });
+    assert.ok(back.kind === 'recorded' && back.candidate !== null);
+    await reviewOf(p, 'impl', 'pass');
+    const product = record(p, prod('impl', 1));
+    assert.deepEqual(p.ctx.memory.data.getList(product.prerequisites), [prod('base', 1)]);
+    const delivered = await pmDeliver(p.ctx, { mission: M, delivery: 'mismatched', selected: [prod('base', 2), prod('impl', 1)].map((id) => ({ kind: 'object' as const, id })), words });
+    assert.equal(delivered.kind, 'incompatible', 'A2 cannot substitute for the A1 this attempt was built on');
+  });
+
   it('no dependency changed: the rework continues from the previous candidate, as before', async () => {
     const s = await firstAttempt();
     p = s.pp;
@@ -235,20 +258,21 @@ describe("a later attempt starts from its dependencies' current work", () => {
   });
 
   it('a carried change that conflicts with a new dependency builds nothing: the attempt waits with a notice; a re-plan of its card starts it afresh', async () => {
-    const s = await firstAttempt();
+    const s = await firstAttempt(true);
     p = s.pp;
-    await replan(p, s.words, 2, plan({ extra: 'common' }));
-    await construct(p, 'extra', { 'lib/common.txt': 'common-extra\n' });
-    await reviewOf(p, 'extra', 'pass');
+    await replan(p, s.words, 2, plan({ baseCommon: true, baseGoal: 'Base with revised common' }));
+    await construct(p, 'base', { 'core/x.txt': 'x2\n', 'lib/common.txt': 'common-extra\n' });
+    await reviewOf(p, 'base', 'pass');
+    await reviewOf(p, 'impl', 'rework');
     const next = await pmNext(p.ctx);
     assert.ok(!next.ready.some((r) => r.kind === 'constructor' && r.step.includes('.impl.')), 'no attempt of impl is ready');
     const n = next.notices.find((x) => x.category === 'rework-start-conflict');
     assert.ok(n !== undefined, `a notice: ${next.notices.map((x) => `${x.category}: ${x.trigger}`).join(' | ')}`);
     assert.match(n.trigger, /lib\/common\.txt/);
     // the way out: a re-plan that changes impl's card starts its next attempt from its dependencies' current work
-    await replan(p, s.words, 3, plan({ extra: 'common', implGoal: 'Task impl, on the shared file' }));
+    await replan(p, s.words, 3, plan({ baseCommon: true, baseGoal: 'Base with revised common', implGoal: 'Task impl, on the shared file' }));
     const third = await construct(p, 'impl', { 'lib/common.txt': 'common-extra and impl\n' });
-    assert.equal(third.start, (await p.ctx.actions().snapshot({ mission: M, purpose: 'test', products: [prod('base', 1), prod('extra', 1)] })).commit);
-    assert.deepEqual(filesOf(p, third.start), files({ 'core/x.txt': 'x1\n', 'lib/common.txt': 'common-extra\n' }));
+    assert.equal(third.start, (await p.ctx.actions().snapshot({ mission: M, purpose: 'test', products: [prod('base', 2)] })).commit);
+    assert.deepEqual(filesOf(p, third.start), files({ 'core/x.txt': 'x2\n', 'lib/common.txt': 'common-extra\n' }));
   });
 });

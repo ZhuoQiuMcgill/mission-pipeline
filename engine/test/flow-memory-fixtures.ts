@@ -13,6 +13,8 @@ import { canonicalJson, sha256 } from '../src/common/hash.ts';
 import { idPart, type ContentHash, type EvidenceId, type MissionId } from '../src/common/ids.ts';
 import type { BaseRecord, LoopKind, ObjectVersionRecord } from '../src/common/records.ts';
 import { validateRecord } from '../src/common/validate.ts';
+import { memoryProofView } from '../src/delivery/memoryView.ts';
+import { compose } from '../src/process/actions.ts';
 import '../src/evaluator/index.ts';
 import { ENV_LINE, forgetObservedEnvironment, runClassOf, type EnvironmentParts } from '../src/evaluator/index.ts';
 import type { FlowNotice, FlowTask, ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../src/flow/ports.ts';
@@ -56,7 +58,7 @@ export interface FakeKnobs {
   /** Symbols the snapshot has, as "file#symbol" (null: every symbol exists). */
   symbols: ReadonlySet<string> | null;
   /** Program actions instead of the fakes (e.g. a test's own snapshot). */
-  actions: Partial<Pick<GitActions, 'snapshot' | 'product' | 'verify'>>;
+  actions: Partial<Pick<GitActions, 'startHolds' | 'snapshot' | 'product' | 'verify'>>;
   /** The candidate collection at a Constructor's hand-back (default: a candidate commit). */
   collect: WorkspaceOps['collect'] | null;
   /** The files of a snapshot commit that file: pointers are checked against (default null: no repository here, not checked). */
@@ -66,12 +68,27 @@ export interface FakeKnobs {
 function fakeActions(ctx: ProcessContext, k: FakeKnobs): GitActions {
   const verified = new Map<string, readonly VerificationRun[]>();
   const calls = new Map<string, number>();
+  const composition: GitActions['composition'] = async (products) => {
+    const view = memoryProofView(ctx.memory, { revision: ctx.memory.head(), recomputing: false, recomputingIn: () => false, labelOf: () => 'unaccepted', decidingRuns: () => [] });
+    // Fake products have no git placement; supply it only to the composition view.
+    const manifest = compose({ ...view, object(id) {
+      const v = view.object(id);
+      return v === null || v.kind !== 'product' || v.tree !== null ? v : { ...v, tree: { commit: fakeCommit(id) as never, writeScope: v.paths, transform: v.content } };
+    } }, products);
+    return manifest.entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
+  };
   return {
+    composition,
+    async startHolds(product) {
+      if (k.actions.startHolds !== undefined) return k.actions.startHolds(product);
+      // The default products have no repository trees. Provenance tests supply real tree responses.
+      return { holds: true, missing: [] };
+    },
     async snapshot(req) {
       if (k.actions.snapshot !== undefined) return k.actions.snapshot(req);
-      const products = [...new Set(req.products ?? [])].sort();
+      const products = await composition(req.carry?.products ?? req.products ?? []);
       const commit = products.length === 0 ? (req.commit ?? FAKE_BASE) : fakeCommit(req.commit ?? FAKE_BASE, ...products);
-      return { path: commit, commit, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
+      return { path: commit, commit, products, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
     },
     async product(req: ProductRequest): Promise<ProductVersion> {
       if (k.actions.product !== undefined) return k.actions.product(req);

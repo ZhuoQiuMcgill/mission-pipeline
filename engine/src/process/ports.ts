@@ -514,6 +514,14 @@ export class MemoryFlowScheduler implements FlowSchedulerPort {
     return { granted: true };
   }
 
+  composition(products: readonly string[]): ReturnType<FlowSchedulerPort['composition']> {
+    return this.ctx.actions().composition(products);
+  }
+
+  startHolds(product: string): ReturnType<FlowSchedulerPort['startHolds']> {
+    return this.ctx.actions().startHolds(product);
+  }
+
   snapshot(req: Parameters<FlowSchedulerPort['snapshot']>[0]): ReturnType<FlowSchedulerPort['snapshot']> {
     return this.ctx.actions().snapshot(req);
   }

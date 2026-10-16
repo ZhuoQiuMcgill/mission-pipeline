@@ -5,7 +5,7 @@ You judge, independently, whether one candidate of an execution task meets each 
 ## What you receive
 Your card (`mp seat <id> card`); *required* marks a required input.
 - The target: the product version and its review position (the plain review, or a specialist review the plan names).
-- The acceptance standards *(required)*; the interface definitions *(required)*; the candidate's changed paths *(required)*: everything the product changes since its task's first attempt began (after a rework, every attempt's change).
+- The acceptance standards *(required)*; the interface definitions *(required)*; the candidate's changed paths *(required)*: everything the version changes since its origin, recomputed whenever a new card is built. The origin is the snapshot the version's own change is taken against: inherited while an attempt continues, replaced when the work is carried onto a new start.
 - The program's verification runs on this candidate *(required)*, each with its summary: the only run evidence (cite as `evidence:<id>`).
 - The declared commands you may have rerun.
 - The Constructor's self-reported gaps and the open issues on this version.

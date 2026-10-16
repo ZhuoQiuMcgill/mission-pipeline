@@ -193,7 +193,7 @@ const ALL_PATHS = [...new Set([...Object.keys(BASE_FILES), ...CHANGED])].sort();
 function expectedFiles(o: { core?: string } = {}): Record<string, string | null> {
   const out: Record<string, string | null> = {};
   for (const path of ALL_PATHS) out[path] = path in CUMULATIVE ? CUMULATIVE[path]! : (BASE_FILES[path] ?? null);
-  if (o.core !== undefined) out['core/x.txt'] = o.core;
+  out['core/x.txt'] = o.core ?? 'x1\n';
   return out;
 }
 
@@ -257,7 +257,7 @@ describe('a product version accepted after a rework brings every attempt’s cha
     assert.equal(p.git('rev-parse', `${snapshot}^`), p.git('rev-parse', 'main'), 'laid over the mission base');
     assert.deepEqual(filesOf(p, snapshot, ALL_PATHS), expectedFiles());
     assert.deepEqual(filesIn(wt, ALL_PATHS), expectedFiles());
-    assert.equal(p.git('diff', '--name-only', 'main', snapshot), CHANGED.join('\n'), 'nothing else changed');
+    assert.equal(p.git('diff', '--name-only', 'main', snapshot), [...CHANGED, 'core/x.txt'].sort().join('\n'), 'the task change and its prerequisite closure');
 
     // the version records where its change starts: the snapshot its first attempt started from
     const rec = record(p, prod('impl', 3));
@@ -416,7 +416,7 @@ describe('a product version accepted after a rework brings every attempt’s cha
     assert.deepEqual(filesOf(p, snap2.commit, ALL_PATHS), expectedFiles());
   });
 
-  it("a re-plan that changes the card continues from the previous attempt's candidate: the version accepted under the new card still brings every attempt's change", async () => {
+  it("a changed card starts a new spec without earlier attempts' changes", async () => {
     const start = await planned();
     p = start.pp;
     const ctx = p.ctx;
@@ -431,14 +431,14 @@ describe('a product version accepted after a rework brings every attempt’s cha
     await pmPlan(ctx, { mission: M, plan: { ...(addPlan(M, start.words) as Record<string, unknown>), round: 2 }, words: [start.words, w] });
     await decompose(p, plan({ implGoal: 'Task impl, with a sharper goal' }));
     const third = await construct(p, 'impl', ATTEMPTS[2]!);
-    assert.equal(third.start, second.candidate, "the new card's attempt continues from the previous attempt's candidate");
+    assert.equal(third.start, first.start, "the new card starts from its prerequisites without the old work");
     await review(p, 'pass');
     await pmNext(ctx);
     const s = await ready(p, 'constructor', 'use');
     const d = pmDispatch(ctx, s.step);
-    assert.deepEqual(filesIn(join(p.dir, d.worktree!), ALL_PATHS), expectedFiles());
+    assert.deepEqual(filesIn(join(p.dir, d.worktree!), ALL_PATHS), Object.fromEntries(ALL_PATHS.map((path) => [path, ATTEMPTS[2]![path] ?? (path === 'core/x.txt' ? 'x1\n' : (BASE_FILES[path] ?? null))])));
     const rec = record(p, prod('impl', 3));
-    assert.equal(rec.predecessor, prod('impl', 2));
+    assert.equal(rec.predecessor, undefined);
     assert.equal(rec.source?.origin, first.start);
   });
 });

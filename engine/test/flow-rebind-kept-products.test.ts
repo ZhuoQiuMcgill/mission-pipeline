@@ -268,6 +268,22 @@ describe('flow: products of kept tasks re-bound to a new plan version (Appendix 
     assert.ok(n !== undefined && n.wi === null);
     assert.match(n.trigger, new RegExp(`built on ${old.iface.replace(/\./g, '\\.')}`));
     assert.ok(!ports.scheduler.tasks.has('con.m1.docs.1'), 'stable mode: its dependent waits');
+    // P2: the notice's documented exit must not carry the incompatible old implementation again.
+    const conflict = new Error('old implementation conflicts with the rebuilt dependency') as Error & { code: string; detail: unknown };
+    conflict.code = 'conflict';
+    conflict.detail = { carried: true, conflicts: [{ path: 'src/parser/impl/index.ts' }] };
+    ports.scheduler.actions = { async snapshot(req) {
+      if (req.carry?.version === old.impl) throw conflict;
+      return { path: req.commit ?? 'b'.repeat(40), commit: req.commit ?? 'b'.repeat(40), products: req.products ?? [] };
+    } };
+    const revised = plan2();
+    await submitPmBatch(ports, { mission: M, plan: { ...revised, elements: revised.elements.map((e, i) => i === 0 ? { ...e, text: `${e.text}; implementation revised` } : e) }, userWords: [old.w] });
+    const fixed = ifaceChanged();
+    const completed = await drive(engine, ports.scheduler, happyScript(M, () => ({ ...fixed, tasks: fixed.tasks.map((t) => t.id === 'impl' ? { ...t, goal: `${t.goal}, rebuilt against the current interface` } : t) })));
+    assert.ok(completed.includes('con.m1.impl.2'), completed.join(', '));
+    assert.equal((await ports.ledger.objectVersion('prod.con.m1.impl.2'))!.predecessor, undefined);
+    assert.ok(!ports.ledger.notices.some((n) => n.category === 'rework-start-conflict'), 'a changed card has a usable exit');
+    assert.equal(await current(ports, 'impl'), 'prod.con.m1.impl.2');
   });
 
   it('installed after the new plan took effect: a later reconciliation finds the kept products and re-binds them', async () => {
