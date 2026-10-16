@@ -42,9 +42,21 @@ relaxed. Read the upgrade notes before you upgrade a project with work in flight
   a pinned start, the declared runs and a Reviewer (notice `legacy-prerequisites-restarted`, naming
   the missing paths). Products whose start holds the content are not touched. If git cannot read a
   start, its acceptance waits with the notice `legacy-prerequisites-unavailable` until it can.
-- **Re-bound kept products are judged by a Reviewer.** If you ran the field's PR stack: a kept
-  product re-bound to a new plan version is judged by a Reviewer in stable mode (maintainer ruling
-  1); the program no longer passes it by itself.
+- **Closing uses the same accepted-start check.** `--mode full` is refused while an accepted
+  start lacks a prerequisite or cannot be read; `with-risk` and `post-audit` list the risk. Follow
+  `mp pm next` for the carried rebuild, or restore unreadable local objects and retry. Missions
+  closed before the upgrade rebuild only after `mp pm mission open`.
+- **A Secretary decision on a 4.1.0 card gets a fresh round.** Those cards kept no versions of
+  their inputs, so an unapplied decision requires one more Secretary step, even if nothing changed.
+- **Labels read as recomputing until the next writes check the stored judgments once.**
+  The check runs in bounded batches; `mp pm drain` finishes them at once. Proof decisions wait
+  until it finishes. Opening does no label upgrade, and stops never run it.
+- **If you ran the field's PR stack:** carried re-binds stay as history; their program judgments
+  no longer count. The next `mp` writes remove them in bounded batches (`mp pm drain` at once);
+  until then labels read as recomputing and proof decisions wait. Stable mode re-binds for a Reviewer, fast
+  mode notifies, and dependents follow the seat's accepted successor. Stack deliveries land as
+  recorded: re-prepare any that rested on a layered or projected proof. No other stack record is
+  re-checked.
 - **Use git 2.53 or later.** Older git can leave a copied folder's worktrees pointing at the
   original repository. 4.1.1 detects this and holds git writes (WI-31), but do not copy or move a
   project folder to continue the work with older git.

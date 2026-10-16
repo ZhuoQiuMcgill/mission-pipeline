@@ -770,7 +770,7 @@ describe('Stabilizer r1: superseded seats and required lineage answers', () => {
     assert.equal(ports.scheduler.tasks.get('rev.m1.iface.1.b2')?.state, 'queued');
     await drive(engine, ports.scheduler, base);
     assert.deepEqual(ports.scheduler.queued(), []);
-    assert.equal(pmClose(ports.ctx, M, { mode: 'full' }).mode, 'full');
+    assert.equal((await pmClose(ports.ctx, M, { mode: 'full' })).mode, 'full');
   });
 
   it('the next card carries the latest response even when its superseded judgment has no review event', async () => {
@@ -864,7 +864,7 @@ describe('Stabilizer r2 Fix D: cancellation repeats across every supersession ex
       assert.deepEqual(await lineEvents(ports, 'iface', 'abandoned'), []);
       assert.ok(!(await lineEvents(ports, 'iface', 'review')).some((e) => e.key === task));
       await assertProven(ports, ['iface', 'impl', 'docs']);
-      assert.equal(pmClose(ports.ctx, M, { mode: 'full' }).mode, 'full');
+      assert.equal((await pmClose(ports.ctx, M, { mode: 'full' })).mode, 'full');
     });
   }
 
@@ -883,7 +883,7 @@ describe('Stabilizer r2 Fix D: cancellation repeats across every supersession ex
     assert.equal((await lineEvents(ports, 'iface', 'dropped')).length, 1, 'cleanup works after the drop event is already recorded');
     await assertProven(ports, ['iface-new', 'impl', 'docs']);
     try {
-      assert.equal(pmClose(ports.ctx, M, { mode: 'full' }).mode, 'full');
+      assert.equal((await pmClose(ports.ctx, M, { mode: 'full' })).mode, 'full');
     } catch (error) {
       // Close also checks historical accepted outputs, including the dropped task's stale product.
       assert.ok(error instanceof Error);
@@ -912,7 +912,7 @@ describe('Stabilizer r2 Fix D: cancellation repeats across every supersession ex
       assert.equal(ports.scheduler.tasks.get(task)?.state, 'abandoned');
       assert.deepEqual(await lineEvents(ports, 'iface', 'abandoned'), []);
       await assertProven(ports, ['iface', 'impl', 'docs']);
-      assert.equal(pmClose(ports.ctx, M, { mode: 'full' }).mode, 'full');
+      assert.equal((await pmClose(ports.ctx, M, { mode: 'full' })).mode, 'full');
     });
   }
 
@@ -991,7 +991,7 @@ describe('Stabilizer r1: per-version deferrals and closing risks', () => {
     const stored = ports.memory.read((db) => db.stmt('SELECT state FROM lbl_fixes WHERE target = ? AND issue = ?').get(card.target, issue)) as { state: string };
     assert.equal(stored.state, 'unfixed');
     assert.equal((await labelsOf(ports, [card.target]))[card.target], 'proven');
-    const close = pmClose(ports.ctx, M, { mode: 'full' });
+    const close = await pmClose(ports.ctx, M, { mode: 'full' });
     assert.ok(close.risks.includes(`issue ${issue} on ${card.target}: deferred to docs: ${reason}`));
   });
 
@@ -1012,7 +1012,7 @@ describe('Stabilizer r1: per-version deferrals and closing risks', () => {
     assert.deepEqual(await ports.scheduler.run(next.task, { handBack: { ...reviewer(next, 'pass'), issue_responses: [answer] } }), []);
     await drive(engine, ports.scheduler, base);
     assert.ok(!ports.scheduler.tasks.has('con.m1.iface.4'), 'repeating deferred with pass does not force rework');
-    const close = pmClose(ports.ctx, M, { mode: 'full' });
+    const close = await pmClose(ports.ctx, M, { mode: 'full' });
     assert.ok(close.risks.includes(`issue ${issue} on ${next.target}: deferred to docs: ${reason}`));
     assert.ok(!close.risks.some((r) => r.includes(`on ${card.target}:`)), 'only the selected version is listed');
   });
@@ -1021,7 +1021,7 @@ describe('Stabilizer r1: per-version deferrals and closing risks', () => {
     const { ports, engine, base, card, issue } = await reviewWithIssue();
     assert.deepEqual(await ports.scheduler.run(card.task, { handBack: { ...reviewer(card, 'pass'), issue_responses: [{ issue, response: 'not-fixed', reason: 'The example is still missing' }] } }), []);
     await drive(engine, ports.scheduler, base);
-    const close = pmClose(ports.ctx, M, { mode: 'full' });
+    const close = await pmClose(ports.ctx, M, { mode: 'full' });
     assert.ok(close.risks.includes(`issue ${issue} on ${card.target}: unfixed`));
     assert.ok(!ports.ledger.notices.some((n) => n.category === 'reviewer-issue-deferred'));
   });
@@ -1042,7 +1042,7 @@ describe('Stabilizer r3: close, then release an obsolete seat', () => {
   }
   async function closedThenReleased(ports: World, engine: FlowEngine, task: string, release: 'ended' | 'abandoned'): Promise<void> {
     assert.equal(ports.scheduler.tasks.get(task)?.state, 'running');
-    pmClose(ports.ctx, M, { mode: 'with-risk', request: `r3-${task}-${release}` });
+    await pmClose(ports.ctx, M, { mode: 'with-risk', request: `r3-${task}-${release}` });
     assert.deepEqual(await ports.scheduler.run(task, { release }), []);
     await engine.reconcile(M);
     await engine.reconcile(M);
@@ -1060,7 +1060,7 @@ describe('Stabilizer r3: close, then release an obsolete seat', () => {
       await drive(engine, ports.scheduler, happyScript(M, changedCards));
       await closedThenReleased(ports, engine, task, release);
       assert.deepEqual(await lineEvents(ports, 'iface', 'abandoned'), []);
-      assert.equal(pmClose(ports.ctx, M, { mode: 'full', request: `r3-full-${release}` }).mode, 'full');
+      assert.equal((await pmClose(ports.ctx, M, { mode: 'full', request: `r3-full-${release}` })).mode, 'full');
     });
   }
 
@@ -1072,7 +1072,7 @@ describe('Stabilizer r3: close, then release an obsolete seat', () => {
     await drive(engine, ports.scheduler, happyScript(M, renamedCards));
     await closedThenReleased(ports, engine, task, 'ended');
     try {
-      pmClose(ports.ctx, M, { mode: 'full', request: 'r3-full-drop' });
+      await pmClose(ports.ctx, M, { mode: 'full', request: 'r3-full-drop' });
     } catch (error) {
       assert.doesNotMatch((error as Error).message, /\d+ unfinished item/);
     }
@@ -1090,7 +1090,7 @@ describe('Stabilizer r3: close, then release an obsolete seat', () => {
       const base = happyScript(M, changedCards);
       await drive(engine, ports.scheduler, (t, s) => t.task === task ? null : base(t, s));
       await closedThenReleased(ports, engine, task, 'ended');
-      assert.equal(pmClose(ports.ctx, M, { mode: 'full', request: `r3-full-${seat}` }).mode, 'full');
+      assert.equal((await pmClose(ports.ctx, M, { mode: 'full', request: `r3-full-${seat}` })).mode, 'full');
     });
   }
 
@@ -1125,7 +1125,7 @@ describe('Stabilizer r3: close, then release an obsolete seat', () => {
     await drive(engine, ports.scheduler, happyScript(M, changedCards));
     assert.equal(await current(ports, 'iface'), 'prod.con.m1.iface.2');
     await closedThenReleased(ports, engine, task, 'ended');
-    assert.equal(pmClose(ports.ctx, M, { mode: 'full', request: 'r3-full-e1' }).mode, 'full');
+    assert.equal((await pmClose(ports.ctx, M, { mode: 'full', request: 'r3-full-e1' })).mode, 'full');
   });
 
   for (const when of ['before', 'after'] as const) {
@@ -1135,7 +1135,7 @@ describe('Stabilizer r3: close, then release an obsolete seat', () => {
       const accepted = (await current(ports, 'iface'))!;
       assert.equal(accepted, 'prod.con.m1.iface.1.b1');
       if (when === 'before') { await requestEnvironmentReview(ports, 'iface'); await engine.reconcile(M); }
-      pmClose(ports.ctx, M, { mode: 'with-risk', request: `r3-e1-${when}` });
+      await pmClose(ports.ctx, M, { mode: 'with-risk', request: `r3-e1-${when}` });
       if (when === 'after') await requestEnvironmentReview(ports, 'iface');
       await engine.reconcile(M);
       await engine.reconcile(M);

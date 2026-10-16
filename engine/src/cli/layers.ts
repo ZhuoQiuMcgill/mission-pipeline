@@ -51,7 +51,7 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelStatus } from '../evaluator/index.ts';
 import { flowCtx } from '../flow/context.ts';
-import { taskLineage } from '../flow/execution.ts';
+import { bySeat, taskLineage } from '../flow/execution.ts';
 import { latestEffective } from '../flow/planning.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import type { SettleRecord } from '../flow/exploration/machine.ts';
@@ -134,8 +134,8 @@ const TASK_LABEL: Readonly<Record<string, (b: Json) => string>> = {
   'loop-verdict': (b) => (b['proceed'] === false ? `reworks used up (${String(b['attempts'] ?? '?')} of ${String(b['allowed'] ?? '?')}${b['reason'] === 'no-progress' ? ', the same issues twice in a row' : ''})` : `rework allowed (${String(b['attempts'] ?? '?')} of ${String(b['allowed'] ?? '?')})`),
   rereview: (b) => `accepted, in re-review ${String(b['n'] ?? '?')} (its runs recorded again)`,
   'basis-revised': () => 'accepted, a basis has a new version: re-review pending',
-  rebind: (b) => `accepted, re-bound to the plan in effect ${String(b['dplan'] ?? '')}: in review`,
-  rebound: (b) => (b['how'] === 'carried' ? 'accepted, re-bound to the plan in effect (its judgment carried over)' : 'accepted, re-bound to the plan in effect (judged again)'),
+  rebind: (b) => bySeat(b) ? `accepted, re-bound to the plan in effect ${String(b['dplan'] ?? '')}: in review` : 'accepted; carried re-bind kept as history',
+  rebound: (b) => bySeat(b) ? 'accepted, re-bound to the plan in effect (judged again)' : 'accepted; carried re-bind kept as history',
   abandoned: () => 'abandoned',
   dropped: () => 'dropped by a re-plan',
   'waiting-replan': () => 'waiting for a re-plan',
@@ -283,7 +283,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       if (last !== undefined && rw !== undefined && !['rework', 'loop-verdict', 'accepted', 'reaccepted', 'rereview', 'basis-revised', 'rebind', 'rebound', 'abandoned', 'dropped'].includes(last.event)) label = `${label}, after a rework (${String(rw.body['reason'] ?? '')})`;
       // the current product's stored proof label: a refutation or a withdrawn basis after acceptance is a change of the task
       // (the attempt's product, or the version it was re-bound to under a later plan)
-      const latest = fs.filter((f) => (f.event === 'product' && typeof f.body['object'] === 'string') || (f.event === 'rebound' && typeof f.body['product'] === 'string')).at(-1);
+      const latest = fs.filter((f) => (f.event === 'product' && typeof f.body['object'] === 'string') || (f.event === 'rebound' && bySeat(f.body) && typeof f.body['product'] === 'string')).at(-1);
       const product = (latest?.event === 'rebound' ? latest.body['product'] : latest?.body['object']) as string | undefined;
       const pl = product === undefined ? undefined : raw.labels.get(product);
       if (pl !== undefined) {

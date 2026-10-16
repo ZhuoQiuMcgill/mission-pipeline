@@ -317,6 +317,45 @@ function parseScope(s: string | null): ConstraintScope | null {
   return s === null ? null : (JSON.parse(s) as ConstraintScope);
 }
 
+/** One step of the position fold, shared by projection and removal (semantics.ts positionState). */
+function positionAfter(prev: { state: string; decided_by: string } | undefined, rec: JudgmentRecord): { state: string; decided_by: string } {
+  // A negation stands until a non-Auditor pass names it in revokes.
+  if (prev?.state === 'fail' && rec.verdict !== 'fail' && !(rec.verdict === 'pass' && rec.executor !== 'auditor' && rec.revokes === prev.decided_by)) return prev;
+  return { state: rec.verdict, decided_by: rec.judgment };
+}
+
+/**
+ * Inverse of a judgment's projection (U-24). Keep the log and admission cites;
+ * remove only its own edges and derived state. Other judgments' edges remain,
+ * just as in a replay without this judgment. Later position states are folded
+ * again, and all readers (including continuations of its past state) are seeded.
+ */
+export function dropJudgment(db: Db, rec: JudgmentRecord, rev: number): string[] {
+  const j = `j:${rec.judgment}`;
+  const seeds = new Set([`e:${rec.target}`, `f:${rec.target}`, `p:${rec.target}`]);
+  for (const r of db.stmt('SELECT dst FROM lbl_edges WHERE src = ?').all(j) as Array<{ dst: string }>) seeds.add(r.dst);
+  db.stmt('DELETE FROM lbl_edges WHERE src = ? AND dst = ?').run(j, `e:${rec.target}`);
+  const sources = [`tj:${rec.target}`, ...readList(db, rec.evidence).map((e) => `ev:${e}`), ...readList(db, rec.bases).map((b) => `bv:${b}`), ...readList(db, rec.reliesOn).map((o) => `p:${o}`)];
+  if (rec.extends !== null) sources.push(`j:${rec.extends}`);
+  for (const src of sources) db.stmt('DELETE FROM lbl_edges WHERE src = ? AND dst = ?').run(src, j);
+  db.stmt('DELETE FROM lbl_judgments WHERE judgment = ?').run(rec.judgment);
+  db.stmt('DELETE FROM lbl_facts WHERE node = ?').run(j);
+  db.stmt('DELETE FROM lbl_work WHERE node = ?').run(j);
+  db.stmt('DELETE FROM lbl_wait WHERE child = ? OR parent = ?').run(j, j);
+  for (const r of db.stmt('SELECT cycle FROM lbl_cycle_members WHERE node = ?').all(j) as Array<{ cycle: string }>) {
+    db.stmt('DELETE FROM lbl_cycles WHERE cycle = ?').run(r.cycle);
+    db.stmt('DELETE FROM lbl_cycle_members WHERE cycle = ?').run(r.cycle);
+  }
+  let prev = db.stmt('SELECT state, decided_by FROM lbl_judgments WHERE target = ? AND review = ? AND rev < ? ORDER BY rev DESC LIMIT 1').get(rec.target, rec.review, rev) as { state: string; decided_by: string } | undefined;
+  for (const r of db.stmt('SELECT judgment, rev FROM lbl_judgments WHERE target = ? AND review = ? ORDER BY rev').all(rec.target, rec.review) as Array<{ judgment: string; rev: number }>) {
+    seeds.add(`j:${r.judgment}`);
+    if (r.rev <= rev) continue;
+    prev = positionAfter(prev, eventRecord<JudgmentRecord>(db, r.rev));
+    db.stmt('UPDATE lbl_judgments SET state = ?, decided_by = ? WHERE judgment = ?').run(prev.state, prev.decided_by, r.judgment);
+  }
+  return [...seeds];
+}
+
 /**
  * Add one base record to the index (and its reverse edges), as the in-memory
  * Index.add did, and return the nodes it touches directly (the seeds of 5.4
@@ -421,19 +460,15 @@ export function projectRecord(db: Db, rec: BaseRecord, rev: number): string[] {
       return seeds;
     }
     case 'judgment': {
+      if (rec.executor === 'program') return seeds;
       if (db.stmt('SELECT 1 FROM lbl_judgments WHERE judgment = ?').get(rec.judgment)) return seeds;
       // The position's state after this judgment (semantics.ts positionState, one step of its fold): a negation
       // stands until a pass of a non-Auditor names it in `revokes`; a later negation replaces it.
       const prev = db.stmt('SELECT state, decided_by FROM lbl_judgments WHERE target = ? AND review = ? ORDER BY rev DESC LIMIT 1').get(rec.target, rec.review) as
         | { state: string; decided_by: string }
         | undefined;
-      let state: string = rec.verdict;
-      let by: string = rec.judgment;
-      if (prev?.state === 'fail' && rec.verdict !== 'fail' && !(rec.verdict === 'pass' && rec.executor !== 'auditor' && rec.revokes === prev.decided_by)) {
-        state = 'fail';
-        by = prev.decided_by;
-      }
-      db.stmt('INSERT INTO lbl_judgments (judgment, target, review, rev, state, decided_by) VALUES (?, ?, ?, ?, ?, ?)').run(rec.judgment, rec.target, rec.review, rev, state, by);
+      const next = positionAfter(prev, rec);
+      db.stmt('INSERT INTO lbl_judgments (judgment, target, review, rev, state, decided_by) VALUES (?, ?, ?, ?, ?, ?)').run(rec.judgment, rec.target, rec.review, rev, next.state, next.decided_by);
       const j = `j:${rec.judgment}`;
       edge(db, j, `e:${rec.target}`);
       edge(db, `tj:${rec.target}`, j);

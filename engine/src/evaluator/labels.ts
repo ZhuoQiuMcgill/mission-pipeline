@@ -9,6 +9,14 @@ import { constraintApplies as objectConstraintApplies } from '../memory/domain/c
 // (after verifying the log), and a rebuild of the memory (after a move) does
 // the same.
 //
+// U-24 (proposal, pending ruling): old program judgments remain in the log but
+// decide nothing. Opening does no label upgrade. The first step of each batch
+// pages through the stored judgment index once, dropping program judgments and
+// seeding their readers. Its cursor and completion marker commit with the work;
+// until checked, labels read as recomputing and proof decisions wait. Stops
+// never run it; a broken chain refuses it. Rebuild, WI-29 recovery and
+// `mp recompute` omit those judgments and mark the same upgrade complete.
+//
 // Propagation is 4.0's in-memory algorithm (5.4) on stored tables, cut into
 // bounded, resumable steps:
 //   1. each appended base record is indexed (store.ts) and the nodes it
@@ -98,6 +106,7 @@ import {
   clearMark,
   CYCLE_ALERT_PREFIX,
   DERIVED_TABLES,
+  dropJudgment,
   dropScan,
   factOf,
   factRecord,
@@ -149,6 +158,8 @@ const CHUNK = 512;
  * most 10,000 paths of at most PATH_DEPTH_MAX segments, a target at most 64
  * review positions). A step past the batch's target runs only as the first
  * step of a PM batch, alone.
+ *   upgrade         one page of judgment rows (1 + rows), or one program
+ *                   judgment's removal (replay cost + its position's rows)
  *   catch-up        one event's projection: 5 + its lists (a proof unit: 4 per
  *                   member, so ≤ 1,000,005; a judgment: its evidence twice,
  *                   bases and reliances; an object: its prerequisites)
@@ -174,7 +185,8 @@ const CHUNK = 512;
  *                   per registered regression run and per issue on it), or
  *                   one chunk of an operation's objects (≤ CHUNK)
  * No step reads a withdrawn constraint, a position's or an environment line's
- * history: their cost does not grow with the project's age.
+ * history during normal propagation. The one-time upgrade refolds a removed
+ * judgment's later position history as one indivisible removal step.
  */
 
 const FACT_KINDS: ReadonlySet<string> = new Set(['j', 'e', 'f', 'p']);
@@ -385,9 +397,17 @@ function anyQueued(db: Db): boolean {
   return Boolean(db.stmt('SELECT 1 FROM lbl_work WHERE queued = 1 LIMIT 1').get());
 }
 
-/** Labels reflect every event and no work is left. */
+const PROGRAM_DROPPED = 'program-judgments-dropped';
+const PROGRAM_FROM = 'program-judgments-from';
+
+/** An empty index needs no upgrade; a batch still marks its first empty page before catch-up. */
+function upgraded(db: Db): boolean {
+  return metaGet(db, PROGRAM_DROPPED) !== null || !db.stmt('SELECT 1 FROM lbl_judgments LIMIT 1').get();
+}
+
+/** Labels reflect every event, the upgrade is complete and no work is left. */
 function isCurrent(db: Db): boolean {
-  return stampOf(db) >= headOf(db) && !anyWork(db);
+  return stampOf(db) >= headOf(db) && !anyWork(db) && upgraded(db);
 }
 
 const CYCLE_META = ['scc_phase', 'scc_from', 'scc_cursor', 'cycle_hash', 'cycle_judgment'];
@@ -532,6 +552,57 @@ function replayCost(rec: LogRecord): number {
       return 2 + countOf(r.objects);
     default:
       return 5;
+  }
+}
+
+/** The log's columns of a join, as `intactRecord` reads them. */
+const LOG_COLUMNS_L = LOG_COLUMNS.split(', ').map((c) => `l.${c} AS ${c}`).join(', ');
+
+/**
+ * U-24: one stored scan, before catch-up or propagation, never on open or a
+ * stop. A removal and all its seeds commit with the rowid cursor. Scan pages
+ * fit the budget; an indivisible large removal is left to a PM's lone step.
+ * Every scanned event is read through the log's integrity check before it is
+ * classified, passed by the cursor or counted toward the marker (§3.3: a
+ * damaged event is never used; CHAIN_BROKEN, and the upgrade stays undone).
+ */
+function dropProgramJudgments(tx: WriteTx, w: Work): boolean {
+  if (metaGet(tx, PROGRAM_DROPPED) !== null) return true;
+  const from = Number(metaGet(tx, PROGRAM_FROM) ?? '0');
+  let cursor = from;
+  try {
+    for (;;) {
+      const n = Math.min(PAGE, w.pageRoom() - 1);
+      if (n < 1 || !w.room(1)) return false;
+      const rows = tx.stmt(`SELECT j.rowid AS cursor, j.judgment, j.target, j.review, ${LOG_COLUMNS_L}
+        FROM lbl_judgments j JOIN log l ON l.rev = j.rev
+        WHERE j.rowid > ? ORDER BY j.rowid LIMIT ?`).all(cursor, n) as unknown as Array<LogRow & { cursor: number; judgment: string; target: string; review: string }>;
+      const first = rows.findIndex((r) => intactRecord<JudgmentRecord>(tx, r).executor === 'program');
+      if (first === 0) {
+        const row = rows[0]!;
+        const fact = factRecord<JudgmentRecord>(tx, 'judgment', row.judgment);
+        if (fact === null) throw new LedgerError('CHAIN_BROKEN', `judgment ${row.judgment} is missing from the log: the label upgrade cannot continue`);
+        const position = Number(tx.stmt('SELECT COUNT(*) AS n FROM lbl_judgments WHERE target = ? AND review = ?').get(row.target, row.review)!.n);
+        const cost = replayCost(fact.rec) + position;
+        if (!w.room(cost)) return false;
+        for (const node of dropJudgment(tx, fact.rec, fact.rev)) seed(tx, node, false);
+        w.spend(cost);
+        cursor = row.cursor;
+        w.step();
+      } else {
+        const count = first < 0 ? rows.length : first;
+        if (!w.room(1 + count)) return false;
+        if (count > 0) cursor = rows[count - 1]!.cursor;
+        w.spend(1 + count);
+        w.step();
+        if (first < 0 && rows.length < n) {
+          metaSet(tx, PROGRAM_DROPPED, '1');
+          return true;
+        }
+      }
+    }
+  } finally {
+    if (cursor !== from) metaSet(tx, PROGRAM_FROM, String(cursor));
   }
 }
 
@@ -1386,7 +1457,7 @@ export interface BatchReport {
 }
 
 /**
- * One batch inside `tx` (§4.1, v06): catch up with unindexed events, then
+ * One batch inside `tx` (§4.1, v06): upgrade the stored judgments, catch up with unindexed events, then
  * discovery from the frontier, then (frontier empty) evaluation of the marked
  * facts and display values, step by step, until the next step would go past
  * the batch's targets. A batch on another write never takes one write past
@@ -1396,7 +1467,7 @@ export interface BatchReport {
 function runBatch(tx: WriteTx, o: BatchKind): BatchReport {
   const used = o.lone ? 0 : (usedBy.get(tx) ?? 0);
   const w = new Work(tx, o, Number.isFinite(o.limit) ? Math.max(0, o.limit - used) : o.limit);
-  if (catchUp(tx, w)) {
+  if (dropProgramJudgments(tx, w) && catchUp(tx, w)) {
     if (discover(tx, w)) dropWalk(tx);
     if (!anyQueued(tx)) evaluate(evaluation(tx, w));
   }
@@ -1441,6 +1512,7 @@ function beforeCommit(tx: WriteTx): undefined {
 
 /** Every label from scratch, inside a maintenance transaction (no work budget): after the index was replayed. */
 function computeAll(tx: WriteTx): void {
+  metaSet(tx, PROGRAM_DROPPED, '1');
   for (const t of DERIVED_TABLES) tx.stmt(`DELETE FROM ${t}`).run();
   tx.stmt('UPDATE lbl_ops SET all_proven = NULL').run();
   for (const k of ['since', ...CYCLE_META]) metaSet(tx, k, null);
@@ -1597,7 +1669,7 @@ function gateProof(tx: WriteTx, what: { readonly opId: string }): void {
     const st = labelStatus(tx);
     throw new LedgerError(
       'RECOMPUTING',
-      `the labels are recomputing (${st.toVisit} nodes to visit, ${st.toRecompute} to evaluate${st.head > st.revision ? `, ${st.head - st.revision} events to index` : ''}): every decision that needs "proven" waits; every mp call does one batch, mp pm drain finishes them (WI-32)`,
+      `the labels are recomputing (${st.toVisit} nodes to visit, ${st.toRecompute} to evaluate${st.head > st.revision ? `, ${st.head - st.revision} events to index` : ''}${!upgraded(tx) ? ', checking program judgments from before 4.1.1 (U-24)' : ''}): every decision that needs "proven" waits; every mp write except a stop does one batch, mp pm drain finishes them (WI-32)`,
     );
   }
   // The labels were computed under the identity the log records (the index took it from the same event when it was written).
@@ -1640,7 +1712,7 @@ export function labelStatus(db: Db): LabelStatus {
   const toVisit = Number((db.stmt('SELECT COUNT(*) AS n FROM lbl_work WHERE queued = 1').get() as { n: number }).n);
   const toRecompute = Number((db.stmt('SELECT COUNT(*) AS n FROM lbl_work WHERE queued = 0').get() as { n: number }).n);
   const since = metaGet(db, 'since');
-  return { revision, head, recomputing: revision < head || toVisit + toRecompute > 0, toVisit, toRecompute, since: since === null ? null : Number(since) };
+  return { revision, head, recomputing: revision < head || toVisit + toRecompute > 0 || !upgraded(db), toVisit, toRecompute, since: since === null ? null : Number(since) };
 }
 
 /** The stored states of objects and proof units (display: the last labels, marked recomputing by `status`). Null: unknown target. */

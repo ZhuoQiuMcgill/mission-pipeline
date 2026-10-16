@@ -150,15 +150,28 @@ async function readLine(ctx: FlowCtx, task: string, revision = Infinity): Promis
   return new Line((await eventsOf(ctx, taskLine(task))).filter((e) => e.revision <= revision));
 }
 
-/** The accepted product of a plan task at its current attempt (its latest re-bound version, Appendix J), or null. */
+/** Select acceptance from the task line, including the dispatch's prerequisite pin. */
+export function lineAcceptance(events: Line['events']): { abandoned: boolean; k: number; product: string | null; pinned: boolean } {
+  const line = new Line(events);
+  const product = line.abandoned ? null : currentAcceptance(line, line.k)?.product ?? null;
+  const dispatch = line.all<DispatchedBody>('dispatched').find((e) => e.body.k === line.k);
+  return { abandoned: line.abandoned, k: line.k, product, pinned: dispatch === undefined || dispatch.body.prerequisites !== undefined };
+}
+
+/** The production start resolver, shared by execution and the closing snapshot. */
+export async function acceptedStartOf(ctx: FlowCtx, task: string, revision = Infinity) {
+  const line = await readLine(ctx, task, revision);
+  const selected = lineAcceptance(line.events);
+  if (selected.product === null) return null;
+  const check = await acceptedStart(ctx, line, selected.k, selected.product);
+  const verdict: 'pinned' | 'holds' | 'lacks' | 'unreadable' = check === undefined ? 'pinned' : check === null ? 'unreadable' : check.holds ? 'holds' : 'lacks';
+  return { product: selected.product, verdict, missing: check?.missing ?? [], rejected: check?.rejected ?? [] };
+}
+
+/** The accepted product of a plan task at its current attempt, with a valid start. */
 export async function acceptedProduct(ctx: FlowCtx, task: string, revision = Infinity): Promise<string | null> {
-  const l = await readLine(ctx, task, revision);
-  if (l.abandoned) return null;
-  const accepted = currentAcceptance(l, l.k);
-  if (accepted === null) return null;
-  const start = await acceptedStart(ctx, l, l.k, accepted.product);
-  if (start !== undefined && (start === null || !start.holds)) return null;
-  return accepted.product;
+  const start = await acceptedStartOf(ctx, task, revision);
+  return start !== null && (start.verdict === 'pinned' || start.verdict === 'holds') ? start.product : null;
 }
 
 type StartHolds = Awaited<ReturnType<FlowSchedulerPort['startHolds']>>;
@@ -743,9 +756,9 @@ interface RebindBody {
   readonly product: string;
   readonly dplan: string;
   readonly prerequisites: readonly string[];
-  /** New re-binds always require a seat judgment (maintainer ruling 1, 2026-10-13). */
-  readonly how: 'review';
-  readonly carries: null;
+  /** New re-binds require a seat; carried re-binds are historical field-stack records. */
+  readonly how: 'review' | 'carried';
+  readonly carries: string | null;
   /** Why the new version needs review. */
   readonly why: readonly string[];
 }
@@ -756,7 +769,7 @@ interface ReboundBody {
   readonly n: number;
   readonly product: string;
   readonly judgment: string;
-  readonly how: 'review';
+  readonly how: 'review' | 'carried';
 }
 
 /** What one pass re-bound, for the PM's notices. */
@@ -777,10 +790,13 @@ interface Acceptance {
   readonly body: ProductBody | null;
 }
 
+/** Carried field-stack re-binds are history; only a seat can accept one. */
+export const bySeat = (b: { readonly how?: unknown }): boolean => b.how !== 'carried';
+
 function currentAcceptance(line: Line, k: number): Acceptance | null {
   const acc = line.one<{ product: string; judgment: string }>('accepted', String(k));
   if (acc === null) return null;
-  const rb = line.all<ReboundBody>('rebound').filter((r) => r.body.k === k).at(-1);
+  const rb = line.all<ReboundBody>('rebound').filter((r) => r.body.k === k && bySeat(r.body)).at(-1);
   const product = rb?.body.product ?? acc.product;
   const since = rb?.revision ?? 0;
   const again = line.all<{ k: number; product?: string; judgment: string }>('reaccepted').filter((r) => r.body.k === k && r.revision > since && (r.body.product ?? acc.product) === product).at(-1);
@@ -846,7 +862,10 @@ async function reboundSuccessors(ctx: FlowCtx): Promise<Map<string, string>> {
   for (const e of await ctx.ports.ledger.events<RebindBody>({ mission: ctx.mission, event: 'rebind' })) if (e.line.startsWith('task:')) rebinds.set(`${e.line}\n${e.key}`, e.body);
   for (const e of await ctx.ports.ledger.events<ReboundBody>({ mission: ctx.mission, event: 'rebound' })) {
     const r = rebinds.get(`${e.line}\n${e.key}`);
-    if (r !== undefined) out.set(r.from, r.product);
+    if (r !== undefined) {
+      if (bySeat(r) && bySeat(e.body)) out.set(r.from, r.product);
+      else out.set(r.product, r.from);
+    }
   }
   return out;
 }
@@ -878,7 +897,7 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   if (cur === null || cur.body === null) return 'none';
   const c = ctx.ports.ledger.content;
   const rebinds = line.all<RebindBody>('rebind').filter((r) => r.body.k === k);
-  const open = rebinds.at(-1);
+  const open = rebinds.filter((r) => bySeat(r.body)).at(-1);
   const pending = open !== undefined && line.one('rebound', open.key) === null ? open : undefined;
   // A superseded re-bind's running Reviewer settles before the next card collects its findings.
   const obsolete = obsoleteSteps(ctx, t.id, line, eff);
@@ -913,7 +932,7 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     // A dependency's accepted closure still describes the old plan while its new version is
     // being judged. Compare only after that pending re-bind settles, avoiding a false stale notice.
     const dep = await readLine(ctx, d);
-    const rb = dep.all<RebindBody>('rebind').filter((r) => r.body.k === dep.k).at(-1);
+    const rb = dep.all<RebindBody>('rebind').filter((r) => r.body.k === dep.k && bySeat(r.body)).at(-1);
     if (rb !== undefined && rb.body.dplan === eff.dplan && rb.body.from === p && dep.one('rebound', rb.key) === null) return 'held';
   }
   // Stable mode: a dependency's accepted version not yet under the plan in effect is re-bound by its
@@ -1250,7 +1269,7 @@ function obsoleteSteps(ctx: FlowCtx, taskId: string, line: Line, eff: EffectiveB
     for (const task of attemptSteps(ctx, taskId, line, line.k)) obsolete.add(task);
   } else {
     const cur = currentAcceptance(line, line.k);
-    const rebinds = line.all<RebindBody>('rebind').filter((r) => r.body.k === line.k);
+    const rebinds = line.all<RebindBody>('rebind').filter((r) => r.body.k === line.k && bySeat(r.body));
     const pending = rebinds.at(-1);
     for (const rb of rebinds) {
       if (line.one('rebound', rb.key) !== null) continue;

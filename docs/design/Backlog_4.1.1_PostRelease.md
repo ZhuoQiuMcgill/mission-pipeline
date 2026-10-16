@@ -38,6 +38,16 @@ Reviewer's `deferred` answer had no owner or reason field.
 - The `OP_CONFLICT` hint ("use a new operation id") misleads for internal operations.
 - Tests: `checkedRenew` checks only one mission; extend it to every mission.
 
+## Labels and the program-judgment upgrade (`src/evaluator`)
+
+- `mp read status` writes its asked-cursor; behind `mp pm drain` it can wait two busy limits
+  (pre-existing).
+- `renewalCandidates` skips the recomputing check; mid-upgrade it may offer a program judgment.
+- `StoredIndex.judgments` resolves program judgments by id: labels agree, but `continuation()`
+  refusal reasons differ from the reference evaluator.
+- Name the upgrade in the status line, which currently says "recomputing (0 to visit…)".
+- A field-stack `mp` writing after the upgrade is not re-checked; mixed versions are unsupported.
+
 ## Products, composition and delivery (`src/delivery`, `src/process/actions.ts`)
 
 - Records written before 4.1.1 list only the paths present in a candidate, so a stacked version's
@@ -115,6 +125,17 @@ Reviewer's `deferred` answer had no owner or reason field.
 - A task step that throws skips `supersededStep` for that pass; call it in a `finally`.
 - The same shape as the closed-mission fix of 4.1.1: `planningStep` returns in a closed mission before
   cancelling older batches' queued Calibrator ① steps, and the exploration step returns too.
+
+## Upgrade follow-ups (final review)
+
+- `decisionFor` writes a rejection and a Secretary step from the read path `cli/layers.ts`.
+- The closed-mission branch in `execution.ts` re-reviews excluded legacy products.
+- The legacy start check runs git again in every `mp` process.
+- `mp read` shows a start-lacking legacy product as proven until its rebuild starts; delivery catches it.
+- `mp pm renew` reads evidence records without the log's integrity check to choose which groups to
+  rerun (it decides only a fresh, recorded rerun); read them through `intactRecord`.
+- Display and lookup readers (tree, notices, layers, mission lookups) read raw log fields: check them,
+  or mark damaged rows in the view.
 
 ## Field findings not taken into 4.1.1
 

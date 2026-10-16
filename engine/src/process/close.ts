@@ -32,6 +32,8 @@ import type { ContentHash, MissionId } from '../common/ids.ts';
 import { decisionLabels, decidingViews, labelBatch, labelStatus } from '../evaluator/index.ts';
 import { appendRecords, closeMission, factById, flowEvents, LedgerError, listDispatches, missionCloses, releaseDispatch, setMission, taskQueue, wordsEntry, type Db, type DispatchInfo, type MissionClose, type WriteTx } from '../memory/index.ts';
 import { PLAN_LINE, PM_PLAN_EFFECTIVE, SECRETARY_LINE, explorationLine, taskLine } from '../flow/plandoc.ts';
+import { acceptedStartOf, lineAcceptance } from '../flow/execution.ts';
+import { flowCtx } from '../flow/context.ts';
 import { fold } from '../flow/exploration/machine.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
@@ -95,8 +97,10 @@ function body<T>(tx: WriteTx, h: string): T {
   return JSON.parse(tx.data.text(h)) as T;
 }
 
+type CheckedStarts = ReadonlyMap<string, Awaited<ReturnType<typeof acceptedStartOf>>>;
+
 /** The closing snapshot document (proof state, unfinished work, risks), read inside the close's write. */
-function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunning: boolean): { readonly doc: Record<string, unknown>; readonly notProven: readonly string[]; readonly unfinished: number; readonly recomputing: boolean } {
+function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunning: boolean, checked: CheckedStarts): { readonly startRisks: readonly string[]; readonly doc: Record<string, unknown>; readonly notProven: readonly string[]; readonly unfinished: number; readonly recomputing: boolean } {
   const ev = (line: string, event: string) => flowEvents(tx, { mission, line, event, limit: 10_000 });
   // the outputs: the effective plans, the accepted products of the plan tasks, the settled explorations' artifacts
   const effective = ev(PLAN_LINE, 'effective').map((e) => body<{ dplan: string; tasks: readonly string[] }>(tx, e.body));
@@ -105,23 +109,20 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
   const outputs: Array<{ object: string; kind: string; of: string }> = [];
   const unfinishedTasks: string[] = [];
   const abandoned: string[] = [];
+  const startRisks: string[] = [];
   for (const t of tasks) {
-    const line = taskLine(t);
-    // given up under its current card (a re-planned card that was given up earlier runs again: execution.ts)
-    const specRev = Number(ev(line, 'spec').at(-1)?.revision ?? 0);
-    if (ev(line, 'abandoned').some((e) => Number(e.revision) > specRev)) {
-      abandoned.push(t);
-      continue;
-    }
-    const reworks = ev(line, 'rework').length;
-    const acc = ev(line, 'accepted').find((e) => e.key === String(1 + reworks));
-    // the accepted version now: its latest re-bound version when a later plan kept the task (design 4.1 Appendix J)
-    const rebound = ev(line, 'rebound')
-      .map((e) => body<{ k: number; product: string }>(tx, e.body))
-      .filter((b) => b.k === 1 + reworks)
-      .at(-1);
-    if (acc === undefined) unfinishedTasks.push(t);
-    else outputs.push({ object: rebound?.product ?? body<{ product: string }>(tx, acc.body).product, kind: 'product', of: `task ${t}` });
+    const selected = lineAcceptance(flowEvents(tx, { mission, line: taskLine(t), limit: 10_000 }).map((e) => ({ revision: Number(e.revision), event: e.event, key: e.key, body: body<unknown>(tx, e.body) })));
+    if (selected.abandoned) { abandoned.push(t); continue; }
+    if (selected.product === null) { unfinishedTasks.push(t); continue; }
+    const start = checked.get(t);
+    let risk: string | null = null;
+    if (start === undefined || start === null || start.product !== selected.product) risk = 'changed while closing; retry';
+    else if (start.verdict === 'lacks') risk = `start lacks ${[...start.missing.map((m) => `${m.prerequisite} at ${m.path}`), ...start.rejected.map((p) => `${p} (its recorded start lacks a prerequisite)`)].join(', ')}; one carried rebuild on mp pm next`;
+    else if (start.verdict === 'unreadable') risk = 'start cannot be read (legacy-prerequisites-unavailable); restore the local objects and retry';
+    if (risk !== null) {
+      unfinishedTasks.push(t);
+      startRisks.push(`${selected.product} (task ${t}): ${risk}`);
+    } else outputs.push({ object: selected.product, kind: 'product', of: `task ${t}` });
   }
   const lastPlan = effective.at(-1);
   if (lastPlan !== undefined) outputs.push({ object: lastPlan.dplan, kind: 'plan', of: 'the effective detailed plan' });
@@ -178,6 +179,7 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
     }
   }
   const risks = [
+    ...startRisks,
     ...notProven.map((x) => `not proven: ${x}`),
     ...issueRisks,
     ...unfinishedTasks.map((t) => `plan task ${t} not accepted`),
@@ -197,7 +199,7 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
     unfinished: { planTasks: unfinishedTasks, explorations: unsettled, queued, running, escalations: openEscalations },
     risks,
   };
-  return { doc, notProven, unfinished: unfinishedTasks.length + unsettled.length + queued.length + running.length, recomputing };
+  return { doc, notProven, startRisks, unfinished: unfinishedTasks.length + unsettled.length + queued.length + running.length, recomputing };
 }
 
 export interface Closed {
@@ -222,7 +224,7 @@ export interface Closed {
  * `pmClose(ctx, mission, { mode, waitRunning, words, request })`. `request`: the caller's request
  * id (the CLI's `--op`; a retry of the same request replays its receipt).
  */
-export function pmClose(ctx: ProcessContext, missionId: string, req: { readonly mode: CloseMode; readonly waitRunning?: boolean; readonly words?: string | null; readonly request?: string | null }): Closed {
+export async function pmClose(ctx: ProcessContext, missionId: string, req: { readonly mode: CloseMode; readonly waitRunning?: boolean; readonly words?: string | null; readonly request?: string | null }): Promise<Closed> {
   if (!CLOSE_MODES.includes(req.mode)) throw new LedgerError('BAD_REQUEST', 'the closing mode is with-risk, full or post-audit');
   const mission = missionId as MissionId;
   const waitRunning = req.waitRunning === true;
@@ -236,15 +238,19 @@ export function pmClose(ctx: ProcessContext, missionId: string, req: { readonly 
   if (req.words !== undefined && req.words !== null && ctx.memory.read((db) => wordsEntry(db, req.words!)) === null) throw new LedgerError('RECORD_INVALID', `no words entry ${req.words}`);
   const known = ctx.memory.read((db) => db.stmt('SELECT 1 FROM missions WHERE mission = ?').get(mission) !== undefined || flowEvents(db, { mission, limit: 1 }).length > 0);
   if (!known) throw new LedgerError('BAD_REQUEST', `there is no mission ${mission}`);
+  const tasks = ctx.memory.read((db) => [...new Set(flowEvents(db, { mission, line: PLAN_LINE, event: 'effective', limit: 10_000 }).flatMap((e) => (JSON.parse(ctx.memory.data.text(e.body)) as { tasks: string[] }).tasks))]);
+  const fc = flowCtx(ctx.ports(), mission);
+  const checked = new Map<string, Awaited<ReturnType<typeof acceptedStartOf>>>();
+  for (const task of tasks) checked.set(task, await acceptedStartOf(fc, task));
   const op = stateOp(ctx, 'close', mission, req);
   let repeated = true;
   const out = ctx.memory.write({ op, payload: { mission, mode: req.mode, waitRunning, words: req.words ?? null, request: req.request ?? null }, command: 'close', filler: ctx.filler }, (tx) => {
     repeated = false;
-    const s = snapshotOf(tx, mission, req.mode, waitRunning);
+    const s = snapshotOf(tx, mission, req.mode, waitRunning, checked);
     if (req.mode === 'full') {
-      if (s.recomputing) throw new LedgerError('RECOMPUTING', 'a full close needs the labels settled: they are recomputing (retry, or mp pm drain, WI-32)');
+      if (s.recomputing && s.startRisks.length === 0) throw new LedgerError('RECOMPUTING', 'a full close needs the labels settled: they are recomputing (retry, or mp pm drain, WI-32)');
       if (s.notProven.length > 0 || s.unfinished > 0) {
-        throw new ProcessError('NOT_READY', `a full close needs every output proven and nothing unfinished: ${[...s.notProven.map((x) => `not proven ${x}`), ...(s.unfinished > 0 ? [`${s.unfinished} unfinished item(s)`] : [])].join('; ')}. Close with-risk or post-audit, or finish the work`);
+        throw new ProcessError('NOT_READY', `a full close needs every output proven and nothing unfinished: ${[...s.startRisks, ...s.notProven.map((x) => `not proven ${x}`), ...(s.unfinished > 0 ? [`${s.unfinished} unfinished item(s)`] : [])].join('; ')}. Close with-risk or post-audit, or finish the work with mp pm next (restore unreadable local objects, or retry if acceptance changed while closing)`);
       }
     }
     const snapshot = tx.data.put(canonicalJson(s.doc)) as ContentHash;
@@ -266,21 +272,26 @@ export function pmClose(ctx: ProcessContext, missionId: string, req: { readonly 
   return { mission, mode: req.mode, waitRunning, version: out.version, asOf: out.asOf, snapshot: out.snapshot, repeated, inFlight, risks: out.risks, message };
 }
 
+type MissionStateResult = { readonly mission: MissionId; readonly state: 'open' | 'closed'; readonly changed: boolean; readonly close?: Closed };
+type MissionOptions = { readonly request?: string | null; readonly mode?: CloseMode; readonly waitRunning?: boolean; readonly words?: string | null };
+
 /**
  * `mp pm mission <id>` (open) / closed. Opening a closed mission lets its held steps run again.
  * Closing goes through pmClose (with-risk unless a mode is given). A mission already open is not
  * written again.
  */
+export function pmMission(ctx: ProcessContext, mission: string, state?: 'open', o?: MissionOptions): MissionStateResult;
+export function pmMission(ctx: ProcessContext, mission: string, state: 'closed', o?: MissionOptions): Promise<MissionStateResult>;
+export function pmMission(ctx: ProcessContext, mission: string, state: 'open' | 'closed', o?: MissionOptions): MissionStateResult | Promise<MissionStateResult>;
 export function pmMission(
   ctx: ProcessContext,
   mission: string,
   state: 'open' | 'closed' = 'open',
   o: { readonly request?: string | null; readonly mode?: CloseMode; readonly waitRunning?: boolean; readonly words?: string | null } = {},
-): { readonly mission: MissionId; readonly state: 'open' | 'closed'; readonly changed: boolean; readonly close?: Closed } {
+): MissionStateResult | Promise<MissionStateResult> {
   const m = mission as MissionId;
   if (state === 'closed') {
-    const close = pmClose(ctx, mission, { mode: o.mode ?? 'with-risk', ...(o.waitRunning !== undefined ? { waitRunning: o.waitRunning } : {}), ...(o.words !== undefined ? { words: o.words } : {}), ...(o.request !== undefined ? { request: o.request } : {}) });
-    return { mission: m, state: 'closed', changed: !close.repeated, close };
+    return pmClose(ctx, mission, { mode: o.mode ?? 'with-risk', ...(o.waitRunning !== undefined ? { waitRunning: o.waitRunning } : {}), ...(o.words !== undefined ? { words: o.words } : {}), ...(o.request !== undefined ? { request: o.request } : {}) }).then((close) => ({ mission: m, state: 'closed', changed: !close.repeated, close }));
   }
   if (state !== 'open') throw new LedgerError('BAD_REQUEST', 'a mission is open or closed');
   const op = stateOp(ctx, 'mission-open', mission, o);

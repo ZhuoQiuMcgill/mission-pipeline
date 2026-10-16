@@ -297,31 +297,35 @@ async function tellToUser(ctx: FlowCtx, id: string, why: string, wi: string | nu
   });
 }
 
-/**
- * The decision to carry out, or null while there is none (no decision yet, or waiting for the
- * user). A user's answer, once recorded, overrides.
- */
+/** Reject and queue a fresh card in the same retry path, without recovering old inputs. */
+async function rejectDecision(ctx: FlowCtx, esc: EscalationBody, round: { key: string; round: number }, d: DecisionBody, why: string): Promise<false> {
+  const n = round.round + 1;
+  const id = esc.id;
+  const key = `${id}#${n}`;
+  const original = await escalation(ctx, id);
+  const task = `${original!.task}.retry${n}`;
+  const inputs = (d.inputs ?? []).filter((i) => i.type === 'decision' || i.type === 'decision-authority' || i.line === d.authorization);
+  await commit(ctx, `flow:secretary-retry:${ctx.mission}:${key}`, { events: [ev(ctx, SECRETARY_LINE, 'decision-rejected', round.key, { id, why, authorization: d.authorization, inputs }), ev(ctx, SECRETARY_LINE, 'secretary-retry', key, { id, task, why })] });
+  await submitSecretary(ctx, { ...esc, task, reasons: [...esc.reasons, why] });
+  return false;
+}
+
 async function decisionAuthorityCurrent(ctx: FlowCtx, esc: EscalationBody, round: { key: string; round: number }, d: DecisionBody): Promise<boolean> {
   if (d.by === 'secretary') {
+    if (round.round === 0 && d.inputs === undefined) return rejectDecision(ctx, esc, round, d, 'The Secretary decided on a card from before 4.1.1, which kept no versions of what it relied on. Review the current facts and decide again.');
     const items = await currentItems(ctx);
     const relied = (d.inputs ?? []).filter((i) => i.type === 'decision' || i.type === 'decision-authority' || i.line === d.authorization);
     const authority = d.authorization === null || items.some((i) => i.line === d.authorization && i.type === 'authorization' && i.state === 'valid');
     const current = relied.every((i) => items.some((now) => now.line === i.line && now.version === i.version && now.state === 'valid'));
     if (!authority || !current) {
       const why = `The Secretary decision was not carried out: its authorization or a cited decision is no longer in force. Review the current facts and decide again.`;
-      const n = round.round + 1;
-      const id = esc.id;
-      const key = `${id}#${n}`;
-      const original = await escalation(ctx, esc.id);
-      const task = `${original!.task}.retry${n}`;
-      await commit(ctx, `flow:secretary-retry:${ctx.mission}:${key}`, { events: [ev(ctx, SECRETARY_LINE, 'decision-rejected', round.key, { id, why, authorization: d.authorization, inputs: relied }), ev(ctx, SECRETARY_LINE, 'secretary-retry', key, { id, task, why })] });
-      await submitSecretary(ctx, { ...esc, task, reasons: [...esc.reasons, why] });
-      return false;
+      return rejectDecision(ctx, esc, round, d, why);
     }
   }
   return true;
 }
 
+/** The decision to carry out, or null while waiting. A user's answer overrides. */
 export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBody | null> {
   const answer = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'user-answer', id);
   if (answer !== null) return answer.body;

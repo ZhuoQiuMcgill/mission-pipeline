@@ -407,6 +407,7 @@ export class Index implements IndexView {
         }
         return true;
       case 'judgment': {
+        if (r.executor === 'program') return false;
         if (this.judgments.has(r.judgment)) return false;
         const info: JudgmentInfo = { rev: c.revision, rec: r };
         this.judgments.set(r.judgment, info);

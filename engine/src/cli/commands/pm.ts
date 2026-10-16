@@ -825,7 +825,7 @@ const close: Command = {
     const mode = flagStr(args, 'mode');
     if (mode !== 'with-risk' && mode !== 'full' && mode !== 'post-audit') throw usage('--mode is with-risk, full or post-audit');
     // the process layer decides inside the close's own write (a full close: labels settled, every output proven, nothing unfinished)
-    const r = pmClose(p.ctx, m, { mode, request: c.op });
+    const r = await pmClose(p.ctx, m, { mode, request: c.op });
     return ok(r.message, r);
   },
 };

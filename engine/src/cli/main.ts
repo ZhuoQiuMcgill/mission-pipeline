@@ -142,7 +142,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
       const session = latestSession(project.ctx.memory);
       const own = cmd.name[0] === 'dispatch' ? null : parseFiller(flagStr(args, 'filled-by'));
       project.ctx.filler = own ?? session?.filler ?? null;
-      const action = { op, command: [cmd.name[0]!, ...(WITH_SUB.has(cmd.name[0]!) && args.positionals[0] !== undefined ? [args.positionals[0]] : [])].join(' '), args: identityOf(cmd, args) };
+      const action = { op, command: [cmd.name[0]!, ...(WITH_SUB.has(cmd.name[0]!) && args.positionals[0] !== undefined ? [args.positionals[0]] : [])].join(' '), args: identityOf(cmd, args), stop: cmd.stop === true };
       const c: RunContext = { io, project, op, now };
       if (cmd.unrecorded === true) result = await cmd.run(c, args);
       else if (cmd.stop === true) {

@@ -137,7 +137,7 @@ describe('review r1 #7, #8: one Secretary grant per lineage; the user\'s exit st
           line: SECRETARY_LINE,
           event: 'decision',
           key: esc,
-          body: { escalation: esc, by: 'secretary', option: 'grant', classification: 'detail', authorization: null, reason: 'one more', instructions: '', grantExtra: 1, notice: '', mayMatter: false },
+          body: { escalation: esc, by: 'secretary', inputs: [], option: 'grant', classification: 'detail', authorization: null, reason: 'one more', instructions: '', grantExtra: 1, notice: '', mayMatter: false },
         },
       ],
     });
