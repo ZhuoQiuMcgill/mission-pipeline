@@ -67,7 +67,7 @@ import {
 } from '../memory/index.ts';
 import { noticeExternalWork } from './external.ts';
 import { assertScopeNotStopped, deriveScope, tagScope, unionWork, type WorkScope } from './scope.ts';
-import { buildCandidate, checkCandidateProofs, type OverlayConflict, type ProofCheck } from './candidate.ts';
+import { buildCandidate, checkCandidateProofs, landedVersions, type OverlayConflict, type ProofCheck } from './candidate.ts';
 import { buildManifest, type DeliveryManifest, type ManifestConflict } from './manifest.ts';
 import { memoryProofView, type LabelView } from './memoryView.ts';
 import type { DeliveryTarget } from './proofView.ts';
@@ -269,7 +269,8 @@ function reportLeaf(doc: DeliveryDocument, ref: string, rebuilds: number): strin
     '## Proof check on the candidate',
     '',
     `- Proven: ${doc.proof.proven.length === 0 ? 'none' : doc.proof.proven.join(', ')}`,
-    ...doc.proof.notFullyProven.map((n) => `- Not fully proven: ${n.id} (${n.reasons.map((r) => r.kind).join(', ')})`),
+    ...(doc.proof.deliveredBy ?? []).map((d) => `- ${d.version}: ${d.path} is delivered by ${d.by}`),
+    ...doc.proof.notFullyProven.map((n) => `- Not fully proven: ${n.id} (${n.reasons.map((r) => r.kind === 'start-lacks-prerequisite' ? `${r.kind}: ${r.missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')}` : r.kind).join(', ')})`),
     '',
     '## Closing checks',
     '',
@@ -517,7 +518,7 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
       try {
         // a version recorded without its origin finds it down its predecessors, as this view has them (Appendix H)
         const v = view;
-        c = await buildCandidate({ git, repo, manifest, base, attributes, snapshotDir: runDir, message: describe(req, manifest), author: req.author, committer: req.committer, versionOf: (id) => v.object(id) });
+        c = await buildCandidate({ git, repo, manifest, base, attributes, snapshotDir: runDir, message: describe(req, manifest), author: req.author, committer: req.committer, versionOf: (id) => v.object(id), alreadyLaid: await landedVersions(git, repo, m, base, (id) => v.object(id)) });
       } catch (e) {
         const lfs = e instanceof RepresentationError && (e.code === 'lfs-object-missing' || e.code === 'lfs-object-corrupt');
         if (!(e instanceof MissingObjectsError) && !lfs) throw e;

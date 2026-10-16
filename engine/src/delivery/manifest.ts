@@ -140,13 +140,14 @@ function stacked(ids: readonly ObjectVersionId[], closure: ReadonlyMap<ObjectVer
     for (let j = i + 1; j < ids.length; j++) {
       const a = ids[i] as ObjectVersionId;
       const b = ids[j] as ObjectVersionId;
-      if (!(closure.get(a)?.has(b) ?? false) && !(closure.get(b)?.has(a) ?? false)) return false;
+      // Mutual prerequisites do not establish which candidate contained the other.
+      if ((closure.get(a)?.has(b) ?? false) === (closure.get(b)?.has(a) ?? false)) return false;
     }
   }
   return true;
 }
 
-export function buildManifest(view: DeliveryProofView, selected: readonly DeliveryTarget[]): ManifestResult {
+export function buildManifest(view: DeliveryProofView, selected: readonly DeliveryTarget[], options: { readonly compositionOnly?: boolean } = {}): ManifestResult {
   const entries = new Map<ObjectVersionId, { object: DeliveryObject; unit: ProofUnitId | null; requiredBy: Map<string, DeliveryTarget>; chain: DeliveryTarget[] }>();
   const units = new Map<ProofUnitId, readonly ObjectVersionId[]>();
   const missing = new Map<string, DeliveryTarget>();
@@ -233,7 +234,7 @@ export function buildManifest(view: DeliveryProofView, selected: readonly Delive
   for (const [module, es] of [...byModule.entries()].sort(([a], [b]) => byId(a, b))) {
     if (apart(es)) conflicts.push({ kind: 'same-module', path: null, module, sides: es.map(side) });
   }
-  if (conflicts.length > 0) return { kind: 'incompatible', conflicts, entries: list };
+  if (conflicts.length > 0 && !options.compositionOnly) return { kind: 'incompatible', conflicts, entries: list };
 
   const rank = new Map(stackOrder(list.map((e) => e.object.id), closure).map((id, i) => [id, i]));
   const paths = new Map<string, ObjectVersionId>();

@@ -24,12 +24,13 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalJson } from '../common/hash.ts';
-import type { GitOid, MissionId, ModuleId, ObjectVersionId } from '../common/ids.ts';
+import type { GitOid, MissionId, ModuleId, ObjectVersionId, ProofUnitId } from '../common/ids.ts';
 import type { ObjectVersionRecord } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
-import { buildCandidate, versionOrigin } from '../delivery/candidate.ts';
-import type { DeliveryManifest } from '../delivery/manifest.ts';
-import type { DeliveryObject } from '../delivery/proofView.ts';
+import { buildCandidate, landedVersions, startHolds, versionOrigin } from '../delivery/candidate.ts';
+import { buildManifest, type DeliveryManifest } from '../delivery/manifest.ts';
+import { memoryProofView } from '../delivery/memoryView.ts';
+import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
 import { AttributeEvaluator, MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
@@ -57,10 +58,20 @@ interface Shared {
   description: Promise<TransformDescription> | null;
 }
 
+/** Resolve the prerequisite closure and whole proof units; the delivery overlay orders them by prerequisites.
+ * Composition labels confer no proof; delivery still applies its compatibility checks.
+ */
+export function compose(view: DeliveryProofView, products: readonly string[]): DeliveryManifest {
+  const built = buildManifest(view, products.map((id) => view.unitMembers(id as ProofUnitId) !== null ? { kind: 'unit', id: id as ProofUnitId } : { kind: 'object', id: id as ObjectVersionId }), { compositionOnly: true });
+  if (built.kind !== 'manifest') throw new ActionError('unknown-product', 'the snapshot products have an unknown or unplaced prerequisite', built);
+  return built.manifest;
+}
+
 export function gitActions(ctx: ProcessContext): GitActions {
   const shared: Shared = { repo: null, description: null };
   const repo = (): Promise<RepoLayout> => (shared.repo ??= discoverRepo(ctx.git, ctx.projectDir));
   const description = async (): Promise<TransformDescription> => (shared.description ??= readTransformDescription(ctx.git, await repo(), ctx.projectDir));
+  const compositionView = () => memoryProofView(ctx.memory, { revision: ctx.memory.head(), recomputing: false, recomputingIn: () => false, labelOf: () => 'unaccepted', decidingRuns: () => [] });
 
   /** The mission's base: the target branch's head (a mission starts from where it will land). */
   function missionBase(): string {
@@ -116,33 +127,30 @@ export function gitActions(ctx: ProcessContext): GitActions {
       if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
       throw e;
     }
-    const start = (await laid(req.mission, missionBase(), carry.products)).commit;
-    if (from !== null && treeOf(from) === treeOf(start)) return { path: prev, commit: prev, ...writable };
+    const next = await laid(req.mission, missionBase(), carry.products);
+    const start = next.commit;
+    if (from !== null && treeOf(from) === treeOf(start)) return { path: prev, commit: prev, products: next.products, ...writable };
     const r = await laid(req.mission, start, [carry.version], `mission-pipeline: ${carry.version} laid over a new start of ${req.mission}`, true);
-    return { path: r.commit, commit: r.commit, origin: start, ...writable };
+    return { path: r.commit, commit: r.commit, origin: start, products: next.products, ...writable };
   }
 
   /** The products laid over `at` (the delivery's overlay); a conflict is an ActionError ('conflict'). */
-  async function laid(mission: string, at: string, given: readonly string[], message?: string, carry = false): Promise<{ readonly commit: string }> {
+  async function laid(mission: string, at: string, given: readonly string[], message?: string, carry = false): Promise<{ readonly commit: string; readonly products: readonly string[] }> {
     const base = commitOf(at);
-    const products = [...new Set(given)].sort();
-    if (products.length === 0) return { commit: base };
-    // a dependent task sees its prerequisites: their versions laid over the base (the delivery's overlay, 5.3),
-    // each with its whole change since its task's first attempt began (Appendix H), each after the versions it
-    // rests on (its recorded prerequisites: a version built on another is laid over it, Appendix L)
-    const objects: DeliveryObject[] = products.map((id) => {
-      const v = versionOf(id as ObjectVersionId);
-      if (v === null) throw new ActionError('unknown-product', `product version ${id} is not recorded with a commit`, { product: id });
-      const r = productRecord(id) as ObjectVersionRecord;
-      return { ...v, prerequisites: ctx.memory.data.getList(r.prerequisites).map((x) => ({ kind: 'object' as const, id: x as ObjectVersionId })) };
-    });
-    const manifest: DeliveryManifest = {
-      revision: 0 as never,
-      selected: [],
-      entries: objects.map((object) => ({ object, unit: null, label: 'proven', requiredBy: [], chain: [] })),
-      units: [],
-      paths: new Map(),
-    };
+    if (given.length === 0) return { commit: base, products: [] };
+    // Read closure and proof-unit membership through the delivery's resolver. Labels here are
+    // unused: compositionOnly lays content without declaring any of it proven.
+    const view = compositionView();
+    let manifest: DeliveryManifest;
+    if (carry) {
+      const objects = given.map((id) => view.object(id as ObjectVersionId));
+      if (objects.some((v) => v === null || v.tree === null)) throw new ActionError('unknown-product', 'a carried product has no recorded commit', { products: given });
+      // Lay only the task's change; its former dependencies must not replace the new start.
+      manifest = { revision: view.revision, selected: [], entries: objects.map((v) => ({ object: { ...v!, prerequisites: [] }, unit: null, label: 'unaccepted', requiredBy: [], chain: [] })), units: [], paths: new Map() };
+    } else {
+      manifest = compose(view, given);
+    }
+    const products = manifest.entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
     const scratch = mkdtempSync(join(ctx.memory.paths.tmp, 'snapshot-'));
     let attributes: AttributeEvaluator | null = null;
     try {
@@ -159,13 +167,14 @@ export function gitActions(ctx: ProcessContext): GitActions {
         author: ctx.ident(0),
         committer: ctx.ident(0),
         versionOf,
+        alreadyLaid: await landedVersions(ctx.git, layout, ctx.memory, gitOid(base), versionOf),
       });
       if (r.kind === 'conflict' && carry) {
         throw new ActionError('conflict', `the change of ${products.join(', ')} since its task's work began conflicts with its dependencies' current products on ${r.conflicts.map((c) => c.path).join(', ')}`, { carried: true, conflicts: r.conflicts });
       }
       if (r.kind === 'conflict') throw new ActionError('conflict', `the accepted products ${products.join(', ')} conflict on ${r.conflicts.map((c) => c.path).join(', ')}`, r.conflicts);
       if (r.kind === 'description-mismatch') throw new ActionError('conflict', `products ${r.versions.join(', ')} rest on another transform description`, r);
-      return { commit: r.candidate.commit };
+      return { commit: r.candidate.commit, products };
     } catch (e) {
       if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
       throw e;
@@ -176,10 +185,26 @@ export function gitActions(ctx: ProcessContext): GitActions {
   }
 
   return {
+    async startHolds(product) {
+      try {
+        const view = compositionView();
+        const version = view.object(product as ObjectVersionId);
+        if (version === null || version.tree === null) throw new ActionError('unknown-product', `product version ${product} has no recorded commit`, { product });
+        return await startHolds(ctx.git, await repo(), view, version);
+      } catch (e) {
+        if (e instanceof ActionError) throw e;
+        throw new ActionError('missing-objects', `the start of ${product} cannot be checked: ${(e as Error).message}`, e);
+      }
+    },
+
+    async composition(products) {
+      return compose(compositionView(), products).entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
+    },
+
     async snapshot(req) {
       if (req.carry !== undefined) return carried(req, req.carry);
       const r = await laid(req.mission, req.commit ?? missionBase(), req.products ?? []);
-      return { path: r.commit, commit: r.commit, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
+      return { path: r.commit, commit: r.commit, products: r.products, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
     },
 
     async product(req: ProductRequest): Promise<ProductVersion> {
@@ -194,10 +219,8 @@ export function gitActions(ctx: ProcessContext): GitActions {
         throw new ActionError('missing-objects', `the candidate ${req.candidate} cannot be read: ${(e as Error).message}`, { candidate: req.candidate });
       }
       if (known !== null && known.source?.commit !== req.candidate) throw new ActionError('conflict', `product version ${object} is recorded with another commit (${known.source?.commit ?? 'none'})`, { object });
-      // the version's own change is taken against its origin, the snapshot its task's first attempt
-      // started from: a rework's worktree starts at the previous attempt's candidate (its base here),
-      // so the change since the base is only the last attempt's (Appendix H); an attempt whose start
-      // was laid anew over its dependencies' current products has that snapshot as its origin (Appendix M)
+      // The origin is the snapshot the version's own change is taken against: inherited while
+      // an attempt continues, replaced when the work is carried onto a new start (Appendices H, M).
       let origin: GitOid | null;
       let before: Map<string, string>;
       try {
@@ -236,7 +259,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
         module: req.module as ModuleId,
         content,
         prerequisites: ctx.memory.data.putList([...req.prerequisites]),
-        scope: { paths: [...after.keys()].sort(), taskType: req.taskType },
+        scope: { paths: writeScope.length === 0 ? [] : [...new Set([...before.keys(), ...after.keys()])].sort(), taskType: req.taskType },
         reviews: [...req.reviews],
         source: { commit: gitOid(req.candidate), writeScope, transform, ...(origin !== null ? { origin } : {}) },
         ...(req.predecessor !== null ? { predecessor: req.predecessor as ObjectVersionId } : {}),

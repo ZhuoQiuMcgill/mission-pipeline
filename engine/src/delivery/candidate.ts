@@ -7,7 +7,7 @@
 //    4.1 Appendix H). For a first attempt that is the commit's parent. A rework
 //    continues in a worktree at the previous attempt's commit, so a version
 //    accepted at a later attempt has that commit as its parent; its origin is
-//    still the snapshot the task's first attempt started from, and its change is
+//    inherited until the work is carried onto a new start, and its change is
 //    every attempt's, not only the last one's. They are overlaid onto the base
 //    one after the other, each after the versions it rests on (its
 //    prerequisites, transitively; unrelated versions by id: Appendix L), since
@@ -29,10 +29,8 @@
 //      any other file in the scope makes it a new version, 6.6 step 4);
 //    - its prerequisites: the versions actually in the candidate must be the
 //      ones it was proven against;
-//    a version that versions resting on it were laid over is read as it stands
-//    under them (Appendix L): the candidate with the paths they changed put back
-//    to what the first of them found there, so their own changes do not count
-//    against it (they are checked as theirs), and anything else still does;
+//    - each shared path is delivered by the strictly stacked top version; the
+//      lower version is checked only on its other paths, on the final tree;
 //    - its evidence: the input hashes of the runs its deciding judgments used
 //      must match the candidate's content.
 //    A version failing any of these, or not proven at the view's revision, can
@@ -55,6 +53,7 @@ import {
   lsTree,
   mktree,
   readObjects,
+  repoArgs,
   type FileMode,
   type Ident,
   type RepoLayout,
@@ -71,8 +70,9 @@ import {
   type SnapshotManifest,
 } from '../git/representation.ts';
 import type { GitExec } from '../git/plainGit.ts';
-import { prerequisiteClosure, stackOrder, type DeliveryManifest, type ManifestEntry } from './manifest.ts';
+import { buildManifest, prerequisiteClosure, stackOrder, type DeliveryManifest, type ManifestEntry } from './manifest.ts';
 import type { DeliveryObject, DeliveryProofView, DeliveryTarget } from './proofView.ts';
+import type { Memory } from '../memory/index.ts';
 import { inWriteScope, writeScopeIdentity } from './writeScope.ts';
 
 export interface EntryState {
@@ -139,13 +139,15 @@ export interface CandidateOptions {
    * it such a version's origin is its commit's parent.
    */
   readonly versionOf?: (id: ObjectVersionId) => VersionLine | null;
+  /** Versions in landed deliveries ancestral to this base; skip their overlay, still check their proof. */
+  readonly alreadyLaid?: ReadonlySet<ObjectVersionId>;
 }
 
 /** What versionOrigin reads of an object version: its id, the version it revises, and where it lives. */
 export interface VersionLine {
   readonly id: string;
   readonly predecessor?: string | null;
-  readonly tree: { readonly commit: GitOid; readonly origin?: GitOid } | null;
+  readonly tree: { readonly commit: GitOid; readonly origin?: GitOid; readonly writeScope?: readonly string[] } | null;
 }
 
 function sameEntry(a: EntryState | null | undefined, b: EntryState | null | undefined): boolean {
@@ -192,10 +194,10 @@ async function recordedParent(git: GitExec, repo: RepoLayout, commit: GitOid): P
 
 /**
  * The origin of a version that lives in the repository (design 4.1 Appendix H): the
- * commit its own change is taken against, the snapshot the first attempt of its task
- * started from. A rework's Constructor continues in a worktree at the previous
- * attempt's commit, so the commit of a version accepted at attempt k has attempt k-1's
- * commit as its parent; its change is everything since the first attempt's snapshot.
+ * snapshot the version's own change is taken against: inherited while an attempt
+ * continues, replaced when the work is carried onto a new start. An unchanged start
+ * continues at the latest recorded candidate; the change includes every attempt since
+ * the inherited origin. A carry onto a new start records that start as its origin.
  * - The recorded origin (ObjectVersionRecord.source.origin), when there is one.
  * - Otherwise (a version recorded before the origin was recorded) it is derived from
  *   the records and the commits alone: down the version's predecessors for as long as
@@ -234,6 +236,71 @@ export async function versionOrigin(git: GitExec, repo: RepoLayout, version: Ver
   }
 }
 
+/**
+ * Versions whose delivered change is already in the base. Only a completed landing and local
+ * ancestry authorize this; equal file contents or an unlanded delivery do not. A landed successor
+ * covers its predecessors too (the version lineage, never a guessed product-id prefix).
+ * Successors with the same commit, write scope and origin (re-binds) count to a fixed point.
+ */
+export async function landedVersions(git: GitExec, repo: RepoLayout, memory: Memory, base: GitOid, versionOf: (id: ObjectVersionId) => VersionLine | null): Promise<Set<ObjectVersionId>> {
+  const rows = memory.read((db) => ({
+    landings: db.stmt("SELECT data FROM landings WHERE phase = 'done'").all() as Array<{ data: string }>,
+    products: db.stmt("SELECT mission, line, event, body, revision FROM flow_events WHERE event IN ('product', 'rebind') ORDER BY revision").all() as Array<{ mission: string; line: string; event: string; body: string; revision: number }>,
+    deliveries: db.stmt("SELECT commit_id, manifest FROM deliveries WHERE manifest IS NOT NULL AND recorded_rev IS NOT NULL").all() as Array<{ commit_id: string; manifest: string }>,
+    versions: db.stmt("SELECT id FROM facts WHERE kind = 'object.version'").all() as Array<{ id: ObjectVersionId }>,
+  }));
+  const landed = new Set(rows.landings.map((r) => (JSON.parse(memory.data.text(r.data)) as { ref?: string }).ref));
+  const lineage = rows.products.map((r) => {
+    const body = JSON.parse(memory.data.text(r.body)) as { object?: ObjectVersionId; product?: ObjectVersionId };
+    return { ...r, version: r.event === 'product' ? body.object : body.product };
+  });
+  const out = new Set<ObjectVersionId>();
+  for (const d of rows.deliveries) {
+    if (!landed.has(d.commit_id)) continue;
+    const ancestry = await git.run([...repoArgs(repo), 'merge-base', '--is-ancestor', d.commit_id, base], { cwd: repo.commonDir });
+    if (ancestry.code !== 0) continue; // absent history is never fetched or treated as ancestry
+    const doc = JSON.parse(memory.data.text(d.manifest)) as { version?: string; entries?: Array<{ id: ObjectVersionId }> };
+    if (doc.version !== 'mp41-delivery/1') continue;
+    const contained = new Set((doc.entries ?? []).map((e) => e.id));
+    // A card change deliberately starts without a predecessor; the task's recorded flow line
+    // still identifies earlier versions of that same task (never infer lineage from id spelling).
+    for (const top of lineage.filter((r) => r.version !== undefined && contained.has(r.version))) {
+      for (const earlier of lineage) if (earlier.version !== undefined && earlier.mission === top.mission && earlier.line === top.line && earlier.revision <= top.revision) contained.add(earlier.version);
+    }
+    for (const id0 of contained) {
+      const seen = new Set<string>();
+      for (let id: ObjectVersionId | null = id0; id !== null && !seen.has(id); ) {
+        seen.add(id);
+        out.add(id);
+        id = (versionOf(id)?.predecessor as ObjectVersionId | undefined) ?? null;
+      }
+    }
+  }
+  // Follow unchanged placements forward too: a kept product re-bound after landing brings
+  // exactly the landed change, even when an upper layer has since changed its shared paths.
+  const origins = new Map<string, Promise<GitOid | null>>();
+  const origin = (v: VersionLine) => {
+    if (!origins.has(v.id)) origins.set(v.id, versionOrigin(git, repo, v, versionOf));
+    return origins.get(v.id)!;
+  };
+  const successors = new Set([...rows.versions.map((r) => r.id), ...lineage.map((r) => r.version)]);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const id of successors) {
+      if (id === undefined || out.has(id)) continue;
+      const v = versionOf(id);
+      if (v?.tree == null || v.predecessor == null || !out.has(v.predecessor as ObjectVersionId)) continue;
+      const prev = versionOf(v.predecessor as ObjectVersionId);
+      if (prev?.tree == null || v.tree.commit !== prev.tree.commit || v.tree.writeScope === undefined || prev.tree.writeScope === undefined) continue;
+      if (JSON.stringify([...new Set(v.tree.writeScope)].sort()) !== JSON.stringify([...new Set(prev.tree.writeScope)].sort())) continue;
+      if (await origin(v) !== await origin(prev)) continue;
+      out.add(id);
+      changed = true;
+    }
+  }
+  return out;
+}
+
 /** The unit members of a manifest, as prerequisiteClosure reads them. */
 function membersIn(manifest: DeliveryManifest): (unit: ProofUnitId) => readonly ObjectVersionId[] | null {
   return (unit) => manifest.units.find((u) => u.unit === unit)?.members ?? null;
@@ -268,6 +335,7 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
     const layers: OverlayLayer[] = [];
     const conflicts: OverlayConflict[] = [];
     for (const [i, e] of placed.entries()) {
+      if (o.alreadyLaid?.has(e.object.id)) continue;
       const found = new Map<string, EntryState | null>();
       layers.push({ version: e.object.id, found });
       const tree = e.object.tree as NonNullable<DeliveryObject['tree']>;
@@ -346,6 +414,7 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
 
 export type ProofMismatch =
   | { readonly kind: 'not-proven'; readonly label: Label }
+  | { readonly kind: 'start-lacks-prerequisite'; readonly missing: StartHoldsResult['missing'] }
   /** The candidate's write scope differs from the accepted version: record a new product version and verify it again. */
   | { readonly kind: 'content-changed'; readonly expected: ContentHash; readonly actual: ContentHash }
   | { readonly kind: 'prerequisite-mismatch'; readonly prerequisite: ObjectVersionId; readonly expected: ContentHash; readonly actual: ContentHash }
@@ -353,7 +422,8 @@ export type ProofMismatch =
   /** 5.3: a member of its proof unit is not proven on the candidate; a unit is proven only as a whole. */
   | { readonly kind: 'unit-member-not-proven'; readonly unit: ProofUnitId; readonly member: ObjectVersionId }
   /** 5.2: a prerequisite (an object, or a member of a prerequisite unit) is not proven on the candidate. */
-  | { readonly kind: 'prerequisite-not-proven'; readonly prerequisite: ObjectVersionId };
+  | { readonly kind: 'prerequisite-not-proven'; readonly prerequisite: ObjectVersionId }
+  | { readonly kind: 'delivering-version-not-proven'; readonly path: string; readonly by: ObjectVersionId };
 
 /**
  * 6.6 step 4: the candidate holds a NEW version of this object. To deliver it as
@@ -375,6 +445,8 @@ export interface ProofCheck {
   readonly proven: readonly ObjectVersionId[];
   /** Deliverable only as "not fully proven", listed in the risk list with the reasons. */
   readonly notFullyProven: readonly { readonly id: ObjectVersionId; readonly reasons: readonly ProofMismatch[] }[];
+  /** Shared paths whose final identity and proof are checked against the named top version. */
+  readonly deliveredBy?: readonly { readonly version: ObjectVersionId; readonly path: string; readonly by: ObjectVersionId }[];
   /** Versions the candidate changed: new product versions to record and re-verify (the process dispatches them, not this module). */
   readonly needsReverification: readonly Reverification[];
 }
@@ -392,6 +464,56 @@ function candidateFileHash(snapshotDir: string, path: string): ContentHash | nul
   }
 }
 
+/** One identity rule for a composed tree, including strictly stacked path ownership. */
+async function treeIdentities(git: GitExec, repo: RepoLayout, manifest: DeliveryManifest, entries: readonly TreeEntry[]) {
+  const closure = prerequisiteClosure(manifest.entries.map((e) => e.object), membersIn(manifest));
+  const handedOver = new Map<ObjectVersionId, Map<string, ObjectVersionId>>();
+  const identities = new Map<ObjectVersionId, { expected: ContentHash; actual: ContentHash; missing: readonly string[] }>();
+  for (const { object } of manifest.entries) {
+    const paths = new Map<string, ObjectVersionId>();
+    if (object.tree !== null) for (const [path, owner] of manifest.paths) {
+      if (inWriteScope(object.tree.writeScope, path) && owner !== object.id && closure.get(owner)?.has(object.id) === true && closure.get(object.id)?.has(owner) !== true) paths.set(path, owner);
+    }
+    handedOver.set(object.id, paths);
+    if (object.tree === null) continue;
+    const keep = (e: TreeEntry) => !paths.has(e.path) && inWriteScope(object.tree!.writeScope, e.path);
+    let original = paths.size > 0 ? (await lsTree(git, repo, object.tree.commit, { recursive: true })).filter(keep) : null;
+    const expected = original === null ? object.content : writeScopeIdentity(original, object.tree.writeScope);
+    const actualEntries = entries.filter(keep);
+    const actual = writeScopeIdentity(actualEntries, object.tree.writeScope);
+    const missing: string[] = [];
+    if (expected !== actual) {
+      original ??= (await lsTree(git, repo, object.tree.commit, { recursive: true })).filter(keep);
+      const before = entryMap(original);
+      const found = entryMap(actualEntries);
+      for (const path of new Set([...before.keys(), ...found.keys()])) {
+        if (!sameEntry(before.get(path), found.get(path))) missing.push(path);
+      }
+    }
+    identities.set(object.id, { expected, actual, missing: missing.sort() });
+  }
+  return { handedOver, identities };
+}
+
+export interface StartHoldsResult {
+  readonly holds: boolean;
+  readonly missing: readonly { readonly prerequisite: ObjectVersionId; readonly path: string }[];
+}
+
+/** Mechanical provenance: the version's origin must hold its whole recorded prerequisite composition. */
+export async function startHolds(git: GitExec, repo: RepoLayout, view: DeliveryProofView, version: DeliveryObject): Promise<StartHoldsResult> {
+  const built = buildManifest(view, version.prerequisites, { compositionOnly: true });
+  if (built.kind !== 'manifest') throw new Error(`cannot resolve the start prerequisites of ${version.id}: ${built.kind}`);
+  if (!built.manifest.entries.some((e) => e.object.tree !== null)) return { holds: true, missing: [] };
+  const origin = await versionOrigin(git, repo, version, (id) => view.object(id));
+  const entries = origin === null ? [] : await lsTree(git, repo, origin, { recursive: true });
+  const { identities } = await treeIdentities(git, repo, built.manifest, entries);
+  return {
+    holds: [...identities.values()].every((i) => i.actual === i.expected),
+    missing: [...identities].flatMap(([prerequisite, i]) => i.missing.map((path) => ({ prerequisite, path }))),
+  };
+}
+
 export async function checkCandidateProofs(o: {
   readonly git: GitExec;
   readonly repo: RepoLayout;
@@ -400,44 +522,9 @@ export async function checkCandidateProofs(o: {
   readonly candidate: Candidate;
 }): Promise<ProofCheck> {
   const entries = await lsTree(o.git, o.repo, o.candidate.commit, { recursive: true });
-  // A version as it stands under the versions laid over it that rest on it (Appendix L): each path they
-  // changed back to what the first of them found there.
-  const closure = prerequisiteClosure(
-    o.manifest.entries.map((e) => e.object),
-    membersIn(o.manifest),
-  );
-  const layers = o.candidate.layers;
-  const under = new Map<ObjectVersionId, TreeEntry[]>();
-  const entriesOf = (version: ObjectVersionId): readonly TreeEntry[] => {
-    let es = under.get(version);
-    if (es !== undefined) return es;
-    const at = layers.findIndex((l) => l.version === version);
-    const back = new Map<string, EntryState | null>();
-    if (at >= 0) {
-      for (const l of layers.slice(at + 1)) {
-        if (!(closure.get(l.version)?.has(version) ?? false)) continue;
-        for (const [path, entry] of l.found) if (!back.has(path)) back.set(path, entry);
-      }
-    }
-    if (back.size === 0) es = entries as TreeEntry[];
-    else {
-      es = entries.filter((x) => x.type === 'tree' || !back.has(x.path));
-      for (const [path, entry] of back) if (entry !== null) es.push({ path, mode: entry.mode, oid: entry.oid, type: entry.mode === '160000' ? 'commit' : 'blob' });
-    }
-    under.set(version, es);
-    return es;
-  };
-  const identities = new Map<string, ContentHash>();
-  const identity = (version: ObjectVersionId, scope: readonly string[]): ContentHash => {
-    const es = entriesOf(version);
-    const key = `${es === entries ? '' : version}\n${JSON.stringify(scope)}`;
-    let id = identities.get(key);
-    if (id === undefined) {
-      id = writeScopeIdentity(es, scope);
-      identities.set(key, id);
-    }
-    return id;
-  };
+  // Per maintainer ruling 2, 2026-10-13: read only the final delivered tree.
+  // Shared paths belong to the strictly stacked top version; no tree is reconstructed.
+  const { handedOver, identities } = await treeIdentities(o.git, o.repo, o.manifest, entries);
   const objectsOf = (t: DeliveryTarget): DeliveryObject[] => {
     if (t.kind === 'object') {
       const x = o.view.object(t.id);
@@ -455,13 +542,15 @@ export async function checkCandidateProofs(o: {
     if (e.label !== 'proven') reasons.push({ kind: 'not-proven', label: e.label });
     // The object itself.
     if (obj.tree !== null) {
-      const actual = identity(obj.id, obj.tree.writeScope);
-      if (actual !== obj.content) {
-        reasons.push({ kind: 'content-changed', expected: obj.content, actual });
+      const start = await startHolds(o.git, o.repo, o.view, obj);
+      if (!start.holds) reasons.push({ kind: 'start-lacks-prerequisite', missing: start.missing });
+      const { expected, actual } = identities.get(obj.id)!;
+      if (actual !== expected) {
+        reasons.push({ kind: 'content-changed', expected, actual });
         needsReverification.push({
           id: obj.id,
           module: obj.module,
-          content: actual,
+          content: writeScopeIdentity(entries, obj.tree.writeScope),
           source: { commit: o.candidate.commit, writeScope: obj.tree.writeScope, transform: obj.tree.transform },
         });
       }
@@ -471,8 +560,10 @@ export async function checkCandidateProofs(o: {
       for (const pre of objectsOf(p)) {
         if (pre.tree === null || pre.id === obj.id) continue;
         if (e.unit !== null && o.view.unitOf(pre.id) === e.unit) continue;
-        const actual = identity(pre.id, pre.tree.writeScope);
-        if (actual !== pre.content) reasons.push({ kind: 'prerequisite-mismatch', prerequisite: pre.id, expected: pre.content, actual });
+        const found = identities.get(pre.id);
+        if (found === undefined) {
+          reasons.push({ kind: 'prerequisite-not-proven', prerequisite: pre.id });
+        } else if (found.actual !== found.expected) reasons.push({ kind: 'prerequisite-mismatch', prerequisite: pre.id, expected: found.expected, actual: found.actual });
       }
     }
     // The evidence its deciding judgments used (a unit member also rests on its unit's).
@@ -481,16 +572,25 @@ export async function checkCandidateProofs(o: {
     for (const t of targets) {
       for (const ev of o.view.decidingEvidence(t)) {
         for (const input of ev.inputs) {
+          if (handedOver.get(obj.id)!.has(input.path)) continue;
           const actual = candidateFileHash(o.candidate.snapshotDir, input.path);
           if (actual !== input.sha256) reasons.push({ kind: 'evidence-input-mismatch', evidence: ev.evidence, path: input.path, expected: input.sha256, actual });
         }
       }
     }
   }
+  const deliveredBy = [...handedOver].flatMap(([version, paths]) => [...paths].map(([path, by]) => ({ version, path, by })));
   // 2. To a fixed point: units as a whole, then down prerequisite edges (reasons are only ever added).
   const failing = (oid: ObjectVersionId): boolean => (reasonsOf.get(oid)?.length ?? 0) > 0;
   for (let changed = true; changed; ) {
     changed = false;
+    for (const d of deliveredBy) {
+      const rs = reasonsOf.get(d.version)!;
+      if (failing(d.by) && !rs.some((r) => r.kind === 'delivering-version-not-proven' && r.path === d.path)) {
+        rs.push({ kind: 'delivering-version-not-proven', path: d.path, by: d.by });
+        changed = true;
+      }
+    }
     for (const u of o.manifest.units) {
       // A member that fails for any reason other than this unit itself (no echo back to the member that caused it).
       const bad = u.members.filter((m) => (reasonsOf.get(m) ?? []).some((r) => !(r.kind === 'unit-member-not-proven' && r.unit === u.unit)));
@@ -524,7 +624,7 @@ export async function checkCandidateProofs(o: {
     if (reasons.length === 0) proven.push(e.object.id);
     else notFullyProven.push({ id: e.object.id, reasons });
   }
-  return { proven, notFullyProven, needsReverification };
+  return { proven, notFullyProven, needsReverification, deliveredBy };
 }
 
 /** The entries of a manifest that live in the repository (for reports). */

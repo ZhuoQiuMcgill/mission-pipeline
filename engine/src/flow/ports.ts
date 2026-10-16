@@ -258,9 +258,9 @@ export interface ProductRequest {
   readonly taskType: string;
   readonly prerequisites: readonly string[];
   readonly reviews: readonly ReviewContract[];
-  /** The product version of the task's previous attempt, whose candidate this attempt continued from; null for a first attempt. */
+  /** The latest recorded product under this spec whose work was carried (including a re-bound version); null for a new spec. */
   readonly predecessor: string | null;
-  /** The snapshot the attempt's work started from when its start was laid anew (the snapshot's `origin`, Appendix M); otherwise derived (versionOrigin). */
+  /** The snapshot the version's own change is taken against: inherited while an attempt continues, replaced when the work is carried onto a new start. Supplied for a new carried start, otherwise derived (versionOrigin). */
   readonly origin?: string;
 }
 
@@ -270,7 +270,7 @@ export interface ProductVersion {
   readonly commit: string;
   /** What the Reviewer and the verification runs read: the candidate commit. */
   readonly snapshot: string;
-  /** The write-scope paths the version changes since its origin, the snapshot its task's first attempt started from: every attempt's change (design 4.1 Appendix H). */
+  /** The write-scope paths changed since the origin: the snapshot the version's own change is taken against, inherited while an attempt continues, replaced when the work is carried onto a new start (Appendices H, M). */
   readonly changedPaths: readonly string[];
 }
 
@@ -305,6 +305,10 @@ export interface VerificationRun {
 }
 
 export interface FlowSchedulerPort {
+  /** Whether the product's origin holds its recorded prerequisite composition; unreadable git is a refusal. */
+  startHolds(product: string): Promise<{ readonly holds: boolean; readonly missing: readonly { readonly prerequisite: string; readonly path: string }[] }>;
+  /** Exact product closure (whole proof units included) sorted by id; the overlay uses prerequisite order. Confers no proof. */
+  composition(products: readonly string[]): Promise<readonly string[]>;
   /** Queue a seat task (idempotent by task id): a ready step for `mp pm next`. */
   submit(task: FlowTask): Promise<void>;
   /** The task's state, or null when the memory does not know it. */
@@ -330,7 +334,7 @@ export interface FlowSchedulerPort {
     /** The seat's write paths (kept on the card as they are; nothing is prepared in 4.1). */
     readonly writable?: readonly string[];
     /**
-     * A later attempt's start (design 4.1 Appendix M): `commit` is the previous attempt's candidate,
+     * A later attempt's start (design 4.1 Appendix M): `commit` is the latest recorded candidate under the current spec,
      * of product version `version`, and `products` are the task's dependencies' accepted products
      * now. When the snapshot of those products over the mission base is not what that version's
      * work started from (its origin), the version's whole change since its origin is laid over that
@@ -342,6 +346,8 @@ export interface FlowSchedulerPort {
     readonly path: string;
     readonly commit: string;
     readonly writable?: readonly string[];
+    /** Exact product versions composing the start, including their prerequisite closure. */
+    readonly products?: readonly string[];
     /** Set when a carried change was laid over a new start: the snapshot the attempt's work now starts from (its product's origin). */
     readonly origin?: string;
   }>;

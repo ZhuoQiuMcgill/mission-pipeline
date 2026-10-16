@@ -26,7 +26,7 @@ export interface WorkspaceOps {
 }
 
 /** The program actions the flows need beyond the memory (snapshot, product, rebind, verify, findSymbol, history): actions.ts gitActions. */
-export type GitActions = Pick<FlowSchedulerPort, 'snapshot' | 'product' | 'rebind' | 'verify' | 'findSymbol' | 'history'>;
+export type GitActions = Pick<FlowSchedulerPort, 'startHolds' | 'composition' | 'snapshot' | 'product' | 'rebind' | 'verify' | 'findSymbol' | 'history'>;
 
 export interface ProcessOptions {
   /** How git runs (default: plain `git` from PATH). */
