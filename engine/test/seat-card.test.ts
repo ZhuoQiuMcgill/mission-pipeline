@@ -161,6 +161,20 @@ describe('handed-back results (8.1 program rules)', () => {
     assert.match(bad((r) => ({ ...r, verdict: 'pass' })), /"pass" leaves a standard/);
   });
 
+  test('deferred responses require an owner and reason before creating records', () => {
+    const c = reviewerCard();
+    const deferred = { ...goodReview(), issue_responses: [{ issue: 'I7', response: 'deferred' as const, reason: 'Handled by documentation', owner: 'docs' }] };
+    assert.deepEqual(resultProblems(c, deferred, CTX), []);
+    assert.match(resultProblems(c, { ...deferred, issue_responses: [{ ...deferred.issue_responses[0]!, owner: ' ' }] }, CTX).join(), /needs an owner and a reason/);
+    assert.match(resultProblems(c, { ...deferred, issue_responses: [{ ...deferred.issue_responses[0]!, reason: ' ' }] }, CTX).join(), /needs an owner and a reason/);
+    assert.match(resultProblems(c, { ...deferred, issue_responses: [{ issue: 'I7', response: 'deferred', reason: 'Later' }] }, CTX).join(), /needs an owner and a reason/);
+    const content = memoryPorts().ledger.content;
+    const record = judgmentRecord(c, deferred, { hash: H('d'), count: 1 } as never);
+    findingRecords(c, { ...deferred, findings: [] }, content, 'D-defer');
+    assert.equal(record.issues[0]!.owner, 'docs');
+    assert.equal(JSON.parse(content.get(record.issues[0]!.reason!)).reason, 'Handled by documentation');
+  });
+
   test('finding 14: every judgment gives a reason and valid evidence pointers; empty or forged evidence is refused', () => {
     const c = reviewerCard();
     const allYes = (evidence: string[], reason = 'checked'): ReviewerResult => ({

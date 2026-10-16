@@ -182,7 +182,7 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
         fail('judgment', 'issues is malformed');
       }
       for (const x of r.issues as Obj[]) {
-        if (x.response === 'deferred' && (typeof x.owner !== 'string' || x.owner.length === 0 || typeof x.reason !== 'string' || !HEX64.test(x.reason))) {
+        if (x.response === 'deferred' && (typeof x.owner !== 'string' || x.owner.trim().length === 0 || typeof x.reason !== 'string' || !HEX64.test(x.reason))) {
           fail('judgment', 'a deferred issue response needs an owner and a reason (5.6)');
         }
       }

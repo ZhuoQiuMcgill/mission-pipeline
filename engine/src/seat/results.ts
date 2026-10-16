@@ -22,7 +22,8 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { posix } from 'node:path';
 import { z } from 'zod';
-import type { EvidenceId, IssueId, JudgmentId, ModuleId, ObjectVersionId } from '../common/ids.ts';
+import { canonicalJson, sha256 } from '../common/hash.ts';
+import type { ContentHash, EvidenceId, IssueId, JudgmentId, ModuleId, ObjectVersionId } from '../common/ids.ts';
 import type { IssueRecord, IssueResponse, JudgmentRecord, ListRef, Verdict } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import type { ConstructorCard, ReviewerCard, SeatCard } from './card.ts';
@@ -48,7 +49,12 @@ export const ReviewerResultShape = {
     )
     .describe('Exactly one judgment per standard on the card.'),
   gap_responses: z.array(z.object({ gap: z.string().describe("A gap id from the card."), response: z.string() })),
-  issue_responses: z.array(z.object({ issue: z.string(), response: z.enum(['fixed', 'not-fixed', 'deferred']), reason: z.string() })),
+  issue_responses: z.array(z.object({
+    issue: z.string(),
+    response: z.enum(['fixed', 'not-fixed', 'deferred']),
+    reason: z.string().describe('Why the issue is fixed, not fixed, or deferred; give a non-empty reason for deferred.'),
+    owner: z.string().optional().describe('Required for deferred: who owns the issue next. It is shown as "deferred to <owner>", outside the task fix list.'),
+  })).describe('Answer every listed issue on this version, including previously deferred issues. For deferred include both owner and reason; repeating a deferral does not require rework.'),
   findings: z.array(z.string()).describe('Problems outside the standards (they become issue records).'),
   verdict: z.enum(['pass', 'rework', 'needs-decision']),
 };
@@ -203,6 +209,9 @@ function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultCont
   for (const g of card.selfReportedGaps) if (!gaps.includes(g.id)) out.push(`gap_responses: gap "${g.id}" is not answered`);
   const issues = r.issue_responses.map((i) => i.issue);
   for (const i of card.openIssues) if (!issues.includes(i.issue)) out.push(`issue_responses: issue "${i.issue}" has no response`);
+  for (const i of r.issue_responses) {
+    if (i.response === 'deferred' && (!i.owner?.trim() || !i.reason.trim())) out.push(`issue_responses: deferred issue "${i.issue}" needs an owner and a reason`);
+  }
   if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes')) out.push('verdict: "pass" leaves a standard not met or unclear');
   return out;
 }
@@ -230,7 +239,11 @@ export function judgmentRecord(card: ReviewerCard, r: ReviewerResult, evidenceLi
     bases: card.binding.bases as ListRef,
     constraints: card.binding.constraints as ListRef,
     reliesOn: card.binding.reliesOn as ListRef,
-    issues: r.issue_responses.map((i): IssueResponse => ({ issue: i.issue as IssueId, response: i.response })),
+    issues: r.issue_responses.map((i): IssueResponse => ({
+      issue: i.issue as IssueId,
+      response: i.response,
+      ...(i.response === 'deferred' ? { owner: i.owner!, reason: sha256(deferredReasonDocument(i)) as ContentHash } : {}),
+    })),
     revokes: card.binding.revokes as JudgmentId | null,
     evidenceUse: card.binding.evidenceUse,
     superseded: card.binding.superseded,
@@ -238,6 +251,11 @@ export function judgmentRecord(card: ReviewerCard, r: ReviewerResult, evidenceLi
   };
   validateRecord(rec);
   return rec;
+}
+
+/** The reason is content-addressed in the judgment and saved with the hand-back's findings. */
+function deferredReasonDocument(i: ReviewerResult['issue_responses'][number]): string {
+  return canonicalJson({ format: 'mp4.issue-deferral.v1', issue: i.issue, owner: i.owner, reason: i.reason });
 }
 
 /** The document a finding's words become (a data value; its hash names the issue). `dispatch`: the dispatch that found it. */
@@ -251,6 +269,9 @@ export function findingDocument(card: ReviewerCard, text: string, dispatch: stri
  * `finding:<that hash>`, unique per dispatch and stable across retries.
  */
 export function findingRecords(card: ReviewerCard, r: ReviewerResult, content: RecordContent, dispatch: string): IssueRecord[] {
+  // recordsOf builds both judgment and findings in the hand-back's write. Store the reason
+  // documents here even when the Reviewer has no new findings (judgmentRecord remains pure).
+  for (const i of r.issue_responses) if (i.response === 'deferred') content.put(deferredReasonDocument(i));
   if (r.findings.length === 0) return [];
   const observedOn = content.putList([card.target]);
   return r.findings.map((text) => {

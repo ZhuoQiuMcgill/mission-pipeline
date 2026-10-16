@@ -29,8 +29,8 @@
 
 import { canonicalJson } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
-import { decisionLabels, labelBatch, labelStatus } from '../evaluator/index.ts';
-import { appendRecords, closeMission, flowEvents, LedgerError, listDispatches, missionCloses, releaseDispatch, setMission, taskQueue, wordsEntry, type Db, type DispatchInfo, type MissionClose, type WriteTx } from '../memory/index.ts';
+import { decisionLabels, decidingViews, labelBatch, labelStatus } from '../evaluator/index.ts';
+import { appendRecords, closeMission, factById, flowEvents, LedgerError, listDispatches, missionCloses, releaseDispatch, setMission, taskQueue, wordsEntry, type Db, type DispatchInfo, type MissionClose, type WriteTx } from '../memory/index.ts';
 import { PLAN_LINE, PM_PLAN_EFFECTIVE, SECRETARY_LINE, explorationLine, taskLine } from '../flow/plandoc.ts';
 import { fold } from '../flow/exploration/machine.ts';
 import type { ProcessContext } from './context.ts';
@@ -152,8 +152,34 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
     .map((e) => `${e.id} (${e.subject}): ${e.summary}`);
   const queued = taskQueue(tx, mission).map((q) => q.task);
   const running = listDispatches(tx, { mission, state: 'in-flight', limit: 10_000 }).map((d) => ({ dispatch: d.dispatch, task: d.task, seat: d.seat }));
+  // v51 §5.6: list the evaluator's stored states on the versions actually selected.
+  // The deciding judgments supply deferral context; they do not recompute issue states here.
+  const issueRisks: string[] = [];
+  for (const output of outputs.filter((o) => o.kind === 'product')) {
+    const states = tx.stmt("SELECT issue, state FROM lbl_fixes WHERE target = ? AND state <> 'fixed' ORDER BY issue").all(output.object) as Array<{ issue: string; state: string }>;
+    if (states.length === 0) continue;
+    const positions = decidingViews(tx, [output.object]).views.get(output.object)?.positions ?? [];
+    const judgments = positions.flatMap((p) => {
+      const r = p.by === null ? null : factById(tx, 'judgment', p.by)?.record;
+      return r?.kind === 'judgment' ? [r] : [];
+    });
+    for (const state of states) {
+      const deferred = judgments.flatMap((j) => j.issues).find((a) => a.issue === state.issue && a.response === 'deferred');
+      let disposition = state.state;
+      if (deferred !== undefined) {
+        let reason: string = deferred.reason!;
+        try {
+          const text = tx.data.text(reason);
+          try { reason = (JSON.parse(text) as { reason?: string }).reason ?? text; } catch { reason = text; }
+        } catch { /* older records can retain their reason hash */ }
+        disposition = `deferred to ${deferred.owner}: ${reason}`;
+      }
+      issueRisks.push(`issue ${state.issue} on ${output.object}: ${disposition}`);
+    }
+  }
   const risks = [
     ...notProven.map((x) => `not proven: ${x}`),
+    ...issueRisks,
     ...unfinishedTasks.map((t) => `plan task ${t} not accepted`),
     ...abandoned.map((t) => `plan task ${t} abandoned`),
     ...unsettled.map((x) => `exploration ${x} not settled`),
