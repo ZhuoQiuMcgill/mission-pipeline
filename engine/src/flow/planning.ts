@@ -1292,7 +1292,7 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const card: ArchitectDecomposeCard = {
     ...cardBase(ctx, task, {
       duties: revision
-        ? 'Revise the previous detailed plan for this round: change exactly what this revision asks, and carry every other task over unchanged (the same id, every field the same), since a changed task card starts a new attempt while its records remain and it continues from its previous candidate; trace every element.'
+        ? 'Revise the previous detailed plan for this round: change exactly what this revision asks, and carry every other task over unchanged (the same id, every field the same), since a changed task card starts a new attempt from the mission base plus its dependencies\' current accepted work, without the earlier attempts\' work (ruling 6); its earlier records remain; trace every element.'
         : 'Decompose the approved PM plan into a detailed plan for this round; trace every element; fix exactly what a revision asks.',
     }),
     seat: 'architect-decompose',
@@ -1451,7 +1451,7 @@ async function restartNotice(ctx: FlowCtx, dplan: string, plan: DetailedPlanDoc)
     wi: null,
     key: dplan,
     trigger: `detailed plan ${dplan} changes the card of ${changed.length} and drops ${dropped.length} of the ${stored.plan.tasks.length} tasks of the plan in effect (${eff.dplan}), keeping ${kept}; accepted work it would restart or drop: ${accepted.join(', ') || 'none'}; work under way: ${underWay.join(', ') || 'none'}`,
-    defaultAction: `nothing is held: the plan goes on to its reviews; once it takes effect, each task whose card changed restarts at a new attempt (its earlier records remain, it continues from its previous candidate, and work under way is cancelled) and each dropped task leaves the plan. Expected when the revision had to change those tasks; otherwise the Architect rewrote cards it should have carried over unchanged`,
+    defaultAction: `nothing is held: the plan goes on to its reviews; once it takes effect, each task whose card changed restarts at a new attempt that starts from the mission base plus its dependencies' current accepted work, without the earlier attempts' work (ruling 6); its earlier records remain, work under way is cancelled, and each dropped task leaves the plan. Expected when the revision had to change those tasks; otherwise the Architect rewrote cards it should have carried over unchanged`,
     detail: { dplan, inEffect: eff.dplan, tasks: stored.plan.tasks.length, kept, changed, dropped, accepted, underWay },
   });
 }

@@ -27,7 +27,7 @@ const M = 'm1' as MissionId;
 type World = ReturnType<typeof memoryPorts>;
 
 /** The carry rule, as the card and the material state it. */
-const CARRY = /Carry over every task the revision does not need to change exactly as it is in the previous detailed plan: the same id and the same value in every field [^\n]*any change to its card, however small, restarts the task at a new attempt; its earlier records remain, and it continues from its previous candidate\. Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require/;
+const CARRY = /Carry over every task the revision does not need to change exactly as it is in the previous detailed plan: the same id and the same value in every field [^\n]*any change to its card, however small, restarts the task at a new attempt that starts from the mission base plus its dependencies' current accepted work, without the earlier attempts' work \(ruling 6\); its earlier records remain\. Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require/;
 
 async function setup(): Promise<{ ports: World; engine: FlowEngine }> {
   const ports = memoryPorts();

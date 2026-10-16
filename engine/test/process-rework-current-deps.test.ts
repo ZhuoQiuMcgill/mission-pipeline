@@ -1,6 +1,6 @@
 // A later attempt starts from its dependencies' current work (design 4.1 Appendix M).
 //
-// A rework (or a respec after a re-plan) continues in a worktree at the previous attempt's
+// A rework under the same, unchanged card continues in a worktree at the previous attempt's
 // candidate. When the task's dependencies changed since its work began (a re-plan added one, or
 // one was accepted again at a newer version), the next attempt starts from the snapshot a first
 // attempt would get now with the previous version's whole change laid over it, and that snapshot

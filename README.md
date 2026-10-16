@@ -40,6 +40,8 @@ mp init --pointer both  # adds one line to CLAUDE.md and AGENTS.md pointing the 
 
 Then open your project with any agent harness (Claude Code, Codex, …) and tell it what you want. It acts as the PM: it reads `.mission-pipeline/pm/PM.md`, runs `mp pm session --filled-by "<harness>/<model>"`, and works through `mp pm next`.
 
+Known issue in 4.1.1: an object constraint recorded while a plan review runs, or after the plans are proven, holds stable production until the PM takes one of the two exits of WI-34 (see the [CHANGELOG](CHANGELOG.md)).
+
 ## Documentation
 
 - [engine/README.md](engine/README.md): install, `mp init`, the PM's loop, seats, the memory folder, the tree reads, platforms and known limitations.

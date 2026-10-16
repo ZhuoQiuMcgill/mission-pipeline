@@ -6,126 +6,342 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [4.1.1] - unreleased
+
+4.1.1 takes in the field's stacked PRs #8–#15, revised per the maintainer's seven rulings of
+2026-10-13 (design contract U-15 to U-21). It also fixes five serious problems that the review of
+those PRs found in 4.1.0, and the field findings B1, B2, B3, B6, B8, B10 and B11. No proof rule is
+relaxed. Read the upgrade notes before you upgrade a project with work in flight.
+
+### Upgrade notes
+- **Let running Constructors hand back first** (see the fourth point).
+- **A new environment identity.** The environment identity now includes the run method (v2: a
+  run's checkout is a git repository of its own at the candidate). The first `mp` command after the
+  upgrade that makes a decision (for example `mp pm next`) therefore records a new identity, even on
+  the same machine with the same tools. Products whose proof rests on declared runs become "not
+  fully proven": in stable mode the work that depends on them waits.
+- **Run `mp pm renew` once** (`mp pm next` offers it). Each affected candidate's verification group
+  runs once more, in its recorded order, in one checkout: expect about one suite run per affected
+  candidate. A group whose run is executing in another process is skipped and offered again. Equal
+  results restore the proof mechanically, without a seat. Different results go to a Reviewer, which
+  `mp pm next` then lists; this includes a check that passed vacuously in 4.1.0's checkout (a scan
+  of tracked files that found none) and now fails. A judgment that cites a sampling run or a timing
+  field needs a Reviewer, as before. Nothing is removed or revoked: old runs, judgments and events
+  stay in the memory.
+- **Dependent attempts recorded before pins existed restart.** An attempt of a task with
+  dependencies that 4.1.0 dispatched, and that is not yet accepted, has no record of the dependency
+  versions its start was built from. On the first pass it restarts at a new attempt on a pinned
+  start, carrying the task's latest recorded product, and is verified and reviewed again (notice
+  `legacy-prerequisites-restarted`). If its Constructor is still running, the seat may finish, but
+  its hand-back is kept as history and not used (a notice under WI-23): its unsaved work is lost.
+- **An accepted product whose start lacks a recorded prerequisite is rebuilt once.** An accepted
+  product without a dispatch pin is checked once: its start must hold the content of the
+  prerequisites it records (in 4.1.0 a product built on one version of a dependency could record a
+  later one). A product whose start lacks that content, or that rests on such a product, leaves
+  current acceptance and gets one carried rebuild: a Constructor attempt that carries its work onto
+  a pinned start, the declared runs and a Reviewer (notice `legacy-prerequisites-restarted`, naming
+  the missing paths). Products whose start holds the content are not touched. If git cannot read a
+  start, its acceptance waits with the notice `legacy-prerequisites-unavailable` until it can.
+- **Re-bound kept products are judged by a Reviewer.** If you ran the field's PR stack: a kept
+  product re-bound to a new plan version is judged by a Reviewer in stable mode (maintainer ruling
+  1); the program no longer passes it by itself.
+- **Use git 2.53 or later.** Older git can leave a copied folder's worktrees pointing at the
+  original repository. 4.1.1 detects this and holds git writes (WI-31), but do not copy or move a
+  project folder to continue the work with older git.
+- **No proof rule is relaxed.**
 
 ### Fixed
-- A later attempt of a task starts from its dependencies' current work. A rework, or a respec after
-  a re-plan, started its Constructor worktree from the previous attempt's candidate, so when a
-  re-plan had added a dependency, or a dependency had been accepted again at a newer version, the
-  worktree and the declared runs never held the new dependency products and the task could not
-  pass review on its own runs. Now, when the snapshot a first attempt would get now (the mission
-  base with the dependencies' current accepted products) is not the one the previous version's
-  work started from, the attempt starts from that snapshot with the previous version's whole
-  change laid over it (three-way), and its product records that snapshot as its origin, so its
-  change is the task's own work. With no change of the dependencies nothing changes. A carried
-  change that conflicts with the new snapshot builds nothing: the attempt waits with a
-  `rework-start-conflict` notice naming the paths (design 4.1 Appendix M).
-- Product versions stacked on each other compose. A dependent task's work starts from a snapshot
-  that holds its dependencies' products, and the plan lets it write what a task it depends on
-  writes; but a snapshot of several products (a later task's, an Auditor's) and a delivery
-  candidate laid the versions in id order and compared each one's "started from" side with the
-  base itself. Where a dependent and the version it rests on changed one file, every such path was
-  reported as a conflict: a task depending on both never got its card, and an integration task or
-  a delivery of the chain could not be built. Now the versions are laid each after the versions it
-  rests on (its recorded prerequisites; unrelated ones by id), and each is compared with the base
-  as the versions before it left it; a conflict names the earlier version that put the other entry
-  there (`by`). The delivery manifest takes versions sharing a path or a module as one line of work
-  when one rests on the other (the one on top delivers the path), and the proof check reads a
-  version as it stands under the versions resting on it. A path the base or an unrelated version
-  changed differently from what a version started from is still a conflict, now also between two
-  unrelated versions in a snapshot, where the later used to replace the earlier silently (design
-  4.1 Appendix L).
-- An Architect revision sees the detailed plan it revises. A revision card (a new PM plan version
-  revising the plan in effect, a mechanical or feasibility return, a Secretary's send-back or
-  re-plan, a settled exploration) carried the previous detailed plan in its data, but its body
-  showed only the task ids and the seat had no command that read the plan, while it was told to
-  revise it. It could not carry a task over unchanged: it rebuilt the plan from the PM plan and the
-  project, or from files it should not rely on, and rewrote cards. A task whose card changes is
-  re-specced and restarts at a new attempt, so such a plan, once in effect, restarted every accepted
-  task and left nothing for the re-bind of kept products. Now the card gives the previous plan in
-  full as a must-read material (`plan-old`): every interface, module, task and risk, written as the
-  hand-back's own fields with one task per line, so a kept task is copied, not retyped (a card
-  queued before the change shows it inline). The card and the Architect's role page state the carry
-  rule: every task the revision does not need to change is carried over exactly (same id, same
-  value in every field), since a changed card restarts the task and its accepted work is no longer
-  used; only what the instructions, the changed PM plan elements, the feasibility findings or the
-  mechanical failures require is changed; a new task gets a new id. A new PM plan version's
-  instruction names the elements added, changed and removed against the version in effect. The PM
-  is told before the plan's reviews when a revision changes or drops tasks of the plan in effect
-  that have accepted work or work under way (`plan-revision-restarts-work`, with the counts and
-  lists); nothing is held.
-- Products accepted under a PM plan version that no longer holds are re-bound to the plan in effect.
-  A product's Reviewer contract relies on the detailed plan in effect when the product was recorded,
-  fixed with the version (v51 §5.2), so once that plan's PM plan lost its Calibrator ① pass (a
-  requirement item made it stale, or a re-check negated it) no judgment of the product could make
-  it proven again. A new PM plan version did not help: a task whose card its detailed plan keeps
-  got no new spec, stayed accepted and was never judged again, so its product stayed "not fully
-  proven" for good, and stable mode held everything depending on it without a word. Now, once the
-  new detailed plan is in effect and proven, such a product is re-bound: a new version of the same
-  candidate (same content, commit and origin) whose contract relies on the plan in effect and whose
-  prerequisites are its dependencies' current, re-bound versions. When nothing its deciding
-  Reviewer judgment judged has changed (the task's card and the definitions of its interfaces in
-  every plan since, its bases and contract lines, the object constraints, its runs), the program
-  carries that judgment over without a seat, as `mp pm renew` does for equal runs; otherwise, in
-  stable mode, a Reviewer judges the new version with the current card and the recorded runs (a
-  rework sends the task back to its Constructor as before), and fast mode goes on with a notice. A
-  task whose card changed is re-specced and rebuilt exactly as before. The PM is told
-  (`kept-products-rebound`, `kept-products-rebind-review`, `kept-product-not-rebound` when the
-  product was built on a dependency version the new plan replaced). Nothing is re-bound while the
-  new plan is not proven, and the re-bind is found on any later pass, so an installation after the
-  new plan took effect recovers on the next `mp pm next`. A Reviewer's judgment now relies on the
-  plan its product's contract names (it relied on the plan in effect, and did not conform to the
-  contract of a product recorded under an earlier plan).
-- A PM plan in effect can be checked again in place. The calibrator-1 contract of a PM plan version
-  binds the mission's whole requirement set (v51 §3.3, v31), so a requirement item added, revised
-  or withdrawn after the plan took effect makes its pass not current, and with it every detailed
-  plan of that version and every product accepted under them (stable mode then releases nothing
-  and takes in no result of work in flight). The design recovers this with a continuation
-  Calibrator ① judgment on the same plan version (§5.2 part 5: "M2 and the detailed plan
-  recover"), but the flow only ever judged a plan before it took effect, and every batch minted a
-  new version; a new version cannot restore the products accepted under the old one, whose
-  Reviewer contracts rely on the old detailed plan. Now `mp pm plan submit` of the plan document in
-  effect, unchanged, with the batch's words and changed items, records a re-check of that version
-  (`b<n>.c<m>`, no new version, no Architect attempt): Calibrator ① judges the same version again
-  as a continuation of its deciding pass, its card focused on the elements resting on the changed
-  items (every element when none does) and listing the items changed since the pass. A pass makes
-  the plan, its detailed plans and the products relying on them current again; a fail or an
-  undecided outcome goes back to the PM like any batch, the plan staying in effect without its
-  proof. A later version's continuation extends the deciding pass, a re-check's or a rerun's
-  included, instead of the batch's first one. A batch that changes the mode is still a new version.
-- A declared verification run executes once per candidate. While such a run was executing and not
-  yet recorded, any other `mp` process that advanced the flow (a seat's hand-back, a PM write
-  command, `mp pm next`) found no run to reuse and started another execution of the same run on
-  the same candidate, each in its own checkout, and waited for it, so those commands hung for the
-  run's whole duration. A declared run now executes under a process lock per reuse key (candidate,
-  command, working directory, environment identity) in `.mission-pipeline/locks/runs/`, taken
-  without waiting and released by the operating system if its holder dies. Meanwhile the other
-  processes run and record nothing: the flow step waits and reuses the run once it is recorded,
-  a hand-back says that its runs are executing in another process, and `mp pm renew` lists the run
-  as skipped. Sampling runs (`mp seat <id> rerun`, experiments) still execute every time.
+- A declared verification run executes once per candidate. While a declared run was executing and
+  not yet recorded, any other `mp` process that advanced the flow (a seat's hand-back, a PM write
+  command, `mp pm next`) found no run to reuse, started another execution of the same run on the
+  same candidate in its own checkout, and waited for it, so those commands hung for the run's whole
+  duration. Now every declared command takes a process lock per reuse key (candidate, command,
+  working directory, environment identity, run method) under `.mission-pipeline/locks/runs/`,
+  without waiting, also in a group that has sampled or network commands; the operating system
+  releases the lock if its holder dies. A process that finds a key busy runs and records nothing:
+  its flow step waits and reuses the run once it is recorded, a hand-back says that its runs are
+  executing in another process, and `mp pm renew` lists the run as skipped. Sampling runs
+  (`mp seat <id> rerun`, experiments) still execute every time. From field PR #8, revised per
+  maintainer ruling 5.
+- A partly reusable verification group records each run once. When some commands of a group had a
+  reusable run and others did not, the whole group ran and the reusable commands got a second
+  evidence record. Now the commands still run in order in one checkout, since a later command may
+  need an earlier one's setup (an install step), but a reusable command runs only as setup: its
+  recorded run stays the one in force, and only the commands without one are recorded. A setup
+  command that fails is reported in the hand-back's notes and the run summary, not recorded as
+  evidence, and the later commands still run. A group whose commands are all reusable executes
+  nothing. From the review of field PR #8.
 - A run's clean checkout is a git repository at the candidate. The checkout under
-  `.mission-pipeline/tmp/` had no `.git` of its own, so a declared command that asked git a
-  question was answered by the enclosing project, where the whole checkout is an excluded path:
-  `git ls-files` listed nothing, `git log` and `git diff <base>` showed the enclosing branch, and
-  linters that honour git's ignore rules found no files; such verifications, reruns and closing
-  checks failed for every candidate. Verification runs, `mp seat <id> rerun`, `mp pm renew` and the
+  `.mission-pipeline/tmp/` had no `.git` of its own, so a declared command that asked git a question
+  was answered by the enclosing project, where the whole checkout is an excluded path: `git
+  ls-files` listed nothing, `git log` and `git diff <base>` showed the enclosing branch, and linters
+  that honour git's ignore rules found no files. Such checks failed for every candidate, or passed
+  vacuously after scanning nothing. Verification runs, `mp seat <id> rerun`, `mp pm renew` and the
   closing checks of `mp pm deliver` now run in a checkout with its own `.git`: HEAD detached at the
   candidate, an index of its tree refreshed against the files, the project's objects borrowed
   through `objects/info/alternates` (and its shallow list), and the transform settings the files
   were written under. Nothing is registered or written in the project's repository, no object is
-  fetched, and the `.git` is removed with the checkout. Variables such as `GIT_DIR` and
-  `GIT_INDEX_FILE` no longer reach the commands. `mp seat <id> checkout` is unchanged.
-- A product accepted after a rework brings every attempt's change. A rework continues in a
-  worktree at the previous attempt's candidate, but a dependent task's snapshot and a delivery took
-  a product version's change against its commit's parent, which after a rework is the previous
-  attempt: a dependent task's snapshot reported a conflict on every path the last attempt changed
-  after an earlier attempt had, so the dependent never got its card and the work after it waited,
-  and a path only an earlier attempt changed was left out. A product version now records its
-  origin, the snapshot its task's first attempt started from, and its change is taken against it.
-  Versions recorded by 4.1.0 derive their origin from their predecessors, so nothing is run again,
-  and a waiting dependent gets its card on the next pass. A path the target branch changed
-  differently since the work began is still a conflict. The Reviewer's changed paths list the
-  product's whole change.
+  fetched, and the `.git` is removed with the checkout. `mp` runs no hook while it builds this
+  repository, or the scratch repository a delivery uses, including hooks set by a global
+  `core.hooksPath`; the declared commands then run with the project's own hook configuration. LFS
+  files stay clean through the engine's built-in pointer conversion, with no project LFS program.
+  `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_SHALLOW_FILE` and the other variables that would point git at
+  another repository or history no longer reach the commands. `git status` of an untouched checkout
+  is empty, except for text blobs stored without the normalization their attributes ask for and
+  files under filters 4.1 does not support (engine README). Closing checks run outside reuse and the
+  run lock. `mp seat <id> checkout` is unchanged. From field PR #9, revised per maintainer ruling 4.
+- Runs recorded by 4.1.0 are no longer reused as they are. A run executed in 4.1.0's plain
+  checkout, where a check that reads git could pass vacuously, was reused for the same candidate and
+  command and kept passing. Declared runs now record run method v2, and reuse requires it. The
+  method is also part of the environment identity, so proof resting on older runs needs one
+  `mp pm renew` (see the upgrade notes). Old runs and judgments stay recorded and are not revoked.
+- `mp pm renew` reruns a verification group as it ran. It reran each cited command alone, so a group
+  such as an install followed by a test failed at the test; the false failure went to a Reviewer,
+  and a later verification reused it. Now each affected candidate's original group runs in recorded
+  order in one checkout, including setup commands no judgment cites, and every renewal of the group
+  is recorded in one write. `mp pm renew` can also be run again safely: a judgment recorded after a
+  first renewal is renewed by the next one instead of failing with an operation conflict; returning
+  to an earlier environment (A, then B, then A again) runs the affected commands afresh instead of
+  reporting a renewal that left the label unproven; a judgment is reported renewed only when its
+  proof now uses the new run; and several refusals on one judgment raise one Reviewer request
+  instead of an operation conflict on every later renew.
+- A copied folder no longer writes into the original repository on older git. After a copy or a
+  move, `mp` ran `git worktree repair` and took exit code 0 as success. On git older than 2.53 (seen
+  with 2.43) a worktree could still point at the original folder's git directory while git writes
+  were allowed again, so a new candidate could be written into the original project. Now `mp` checks
+  each copied worktree's links in both directions (its `.git` file, the admin directory's `gitdir`,
+  `commondir`, and `git worktree list`) without touching HEAD, the index or uncommitted files. It
+  rewrites the two link files directly when they are wrong, and checks again. If they are still
+  wrong, git writes stay held and the move stays pending, with a notice under WI-31, and
+  `mp pm confirm-copy` is refused until the links are fixed. A registered worktree whose directory
+  is missing from the copy (git's "prunable") is skipped and reported.
+- An attempt's prerequisites are the versions it was built on. They were read when the attempt
+  handed back: when a dependency was accepted again while the attempt was queued or running, the
+  product was recorded as resting on the newer version although its candidate and runs came from
+  the older one, and it could be proven and delivered with it. Now the dispatch records the exact
+  product versions that compose the attempt's start, with their prerequisite closure, and these are
+  the product's prerequisites. A newer dependency needs a new attempt and a new verification. A
+  delivery reports a version whose start lacks a recorded prerequisite as `start-lacks-prerequisite`.
+  For attempts recorded before 4.1.1, see the upgrade notes.
+- A product accepted after a rework brings every attempt's change. A rework continues in a worktree
+  at the previous attempt's candidate, but a dependent task's snapshot and a delivery took a product
+  version's change against its commit's parent, which after a rework is the previous attempt. A
+  dependent task's snapshot then reported a conflict on every path the last attempt changed after an
+  earlier attempt had, so the dependent never got its card, and a path only an earlier attempt
+  changed was left out. A product version now records its origin, the snapshot its own change is
+  taken against: inherited while an attempt continues, replaced when the work is carried onto a new
+  start. Versions recorded by 4.1.0 derive their origin from their predecessors, so nothing runs
+  again, and a waiting dependent gets its card on the next pass. A path the target branch changed
+  differently since the work began is still a conflict. Reviewer cards built from now on list the
+  changed paths recomputed from the origin; old events keep their recorded lists. From field PR #10.
+- A later attempt of a task starts from its dependencies' current work. A rework started its
+  Constructor worktree from the previous attempt's candidate, so when a dependency had been
+  accepted again at a newer version, or a re-plan had added one, the worktree and the declared runs
+  never held the new dependency products, and the task could not pass review on its own runs. Now,
+  when the snapshot a first attempt would get now differs from the one the previous version's work
+  started from, the attempt starts from that snapshot with the previous version's whole change laid
+  over it (three-way), and its product records that snapshot as its origin. When nothing changed,
+  the attempt continues from the previous candidate as before. A carried change that conflicts with
+  the new snapshot builds nothing: the attempt waits with the notice `rework-start-conflict`, which
+  names the paths, and is tried again on every pass. A re-plan that changes the task's card starts
+  its next attempt from the dependencies' current work without the earlier change; the previous
+  candidate stays readable at its commit. The carried work is the latest product recorded under the
+  current card, at the version its last Reviewer judged, even when attempts in between were
+  cancelled before they produced anything (such an attempt used to start empty; field finding B6).
+  From field PR #15, revised per maintainer ruling 6.
+- Product versions stacked on each other compose. A dependent task's work starts from a snapshot
+  that holds its dependencies' products, and the plan lets it write what a task it depends on
+  writes; but a snapshot of several products (a later task's, an Auditor's) and a delivery
+  candidate laid the versions in id order and compared each one's "started from" side with the base
+  itself, so every path that a dependent and the version under it both changed was reported as a
+  conflict: a task depending on both never got its card, and an integration task or a delivery of
+  the chain could not be built. Now each version is laid after the versions it rests on, and is
+  compared with the base as the versions before it left it; a conflict names the version that put
+  the other entry there (`by`). A path the base or an unrelated version changed differently from
+  what a version started from is still a conflict, now also between two unrelated versions in a
+  snapshot, where the later used to replace the earlier silently. Snapshots lay the whole
+  prerequisite closure, proof units included: a task that depends on B, which rests on A, also gets
+  A (A's files used to be missing, or to conflict; field finding B9). From field PR #14, revised per
+  maintainer ruling 2.
+- Delivery proof stays on the final delivered tree when versions are stacked. The delivery manifest
+  refused two versions that share a path or a module even when one rests on the other. Now, when one
+  is stacked on the other (the top version's candidate was built on a start that held the lower
+  version), the top version delivers the shared path: its identity covers that path on the final
+  tree, and its Reviewer judged the integrated content. The lower version's identity covers its
+  other paths, on the final tree. If the top version is not proven, the shared path is not proven;
+  there is no fallback. The delivery report names each such handover. Versions that share a path or
+  a module and are not stacked are refused, as in 4.1.0. The field PR's layered or projected proof
+  tree is not used: it listed a change and its reversal as both proven (maintainer ruling 2).
+- A mission can run a second round after its delivery has landed. Once a delivery was on the target
+  branch, laying an earlier delivered version again over a base that held a later change of the same
+  file was a conflict: every new task depending on a delivered task was refused its card on every
+  pass, and the next delivery conflicted the same way. Now a version counts as already laid when a
+  completed landing whose delivery contained it (or a later version of the same task, or its
+  unchanged re-bound successor) is an ancestor of the base, checked with the local git without
+  fetching; such a version is not laid again. Its proof is still its own, and the new delivery is
+  checked on its final tree as usual (field finding B10).
+- A PM plan in effect can be checked again in place. The calibrator-1 contract of a PM plan version
+  binds the mission's whole requirement set (v51 §3.3), so a requirement item added, revised or
+  withdrawn after the plan took effect makes its pass not current, and with it every detailed plan of
+  that version and every product accepted under them; stable mode then releases nothing and takes in
+  no result of work in flight. The flow only ever judged a plan before it took effect, and every
+  batch minted a new version, which cannot restore the products accepted under the old one. Now
+  `mp pm plan submit` of the plan document in effect, unchanged, with the batch's words and changed
+  items, records a re-check of that version (`b<n>.c<m>`, no new version, no Architect): Calibrator ①
+  judges the same version again as a continuation of its deciding pass. Its card shows the old and
+  new text of revised items and the content of withdrawn ones, and its focus is the elements resting
+  on the changed items, or the whole plan when a change cannot be mapped. A pass counts only when it
+  is the current deciding judgment in force: a basis changed during the review reruns it, and a
+  negation stays until a valid ruling revokes it. A late hand-back of an older re-check is recorded
+  and not accepted. A pass makes the plan current again, and with it what relies on the plan only
+  through it; a product bound directly to a revised item, evidence or constraint stays unproven
+  until its own review is current. A batch is identified with its mode, its dependent items and the
+  requirement-set version, so a change of mode only, or a second revision with the same words, is a
+  new batch. In fast mode, production that rests on contested or negated elements waits until they
+  are revised or validly ruled; other production goes on. From field PR #11, revised per maintainer
+  ruling 3.
+- An Architect revision sees the detailed plan it revises. A revision card carried the previous
+  detailed plan in its data but showed only the task ids, and the seat had no command that read the
+  plan, while it was told to revise it. It rebuilt the plan and rewrote cards, so once such a plan
+  took effect every accepted task was restarted. Now the card gives the previous plan in full as a
+  must-read material (`plan-old`), one task per line in the hand-back's own fields, so a kept task is
+  copied, not retyped. The card and the Architect's role page advise carrying every task the
+  revision does not need to change over exactly, since a changed card restarts the task. A new PM
+  plan version's instruction names the elements added, changed and removed. The PM is told before
+  the plan's reviews when a revision changes or drops tasks with accepted work or work under way
+  (`plan-revision-restarts-work`); the notice is sent on a later pass if sending failed, also for a
+  plan checked before the upgrade. Earlier records stay in the memory. From field PR #13; its rules
+  for the seat are guidance until ruled (maintainer ruling 7).
+- A task waiting for its own re-plan resumes only under the plan that answers it. Any newer plan in
+  effect released the wait, so the task restarted under its old card before its own re-plan was
+  routed. Now the wait is bound to the Architect attempt that answers the request, or a revision
+  descended from it; an unrelated plan does not release it. If that attempt is superseded before it
+  answers, the request is routed into the current batch again.
+- A seat's card is completed when it is dispatched. A card was built when its step was queued, so a
+  seat dispatched later missed the decisions, Secretary answers, authorizations and constraints
+  recorded in between, and judged against superseded inputs; a Secretary decision could be carried
+  out under an authorization withdrawn meanwhile. Now `mp pm dispatch` re-selects the card's
+  decision quotes, authorizations, constraints and (for the Secretary) the escalation's current
+  facts with the same rules its builder uses, and the hand-back is checked against the card that was
+  dispatched. When a planning step's bound inputs changed, the dispatch is refused with `NOT_READY`
+  and `mp pm next` rebuilds the step; an Auditor card is regenerated with its current bases and
+  constraints. A Constructor whose card the plan in effect no longer holds is refused as
+  superseded, and in fast mode one whose production rests on a contested element waits until it is
+  ruled. Before a Secretary decision is carried out, the authorization and the
+  decisions it relied on are checked again; if one changed, the decision is not carried out and a
+  fresh Secretary round is queued. Exploration cards keep their definition's inputs, and blind
+  seats never receive project decisions (field finding B1).
+- Instruction constraints reach the Reviewer and the Secretary. A PM ruling recorded as an
+  instruction constraint was shown only to Constructors, never to the seat judging the work.
+  Reviewer and Secretary cards now show the instruction constraints that apply to the task (by task
+  type or path), marked as instructions and not as proof inputs. Object constraints keep their proof
+  role (field finding B2).
+- Decisions recorded after the plan reach seat cards. Cards quoted only the decision items that the
+  task in the detailed plan listed. Now they also quote the mission's decisions in force that the
+  task's requirement items or constraints relate to, and every decision recorded after the plan the
+  card works under, marked "recorded after the plan". Withdrawn or replaced items are never quoted
+  as current (field finding B8).
+- An object constraint no longer stops a plan, a legalization or an exploration for good.
+  Calibrator ①, the feasibility review and Calibrator ② bound no constraints, so any object
+  constraint that applied to a plan (with the default scope `**`, every one) left the PM plan and
+  the detailed plan not fully proven, with an empty queue and no notice, and stable production
+  stopped. For the same reason a legalization ended "not legalized" (WI-25), and an attacked
+  exploration version was never proven. Now these reviews, the chain Auditor, and the attack-mode
+  Crititor and Stabilizer show and bind the object constraints that apply to their object, chosen
+  by the object's own mission and scope; a constraint recorded while such a review is still queued
+  is taken into its card before it is dispatched. A constraint that arrives while a plan review runs, or after the plans are
+  proven, is a known issue (WI-34, below).
+- A PM plan that relies on a withdrawn requirement line goes back to the PM. Calibrator ① reruns of
+  such a plan went stale one after another, and the PM was never told why. Now its queued
+  Calibrator ① steps are cancelled, no rerun is queued, and the PM is told that the plan relies on
+  the withdrawn line and needs a new plan version.
+- Products accepted under a PM plan version that no longer holds are re-bound to the plan in effect,
+  and a Reviewer judges them. A product's Reviewer contract relies on the detailed plan in effect
+  when the product was recorded, fixed with the version (v51 §5.2), so once that plan lost its proof
+  no judgment of the product could make it proven again. A new PM plan version did not help: a task
+  whose card its detailed plan keeps got no new spec and was never judged again, so its product
+  stayed "not fully proven" for good, and stable mode held everything depending on it without a
+  word. Now, once the new detailed plan is in effect and proven, such a product gets a new version
+  of the same candidate (`<product>.b<n>`: same content, commit and origin) whose contract relies on
+  the plan in effect and whose prerequisites are its dependencies' current closure. In stable mode a
+  Reviewer judges it with the current card, reusing the recorded declared runs (notice
+  `kept-products-rebind-review`). It is accepted only when the Reviewer passes it; a rework sends
+  the task to its Constructor with that version as predecessor; the work that depends on it waits.
+  The program never passes a re-bound version by itself: the field PR's mechanical carry-over is
+  removed. In fast mode nothing is re-bound: the PM is told once per product and plan
+  (`kept-product-not-rebound`), the product stays "not fully proven" and dependent work goes on. A
+  product whose prerequisites differ from its dependencies' accepted closure (a dependency was
+  rebuilt rather than re-bound) is not re-bound; the notice names the stale and missing versions,
+  and a re-plan that changes its card rebuilds it. A Reviewer's judgment now relies on the plan its
+  product's contract names. From field PR #12, revised per maintainer ruling 1.
+- A Reviewer must answer every issue already observed in the task's lineage. A finding recorded by a
+  review that went to the Secretary was missing from the next round's card, and a pass that left it
+  unanswered was accepted. Now every Reviewer card lists each issue observed on any version of the
+  lineage (earlier attempts, earlier rounds on the same version, re-bound versions), with the latest
+  response as context, and a hand-back that leaves one unanswered is refused.
+- A Reviewer can answer an open issue "deferred". The hand-back schema had no owner for a deferral,
+  so a deferred answer failed as a program internal error (WI-20), and Reviewers fell back to
+  "not-fixed", which the next Constructor read as its own to fix. Now a `deferred` answer names an
+  `owner` and gives a non-empty reason. Later Constructor cards show the issue as "deferred to
+  <owner>", outside the task's fix list; every later Reviewer answers it again, and repeating the
+  deferral does not force a rework; the PM is told (`reviewer-issue-deferred`). The issue stays
+  unfixed, and a close lists it (field finding B3).
+- Steps the flow will not continue leave the queue for good. When a seat of a superseded attempt (an
+  old card, a dropped or abandoned task, a superseded re-bind) was released with `--ended` or
+  `--abandoned`, its step went back to the queue and stayed there: `mp pm next` listed it, a
+  dispatch wasted a seat run, and a full close was refused for an unfinished item. Now such steps
+  are cancelled on every pass, also in a closed mission. Running seats still finish; their results
+  are recorded and not continued (WI-23).
+
+### Changed
+- `mp pm close` lists as risks the issues of each selected product version whose state is not
+  fixed: "not fixed", or "deferred to <owner>" with the reason. It adds no refusal to close.
+- `mp pm constraint add` needs no mission argument: a constraint is project-wide unless
+  `--mission <m>` scopes it. The 4.1.0 form, with the mission as the first argument, still works and
+  still records a project-wide constraint.
+- The design contract (v06) records the maintainer's rulings on the field PRs and the 4.1.1 design
+  calls as U-15 to U-23. Mechanics the rulings do not cover are marked "Proposal, pending ruling".
+
+### Added
+- `mp pm constraint withdraw <id> --words W-<n>`: the constraint's record is kept, and its line is
+  no longer in force. Proof requirements follow through the labels; nothing that did not rely on it
+  is reopened. A withdrawn id stays withdrawn: record a replacement under a new id.
+  `mp pm constraint add --mission <m>` scopes a constraint to one mission; whether a constraint
+  applies is decided by each object's own mission (field finding B11).
+- WI-34 and its notice `plan-constraint-gap` (see Known issues).
+
+### Known issues
+- A plan's proof can fall short of an object constraint recorded later (WI-34). When an object
+  constraint that applies to a plan is recorded while one of the plan's reviews runs, or after the
+  plans are proven, the plan's current pass judgments do not cover it: the plan is not fully proven,
+  and stable production waits. `mp` sends the PM a WI-34 notice naming the plan, the uncovered
+  constraint lines and the review positions. There are two exits, both started by the PM with the
+  user's words: resubmit the same PM plan (a Calibrator ① re-check) for a gap on the PM plan, or
+  submit an agreed changed PM plan for a gap on the detailed plan's feasibility or Calibrator ②
+  position. Nothing is started automatically and nothing is relaxed; fast mode goes on, with the
+  plan shown "not fully proven". A ruling on whether the program may start a plan re-review by
+  itself is on the 4.1.2 agenda.
+- Records written before 4.1.1 list only the paths present in a candidate. A stacked version that
+  deleted a file inside the write scope of the version below it is therefore not seen as delivering
+  that deletion: each version resting on it can be restarted once for a "missing" path, and a
+  delivery holding both shows the lower version not fully proven until a card change re-records the
+  deleting task.
+- `mp pm next` still lists a step that `mp pm dispatch` refuses with `NOT_READY` (a superseded or
+  contested Constructor, a planning step whose inputs changed). Run `mp pm next` again and dispatch
+  what it then lists; a Constructor waiting for a ruling stays listed until the dispute is ruled.
+- Stable mode checks a task's dependencies when its Constructor step is queued, not when it is
+  dispatched (as in 4.1.0): a step queued before a dependency lost its proof can still be dispatched.
+  Its result is never shown as proven while the dependency is not.
+- A constraint that arrives while an exploration's Crititor or Stabilizer runs, or after the
+  exploration settled, is not bound to that judgment. A settled conclusion that loses its proof is
+  reported with `exploration-conclusion-unproven`; the way out is a new exploration or a re-plan,
+  not WI-34's exits.
+- A declared command that hangs and ignores SIGTERM keeps its `mp` process, and with it the run lock,
+  past the timeout; other processes record that run as pending. End that `mp` process: the lock is
+  released with it.
+- `kept-product-not-rebound` notices do not close. While a dependency's re-bind is sent back to
+  rework, a dependent can get one notice for the interim set of versions and another for the final
+  one.
 
 ## [4.1.0] — 2026-10-11
 

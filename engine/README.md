@@ -1,6 +1,6 @@
 # Mission Pipeline 4.1 engine
 
-Version 4.1.0 (unreleased). TypeScript implementation of the design contract [`docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md`](../docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md) (section numbers below refer to it). Where it says "v51 unchanged", the 4.0 design [`DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md`](../docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md) (Chinese) applies. When code and design disagree, the code is wrong or the design is revised first.
+Version 4.1.1. TypeScript implementation of the design contract [`docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md`](../docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md) (section numbers below refer to it). Where it says "v51 unchanged", the 4.0 design [`DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md`](../docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md) (Chinese) applies. When code and design disagree, the code is wrong or the design is revised first.
 
 ## What it is
 

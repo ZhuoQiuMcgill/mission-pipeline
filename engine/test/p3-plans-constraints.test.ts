@@ -249,7 +249,7 @@ describe('P3: recovery and guidance regressions', () => {
     await engine.reconcile(M); await engine.reconcile(M);
     const notices = w.ledger.notices.filter((n) => n.category === 'plan-revision-restarts-work');
     assert.equal(notices.length, 1);
-    assert.match(notices[0]!.defaultAction, /earlier records remain.*previous candidate/);
+    assert.match(notices[0]!.defaultAction, /starts from the mission base plus its dependencies' current accepted work, without the earlier attempts' work \(ruling 6\); its earlier records remain/);
     assert.doesNotMatch(notices[0]!.defaultAction, /no longer used/);
     assert.ok((await event(w, 'told')).some((e) => e.key === 'plan-revision-restarts-work:dplan.m1.2.1'));
     assert.ok(w.scheduler.queued('architect-feasibility').length > 0, 'the notice retry leaves a review exit');
@@ -296,11 +296,11 @@ describe('P3: recovery and guidance regressions', () => {
 
 
 describe('P3: ruling and dispatch exits', () => {
-  it('the new revision restrictions are labelled guidance, and records/candidates survive a respec', () => {
+  it('the new revision restrictions are labelled guidance, and a respec preserves records without carrying earlier work', () => {
     assert.match(REVISION_CARRY_RULE, /guidance \(Proposal, pending ruling\)/);
     assert.match(roleText('architect'), /Guidance \(Proposal, pending ruling\)/);
     assert.doesNotMatch(roleText('architect'), /Never rebuild|no longer used/);
-    assert.match(REVISION_CARRY_RULE, /records remain.*previous candidate/);
+    assert.match(REVISION_CARRY_RULE, /starts from the mission base plus its dependencies' current accepted work, without the earlier attempts' work \(ruling 6\); its earlier records remain/);
   });
 
   it('a queued fast Constructor is held if its element becomes negated before claim, and a valid ruling releases it', async () => {
