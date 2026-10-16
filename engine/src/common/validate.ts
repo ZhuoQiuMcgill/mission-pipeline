@@ -1,3 +1,4 @@
+import { missionIdProblem } from './ids.ts';
 // Structural validation of records at the memory's boundary (6.1 "发布前复核":
 // a record that would make the derived state uncomputable, or a fact the
 // labels would read differently from its writer, never enters the log).
@@ -71,6 +72,7 @@ function scope(r: Obj, k: string, nullable: boolean): void {
   if (!isObj(v)) fail(String(r.kind), `${k} is not a scope`);
   strings(v, 'paths');
   strings(v, 'taskTypes');
+  if (v['mission'] !== undefined && missionIdProblem(v['mission']) !== null) fail(String(r.kind), 'scope.mission is not a mission id');
 }
 
 /** 4.1 §6.5: an environment identity's parts: bounded strings, at most 64 version commands. */

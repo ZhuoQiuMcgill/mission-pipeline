@@ -69,7 +69,9 @@ describe("review r1 #8: a refused Secretary grant leaves the user's exit open", 
     await drive(engine, ports.scheduler, withKinds({ 'architect-decompose': () => ({ handBack: architect(bad) }), secretary: () => null }));
     const sec = ports.scheduler.queued('secretary')[0];
     assert.ok(sec !== undefined);
-    // between the card and the decision, the Secretary's one grant on the lineage is used elsewhere
+    // Dispatch refreshes the grant flag; consume it after claim to keep testing the apply-time race.
+    ports.scheduler.dispatchOf(sec.task);
+    // between the dispatch and the decision, the Secretary's one grant on the lineage is used elsewhere
     assert.equal((await ports.ledger.grantLoop({ lineage: 'plan.m1.1', loop: 'env-retry', by: 'secretary', extra: 1, op: 'elsewhere' })).granted, true);
     await ports.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'grant') });
     await engine.reconcile(M);
@@ -237,6 +239,7 @@ describe('review r1 #12: a stale Calibrator ① pass does not release the plan',
     const { ports, engine } = await setup();
     await engine.reconcile(M);
     const c = ports.scheduler.card<Calibrator1Card>('cal1.m1.1');
+    ports.scheduler.dispatchOf(c.task); // the change arrives after the dispatch-time refresh
     await recordItem(ports, { mission: M, item: 'g2', type: 'goal', text: 'Also TSV', source: { kind: 'words', words: 'W-1', quote: 'CSV parser' } });
     await ports.scheduler.run('cal1.m1.1', { handBack: cal1Pass(c) });
     await engine.reconcile(M);

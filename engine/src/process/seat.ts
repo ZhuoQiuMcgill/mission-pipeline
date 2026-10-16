@@ -44,6 +44,7 @@ import {
   type Filler,
   type WriteTx,
 } from '../memory/index.ts';
+import { supersededRecheck, type PmBatchBody, type RecheckBody } from '../flow/planning.ts';
 import { SECRETARY_LINE } from '../flow/plandoc.ts';
 import { EvidenceRequestSchema, rerunCommands, seatCommandsOf } from '../seat/card.ts';
 import type { ReviewerCard } from '../seat/card.ts';
@@ -314,7 +315,18 @@ export const DECISION_RELEASED = 'decision-released';
  * carried out or closed (applied), or the user answered it first. Its hand-back is recorded as
  * history, not accepted, and its records (a ruling judgment) are not appended. Null: still open.
  */
-function mootSecretary(db: Db, v: DispatchView): string | null {
+function mootSecretary(db: Db, v: DispatchView, data: ProcessContext['memory']['data']): string | null {
+  if (v.card.seat === 'calibrator-1') {
+    const events = [];
+    let after = 0;
+    for (;;) {
+      const page = flowEvents(db, { mission: v.info.mission, line: 'plan', after });
+      events.push(...page);
+      if (page.length < 1000) break;
+      after = page.at(-1)!.revision;
+    }
+    return supersededRecheck(v.info.task, events.filter((e) => e.event === 'pm-batch').map((e) => JSON.parse(data.text(e.body)) as PmBatchBody), events.filter((e) => e.event === 'cal1-recheck').map((e) => JSON.parse(data.text(e.body)) as RecheckBody));
+  }
   if (v.card.seat !== 'secretary') return null;
   const id = (v.card as { request?: { id?: unknown } }).request?.id;
   if (typeof id !== 'string') return null;
@@ -345,7 +357,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   // closed (unless the close waits for running work, §6.7): recorded, not accepted
   const closedBefore = ctx.memory.read((db) => (v.info.state === 'in-flight' ? lateForClose(db, v.info, v.spec) : null));
   // a Secretary whose escalation was decided or closed meanwhile: like a late hand-back (checked again in the write)
-  const mootBefore = ctx.memory.read((db) => (v.info.state === 'in-flight' ? mootSecretary(db, v) : null));
+  const mootBefore = ctx.memory.read((db) => (v.info.state === 'in-flight' ? mootSecretary(db, v, data) : null));
   const late = v.info.state === 'released' || closedBefore !== null || mootBefore !== null || ctx.memory.read((db) => stoppedFor(db, v.info.tag));
   const entry = seatCardEntry(v.card.seat);
   const runs = ctx.memory.read((db) => dispatchRuns(db, data, v.info));
@@ -378,7 +390,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     if (close !== null) takeBackForClose(tx, v.info, close);
     // a Secretary hand-back whose escalation is no longer open: the dispatch is taken back first, so the
     // hand-back is recorded after the release (not accepted) and its ruling is never appended
-    const moot = close === null && dispatchInfo(tx, dispatch)?.state === 'in-flight' ? mootSecretary(tx, v) : null;
+    const moot = close === null && dispatchInfo(tx, dispatch)?.state === 'in-flight' ? mootSecretary(tx, v, data) : null;
     if (moot !== null) {
       releaseDispatch(tx, { dispatch, how: 'ended', requeue: false });
       appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: TASKS_LINE, event: DECISION_RELEASED, key: dispatch, body: tx.data.put(canonicalJson({ dispatch, task: v.info.task, why: moot })) as ContentHash }]);

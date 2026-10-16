@@ -27,3 +27,5 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-31: The repository lives outside the folder, or a copy shares one repository with another copy
 - WI-32: Recomputing the labels does not finish (mp pm drain)
 - WI-33: An exploration awaits a ruling: the Stabilizer found a shift of direction or a drift
+
+Constraint maintenance: `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` (project-wide by default); `mp pm constraint withdraw <id> --words W-n` keeps the record and removes its force.

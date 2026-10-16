@@ -1,3 +1,4 @@
+import { resolveBases } from '../memory/domain/constraints.ts';
 // Shared helpers of the flows: the context of one reconciliation pass, deterministic ids, card
 // defaults, contract bindings, notices with their WI, and reading basis versions.
 
@@ -100,19 +101,7 @@ export interface BasisIndex {
 }
 
 export async function basisIndex(ctx: FlowCtx): Promise<BasisIndex> {
-  const current = new Map<string, string>();
-  const lineOf = new Map<string, string>();
-  const records = new Map<string, BasisVersionRecord>();
-  // not filtered by mission: project-wide constraints and standards name none
-  for (const c of await ctx.ports.ledger.records(['basis.version'])) {
-    const r = c.record as BasisVersionRecord;
-    current.set(r.line, r.version);
-    lineOf.set(r.version, r.line);
-    records.set(r.version, r);
-  }
-  const withdrawn = new Set<string>();
-  for (const c of await ctx.ports.ledger.records(['basis.withdrawn'])) withdrawn.add((c.record as { line: string }).line);
-  return { current, lineOf, records, withdrawn };
+  return resolveBases((await ctx.ports.ledger.records(['basis.version', 'basis.withdrawn'])).map((c) => c.record));
 }
 
 /**

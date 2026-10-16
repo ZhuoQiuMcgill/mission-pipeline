@@ -163,12 +163,12 @@ export const PREVIOUS_PLAN_MATERIAL = 'plan-old';
 
 /**
  * The carry rule of a revision (§6.2: a task whose card changes restarts at a new attempt, and the
- * work accepted under the old card is no longer used; a task whose card is unchanged keeps it).
+ * earlier records remain and the next attempt continues from its previous candidate; a task whose card is unchanged keeps it).
  */
 export const REVISION_CARRY_RULE =
   'Carry over every task the revision does not need to change exactly as it is in the previous detailed plan: the same id and the same value in every field (goal, standards, requirement items, write scope, files to read, interpreter, verification commands, interfaces, dependencies, exclusive resources, estimate, provenance). ' +
-  "A task's fields are its card, and any change to its card, however small, restarts the task at a new attempt, and its accepted work is no longer used. " +
-  'Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require (and what such a change forces, such as a dependency on a new task); give a new task an id that no task of the previous plan has. ' +
+  "A task's fields are its card, and any change to its card, however small, restarts the task at a new attempt; its earlier records remain, and it continues from its previous candidate. " +
+  'Change only what the instructions, the changed PM plan elements, the feasibility findings or the mechanical check failures require (and what such a change forces, such as a dependency on a new task); as guidance (Proposal, pending ruling), prefer a fresh id for a new task. ' +
   'Keep the modules and interfaces the unchanged tasks use as they are too.';
 
 /**

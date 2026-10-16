@@ -22,6 +22,7 @@ export {
   pmAck,
   pmAnswer,
   pmConstraint,
+  pmWithdrawConstraint,
   pmDeliver,
   pmDispatch,
   pmDrain,

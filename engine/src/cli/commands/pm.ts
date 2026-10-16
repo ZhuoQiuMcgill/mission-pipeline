@@ -36,6 +36,7 @@ import {
   pmClose,
   pmAnswer,
   pmConstraint,
+  pmWithdrawConstraint,
   pmDeliver,
   pmDispatch,
   pmDrain,
@@ -472,19 +473,28 @@ const constraint: Command = {
   group: 'pm',
   name: ['constraint'],
   summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope',
-  usage: 'mp pm constraint add <mission> <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>]',
-  flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list' },
+  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>]\n       mp pm constraint withdraw <constraint> --words W-<n>',
+  flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string' },
   async run(c, args) {
     const p = P(c);
-    if (positional(args, 0, 'add') !== 'add') throw usage('constraint takes add');
-    const m = missionArg(args, 1);
-    const id = positional(args, 2, 'constraint id');
+    const action = positional(args, 0, 'add or withdraw');
+    if (action === 'withdraw') {
+      const id = positional(args, 1, 'constraint id');
+      await pmWithdrawConstraint(p.ctx, { constraint: id, words: wordsArg(p.ctx, args, true)! });
+      return ok(`Constraint ${id} withdrawn; its record is kept.`, { constraint: id, withdrawn: true });
+    }
+    if (action !== 'add') throw usage('constraint takes add or withdraw');
+    const missionScope = flagStr(args, 'mission');
+    if (missionScope !== null && missionIdProblem(missionScope) !== null) throw usage(`--mission: ${missionIdProblem(missionScope)}`);
+    const legacy = args.positionals.length === 3;
+    const m = legacy ? missionArg(args, 1) : (missionScope ?? 'project') as MissionId;
+    const id = positional(args, legacy ? 2 : 1, 'constraint id');
     const kind = flagStr(args, 'kind');
     if (kind !== 'object' && kind !== 'instruction') throw usage('--kind is object or instruction (when unsure: object)');
     const text = flagStr(args, 'text');
     if (text === null || text.trim() === '') throw usage('--text: the constraint');
     const paths = flagList(args, 'paths');
-    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
+    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(missionScope !== null ? { missionScope } : {}), scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
     return ok(`Constraint ${id} (${kind}) recorded as ${r.version}.`, { mission: m, constraint: id, version: r.version });
   },
 };
@@ -547,7 +557,7 @@ const plan: Command = {
       throw refused('BAD_PLAN', `the PM plan does not validate: ${issues}. Its format, prefilled for this mission: mp pm plan template ${m}`);
     }
     if (r.recheck === true) {
-      return ok(`The plan document is the plan in effect, unchanged: batch ${r.batch} re-checks ${r.plan} (no new version, no Architect). Calibrator ① judges it again on the requirement items as they are now (mp pm next); a pass makes it, and what relies on it, current again.`, { mission: m, batch: r.batch, plan: r.plan, recheck: true });
+      return ok(`The plan document is the plan in effect, unchanged: batch ${r.batch} re-checks ${r.plan} (no new version, no Architect). Calibrator ① judges it again on the requirement items as they are now (mp pm next); a current deciding pass restores its proof; dependents recover only while their own inputs remain current.`, { mission: m, batch: r.batch, plan: r.plan, recheck: true });
     }
     return ok(`PM plan batch ${r.batch} recorded (plan ${r.plan}); Calibrator ① checks it next (mp pm next). The Architect starts only after it passes.`, { mission: m, batch: r.batch, plan: r.plan });
   },
