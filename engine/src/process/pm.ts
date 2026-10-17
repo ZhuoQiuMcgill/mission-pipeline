@@ -6,15 +6,17 @@ import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 //               dispatches removed, the process advanced; then, notices first (marked delivered):
 //               the ready steps (seat, task, mission, purpose, parallel), the steps held (a stop,
 //               a lease, the git-writes hold), what waits on the user, the dispatches in flight
-//               with their age, and "renew N" after an environment change (decision 18)
+//               with their age. 4.1.2: after an environment change, no renew step; one notice per
+//               change names how many runs current proof rests on are from older environments
 //   pmDispatch  claims a ready step once (A1 claimDispatch): the dispatch id, the card leaf
 //               `missions/<m>/dispatches/<d>/card.md`, its material leaves, its leases; a
 //               Constructor's worktree is created at the card's commit (A4)
 //   pmRelease   `--ended` / `--abandoned` (§5.4): the worktree removed or kept; the step queued
 //               again at once, counted on the lineage's re-dispatch loop (decision 15: two
 //               re-dispatches, then WI-08 and the Secretary)
-//   pmRenew     after an environment change: the declared commands of the affected runs rerun on
-//               clean checkouts; equal outputs renew the evidence (A2 recordRenewedRun)
+//   pmRenew     the PM's explicit tool after an environment change (never a ready step, 4.1.2):
+//               the declared commands of the affected runs rerun on clean checkouts; equal outputs
+//               renew the evidence (A2 recordRenewedRun)
 //   pmDrain     A2's drain (WI-32)
 //   pmStop      a stop, written before anything queued; "stop recorded; N dispatches in flight"
 // and the PM's flow commands (requirements with their verbatim quote, constraints, PM plan
@@ -85,6 +87,8 @@ import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from '.
 import { closingRunner, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { heldByClose } from './close.ts';
 import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
+import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/scope.ts';
+import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
 import { materialLeaf } from './seat.ts';
 
 // ---------------------------------------------------------------- shared
@@ -207,8 +211,8 @@ export interface NextReport {
   readonly held: readonly HeldStep[];
   readonly waitingOnUser: readonly UserWait[];
   readonly inFlight: readonly InFlight[];
-  /** Decision 18: after an environment change, `mp pm renew` is a ready step with the number of affected candidates. */
-  readonly renew: { readonly candidates: number; readonly reviews: number } | null;
+  /** 4.1.2: the runs current proof rests on that were recorded under an older environment identity (they still count; `mp pm renew` is never a ready step; a notice tells the PM once per change). */
+  readonly olderEnvironmentRuns: number;
   readonly labels: { readonly recomputing: boolean; readonly toVisit: number; readonly toRecompute: number; readonly since: number | null };
   readonly landings: RecoveryReport | null;
   /** Flow steps that failed this time (each also a WI-20 notice). */
@@ -323,16 +327,17 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
   }
   const errors: string[] = [];
   for (const r of await advance(ctx)) for (const e of r.errors) errors.push(`${r.mission} ${e.step}: ${e.message}`);
+  // 4.1.2: an environment change is told once (runs from older environments still count), never a ready step
+  const olderEnvironmentRuns = noticeOlderEnvironment(ctx);
   const steps = readSteps(ctx);
   const data = ctx.memory.data;
   const notices = ctx.memory.read((db) => listNotices(db, data)).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
   if (o.markDelivered !== false) markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
-  const ren = ctx.memory.read((db) => renewalCandidates(db));
   const st = ctx.memory.read((db) => labelStatus(db));
   return {
     notices,
     ...steps,
-    renew: ren.affected > 0 || ren.reviews.length > 0 ? { candidates: ren.affected, reviews: ren.reviews.length } : null,
+    olderEnvironmentRuns,
     labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since },
     landings,
     errors,
@@ -384,7 +389,7 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       const refreshed = tx.data.put(canonicalJson(spec));
       const n = Number((tx.stmt('SELECT COUNT(*) AS n FROM dispatches').get() as { n: number }).n) + 1;
       const dispatch = `D-${n}`;
-      const card = renderSeatCard(spec.card, { dispatch, projectDir: ctx.projectDir });
+      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite });
       const claimed = claimDispatch(tx, { dispatch, task: step, seat: spec.card.seat, capabilities: spec.capabilities, filler, worktree: entry.exportsProduct === true, card });
       // the materials as leaves (§5.2): `mp seat <id> read` reads them, hash-checked
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
@@ -523,7 +528,16 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
     group.push(cand);
     groups.set(key, group);
   }
+  // a stop stops (§6.6): a renew executes suites, so every group's scope (the delivery's resolver) is checked
+  // before any group runs, and each group again right before it runs (a renew can run many; a stop recorded
+  // meanwhile refuses the rest). The refusal is thrown, never counted as a skipped run.
+  const scopeOf = (originals: ReadonlyArray<(typeof c.candidates)[number]>): WorkScope => renewScope(ctx, originals);
+  const scopes = new Map([...groups.values()].map((g) => [g, scopeOf(g)]));
+  ctx.memory.read((db) => {
+    for (const s of scopes.values()) assertScopeNotStopped(db, s, 'this renewal');
+  });
   for (const originals of groups.values()) {
+    ctx.memory.read((db) => assertScopeNotStopped(db, scopes.get(originals)!, 'this renewal'));
     try {
       const first = originals[0]!;
       const fields = byEvidence.get(first.evidence)!.fields;
@@ -618,6 +632,23 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
   }
   await advance(ctx, undefined, { dispatch: null, task: null, step: `mp pm renew (environment ${env.identity.slice(0, 16)})` });
   return { environment: c.environment, reruns, reviews: c.reviews, skipped, reviewSteps: needed.length };
+}
+
+/**
+ * The stop scope of one renewal group (§6.6): the missions of the object versions its judgments decide
+ * and the mission its runs belong to, with their dispatches' capabilities (delivery/scope.ts deriveScope).
+ */
+function renewScope(ctx: ProcessContext, originals: ReadonlyArray<{ readonly evidence: string; readonly judgments: ReadonlyArray<{ readonly target: string }> }>): WorkScope {
+  const missions = new Set<string>();
+  for (const cand of originals) {
+    for (const j of cand.judgments) {
+      const m = missionOfObject(ctx, j.target);
+      if (m !== null) missions.add(m);
+    }
+  }
+  const own = missionOfEvidence(ctx, originals[0]!.evidence);
+  const [lead, ...rest] = [...(own !== 'project' ? [own] : []), ...missions];
+  return ctx.memory.read((db) => deriveScope(db, (lead ?? own) as MissionId, rest));
 }
 
 /** The mission of an object version, or null. */

@@ -36,7 +36,9 @@ describe('mp init', () => {
     assert.equal(cfg.format, 'mp41.config.v1');
     assert.equal(cfg.targetBranch, 'main');
     assert.deepEqual(cfg.environment.versionCommands, ['node --version'], 'a package.json declares node');
-    assert.deepEqual(cfg.closingChecks, []);
+    // 4.1.2: mp init writes the full suite under its own key; closingChecks is only read as its deprecated alias
+    assert.deepEqual(cfg.fullSuite, []);
+    assert.equal(cfg.closingChecks, undefined);
     assert.equal((await cli(p.dir, ['config'])).code, 0);
     assert.match(readFileSync(join(p.dir, '.git', 'info', 'exclude'), 'utf8'), /\.mission-pipeline\//);
     const claude = readFileSync(join(p.dir, 'CLAUDE.md'), 'utf8');

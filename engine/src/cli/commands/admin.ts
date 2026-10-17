@@ -7,7 +7,8 @@ import { recompute } from '../../evaluator/index.ts';
 import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { CliError, EXIT, usage } from '../errors.ts';
-import { configPath, parseConfig, readConfig } from '../config.ts';
+import { configPath, fullSuiteSource, parseConfig, readConfig } from '../config.ts';
+import { fullSuiteOf } from '../../common/fullSuite.ts';
 import { copyDocs, mpInit, mpVersion, type PointerTarget } from '../init.ts';
 import type { Project } from '../project.ts';
 import { section } from '../render.ts';
@@ -55,19 +56,26 @@ const config: Command = {
   async run(c) {
     const p = P(c);
     const file = configPath(p.dir);
-    if (!existsSync(file)) return ok('No config.json: the defaults are used (target branch main, no closing checks, no version commands). mp init writes one.', readConfig(p.dir));
+    if (!existsSync(file)) return ok('No config.json: the defaults are used (target branch main, no full suite, no version commands). mp init writes one.', readConfig(p.dir));
     const cfg = parseConfig(JSON.parse(readFileSync(file, 'utf8')));
+    const src = fullSuiteSource(cfg);
+    const suite = fullSuiteOf(cfg);
     const lines = [
       `.mission-pipeline/config.json is valid.`,
+      ...(src.both ? ['Warning: both fullSuite and the deprecated closingChecks are present; fullSuite is used and closingChecks is ignored (remove it).'] : []),
       `Target branch: ${cfg.targetBranch}`,
-      ...section('Verification commands (for plans)', cfg.verificationCommands.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
-      ...section('Closing checks (mp pm deliver)', cfg.closingChecks.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
+      ...section('Local tests: verificationCommands (the Architect may assign them to tasks)', cfg.verificationCommands.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
+      ...section(
+        `Full suite (integration Reviewer full-run, mp pm full-run, mp pm deliver), read from ${src.key === 'fullSuite' ? 'fullSuite' : src.key === 'closingChecks' ? 'closingChecks (deprecated alias: rename it to fullSuite)' : 'neither key'}`,
+        suite.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}${x.cwd !== undefined ? ` (in ${x.cwd})` : ''}`),
+        'none',
+      ),
       ...section('Environment identity: version commands', cfg.environment.versionCommands, 'none (operating system and architecture only)'),
       ...section('Exclusive resources', cfg.exclusiveResources, 'none'),
       ...section('Filler hints', Object.entries(cfg.fillers).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`), 'none'),
       `Command timeout: ${Math.round(cfg.commandTimeoutMs / 1000)} s`,
     ];
-    return ok(lines.join('\n'), cfg);
+    return ok(lines.join('\n'), { ...cfg, fullSuiteReadFrom: src.key, fullSuiteKeysBoth: src.both });
   },
 };
 

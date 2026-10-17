@@ -47,10 +47,13 @@ for (const scenario of ['legacy', 'legacy-v1', 'legacy-uncited-setup', 'all-reus
         });
       }
       ctx.memory.write({}, (tx) => appendRecords(tx, [b.product('P', { commit }), b.judge('J', 'P', { evidence: originals, fields: ['exit'] })]));
-      assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], 'proven');
+      // 4.1.2: a run of an older run method (4.1.0's plain checkouts) never counts (invalidation by cause);
+      // a current-method run recorded under another environment identity still does (labelled "older environment")
+      const olderMethod = scenario !== 'v2-partial-reuse';
+      assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], olderMethod ? 'not-fully-proven' : 'proven');
       ctx = p.reopen(scenario === 'v2-partial-reuse' ? ENV_B : ENV_A);
       const environment = ctx.environment().identity;
-      assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], 'not-fully-proven');
+      assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], olderMethod ? 'not-fully-proven' : 'proven', 'an environment change alone no longer invalidates proof');
       const req = { mission: 'm1', commit, purpose: 'verification under current identity', declaration: { by: 'mp' as const, checkout: 'clean' as const, declared: true } };
       if (scenario === 'all-reused' || scenario === 'v2-partial-reuse') {
         await runOnCommit(ctx, { ...req, commands: scenario === 'all-reused' ? commands : [commands[0]!] });

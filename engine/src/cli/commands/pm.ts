@@ -5,6 +5,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
+import { fullSuiteOf } from '../../common/fullSuite.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
 import { ITEM_ID, missionIdProblem } from '../../common/ids.ts';
 import { LOOP_KINDS, type LoopKind } from '../../common/records.ts';
@@ -41,6 +42,8 @@ import {
   pmDeliver,
   pmDispatch,
   pmDrain,
+  pmFullRun,
+  pmReopenExploration,
   pmGrant,
   pmLand,
   pmLegalizationState,
@@ -68,6 +71,7 @@ import { age, clip, filler, section, short, wiText } from '../render.ts';
 import { describeScope, detectStop, parseScope, stopScopeFor, stopWords } from '../stopDetect.ts';
 import { planTemplate } from '../templates.ts';
 import { pmCoreText, pmHandbookPath, wiDir } from '../wi.ts';
+import { fullRunLines } from './seat.ts';
 
 const WORDS = /^W-[1-9][0-9]*$/;
 
@@ -157,7 +161,6 @@ export function renderNext(p: Project, n: NextReport, hints: Readonly<Record<str
       'none',
     ),
   );
-  if (n.renew !== null) lines.push(`Ready: mp pm renew — the environment identity changed; ${n.renew.candidates} candidate(s) to rerun${n.renew.reviews > 0 ? `, ${n.renew.reviews} judgment(s) need a Reviewer` : ''}`);
   lines.push(
     ...section(
       'Ready steps',
@@ -280,7 +283,7 @@ const clean: Command = {
 const renew: Command = {
   group: 'pm',
   name: ['renew'],
-  summary: 'after an environment change: rerun the declared commands of the affected runs; equal outputs restore the proof without a seat (§6.5)',
+  summary: 'the PM\'s explicit tool after an environment change: rerun the declared commands of runs from older environments under this one; equal outputs renew the evidence without a seat (§6.5; never a ready step)',
   usage: 'mp pm renew',
   flags: {},
   decides: true,
@@ -744,10 +747,54 @@ const deliver: Command = {
     const delivery = flagStr(args, 'op') ?? `d-${sha256(`${m}\n${[...outputs].sort().join(',')}\n${w}`).slice(0, 12)}`;
     if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(delivery)) throw usage(`a delivery id (--op) is letters, digits and "-", at most 64: ${delivery}`);
     const rebuildOf = flagStr(args, 'rebuild-of');
-    const r = await pmDeliver(p.ctx, { mission: m, delivery, selected: outputs.map(target), closingChecks: p.config.closingChecks, words: w, ...(rebuildOf !== null ? { rebuildOf } : {}) });
+    const r = await pmDeliver(p.ctx, { mission: m, delivery, selected: outputs.map(target), closingChecks: fullSuiteOf(p.config), words: w, ...(rebuildOf !== null ? { rebuildOf } : {}) });
     const d = renderDelivery(p, r);
     const nextLine = r.kind === 'delivered' ? `\nThe user's "deliver" is consent to land: mp pm land ${delivery} --words ${w}` : '';
     return ok(`${d.text}${nextLine}`, { mission: m, delivery, result: r, wi: d.wi }, d.exitCode);
+  },
+};
+
+const fullRun: Command = {
+  group: 'pm',
+  name: ['full-run'],
+  summary: "D-7: run the full suite once more at the end of a mission, on the candidate mp pm deliver would build; the user's words or an authorization in force decide it, recorded with a full-run marker",
+  usage: 'mp pm full-run <mission> --words W-<n> | --authority <item-id>  --reason "<why the changes since the last full run are worth another>" [--outputs <object|unit:<id>,...>]',
+  flags: { words: 'string', authority: 'string', reason: 'string', outputs: 'list' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const w = wordsArg(p.ctx, args, false);
+    const authority = flagStr(args, 'authority');
+    if (w === null && authority === null) throw refused('NO_DECISION', 'a full run at the end of a mission needs who decided it: --words W-<n> (the user agreed, after the PM reported the reason) or --authority <item-id> (an authorization item in force that leaves this to the PM); nothing was run');
+    const reason = flagStr(args, 'reason');
+    if (reason === null || reason.trim() === '') throw usage('--reason "<text>": why the changes since the last full run are worth another one');
+    const outputs = flagList(args, 'outputs');
+    const r = await pmFullRun(p.ctx, { mission: m, words: w, authority, reason, ...(outputs.length > 0 ? { outputs: outputs.map(target) } : {}) });
+    const lines = [
+      `Candidate ${short(r.candidate)} (what mp pm deliver would build for ${r.outputs.join(', ')}; nothing was delivered).`,
+      ...fullRunLines(r.marker),
+      ...r.marker.failing.flatMap((f) => [`--- last lines of ${f.id}:`, f.tail]),
+      r.marker.passed ? 'Report the result to the user; mp pm deliver reuses this run for the same tree.' : 'It failed: trace the failure to its task (mp read full-runs, the run summary) and have that task repaired; report to the user.',
+    ];
+    return ok(lines.join('\n'), { mission: m, ...r }, r.marker.passed ? 0 : EXIT.REFUSED);
+  },
+};
+
+const reopenExploration: Command = {
+  group: 'pm',
+  name: ['reopen-exploration'],
+  summary: 'after an environment change: reopen a settled exploration so its evidence executions run again under this environment and the attacker re-checks the version (it is never reopened by itself)',
+  usage: 'mp pm reopen-exploration <mission> <exploration> [--words W-<n>]',
+  flags: { words: 'string' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const x = positional(args, 1, 'exploration');
+    const w = wordsArg(p.ctx, args, false);
+    const r = await pmReopenExploration(p.ctx, { mission: m, exploration: x, words: w });
+    return ok(r.requested ? `Exploration ${x} of ${m} is reopened under environment ${short(r.environment)} (if its executions ran in an older one): mp pm next lists the reruns.` : `Exploration ${x} of ${m} was already reopened under this environment: nothing new.`, { mission: m, exploration: x, ...r });
   },
 };
 
@@ -810,7 +857,7 @@ const land: Command = {
     if (r.kind !== 'base-moved') return ok(d.text, { mission: m, delivery, result: r, intent: r.kind === 'landed' || r.kind === 'open' ? r.intent : null, wi: d.wi }, d.exitCode);
     // WI-05 default: rebuild the candidate on the new base (counted), then the PM lands the new delivery
     const ident = p.ctx.ident();
-    const rb = await rebuildDelivery(p.ctx.gitCtx, { mission: m as MissionId, delivery, closingChecks: p.config.closingChecks, author: ident, committer: ident, filler: p.ctx.filler }, { labels: () => labelView(p.ctx), closing: closingRunner(p.ctx) });
+    const rb = await rebuildDelivery(p.ctx.gitCtx, { mission: m as MissionId, delivery, closingChecks: fullSuiteOf(p.config), author: ident, committer: ident, filler: p.ctx.filler }, { labels: () => labelView(p.ctx), closing: closingRunner(p.ctx) });
     const rd = renderDelivery(p, rb);
     const lines = [d.text, `Rebuilt on the new base (WI-05 default): ${rd.text}`, ...(rb.kind === 'delivered' ? [`Next: mp pm land ${rb.record.delivery} --words ${w}`] : []), ...wiLine(p, 'WI-05')];
     return ok(lines.join('\n'), { mission: m, delivery, result: r, rebuild: rb, wi: 'WI-05' }, rb.kind === 'delivered' ? EXIT.REFUSED : rd.exitCode);
@@ -952,6 +999,8 @@ export const PM_COMMANDS: readonly Command[] = [
   grant,
   legalize,
   deliver,
+  fullRun,
+  reopenExploration,
   land,
   withdrawDeliveryCmd,
   detachDuplicate,

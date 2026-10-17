@@ -50,6 +50,7 @@ export {
   readEnvironmentConfig,
   recordedEnvironment,
   recordEnvironment,
+  RUN_METHOD,
   runVersionCommand,
   VERSION_OUTPUT_MAX,
   type CurrentEnvironment,
@@ -57,8 +58,8 @@ export {
   type EnvironmentIdentity,
   type EnvironmentParts,
 } from './environment.ts';
-export { findReusableRun, recordRenewal, recordRenewedRun, renewalCandidates, type RenewalCandidate, type RenewalCandidates, type RenewalJudgment, type RenewalOutcome } from './renew.ts';
-export { rerunMismatch, RUN_FIELD, runClassOf, runCwdOf, sampleRunId, type RunDeclaration } from './runs.ts';
+export { findReusableRun, olderEnvironmentProof, olderEnvironmentRun, OLDER_ENVIRONMENT, recordRenewal, recordRenewedRun, renewalCandidates, type RenewalCandidate, type RenewalCandidates, type RenewalJudgment, type RenewalOutcome } from './renew.ts';
+export { olderRunMethod, rerunMismatch, RUN_FIELD, runClassOf, runCwdOf, sampleRunId, type RunDeclaration } from './runs.ts';
 export { isStatisticalOrExternalField, isTimingField, renewalDecision, usesSampledFields, type EvidenceUse, type RenewalDecision } from './renewal.ts';
 export { labelSummary, type StoredSummary } from './summary.ts';
 export type { Conclusion, ContinuationRequest, ContinuationResult, DecidingEvidence, DecidingView, DerivedState, FixState, Label, OpState, TargetState } from './semantics.ts';

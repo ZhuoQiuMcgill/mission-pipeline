@@ -36,7 +36,7 @@
 import { canonicalJson } from '../common/hash.ts';
 import type { MissionId } from '../common/ids.ts';
 import type { ListRef } from '../common/records.ts';
-import { judgmentStates, labelStatus } from '../evaluator/index.ts';
+import { judgmentStates, labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof, olderEnvironmentRun, recordedEnvironment } from '../evaluator/index.ts';
 import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
@@ -174,6 +174,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
     // ---- labels, judgment currency
     const labels = new Map((db.stmt('SELECT target, label FROM lbl_labels').all() as Array<{ target: string; label: string }>).map((r) => [r.target, r.label]));
     const recomputing = labelStatus(db).recomputing;
+    // 4.1.2: a label resting on runs from an older environment identity, and such a run, read "older environment" (renew.ts: the one resolver)
+    const currentEnv = recordedEnvironment(db)?.identity ?? null;
+    const olderTargets = olderEnvironmentProof(db).targets;
+    const olderNote = (id: string): string => (olderTargets.has(id) ? ` (${OLDER_ENVIRONMENT})` : '');
 
     // ---- who issued each PM command (§3.2 item 13): the PM actions' results name what they made
     const pmFiller = new Map<string, string>();
@@ -287,7 +291,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       const okind = String(rec['objectKind']);
       n.title ||= `${okind}${rec['module'] ? ` of module ${rec['module']}` : ''}${Array.isArray(rec['scope']?.['paths']) && okind !== 'plan' ? `: ${clip((rec['scope']['paths'] as string[]).join(', '), 100)}` : ''}`;
       const l = labels.get(id);
-      n.state = l === undefined ? 'no label yet' : `${l}${recomputing ? ' (recomputing)' : ''}`;
+      n.state = l === undefined ? 'no label yet' : `${l}${olderNote(id)}${recomputing ? ' (recomputing)' : ''}`;
       if (typeof rec['predecessor'] === 'string') edge(n.key, objKey(rec['predecessor']), 'revises');
       for (const c of (rec['reviews'] ?? []) as Json[]) {
         for (const r of (c['reliesOn'] ?? []) as string[]) edge(n.key, objKey(r), 'relies on');
@@ -506,7 +510,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'consumed' && typeof b['version'] === 'string' && b['changed'] === true) {
           const n = objNode(b['version'], f.rev);
           n.title ||= `exploration version (${String(b['kind'])})`;
-          if (!n.state) n.state = labels.has(b['version']) ? String(labels.get(b['version'])) : 'submitted';
+          if (!n.state) n.state = labels.has(b['version']) ? `${String(labels.get(b['version']))}${olderNote(b['version'])}` : 'submitted';
           edge(n.key, `exploration:${x}`, 'version of');
           const d = typeof b['task'] === 'string' ? handingDispatch(b['task']) : null;
           if (d !== null) {
@@ -646,6 +650,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       const n = node('run', id, obj !== null ? (objects.get(obj)?.['mission'] ?? null) : null, Number(r.rev));
       n.title ||= `${String(rec['runClass'])} run: ${clip(String(fields['command'] ?? ''), 80)}`;
       n.state = fields['status'] === 'completed' && String(fields['exit']) === '0' ? 'passed' : `failed (${String(fields['status'] ?? '?')}, exit ${String(fields['exit'] ?? '?')})`;
+      if (olderEnvironmentRun({ envLine: String(rec['envLine'] ?? ''), envSnapshot: String(rec['envSnapshot'] ?? '') }, currentEnv)) n.state += ` (${OLDER_ENVIRONMENT})`;
       n.checks = runChecks(fields);
       n.by = disp !== null ? `mp, rerun by dispatch ${disp}` : del !== null ? 'mp (closing checks)' : `mp (${String(fields['purpose'] ?? 'declared run')})`;
       if (r.op !== null) n.leaves.push(...(leavesByOp.get(r.op) ?? []).filter((l) => /\/runs\//.test(l)));

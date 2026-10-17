@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { parseFiller, seatCard, seatCheckout, seatHandback, seatRead, seatRequestEvidence, seatRerun, type HandBackAnswer } from '../../process/index.ts';
+import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatRead, seatRequestEvidence, seatRerun, type FullRunMarker, type HandBackAnswer } from '../../process/index.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
 import { CliError, EXIT, refused, usage } from '../errors.ts';
@@ -99,6 +99,39 @@ const rerun: Command = {
   },
 };
 
+/** A full-run marker as lines for people (the seat's full-run answer, `mp read full-runs`). */
+export function fullRunLines(m: FullRunMarker): string[] {
+  const head = `Full run ${m.id}: ${m.passed ? 'passed' : 'FAILED'} on commit ${m.commit} (tree ${m.tree.slice(0, 12)}), environment ${m.environment.slice(0, 12)}, by ${m.by === 'pm' ? 'the PM' : `the Reviewer ${m.cites.dispatch ?? ''}`.trim()}${m.reusedFrom !== null ? `; reuses the passing full run ${m.reusedFrom} on the same tree (nothing ran)` : ''}`;
+  return [
+    head,
+    ...m.commands.map((c) => `  [${c.id}] ${c.command}${c.cwd !== '.' ? ` (in ${c.cwd})` : ''}: ${c.passed ? 'passed' : 'failed'} (exit ${c.exit}) — evidence:${c.evidence}${c.executed ? '' : ' (reused)'}${c.setupFailure !== undefined ? ` — ${c.setupFailure}` : ''}`),
+    ...(m.cites.words !== null || m.cites.authority !== null ? [`  decided by: ${m.cites.words !== null ? `the user's words ${m.cites.words}` : `authorization ${m.cites.authority}`}${m.cites.reason !== null ? `; reason: ${m.cites.reason}` : ''}`] : []),
+    ...(m.leaf !== null ? [`  summary: .mission-pipeline/${m.leaf}`] : []),
+  ];
+}
+
+const fullRun: Command = {
+  group: 'seat',
+  name: ['full-run'],
+  summary: "an integration task's Reviewer: mp runs the project's full suite on a clean checkout of your candidate (last, once nothing visible is wrong); a passing run on the same tree is reused",
+  usage: 'mp seat <dispatch> full-run',
+  flags: {},
+  decides: true,
+  async run(c, args) {
+    const d = dispatchOf(args);
+    const r = await seatFullRun(P(c).ctx, d);
+    const m = r.marker;
+    const lines = [
+      ...fullRunLines(m),
+      ...m.failing.flatMap((f) => [`--- last lines of ${f.id}:`, f.tail]),
+      m.passed
+        ? `Cite its runs in your judgments as evidence:<id> (${m.commands.map((x) => `evidence:${x.evidence}`).join(', ')}).`
+        : 'It failed: trace the failure to the task whose change caused it (the last lines above; the run summary), name that task in your findings and hand back "needs-decision": the fix belongs to that task, not to this integration task.',
+    ];
+    return ok(lines.join('\n'), r, 0);
+  },
+};
+
 /**
  * The no-file form (a harness whose sub-agents may not write files): one document on stdin, the
  * Markdown report with the structured fields as its LAST fenced ```json block (or given with
@@ -177,4 +210,4 @@ const requestEvidence: Command = {
   },
 };
 
-export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, handback, requestEvidence];
+export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, fullRun, handback, requestEvidence];

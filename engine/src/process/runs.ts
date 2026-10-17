@@ -135,9 +135,34 @@ export function tapResults(output: string): Array<{ readonly name: string; reado
   return out;
 }
 
-function tail(output: Buffer, lines = 40): string {
+/** How much of a failing command's output a run keeps (U-13: never the whole output). */
+export interface TailLimit {
+  readonly lines: number;
+  /** UTF-8 bytes; the end of the output is kept. */
+  readonly bytes: number;
+}
+
+/** A local run (a task's verification, a rerun): the last 40 lines of a failing command. */
+export const LOCAL_TAIL: TailLimit = { lines: 40, bytes: 1024 * 1024 };
+/** A full run (4.1.2, D-6): the last 400 lines of each failing command, at most 64 KiB, so a failure can be traced to its task. */
+export const FULL_RUN_TAIL: TailLimit = { lines: 400, bytes: 64 * 1024 };
+
+/** The last lines of an output, within `limit` (whole characters: a cut never splits one). */
+export function tail(output: Buffer, limit: TailLimit = LOCAL_TAIL): string {
   const all = output.toString('utf8').replace(/\r\n/g, '\n').trimEnd().split('\n');
-  return all.slice(-lines).join('\n');
+  let text = all.slice(-limit.lines).join('\n');
+  if (Buffer.byteLength(text, 'utf8') <= limit.bytes) return text;
+  const buf = Buffer.from(text, 'utf8');
+  let at = buf.length - limit.bytes;
+  // skip continuation bytes: start on a character boundary
+  while (at < buf.length && (buf[at]! & 0xc0) === 0x80) at++;
+  text = buf.subarray(at).toString('utf8');
+  return text;
+}
+
+/** A declared command as a shell command line: a string as it is, an argv joined with each word quoted when it needs it. */
+export function commandLine(command: string | readonly string[]): string {
+  return typeof command === 'string' ? command : command.map((a) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(a) ? a : JSON.stringify(a))).join(' ');
 }
 
 // ---------------------------------------------------------------- run locks
@@ -245,7 +270,7 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
     lines.push(`- Evidence: ${r.evidence}${r.reused ? ' (reused; execution only as setup)' : ''}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (the output itself is not kept)`);
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
-    if (!r.passed && r.tail !== '') lines.push('', 'Last lines of the output:', '', '```', r.tail, '```');
+    if ((!r.passed || r.setupFailure !== undefined) && r.tail !== '') lines.push('', 'Last lines of the output:', '', '```', r.tail, '```');
     lines.push('');
   }
   return lines.join('\n');
@@ -284,6 +309,10 @@ export async function runOnCommit(
     readonly doNotReuse?: readonly string[];
     /** An op id for the recording write (journal-safe retries). */
     readonly op?: string;
+    /** How much of a failing command's output is kept (default LOCAL_TAIL; a full run: FULL_RUN_TAIL). */
+    readonly tail?: TailLimit;
+    /** A run id prefix for an execution (default "run", "rerun" for a rerun). */
+    readonly runPrefix?: string;
   },
 ): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
   const env = ctx.environment();
@@ -318,7 +347,7 @@ async function executeRuns(
   classOf: (c: DeclaredCommand) => RunClass,
   reusable: readonly (RecordedRun | null)[],
 ): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
-  const run = newRunId(req.declaration.rerun === true ? 'rerun' : 'run');
+  const run = newRunId(req.runPrefix ?? (req.declaration.rerun === true ? 'rerun' : 'run'));
   const dir = runCheckoutDir(ctx.memory.paths, run);
   const executed: RecordedRun[] = [];
   const records: EvidenceRecord[] = [];
@@ -338,7 +367,8 @@ async function executeRuns(
       if (prior !== null && prior !== undefined) {
         const failed = out.timedOut || out.error !== null || out.exitCode !== 0;
         const setupFailure = failed ? `Setup-only execution of ${c.id} failed (${out.timedOut ? 'timeout' : out.error ?? out.signal ?? `exit ${out.exitCode}`}); evidence ${prior.evidence} is unchanged; later commands still ran.` : undefined;
-        executed.push({ ...prior, command: c, reused: true, ...(setupFailure === undefined ? {} : { setupFailure }) });
+        // the failing setup's last lines are kept with the run (its summary leaf), never as evidence
+        executed.push({ ...prior, command: c, reused: true, ...(setupFailure === undefined ? {} : { setupFailure, tail: tail(out.output, req.tail ?? LOCAL_TAIL) }) });
         continue;
       }
       const fields = fieldsOf(out, { ...(req.fields ?? {}), group, [RUN_FIELD.method]: RUN_METHOD, [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: c.command, [CWD_FIELD]: rel, commandId: c.id.slice(0, 200), run, purpose: req.purpose.slice(0, 200) });
@@ -347,7 +377,7 @@ async function executeRuns(
       validateRecord(rec);
       records.push(rec);
       const passed = fields['status'] === 'completed' && fields['exit'] === '0';
-      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed ? '' : tail(out.output), reused: false };
+      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false };
       executed.push(recorded);
       if (runClass === 'declared') staged.set(key, recorded);
     }
@@ -383,12 +413,16 @@ export function closingRunner(ctx: ProcessContext): ClosingRunner {
       const recorded: RecordedRun[] = [];
       const outcomes: ClosingOutcome[] = [];
       for (const c of req.checks) {
-        const command = typeof c.command === 'string' ? c.command : c.command.map((a) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(a) ? a : JSON.stringify(a))).join(' ');
-        const out = ctx.runner({ command, cwd: req.dir, timeoutMs: ctx.commandTimeoutMs });
+        const command = commandLine(c.command);
+        // a full-suite command read as a closing check (4.1.2: fullSuiteOf) may name its working directory
+        const rel = normalizeCwd((c as { readonly cwd?: string }).cwd);
+        const cwd = rel === '.' ? req.dir : join(req.dir, ...rel.split('/'));
+        if (rel !== '.') mkdirSync(cwd, { recursive: true });
+        const out = ctx.runner({ command, cwd, timeoutMs: ctx.commandTimeoutMs });
         const fields = fieldsOf(out, { [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: command, commandId: c.id.slice(0, 200), run, purpose: `closing checks of delivery ${req.delivery}`, delivery: req.delivery });
         const id = `${run}.${idPart(c.id)}`;
         const passed = fields['status'] === 'completed' && fields['exit'] === '0';
-        const t = passed ? '' : tail(out.output, 20);
+        const t = passed ? '' : tail(out.output, { lines: 20, bytes: LOCAL_TAIL.bytes });
         recorded.push({ evidence: id, command: { id: c.id, command }, passed, summary: summaryOf(fields), fields, tail: t, reused: false });
         outcomes.push({ id: c.id, passed, exitCode: out.exitCode, run: id, outputHash: fields['output']!, tail: t });
       }

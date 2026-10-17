@@ -10,6 +10,7 @@ import { currentEnvironment, type CurrentEnvironment, type EnvironmentParts } fr
 import type { Ident } from '../git/objects.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import type { SnapshotFiles } from '../seat/results.ts';
+import type { SuiteCommand } from '../common/fullSuite.ts';
 import { collectCandidate, ensureWorkspace, releaseWorkspace, removeWorkspace, type Collection, type CollectRequest, type GitContext } from '../git/workspace.ts';
 import type { FlowPorts, FlowSchedulerPort } from '../flow/ports.ts';
 import { gitActions } from './actions.ts';
@@ -48,6 +49,8 @@ export interface ProcessOptions {
   readonly targetBranch?: string;
   /** Per declared command (default 30 minutes). */
   readonly commandTimeoutMs?: number;
+  /** The project's full test suite (config.json `fullSuite`, or its alias `closingChecks`: fullSuiteOf); default none. */
+  readonly fullSuite?: readonly SuiteCommand[];
   /** Tests without a repository: the files of a snapshot commit that hand-back pointers are checked against (null: not checked). Default: git's (seat.ts commitFiles). */
   readonly snapshotFiles?: (commit: string) => SnapshotFiles | null;
 }
@@ -60,6 +63,8 @@ export interface ProcessContext {
   readonly runner: CommandRunner;
   readonly targetBranch: string;
   readonly commandTimeoutMs: number;
+  /** The project's full test suite (4.1.2: integration Reviewer full-run, mp pm full-run); empty when none is configured. */
+  readonly fullSuite: readonly SuiteCommand[];
   /** The PM's filler for this process's `mp pm` writes (information only). */
   filler: Filler | null;
   /**
@@ -99,6 +104,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     runner: o.runner ?? shellRunner,
     targetBranch: o.targetBranch ?? 'main',
     commandTimeoutMs: o.commandTimeoutMs ?? 30 * 60_000,
+    fullSuite: o.fullSuite ?? [],
     filler: o.filler ?? null,
     snapshotFiles: o.snapshotFiles ?? null,
     handover: null,

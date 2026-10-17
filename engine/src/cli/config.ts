@@ -3,9 +3,13 @@
 // what the project declares, nothing about any harness or model account:
 //
 //   targetBranch            the branch missions deliver to; its head is a mission's base
-//   verificationCommands    the project's own test commands, for the PM and the Architect to name
-//                           in plans (each task's card carries the commands `mp` runs, §5.3)
-//   closingChecks           run by `mp pm deliver` on the delivery candidate's clean checkout (§6.7)
+//   verificationCommands    the project's local tests, for the PM and the Architect to name in
+//                           plans (each task's card carries the commands `mp` runs, §5.3)
+//   fullSuite               the project's full test suite (4.1.2, D-4..D-7): run by `mp` for an
+//                           integration Reviewer (`mp seat <id> full-run`), by the PM's decision
+//                           (`mp pm full-run`), and by the delivery; optional, with no default
+//   closingChecks           the 4.1.1 key, read as a deprecated alias of `fullSuite` when that is
+//                           absent (fullSuiteOf, src/common/fullSuite.ts); `mp config` says which
 //   commandTimeoutMs        per declared command
 //   environment             { versionCommands }: what the environment identity covers (§6.5)
 //   exclusiveResources      resources tasks may lease (a database, a device); informational here
@@ -20,7 +24,11 @@ import { CliError, EXIT } from './errors.ts';
 
 export const CONFIG_FORMAT = 'mp41.config.v1';
 
-const Command = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/), command: z.union([z.string().min(1).max(4000), z.array(z.string().min(1)).min(1).max(100)]) }).strict();
+const CommandId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+const CommandLine = z.union([z.string().min(1).max(4000), z.array(z.string().min(1)).min(1).max(100)]);
+const Command = z.object({ id: CommandId, command: CommandLine }).strict();
+/** A full-suite command (COMMON `fullSuite`: `{ id, command, cwd? }`; cwd relative to the repository root). */
+const SuiteCommandSchema = z.object({ id: CommandId, command: CommandLine, cwd: z.string().min(1).max(1000).optional() }).strict();
 
 /** The seats a filler hint can name (role pages under roles/). */
 export const SEATS: readonly string[] = ['pm', 'calibrator', 'architect', 'secretary', 'constructor', 'reviewer', 'researcher', 'crititor', 'stabilizer', 'auditor'];
@@ -30,7 +38,9 @@ export const ConfigSchema = z
     format: z.literal(CONFIG_FORMAT),
     targetBranch: z.string().min(1).max(255).regex(/^[^\s~^:?*[\\]+$/, 'a branch name'),
     verificationCommands: z.array(Command).max(100).default([]),
-    closingChecks: z.array(Command).max(100).default([]),
+    // optional with no default, so that the alias works: fullSuiteOf(config) reads fullSuite, else closingChecks
+    fullSuite: z.array(SuiteCommandSchema).max(100).optional(),
+    closingChecks: z.array(Command).max(100).optional(),
     commandTimeoutMs: z.number().int().min(1_000).max(24 * 3_600_000).default(30 * 60_000),
     environment: z.object({ versionCommands: z.array(z.string().min(1).max(1000)).max(50).default([]) }).strict().default({ versionCommands: [] }),
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
@@ -61,7 +71,7 @@ export function defaultConfig(o: { readonly targetBranch: string; readonly versi
     format: CONFIG_FORMAT,
     targetBranch: o.targetBranch,
     verificationCommands: [],
-    closingChecks: [],
+    fullSuite: [],
     commandTimeoutMs: 30 * 60_000,
     environment: { versionCommands: [...o.versionCommands] },
     exclusiveResources: [],
@@ -81,6 +91,15 @@ export function parseConfig(raw: unknown): ProjectConfig {
     if (!SEATS.includes(seat)) throw new CliError('BAD_CONFIG', `.mission-pipeline/config.json: fillers.${seat}: not a seat (seats: ${SEATS.join(', ')})`, { exitCode: EXIT.REFUSED });
   }
   return r.data;
+}
+
+/**
+ * Which key the full suite was read from (COMMON: `fullSuite`, else the deprecated alias
+ * `closingChecks`), and whether both are present (then `fullSuite` wins and `mp config` warns).
+ */
+export function fullSuiteSource(c: Pick<ProjectConfig, 'fullSuite' | 'closingChecks'>): { readonly key: 'fullSuite' | 'closingChecks' | null; readonly both: boolean } {
+  const both = c.fullSuite !== undefined && c.closingChecks !== undefined;
+  return { key: c.fullSuite !== undefined ? 'fullSuite' : c.closingChecks !== undefined ? 'closingChecks' : null, both };
 }
 
 /** The project's configuration; a missing file is the defaults with branch "main" (a project initialized by hand). */

@@ -93,6 +93,27 @@ export function rerunMismatch(original: Readonly<Record<string, string>>, rerun:
   return null;
 }
 
+/**
+ * 4.1.2 (invalidation by cause): a run `mp` recorded (it names its candidate) under an older run
+ * method than RUN_METHOD, i.e. 4.1.0's plain checkouts without `.git`, which is known to be wrong for
+ * commands that read git state. Such a run never counts as evidence; a run under an older
+ * environment identity (a tool-version drift) still does, labelled "older environment".
+ */
+export function olderRunMethod(fields: Readonly<Record<string, string>>): boolean {
+  return Object.hasOwn(fields, RUN_FIELD.candidate) && fields[RUN_FIELD.method] !== RUN_METHOD;
+}
+
+/**
+ * 4.1.2: whether a recorded run still counts as evidence, one rule for every reader
+ * (semantics.ts evidenceApplicable, the Auditor's card): a run on the 4.1 environment line counts
+ * under any environment identity unless it was recorded under an older run method; a run on any
+ * other line counts while it is bound to its line's current snapshot.
+ */
+export function runCounts(rec: { readonly envLine: string; readonly envSnapshot: string; readonly fields: Readonly<Record<string, string>> }, currentSnapshot: string | undefined): boolean {
+  if (rec.envLine === ENV_LINE) return !olderRunMethod(rec.fields);
+  return currentSnapshot === rec.envSnapshot;
+}
+
 /** Current-method reuse key. Old evidence remains readable and usable by its seat's judgment,
  * but cannot stand for an execution in a repository at the candidate. */
 export function reusableMethodRun(db: Db, key: { readonly candidate: string; readonly command: string; readonly cwd: string; readonly environment: string }): { readonly evidence: string; readonly fields: Readonly<Record<string, string>> } | null {

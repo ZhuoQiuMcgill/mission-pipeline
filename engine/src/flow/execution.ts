@@ -676,8 +676,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       return actionRefused(ctx, `${product.object}:verify`, e);
     }
     if (v === 'pending') return;
-    runs = [...v];
-    await commit(ctx, `flow:verified:${ctx.mission}:${product.object}`, { events: [ev(ctx, lineName, 'verified', String(k), { runs })] });
+    runs = await commitVerified(ctx, lineName, k, product.object, [...v]);
   }
 
   // the Reviewer (a re-review after an answered "needs decision")
@@ -712,6 +711,33 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
         handover: { from: rev, objects: [product.object] },
       });
       return;
+  }
+}
+
+/** The guard code of a "verified" event another writer recorded first (commitVerified). */
+const VERIFIED_FIRST = 'VERIFIED_FIRST';
+
+/**
+ * Attempt k's "verified" event (4.1.2): the Constructor's hand-back records its runs as this event
+ * in its own process (seat.ts recordVerified), so the flow normally reads it and runs nothing. When
+ * both reach it together, the first writer wins: the flow writes only while the event is absent
+ * (in its write), and otherwise adopts the recorded runs; nothing conflicts.
+ */
+async function commitVerified(ctx: FlowCtx, lineName: string, k: number, object: string, runs: VerificationRun[]): Promise<VerificationRun[]> {
+  const kept = async (): Promise<VerificationRun[] | null> => (await eventOf<{ runs: VerificationRun[] }>(ctx, lineName, 'verified', String(k)))?.body.runs ?? null;
+  const first = await kept();
+  if (first !== null) return first;
+  try {
+    await commit(ctx, `flow:verified:${ctx.mission}:${object}`, {
+      events: [ev(ctx, lineName, 'verified', String(k), { runs })],
+      guard: { absent: [{ mission: ctx.mission, line: lineName, event: 'verified', key: String(k) }], code: VERIFIED_FIRST, message: `attempt ${k} of ${lineName} was verified by another writer first` },
+    });
+    return runs;
+  } catch (e) {
+    if ((e as { code?: string }).code !== VERIFIED_FIRST) throw e;
+    const adopted = await kept();
+    if (adopted === null) throw e;
+    return adopted;
   }
 }
 
@@ -1555,6 +1581,8 @@ async function submitReviewer(
     candidate: { changedPaths: [...changedPaths] },
     verificationRuns: runs.map((r) => ({ evidence: r.evidence, command: r.command, summary: r.summary })),
     declaredCommands: t.verificationCommands.map((x) => ({ ...x })),
+    // 4.1.2 (D-5, D-6): an integration task's Reviewer judges the whole; `mp seat <id> full-run` is offered when the project declares a full suite
+    ...(t.kind === 'integration' ? { integration: true } : {}),
     selfReportedGaps: gaps,
     openIssues,
     binding: {

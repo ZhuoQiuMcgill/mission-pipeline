@@ -19,9 +19,14 @@
 //                     decision 14), the report filed as the leaf dispatches/<d>/report.md, the
 //                     records appended in the same write, then the process advanced. Once it is
 //                     recorded, tmp/<dispatch>/ is removed and the dispatch's checkout holds end.
+//   full-run          (an integration task's Reviewer, when the project declares a full suite) the
+//                     full suite on a clean checkout of the candidate, last, once nothing visible is
+//                     wrong (4.1.2, D-5, D-6; fullRuns.ts); its runs become citable by the dispatch
 // A Constructor's hand-back first collects its candidate from its worktree (A4, decision 17),
 // then `mp` runs the card's verification commands on a clean checkout of the candidate (§5.3)
-// and removes the worktree once the hand-back is accepted.
+// and removes the worktree once the hand-back is accepted. Those runs are recorded as the flow's
+// "verified" event of that attempt in the same process (4.1.2: the flow reads it and never runs
+// them again); the first writer of that event wins, the other adopts it.
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -32,6 +37,7 @@ import type { Collection } from '../git/workspace.ts';
 import { continuationCheck, type ContinuationRequest } from '../evaluator/index.ts';
 import {
   appendRecords,
+  assertNotStopped,
   recordContinuationCheck,
   dispatchInfo,
   dispatchLeaf,
@@ -60,6 +66,8 @@ import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
 import { runOnCommit, type RecordedRun } from './runs.ts';
+import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
+import { tagScope } from '../delivery/scope.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
 import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
@@ -106,8 +114,9 @@ function inFlight(v: DispatchView, what: string): void {
   if (v.info.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${v.info.dispatch} is ${v.info.state === 'released' ? `released (${v.info.released})` : 'handed back'}: ${what} is for a dispatch in flight`);
 }
 
-function allows(v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'request-evidence'): void {
-  if (!seatCommandsOf(v.card).includes(command)) throw new ProcessError('NOT_ALLOWED', `the ${v.card.seat} card of dispatch ${v.info.dispatch} has no \`${command}\` command (its commands: ${seatCommandsOf(v.card).join(', ')})`);
+function allows(ctx: ProcessContext, v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'request-evidence' | 'full-run'): void {
+  const commands = seatCommandsOf(v.card, { fullSuite: ctx.fullSuite });
+  if (!commands.includes(command)) throw new ProcessError('NOT_ALLOWED', `the ${v.card.seat} card of dispatch ${v.info.dispatch} has no \`${command}\` command (its commands: ${commands.join(', ')})`);
 }
 
 /**
@@ -116,7 +125,7 @@ function allows(v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'reque
  */
 export function seatRead(ctx: ProcessContext, dispatch: string, material: string, page = 1): { readonly material: string; readonly page: number; readonly pages: number; readonly mustRead: boolean; readonly text: string } {
   const v = dispatchView(ctx, dispatch);
-  allows(v, 'read');
+  allows(ctx, v, 'read');
   const materials = ((v.card['materials'] as MaterialRef[] | undefined) ?? []);
   const m = materials.find((x) => x.id === material);
   if (m === undefined) throw new ProcessError('NOT_ALLOWED', `"${material}" is not a material on the card (materials: ${materials.map((x) => x.id).join(', ') || 'none'})`);
@@ -149,7 +158,7 @@ const COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
  */
 export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promise<{ readonly path: string; readonly commit: string | null }> {
   const v = dispatchView(ctx, dispatch);
-  allows(v, 'checkout');
+  allows(ctx, v, 'checkout');
   const snap = cardSnapshot(v);
   if (snap === null) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to read`);
   if (!COMMIT.test(snap)) return { path: join(ctx.projectDir, ...snap.split('/')), commit: null };
@@ -165,8 +174,10 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promi
  */
 export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<{ readonly run: string; readonly passed: boolean; readonly summary: string; readonly leaf: string | null }> {
   const v = dispatchView(ctx, dispatch);
+  // a stop stops (§6.6): nothing is run in its scope, refused before any other refusal
+  ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this rerun'));
   inFlight(v, 'a rerun');
-  allows(v, 'rerun');
+  allows(ctx, v, 'rerun');
   const c = rerunCommands(v.card).find((x) => x.id === commandId);
   if (c === undefined) throw new ProcessError('NOT_ALLOWED', `"${commandId}" is not a declared command on the card (ids: ${rerunCommands(v.card).map((x) => x.id).join(', ')})`);
   const snap = cardSnapshot(v);
@@ -189,6 +200,80 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
   });
   const x = r.runs[0]!;
   return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf };
+}
+
+/** An integration task's Reviewer card (the flow marks it; `full-run` is offered when the project declares a full suite). */
+function integrationReview(ctx: ProcessContext, card: DispatchView['card']): boolean {
+  return card.seat === 'reviewer' && card['integration'] === true && ctx.fullSuite.length > 0;
+}
+
+/**
+ * `mp seat <id> full-run` (4.1.2, D-5, D-6): an integration task's Reviewer has `mp` run the full
+ * suite on a clean checkout of its candidate (fullRuns.ts runFullSuite: a passing full run on the
+ * same tree and environment is reused, nothing executed); the marker cites the dispatch and its
+ * runs become citable as evidence:<id> by this dispatch. The card asks for it last, once nothing
+ * visible is wrong.
+ */
+export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promise<{ readonly marker: FullRunMarker; readonly reused: boolean }> {
+  const v = dispatchView(ctx, dispatch);
+  // a stop stops (§6.6): no suite is run in its scope, refused before any other refusal
+  ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this full run'));
+  inFlight(v, 'a full run');
+  allows(ctx, v, 'full-run');
+  const snap = cardSnapshot(v);
+  if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
+  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag) });
+}
+
+/**
+ * The integration Reviewer's pass (4.1.2, D-6): when the project declares a full suite, a "pass"
+ * cites a passing full run of its candidate (its tree, the current suite); rework and
+ * needs-decision need none. Empty: nothing to refuse.
+ */
+function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
+  if (!integrationReview(ctx, v.card)) return [];
+  const r = fields as { verdict?: unknown; judgments?: Array<{ evidence?: unknown }> } | null;
+  if (r === null || typeof r !== 'object' || r.verdict !== 'pass') return [];
+  const snap = cardSnapshot(v);
+  if (snap === null || !COMMIT.test(snap)) return [];
+  const cited = new Set((Array.isArray(r.judgments) ? r.judgments : []).flatMap((j) => (Array.isArray(j?.evidence) ? j.evidence : [])).filter((e): e is string => typeof e === 'string' && e.startsWith('evidence:')).map((e) => e.slice('evidence:'.length)));
+  let tree: string;
+  try {
+    tree = treeOf(ctx, snap);
+  } catch (e) {
+    return [`verdict: an integration task's "pass" cites a passing full run of its candidate, and the candidate's tree cannot be read here (${(e as Error).message})`];
+  }
+  const data = ctx.memory.data;
+  const passing = ctx.memory.read((db) => passingFullRunEvidence(db, data, tree, suiteHash(ctx.fullSuite)));
+  if ([...cited].some((e) => passing.has(e))) return [];
+  return [`verdict: an integration task's "pass" cites a passing full run of its candidate: when nothing visible is wrong, run \`mp seat ${v.info.dispatch} full-run\` and cite its runs as evidence:<id>; if the change or the local results already show a problem, hand back "rework" (or "needs-decision") without a full run`];
+}
+
+/** The plan task line and attempt of a Constructor dispatch's task: the flow's "dispatched" event keyed by it (execution.ts submitConstructor), or null. */
+function constructorAttempt(ctx: ProcessContext, mission: string, task: string): { readonly line: string; readonly k: number } | null {
+  const data = ctx.memory.data;
+  return ctx.memory.read((db) => {
+    const row = db.stmt("SELECT line, body FROM flow_events WHERE mission = ? AND event = 'dispatched' AND key = ? AND line LIKE 'task:%' ORDER BY revision LIMIT 1").get(mission, task) as { line: string; body: string } | undefined;
+    if (row === undefined) return null;
+    const k = (JSON.parse(data.text(row.body)) as { k?: unknown }).k;
+    return typeof k === 'number' && Number.isSafeInteger(k) ? { line: row.line, k } : null;
+  });
+}
+
+/**
+ * The hand-back's runs as the flow's "verified" event of that attempt (4.1.2 item 1): the flow
+ * pass reads it and never executes them again. One writer wins: an event already there (the flow
+ * wrote it first) is kept and nothing is written; the flow adopts this one when it comes second.
+ */
+export function recordVerified(ctx: ProcessContext, v: DispatchView, runs: readonly VerificationRun[]): 'recorded' | 'kept' | 'no-attempt' {
+  const at = constructorAttempt(ctx, v.info.mission, v.info.task);
+  if (at === null) return 'no-attempt';
+  const key = String(at.k);
+  return ctx.memory.write({ op: `handback-verified:${v.info.dispatch}`, payload: { dispatch: v.info.dispatch, line: at.line, k: at.k } }, (tx) => {
+    if (flowEventExists(tx, { mission: v.info.mission, line: at.line, event: 'verified', key })) return 'kept' as const;
+    appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: at.line, event: 'verified', key, body: tx.data.put(canonicalJson({ runs })) as ContentHash }]);
+    return 'recorded' as const;
+  });
 }
 
 // ---------------------------------------------------------------- hand-backs
@@ -384,6 +469,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const problems = [
       ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not read (mp seat ${dispatch} read <material> --page <n>)`),
       ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}) }),
+      ...integrationPassProblems(ctx, v, input.fields),
     ];
     const unique = [...new Set(problems)];
     if (unique.length > 0) return refuse(ctx, dispatch, 'handback', unique);
@@ -441,6 +527,12 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       else {
         verification = [...runs];
         for (const r of runs) if ('setupFailure' in r && typeof r.setupFailure === 'string') notes.push(r.setupFailure);
+        // 4.1.2: these runs are the flow's "verified" event of this attempt, so the flow never runs them again
+        try {
+          recordVerified(ctx, v, runs);
+        } catch (e) {
+          notes.push(`the verification result could not be handed to the process now (${(e as Error).message}); mp pm next reuses the recorded runs`);
+        }
       }
     } catch (e) {
       notes.push(`the verification runs could not run now (${(e as Error).message}); mp runs them again on the next step`);
@@ -514,7 +606,7 @@ function collectionProblems(c: Exclude<Collection, { kind: 'candidate' }>): stri
 /** `mp seat <id> request-evidence --request <file.json> --notes <file.md>` (decision 13): a hand-back of kind "needs evidence". */
 export async function seatRequestEvidence(ctx: ProcessContext, dispatch: string, files: { readonly request: string; readonly notes: string; readonly filler?: Filler | null }): Promise<HandBackAnswer> {
   const v = dispatchView(ctx, dispatch);
-  allows(v, 'request-evidence');
+  allows(ctx, v, 'request-evidence');
   const notesText = readHandBackFile(ctx, dispatch, files.notes, 'notes');
   let req: unknown;
   try {
