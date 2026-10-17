@@ -23,7 +23,7 @@ import { recoverLandings, type LandingResult } from '../git/land.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import { pmAction, recordPmAction, type Filler, type Memory } from '../memory/index.ts';
 import { openProcess, type ProcessContext, type ProcessOptions } from '../process/index.ts';
-import { defaultConfig, readConfig, type ProjectConfig } from './config.ts';
+import { commitIdentities, defaultConfig, readConfig, type ProjectConfig } from './config.ts';
 import { fullSuiteOf } from '../common/fullSuite.ts';
 import { CliError, EXIT, errorMessage, wi41 } from './errors.ts';
 
@@ -137,7 +137,9 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   const config = o.readsConfig === false ? defaultConfig({ targetBranch: 'main', versionCommands: [] }) : readConfig(dir);
   const startedAt = Date.now();
   const git = io.process?.git ?? PlainGit.create();
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), filler: o.filler ?? null, ...(io.process ?? {}) });
+  // the identity of the commits mp writes: config `commit` (4.1.2); a test's process options still win
+  const ids = commitIdentities(config);
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {

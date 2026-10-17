@@ -682,6 +682,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       if (refOnly.has(String(r['delivery']))) n.state += ', delivered as a ref only';
       const checks = (doc?.['checks'] ?? []) as Json[];
       if (checks.length > 0) n.checks = `closing checks ${checks.filter((c) => c['passed'] === true).length}/${checks.length} passed`;
+      // 4.1.2: no command runs at delivery; the full-run status of its tree as recorded then
+      else if (typeof (doc?.['fullRun'] as Json | undefined)?.['line'] === 'string') n.checks = `no command ran; at delivery: ${String((doc!['fullRun'] as Json)['line'])}`;
       for (const s of (doc?.['selected'] ?? []) as Json[]) {
         const t = String(s['id'] ?? '');
         if (objects.has(t)) edge(n.key, objKey(t), 'delivers');

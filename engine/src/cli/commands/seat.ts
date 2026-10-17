@@ -27,12 +27,15 @@ function fileArg(c: RunContext, f: string): string {
   return existsSync(here) ? here : f;
 }
 
-function answerResult(a: HandBackAnswer): CommandResult {
+function answerResult(a: HandBackAnswer, p?: Project): CommandResult {
   if (a.kind === 'refused') {
     return ok([`Hand-back of ${a.dispatch} refused (it does not count; fix these and run the same command again):`, ...a.problems.map((x) => `- ${x}`)].join('\n'), a, EXIT.REFUSED);
   }
+  // a Constructor's worktree is removed after its hand-back: a shell that sat in it fails its next command (4.1.2)
+  const removed = a.candidate !== null && p !== undefined && !existsSync(join(p.ctx.memory.paths.worktrees, a.dispatch));
+  const gone = removed ? '; your worktree has been removed — if your shell was inside it, the next command\'s error is expected' : '';
   const lines = [
-    a.repeated ? `Hand-back of ${a.dispatch} was already recorded: nothing new.` : a.outcome === 'accepted' ? `Hand-back of ${a.dispatch} recorded.` : `Hand-back of ${a.dispatch} recorded but not accepted (${a.outcome === 'after-release' ? 'the dispatch was released before it arrived' : 'a stop covers it'}).`,
+    a.repeated ? `Hand-back of ${a.dispatch} was already recorded: nothing new${gone}.` : a.outcome === 'accepted' ? `Hand-back of ${a.dispatch} recorded${gone}.` : `Hand-back of ${a.dispatch} recorded but not accepted (${a.outcome === 'after-release' ? 'the dispatch was released before it arrived' : 'a stop covers it'})${gone}.`,
     ...(a.report !== null ? [`Report: .mission-pipeline/${a.report}`] : []),
     ...(a.candidate !== null ? [`Candidate commit ${a.candidate.commit} on base ${a.candidate.base}: ${a.candidate.changedPaths.join(', ') || 'no changes'}`] : []),
     ...(a.candidate !== null && a.candidate.ignored.length > 0 ? [`Ignored files inside your write paths were not collected: ${a.candidate.ignored.join(', ')}${a.candidate.ignoredTotal > a.candidate.ignored.length ? ` (and ${a.candidate.ignoredTotal - a.candidate.ignored.length} more)` : ''}`] : []),
@@ -183,7 +186,7 @@ const handback: Command = {
     } else if (flagStr(args, 'result-json') !== null) throw usage('--result-json goes with --stdin');
     if (report === null || result === null) throw usage("--stdin (your report on stdin, the fields as its last ```json block), or --report <file.md> --result <file.json>");
     const a = await seatHandback(P(c).ctx, d, { report: fileArg(c, report), result: fileArg(c, result), ...(f !== null ? { filler: parseFiller(f) } : {}) });
-    return answerResult(a);
+    return answerResult(a, P(c));
   },
 };
 

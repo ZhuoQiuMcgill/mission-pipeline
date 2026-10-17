@@ -183,14 +183,13 @@ describe('process: a mission from words to landing (4.1 §5, §6)', () => {
     assert.equal(ds.length, 5);
     assert.deepEqual(ctx.memory.read((db) => dispatchInfo(db, d4.dispatch))?.filler, { harness: 'claude-code', model: 'claude-sonnet' });
 
-    // delivery and landing (A4) with this package's labels and closing runs
+    // delivery and landing (A4) with this package's labels; no command runs at delivery (4.1.2, D-7)
     const w2 = pmSay(ctx, 'Deliver it.');
     ctx = p.ctx;
-    const del = await pmDeliver(ctx, { mission: M, delivery: 'v1', selected: [{ kind: 'object', id: product }], closingChecks: [{ id: 'smoke', command: 'node src/check.js' }], words: w2.words });
+    const del = await pmDeliver(ctx, { mission: M, delivery: 'v1', selected: [{ kind: 'object', id: product }], words: w2.words });
     assert.equal(del.kind, 'delivered', JSON.stringify(del));
     if (del.kind !== 'delivered') return;
-    assert.equal(del.record.checks[0]?.passed, true);
-    assert.ok(del.record.checks[0]?.run !== null, 'the closing check is recorded as a run');
+    assert.equal(del.record.fullRun?.line, 'full suite never run', 'the full-run status of the delivered tree is recorded');
     const landed = await pmLand(ctx, { mission: M, delivery: 'v1', words: w2.words });
     assert.equal(landed.kind, 'landed', JSON.stringify(landed));
     assert.equal(p.git('rev-parse', 'refs/heads/main'), del.record.commit);

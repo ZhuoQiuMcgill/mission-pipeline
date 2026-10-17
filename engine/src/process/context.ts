@@ -33,8 +33,10 @@ export interface ProcessOptions {
   /** How git runs (default: plain `git` from PATH). */
   readonly git?: PlainGit;
   readonly now?: () => number;
-  /** Author and committer of the commits `mp` writes (candidates, snapshot overlays). */
+  /** Author of the commits `mp` writes (candidates, snapshot overlays, deliveries): config `commit.author` (4.1.2). */
   readonly ident?: Ident;
+  /** Committer of the delivery and candidate commits: config `commit.committer` (default: the author). */
+  readonly committer?: Ident;
   /** Tests: the environment observation instead of running the declared version commands. */
   readonly observe?: () => EnvironmentParts;
   /** Runs the project's declared commands (default: the platform's shell). */
@@ -76,8 +78,10 @@ export interface ProcessContext {
   readonly snapshotFiles: ((commit: string) => SnapshotFiles | null) | null;
   /** The git package's context (A4). */
   readonly gitCtx: GitContext;
-  /** The identity of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
+  /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
+  /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
+  committer(at?: number): Ident;
   /** The current environment identity (§6.5): observed once per process, recorded when it changed. Call it before any decision that reads labels. */
   environment(): CurrentEnvironment;
   /** The flows' ports on this memory (ports.ts), built once. */
@@ -92,6 +96,12 @@ const DEFAULT_IDENT: Ident = { name: 'Mission Pipeline', email: 'mp@localhost' }
 
 /** A context over an open memory (the caller closes the memory). */
 export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessContext {
+  const dated = (base: Ident, at?: number): Ident => {
+    if (base.date !== undefined && at === undefined) return base;
+    const secs = Math.floor((at ?? ctx.now()) / 1000);
+    // "@" marks a Unix time whatever its size (git refuses a bare small one, such as the overlay's fixed 0)
+    return { name: base.name, email: base.email, date: `@${secs} +0000` };
+  };
   const git = o.git ?? PlainGit.create();
   let ports: FlowPorts | null = null;
   let actions: GitActions | null = null;
@@ -110,11 +120,10 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     handover: null,
     gitCtx: { memory, git },
     ident(at?: number): Ident {
-      const base = o.ident ?? DEFAULT_IDENT;
-      if (base.date !== undefined && at === undefined) return base;
-      const secs = Math.floor((at ?? ctx.now()) / 1000);
-      // "@" marks a Unix time whatever its size (git refuses a bare small one, such as the overlay's fixed 0)
-      return { name: base.name, email: base.email, date: `@${secs} +0000` };
+      return dated(o.ident ?? DEFAULT_IDENT, at);
+    },
+    committer(at?: number): Ident {
+      return dated(o.committer ?? o.ident ?? DEFAULT_IDENT, at);
     },
     environment(): CurrentEnvironment {
       return currentEnvironment(memory, o.observe !== undefined ? { observe: o.observe } : {});

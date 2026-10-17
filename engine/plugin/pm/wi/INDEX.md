@@ -16,7 +16,7 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-16: A dependency cycle
 - WI-19: The transform description changed after acceptance
 - WI-20: Inconsistent program records or namespace, or an internal error
-- WI-21: The delivery candidate's closing checks failed
+- WI-21: A full run at the end failed
 - WI-23: A re-plan dropped or changed a task that has work in flight
 - WI-24: The Secretary could not decide: you and the user decide (mp pm answer)
 - WI-25: A legalization cannot complete: a broken link, a failed backfill, or the chain not accepted

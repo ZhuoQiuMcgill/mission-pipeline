@@ -476,7 +476,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     if (entry.exportsProduct === true) {
       const ws = v.card['workspace'] as { snapshot: string; writablePaths: readonly string[] };
       const ident = ctx.ident(v.info.createdAt);
-      const c = await ctx.workspaces().collect({ dispatch, base: ws.snapshot, writePaths: ws.writablePaths, message: `mission-pipeline: ${v.info.task} (dispatch ${dispatch}, mission ${v.info.mission})`, author: ident, committer: ident });
+      const c = await ctx.workspaces().collect({ dispatch, base: ws.snapshot, writePaths: ws.writablePaths, message: `mission-pipeline: ${v.info.task} (dispatch ${dispatch}, mission ${v.info.mission})`, author: ident, committer: ctx.committer(v.info.createdAt) });
       if (c.kind !== 'candidate') return refuse(ctx, dispatch, 'handback', collectionProblems(c));
       candidate = { commit: c.commit, base: c.base, changedPaths: [...new Set([...c.added, ...c.modified, ...c.deleted, ...c.modeChanged])].sort(), ignored: c.ignored.paths, ignoredTotal: c.ignored.total };
     }
@@ -655,11 +655,16 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
   return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate: null, verification: null, notes };
 }
 
-/** Advance the mission's process after a hand-back (§5.1 step 4); a flow error is the PM's (a notice), never the seat's. */
+/**
+ * Advance the mission's process after a hand-back (§5.1 step 4); a flow error is the PM's (a notice), never
+ * the seat's. A seat-side pass (4.1.2): what the seat's sandbox could not write is left to the PM's next
+ * step with a note, and raises no WI-20 notice; any other error still does.
+ */
 async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<void> {
   try {
     // the work this hand-back hands over is recorded as handed over by it (§3.2, U-13)
-    await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` });
+    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, { seatSide: true });
+    for (const r of reports) for (const e of r.errors) if (e.sandbox !== undefined) notes.push(`left to the PM: this seat's sandbox could not write ${e.sandbox}`);
   } catch (e) {
     notes.push(`the process will advance on the PM's next step (${(e as Error).message})`);
   }

@@ -7,7 +7,7 @@ import { recompute } from '../../evaluator/index.ts';
 import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { CliError, EXIT, usage } from '../errors.ts';
-import { configPath, fullSuiteSource, parseConfig, readConfig } from '../config.ts';
+import { configPath, DEFAULT_COMMIT_IDENT, fullSuiteSource, parseConfig, readConfig } from '../config.ts';
 import { fullSuiteOf } from '../../common/fullSuite.ts';
 import { copyDocs, mpInit, mpVersion, type PointerTarget } from '../init.ts';
 import type { Project } from '../project.ts';
@@ -66,10 +66,11 @@ const config: Command = {
       `Target branch: ${cfg.targetBranch}`,
       ...section('Local tests: verificationCommands (the Architect may assign them to tasks)', cfg.verificationCommands.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
       ...section(
-        `Full suite (integration Reviewer full-run, mp pm full-run, mp pm deliver), read from ${src.key === 'fullSuite' ? 'fullSuite' : src.key === 'closingChecks' ? 'closingChecks (deprecated alias: rename it to fullSuite)' : 'neither key'}`,
+        `Full suite (the integration Reviewer's full-run, mp pm full-run), read from ${src.key === 'fullSuite' ? 'fullSuite' : src.key === 'closingChecks' ? 'closingChecks (deprecated alias: rename it to fullSuite)' : 'neither key'}`,
         suite.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}${x.cwd !== undefined ? ` (in ${x.cwd})` : ''}`),
         'none',
       ),
+      `Commit identity: author ${cfg.commit?.author ?? `${DEFAULT_COMMIT_IDENT} (default)`}; committer ${cfg.commit?.committer ?? (cfg.commit?.author !== undefined ? 'the author' : `${DEFAULT_COMMIT_IDENT} (default)`)}`,
       ...section('Environment identity: version commands', cfg.environment.versionCommands, 'none (operating system and architecture only)'),
       ...section('Exclusive resources', cfg.exclusiveResources, 'none'),
       ...section('Filler hints', Object.entries(cfg.fillers).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`), 'none'),

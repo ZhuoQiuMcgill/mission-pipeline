@@ -1,8 +1,8 @@
 // The optional Claude Code adapter (plugin/hooks/claude-code.mjs; design 4.1 §6.1, decision 9):
 // a prompt is recorded with `mp pm say` and the PM's own `mp pm say` of the same text records
 // nothing new; the fixed prompt of a dispatched seat is never recorded as the user's words; outside
-// a project it does nothing and never blocks; at session start it prints the handbook core and
-// `mp pm next`.
+// a project it does nothing and never blocks; at session start (every session, a seat's included)
+// it prints a neutral three-line pointer and runs no `mp` command (4.1.2).
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -19,9 +19,13 @@ function hook(event: string, input: unknown, cwd: string): { code: number; out: 
 }
 
 function words(dir: string): number {
+  return count(dir, 'SELECT COUNT(*) AS n FROM words');
+}
+
+function count(dir: string, sql: string): number {
   const db = new DatabaseSync(join(dir, '.mission-pipeline', 'memory.db'), { readOnly: true });
   try {
-    return Number((db.prepare('SELECT COUNT(*) AS n FROM words').get() as { n: number }).n);
+    return Number((db.prepare(sql).get() as { n: number }).n);
   } finally {
     db.close();
   }
@@ -58,12 +62,19 @@ describe('the optional Claude Code adapter', () => {
     assert.equal(words(p.dir), 1);
   });
 
-  it('at session start: the handbook core and mp pm next', () => {
+  it('4.1.2: at session start, a neutral three-line pointer; no mp command runs (a seat never acts as the PM)', () => {
+    const before = [count(p.dir, 'SELECT COUNT(*) AS n FROM log'), count(p.dir, 'SELECT COUNT(*) AS n FROM pm_actions')];
     const r = hook('session-start', { cwd: p.dir }, p.dir);
     assert.equal(r.code, 0);
-    assert.match(r.out, /If you are acting as the Mission Pipeline PM/);
-    assert.match(r.out, /mp pm say/);
-    assert.match(r.out, /\$ mp pm next\n[\s\S]*Notices \(first\)/);
+    assert.equal(
+      r.out,
+      'This project uses Mission Pipeline.\nIf you are the PM, read the core of `.mission-pipeline/pm/PM.md` and run `mp pm next`.\nIf you were started as a seat, your card (`mp seat <id> card`) is your whole instruction.\n',
+    );
+    assert.doesNotMatch(r.out, /Notices \(first\)|Ready steps/, 'no PM steps are shown');
+    assert.deepEqual([count(p.dir, 'SELECT COUNT(*) AS n FROM log'), count(p.dir, 'SELECT COUNT(*) AS n FROM pm_actions')], before, 'nothing was written: no mp pm next ran');
+    // from inside a seat's folder under the project, the same pointer
+    const nested = hook('session-start', { cwd: join(p.dir, '.mission-pipeline', 'tmp') }, p.dir);
+    assert.equal(nested.out, r.out);
   });
 
   it('outside a project it prints nothing and exits 0', () => {

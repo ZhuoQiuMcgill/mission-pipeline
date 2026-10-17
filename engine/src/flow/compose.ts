@@ -17,11 +17,14 @@ export interface CreateFlowEngineOptions {
   readonly maxPasses?: number;
   /** Extra steps (tests, future flows), run after the built-in ones. */
   readonly steps?: ReadonlyArray<{ readonly name: string; readonly step: FlowStep }>;
+  /** A seat-side pass (4.1.2): permission errors of the seat's environment are left to the PM, without a notice. */
+  readonly seatSide?: boolean;
 }
 
 export function createFlowEngine(ports: FlowPorts, o: CreateFlowEngineOptions = {}): FlowEngine {
   return new FlowEngine(ports, {
     ...(o.maxPasses !== undefined ? { maxPasses: o.maxPasses } : {}),
+    ...(o.seatSide === true ? { seatSide: true } : {}),
     steps: [...EXPLORATION_FLOW_STEPS, ...(o.steps ?? [])],
   });
 }

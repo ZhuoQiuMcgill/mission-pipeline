@@ -7,6 +7,7 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
+import { PLAN_LINE } from '../flow/plandoc.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
 import type { Project } from './project.ts';
@@ -264,6 +265,21 @@ export async function showItem(p: Project, kind: string, id: string): Promise<Sh
       extraJson['delivery'] = info;
       extraJson['landingIntents'] = intents;
     }
+  }
+  if (kind === 'plan') {
+    // the mechanical checks' failure texts, as the flow recorded them (the event's own body; 4.1.2)
+    const checks = ctx.memory.read((db) =>
+      found.filter((n) => n.mission !== null).flatMap((n) =>
+        flowEvents(db, { mission: n.mission as MissionId, line: PLAN_LINE, event: 'mechanical-check', limit: 10_000 })
+          .filter((e) => e.key === n.id)
+          .map((e) => ({ plan: n.id, ...(JSON.parse(ctx.memory.data.text(e.body)) as { ok?: boolean; failures?: string[]; orderChanges?: string[] }) })),
+      ),
+    );
+    for (const c of checks) {
+      if (c.ok === true && (c.orderChanges ?? []).length === 0) continue;
+      extra.push(...section(`  mechanical checks of ${c.plan}: ${c.ok === true ? 'passed' : `failed (${(c.failures ?? []).length})`}`, [...(c.failures ?? []).map((f) => `  failed: ${f}`), ...(c.orderChanges ?? []).map((o) => `  order change (to the Secretary): ${o}`)]));
+    }
+    extraJson['mechanicalChecks'] = checks;
   }
   if (kind === 'dispatch' && found[0] !== undefined) {
     const d = found[0].id;

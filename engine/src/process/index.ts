@@ -28,6 +28,7 @@ export {
   pmDrain,
   pmGrant,
   pmLand,
+  pmRebuild,
   pmLegalizationState,
   pmLegalize,
   pmNext,
@@ -70,8 +71,9 @@ export {
   type HandBackInput,
 } from './seat.ts';
 export { DISPATCH_LINE, MemoryFlowEvaluator, MemoryFlowLedger, MemoryFlowScheduler, REDISPATCH_LOOP, handbackDoc, memoryFlowPorts, noticeAlertId, raiseNotice, taskStatus, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
-export { CLOSE_MODES, allowedAfterClose, heldByClose, missionState, pmClose, pmMission, type CloseMode, type Closed } from './close.ts';
+export { CLOSE_MODES, allowedAfterClose, fullRunLine, heldByClose, missionState, pmClose, pmMission, snapshotLines, type CloseMode, type Closed, type CloseSnapshot } from './close.ts';
+export { acceptedOutputs, deliveryIdFor, pmFinish, targetKey, type Finished } from './finish.ts';
 export { cardForSeat, noticeOlderEnvironment, OLDER_ENVIRONMENT_NOTICE, pmReopenExploration } from './environmentLabels.ts';
-export { buildDeliveryCandidate, FULL_RUN_EVENT, FULL_RUNS_LINE, fullRunMarkers, fullRunStatus, missionOutputs, passingFullRunEvidence, pmFullRun, runFullSuite, suiteHash, treeOf, type FullRunBody, type FullRunCites, type FullRunCommand, type FullRunMarker, type FullRunResult, type PmFullRunRequest } from './fullRuns.ts';
+export { buildDeliveryCandidate, FULL_RUN_EVENT, FULL_RUNS_LINE, fullRunMarkers, fullRunStatus, missionOutputs, passingFullRunEvidence, pmFullRun, runFullSuite, suiteHash, treeOf, type FullRunBody, type FullRunCites, type FullRunCommand, type FullRunMarker, type FullRunResult, type FullRunStatus, type PmFullRunRequest } from './fullRuns.ts';
 export { CWD_FIELD, normalizeCwd, runCwd, closingRunner, commandLine, FULL_RUN_TAIL, LOCAL_TAIL, newRunId, runLeaf, runOnCommit, RunInProgress, shellRunner, tail, tapResults, type CommandOutcome, type CommandRunner, type DeclaredCommand, type RecordedRun, type TailLimit } from './runs.ts';
 export { pmClean, sweepTmp, type CleanReport, type SweepReport, type SweptEntry } from './housekeeping.ts';

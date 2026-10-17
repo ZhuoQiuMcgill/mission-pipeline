@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Optional Claude Code adapter (design 4.1 §6.1, §9): nothing in Mission Pipeline needs it.
 //
-//   session-start        prints the PM handbook core (for a session acting as the PM) and `mp pm next`
+//   session-start        prints a neutral three-line pointer, and runs nothing: every session starts
+//                        here, a dispatched seat's included, so it never acts as the PM (4.1.2)
 //   user-prompt-submit   records the user's message verbatim with `mp pm say --stdin`; the PM's own
 //                        `mp pm say` of the same text then records nothing new (decision 9)
 //
@@ -45,6 +46,13 @@ function harnessText(prompt) {
   return t.includes('[Subagent hand-back]');
 }
 
+/** What every session in a project sees at its start (the PM and a dispatched seat alike). */
+const SESSION_POINTER = [
+  'This project uses Mission Pipeline.',
+  'If you are the PM, read the core of `.mission-pipeline/pm/PM.md` and run `mp pm next`.',
+  'If you were started as a seat, your card (`mp seat <id> card`) is your whole instruction.',
+].join('\n');
+
 function inProject(dir) {
   for (let d = dir; ; d = dirname(d)) {
     if (existsSync(join(d, '.mission-pipeline', 'memory.db'))) return true;
@@ -55,20 +63,8 @@ function inProject(dir) {
 try {
   if (inProject(cwd)) {
     if (event === 'session-start') {
-      const core = (() => {
-        for (let d = cwd; ; d = dirname(d)) {
-          const f = join(d, '.mission-pipeline', 'pm', 'PM.md');
-          if (existsSync(f)) {
-            const t = readFileSync(f, 'utf8');
-            const a = t.indexOf('<!-- core:start -->');
-            const b = t.indexOf('<!-- core:end -->');
-            return a >= 0 && b > a ? t.slice(a + '<!-- core:start -->'.length, b).trim() : '';
-          }
-          if (dirname(d) === d) return '';
-        }
-      })();
-      const next = mp(['pm', 'next']);
-      process.stdout.write(`If you are acting as the Mission Pipeline PM: read .mission-pipeline/pm/PM.md; its core:\n${core}\n${next !== null ? `\n$ mp pm next\n${next}` : ''}`);
+      // no mp command and no PM text: a seat would otherwise see the PM's steps and write as the PM
+      process.stdout.write(`${SESSION_POINTER}\n`);
     } else if (event === 'user-prompt-submit') {
       const prompt = typeof input.prompt === 'string' ? input.prompt : '';
       if (prompt.trim() !== '' && !harnessText(prompt)) {

@@ -186,11 +186,14 @@ describe('review r1 #8: closing a mission', () => {
     assert.equal(ctx.memory.read((db) => missionCloses(db, M)).length, 2, 'a new snapshot version on every close');
   });
 
-  it('a full close is refused while an output is not proven or work is unfinished; audits are post-close work', async () => {
+  it('4.1.2 (D-11): a full close with work unfinished is not refused: it closes and its snapshot lists the work; audits are post-close work', async () => {
     p = await toConstructor();
     const ctx = p.ctx;
-    await assert.rejects(() => pmClose(ctx, M, { mode: 'full' }), (e: Error) => e instanceof ProcessError && e.code === 'NOT_READY' && /full close/.test(e.message));
-    assert.equal(ctx.memory.read((db) => missionState(db, M)), 'open', 'nothing written');
+    const closed = await pmClose(ctx, M, { mode: 'full' });
+    assert.equal(closed.mode, 'full', 'the mode is only recorded');
+    assert.equal(ctx.memory.read((db) => missionState(db, M)), 'closed');
+    assert.ok(closed.doc.unfinished.planTasks.length + closed.doc.unfinished.queued.length + closed.doc.unfinished.running.length > 0, JSON.stringify(closed.doc.unfinished));
+    assert.ok(closed.risks.length > 0);
     assert.equal(allowedAfterClose({ card: { seat: 'auditor-node' } }), true);
     assert.equal(allowedAfterClose({ card: { seat: 'reviewer' }, afterClose: 'audit' }), true, 'a re-review after an environment change');
     assert.equal(allowedAfterClose({ card: { seat: 'constructor' } }), false);

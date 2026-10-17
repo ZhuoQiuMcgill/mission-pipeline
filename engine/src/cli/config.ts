@@ -15,11 +15,15 @@
 //   exclusiveResources      resources tasks may lease (a database, a device); informational here
 //   fillers                 per seat, a filler hint "<harness>/<model>" shown by `mp pm next`
 //                           (information only: any filler can fill any seat, §2.1)
+//   commit                  { author?, committer? } as "Name <email>": the identity of the commits
+//                           `mp` writes (4.1.2); default Mission Pipeline <mp@localhost>; the
+//                           committer defaults to the author
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { environmentConfig } from '../evaluator/index.ts';
+import type { Ident } from '../git/objects.ts';
 import { CliError, EXIT } from './errors.ts';
 
 export const CONFIG_FORMAT = 'mp41.config.v1';
@@ -29,6 +33,9 @@ const CommandLine = z.union([z.string().min(1).max(4000), z.array(z.string().min
 const Command = z.object({ id: CommandId, command: CommandLine }).strict();
 /** A full-suite command (COMMON `fullSuite`: `{ id, command, cwd? }`; cwd relative to the repository root). */
 const SuiteCommandSchema = z.object({ id: CommandId, command: CommandLine, cwd: z.string().min(1).max(1000).optional() }).strict();
+/** A commit identity "Name <email>" (git's ident rules: no angle brackets or line breaks in the name, none and no spaces in the email). */
+const IDENT_TEXT = /^([^<>\r\n]*[^<>\s][^<>\r\n]*?)\s*<([^<>\s]+)>$/;
+const IdentText = z.string().max(400).regex(IDENT_TEXT, 'a commit identity "Name <email>"');
 
 /** The seats a filler hint can name (role pages under roles/). */
 export const SEATS: readonly string[] = ['pm', 'calibrator', 'architect', 'secretary', 'constructor', 'reviewer', 'researcher', 'crititor', 'stabilizer', 'auditor'];
@@ -45,8 +52,25 @@ export const ConfigSchema = z
     environment: z.object({ versionCommands: z.array(z.string().min(1).max(1000)).max(50).default([]) }).strict().default({ versionCommands: [] }),
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
     fillers: z.record(z.string(), z.string().min(1).max(400).nullable()).default({}),
+    commit: z.object({ author: IdentText.optional(), committer: IdentText.optional() }).strict().optional(),
   })
   .strict();
+
+/** The default identity of the commits `mp` writes (process/context.ts DEFAULT_IDENT). */
+export const DEFAULT_COMMIT_IDENT = 'Mission Pipeline <mp@localhost>';
+
+function identOf(text: string): Ident {
+  const m = IDENT_TEXT.exec(text)!;
+  return { name: m[1]!.trim(), email: m[2]! };
+}
+
+/** The commit identities config.json declares (`commit.author`, `commit.committer`); absent: the process defaults (the committer falls back to the author). */
+export function commitIdentities(c: ProjectConfig): { readonly author?: Ident; readonly committer?: Ident } {
+  return {
+    ...(c.commit?.author !== undefined ? { author: identOf(c.commit.author) } : {}),
+    ...(c.commit?.committer !== undefined ? { committer: identOf(c.commit.committer) } : {}),
+  };
+}
 
 export type ProjectConfig = z.infer<typeof ConfigSchema>;
 
@@ -54,9 +78,24 @@ export function configPath(projectDir: string): string {
   return join(projectDir, '.mission-pipeline', 'config.json');
 }
 
-/** The version commands `mp init` declares for what it finds in the project (the maintainer edits them freely). */
+/** Folders `mp init` never looks into for version markers (dependencies, build output, tools' state). */
+const SKIP_DIRS = new Set(['node_modules', 'vendor', 'target', 'dist', 'build', 'venv']);
+
+/**
+ * The version commands `mp init` declares for what it finds in the project, at its root and in its
+ * first-level folders (`frontend/package.json` and the like), each command once (the maintainer
+ * edits them freely).
+ */
 export function detectVersionCommands(projectDir: string): string[] {
-  const has = (f: string): boolean => existsSync(join(projectDir, f));
+  const dirs = [projectDir];
+  try {
+    for (const e of readdirSync(projectDir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      if (e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name)) dirs.push(join(projectDir, e.name));
+    }
+  } catch {
+    /* an unreadable folder: the root alone */
+  }
+  const has = (f: string): boolean => dirs.some((d) => existsSync(join(d, f)));
   const out: string[] = [];
   if (has('package.json')) out.push('node --version');
   if (has('pyproject.toml') || has('setup.py') || has('requirements.txt')) out.push('python3 --version');

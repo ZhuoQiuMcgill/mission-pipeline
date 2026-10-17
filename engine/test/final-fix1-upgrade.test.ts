@@ -64,15 +64,14 @@ async function legacyB9() {
   return { ...w, engine, script };
 }
 
-test('T1a: close checks the persisted B9 start before any pass; both risk modes record it; reopen rebuilds once', async () => {
+test('T1a: close checks the persisted B9 start before any pass; every mode records it (4.1.2: never refused); reopen rebuilds once', async () => {
   const w = await legacyB9();
   const p = 'prod.con.m1.docs.1';
   assert.equal(w.checks.size, 0, 'no flow pass after acceptance has checked the legacy start');
-  await assert.rejects(async () => pmClose(w.ports.ctx, M, { mode: 'full' }), (e) => {
-    assert.ok(notReady(e));
-    for (const text of [p, 'prod.con.m1.iface.1', 'src/parser/api.ts', 'mp pm next']) assert.ok(e.message.includes(text), e.message);
-    return true;
-  });
+  const full = await pmClose(w.ports.ctx, M, { mode: 'full', request: 'full' });
+  for (const text of [p, 'prod.con.m1.iface.1', 'src/parser/api.ts', 'mp pm next']) assert.ok(full.doc.startRisks.some((r) => r.includes(text)), JSON.stringify(full.doc.startRisks));
+  assert.equal(w.ports.memory.read((db) => missionState(db, M)), 'closed');
+  pmMission(w.ports.ctx, M, 'open');
   assert.equal(w.ports.memory.read((db) => missionState(db, M)), 'open');
   for (const mode of ['with-risk', 'post-audit'] as const) {
     const closed = await pmClose(w.ports.ctx, M, { mode, request: mode });
@@ -91,7 +90,7 @@ test('T1a: close checks the persisted B9 start before any pass; both risk modes 
   assert.equal((await pmClose(w.ports.ctx, M, { mode: 'full', request: 'recovered' })).mode, 'full');
 });
 
-test('T1b: an unreadable accepted start still refuses full close after a pass; restored objects allow retry', async () => {
+test('T1b: an unreadable accepted start is recorded by a full close after a pass (4.1.2: never refused); restored objects clear it', async () => {
   const w = provenancePorts();
   const exposeLegacy = oldDispatches(w.ports);
   const engine = await seed(w.ports);
@@ -103,12 +102,15 @@ test('T1b: an unreadable accepted start still refuses full close after a pass; r
   w.ports.scheduler.actions.startHolds = async () => { throw new Error('missing local commit'); };
   await engine.reconcile(M);
   assert.ok(w.ports.ledger.notices.some((n) => n.category === 'legacy-prerequisites-unavailable'));
-  await assert.rejects(async () => pmClose(w.ports.ctx, M, { mode: 'full' }), (e) => notReady(e) && /start cannot be read.*legacy-prerequisites-unavailable/.test(e.message) && /mp pm next/.test(e.message));
+  const full = await pmClose(w.ports.ctx, M, { mode: 'full', request: 'unreadable' });
+  assert.ok(full.doc.startRisks.some((r) => /start cannot be read.*legacy-prerequisites-unavailable/.test(r)), JSON.stringify(full.doc.startRisks));
+  pmMission(w.ports.ctx, M, 'open');
   const risk = await pmClose(w.ports.ctx, M, { mode: 'with-risk' });
   assert.ok(risk.risks.some((r) => /start cannot be read/.test(r)));
   pmMission(w.ports.ctx, M, 'open');
   w.ports.scheduler.actions.startHolds = holds;
-  assert.equal((await pmClose(w.ports.ctx, M, { mode: 'full', request: 'restored' })).mode, 'full');
+  const restored = await pmClose(w.ports.ctx, M, { mode: 'full', request: 'restored' });
+  assert.deepEqual([restored.mode, restored.doc.startRisks], ['full', []]);
   assert.ok(!w.ports.scheduler.tasks.has('con.m1.impl.2'), 'read failures never become a rebuild');
 });
 
@@ -131,7 +133,15 @@ test('T1c: pinned starts use the public production resolvers and preserve the fu
       { object: 'prod.con.m1.impl.1', kind: 'product', of: 'task impl', label: 'proven' },
       { object: 'dplan.m1.1.1', kind: 'plan', of: 'the effective detailed plan', label: 'proven' },
     ],
+    words: null,
+    delivered: null,
     unfinished: { planTasks: [], explorations: [], queued: [], running: [], escalations: [] },
+    issues: [],
+    startRisks: [],
+    olderEnvironment: [],
+    repairs: [],
+    fullRun: null,
+    labelsRecomputing: false,
     risks: [],
   });
 });
@@ -155,9 +165,12 @@ test('close race: a product accepted during its pre-check is excluded until retr
     }
     return result;
   };
-  await assert.rejects(async () => pmClose(w.ports.ctx, M, { mode: 'full' }), (e) => notReady(e) && /changed-product.*changed while closing; retry/.test(e.message));
+  const raced = await pmClose(w.ports.ctx, M, { mode: 'full', request: 'race' });
+  assert.ok(raced.doc.startRisks.some((r) => /changed-product.*changed while closing; retry/.test(r)), JSON.stringify(raced.doc.startRisks));
+  pmMission(w.ports.ctx, M, 'open');
   w.ports.scheduler.actions.startHolds = holds;
-  assert.equal((await pmClose(w.ports.ctx, M, { mode: 'full', request: 'race-retry' })).mode, 'full');
+  const retried = await pmClose(w.ports.ctx, M, { mode: 'full', request: 'race-retry' });
+  assert.deepEqual([retried.mode, retried.doc.startRisks], ['full', []]);
 });
 
 async function legacySecretary(revised: boolean, claim = false) {

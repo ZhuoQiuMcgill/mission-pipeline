@@ -159,6 +159,9 @@ function acceptedSince(db: Db, data: { text(h: string): string }, mission: strin
  * recorded after it, and the paths in which `tree` differs from the marker's tree (null: no marker).
  * Every read of this state calls this resolver.
  */
+/** What `fullRunStatus` answers (P4's delivery and close read it). */
+export type FullRunStatus = ReturnType<typeof fullRunStatus>;
+
 export function fullRunStatus(ctx: ProcessContext, mission: string, tree: string): { readonly last: FullRunMarker | null; readonly sameTree: boolean; readonly changedSince: { readonly products: string[]; readonly paths: string[] } | null } {
   const data = ctx.memory.data;
   const { last, products } = ctx.memory.read((db) => {
