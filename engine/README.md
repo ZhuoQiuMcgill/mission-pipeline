@@ -50,7 +50,7 @@ mp init --pointer claude      # or agents, both, none (the default)
 | `fillers` | per seat, a hint `"<harness>/<model>"` that `mp pm next` shows; information only |
 | `commit` | `{ "author"?, "committer"? }` as `"Name <email>"`: the identity of the commits `mp` writes (candidates, deliveries, rebuilds); default `Mission Pipeline <mp@localhost>`, and the committer defaults to the author |
 
-`mp docs update` refreshes `roles/` and `pm/` from the installed `mp` (the version is recorded in `pm/installed.json`).
+`mp docs update` refreshes `roles/` and `pm/` from the installed `mp` (the version is recorded in `pm/installed.json`). Run it after every upgrade of `mp`: the project keeps its own copies, and an upgrade does not replace them, so the PM and the seats would otherwise read the old handbook and role pages. The upgrade notes for each release are in `CHANGELOG.md`.
 
 ## How a harness acts as the PM
 

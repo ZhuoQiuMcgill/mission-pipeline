@@ -25,6 +25,9 @@ it was not. Read the upgrade notes before you upgrade a project with work in fli
 
 ### Upgrade notes
 - **Let running seats hand back first.**
+- **Run `mp docs update`.** The project keeps its own copies of the PM handbook, the role pages and
+  the WI pages, and an engine upgrade does not replace them. Then have the PM read the handbook's
+  core again.
 - **The full suite.**
   - Rename `closingChecks` in `config.json` to `fullSuite`. The old key is still read when
     `fullSuite` is absent; `mp config` says which key it read and warns when both are present.
@@ -35,9 +38,11 @@ it was not. Read the upgrade notes before you upgrade a project with work in fli
   runs from an older environment, and `mp pm renew` is a tool the PM uses when it judges the change
   matters; `mp pm next` no longer offers it. Runs recorded by 4.1.0 (run method v1) still do not
   count: renew them once if you never did.
-- **Plans in effect keep their commands.** A task of a plan already in effect that lists a
-  full-suite command still runs it at hand-back, and a task that writes nothing still gets a
-  Constructor. An integration task with nothing to write that was not dispatched yet runs without a
+- **Plans in effect keep their tasks, not their full-suite runs.** `mp` never runs a full-suite
+  command at a hand-back, on a plan already in effect too: the hand-back notes the command it
+  skipped, and only the integration task's Reviewer runs the suite, with `full-run`. A plan with no
+  integration task has then run no suite when the work is done, and the PM decides about a full run
+  before closing. A task that writes nothing still gets a Constructor. An integration task with nothing to write that was not dispatched yet runs without a
   Constructor. A revision of such a plan is checked against the new mechanical rules 6 and 7 (every
   task writes something; no task, the integration task included, lists the full suite among its
   commands): the Architect fixes those

@@ -65,11 +65,11 @@ interface Shared {
 
 /**
  * The commands of a task the program runs at hand-back and in the flow's verification (4.1.2, D-4,
- * D-5, D-7): its declared commands without the project's full suite (by normalized text), for every
+ * D-5, D-7): its declared commands without the project's full suite (by normalized text and working directory), for every
  * task kind and every card, a 4.1.1 plan's included. The suite is left to the integration review.
  */
-export function verificationCommands<C extends { readonly command: string | readonly string[] }>(suite: readonly SuiteCommand[], commands: readonly C[]): C[] {
-  return commands.filter((c) => !isFullSuiteCommand(suite, c.command));
+export function verificationCommands<C extends { readonly command: string | readonly string[]; readonly cwd?: string }>(suite: readonly SuiteCommand[], commands: readonly C[]): C[] {
+  return commands.filter((c) => !isFullSuiteCommand(suite, c.command, c.cwd));
 }
 
 /** Whether a stop covers the work of `mission` (§6.6; the delivery's scope resolver): its verification waits until the stop is released. */

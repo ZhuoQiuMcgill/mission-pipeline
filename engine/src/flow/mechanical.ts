@@ -123,7 +123,7 @@ export function writesNothingProblem(t: Pick<DetailedTask, 'id' | 'kind' | 'writ
 /** Rule 7: a task, of any kind, that declares a full-suite command (the integration Reviewer's `full-run` runs the suite, never a hand-back). */
 export function fullSuiteProblem(t: Pick<DetailedTask, 'id' | 'kind' | 'verificationCommands'>, suite: readonly SuiteCommand[]): string | null {
   if (suite.length === 0) return null;
-  if (!t.verificationCommands.some((c) => isFullSuiteCommand(suite, c.command))) return null;
+  if (!t.verificationCommands.some((c) => isFullSuiteCommand(suite, c.command, c.cwd))) return null;
   return t.kind === 'integration'
     ? `task ${t.id} (integration) lists the full suite as a verification command: its Reviewer runs the suite with \`mp seat <id> full-run\`, last; give the task the project's local commands (D-5).`
     : `task ${t.id} runs the full suite: only the integration task's Reviewer runs it (D-5, D-6).`;

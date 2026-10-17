@@ -196,7 +196,7 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
   ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this rerun'));
   inFlight(v, 'a rerun');
   allows(ctx, v, 'rerun');
-  const suiteCommand = rerunCommands(v.card).find((x) => x.id === commandId && isFullSuiteCommand(ctx.fullSuite, x.command));
+  const suiteCommand = rerunCommands(v.card).find((x) => x.id === commandId && isFullSuiteCommand(ctx.fullSuite, x.command, x.cwd));
   // 4.1.2 (D-5, D-7): the project's full suite is the integration Reviewer's full run, recorded with a marker
   if (suiteCommand !== undefined) throw new ProcessError('NOT_ALLOWED', `"${commandId}" is the project's full suite: it is not rerun from a card; ${isIntegrationCard(v.card) ? `run it with \`mp seat ${dispatch} full-run\`` : 'it is left to the integration review (its Reviewer runs `mp seat <id> full-run`)'}`);
   const c = rerunnableCommands(v.card, { fullSuite: ctx.fullSuite }).find((x) => x.id === commandId);
@@ -541,7 +541,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     // §5.3: the program's runs on a clean checkout of the candidate are the evidence
     const commands = ((v.card['verificationCommands'] as Array<{ id: string; command: string; cwd?: string }> | undefined) ?? []);
     // 4.1.2 (D-4, D-5, D-7): the project's full suite on the card is not run here (actions.ts verify)
-    const suite = commands.filter((c) => isFullSuiteCommand(ctx.fullSuite, c.command));
+    const suite = commands.filter((c) => isFullSuiteCommand(ctx.fullSuite, c.command, c.cwd));
     if (suite.length > 0) notes.push(`${suite.map((c) => c.id).join(', ')} ${suite.length === 1 ? 'is' : 'are'} the project's full suite: not run at hand-back; it is left to the integration review (its Reviewer's mp seat <id> full-run)`);
     // a stop stops (§6.6): the runs wait until it is released
     if (verificationStopped(ctx, v.info.mission as MissionId)) {

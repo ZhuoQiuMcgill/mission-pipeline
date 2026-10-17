@@ -40,7 +40,7 @@ cd /path/to/your/project
 mp init --pointer both  # adds one line to CLAUDE.md and AGENTS.md pointing the PM to its handbook
 ```
 
-Then open your project with any agent harness (Claude Code, Codex, …) and tell it what you want. It acts as the PM: it reads `.mission-pipeline/pm/PM.md`, runs `mp pm session --filled-by "<harness>/<model>"`, and works through `mp pm next`. `mp` removes its own checkouts when it is done with them; `mp pm clean` frees what is left and reports the space (run it once after upgrading from 4.1.1).
+Then open your project with any agent harness (Claude Code, Codex, …) and tell it what you want. It acts as the PM: it reads `.mission-pipeline/pm/PM.md`, runs `mp pm session --filled-by "<harness>/<model>"`, and works through `mp pm next`. `mp` removes its own checkouts when it is done with them; `mp pm clean` frees what is left and reports the space (run it once after upgrading from 4.1.1). After any upgrade of `mp`, run `mp docs update` so the project's copies of the handbook and role pages match the engine.
 
 Known issue since 4.1.1: an object constraint recorded while a plan review runs, or after the plans are proven, holds stable production until the PM takes one of the two exits of WI-34 (see the [CHANGELOG](CHANGELOG.md)).
 

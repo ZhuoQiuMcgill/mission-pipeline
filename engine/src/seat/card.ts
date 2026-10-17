@@ -241,16 +241,16 @@ export function seatCommandsOf(card: { readonly seat: string } & Readonly<Record
  * suite is left to the integration review, whose Reviewer runs it with `mp seat <id> full-run`).
  */
 export function rerunnableCommands(card: Readonly<Record<string, unknown>>, o: CardProject = {}): Array<{ readonly id: string; readonly command: string; readonly cwd?: string }> {
-  return rerunCommands(card).filter((c) => !isFullSuiteCommand(o.fullSuite ?? [], c.command));
+  return rerunCommands(card).filter((c) => !isFullSuiteCommand(o.fullSuite ?? [], c.command, c.cwd));
 }
 
 /** The commands on a card (a Constructor's verification commands, a Reviewer's declared commands) that are the project's full suite (4.1.2). */
 export function fullSuiteOnCard(card: Readonly<Record<string, unknown>>, o: CardProject = {}): Array<{ readonly id: string; readonly command: string }> {
   const suite = o.fullSuite ?? [];
   if (suite.length === 0) return [];
-  const listed = [...((card['verificationCommands'] as Array<{ id: string; command: string }> | undefined) ?? []), ...rerunCommands(card)];
+  const listed: Array<{ readonly id: string; readonly command: string; readonly cwd?: string }> = [...((card['verificationCommands'] as Array<{ id: string; command: string; cwd?: string }> | undefined) ?? []), ...rerunCommands(card)];
   const seen = new Set<string>();
-  return listed.filter((c) => isFullSuiteCommand(suite, c.command) && !seen.has(c.id) && (seen.add(c.id), true));
+  return listed.filter((c) => isFullSuiteCommand(suite, c.command, c.cwd) && !seen.has(c.id) && (seen.add(c.id), true));
 }
 
 /** The commands a seat may have `mp` run with `mp seat <id> rerun <command-id>` (declared on its card). */

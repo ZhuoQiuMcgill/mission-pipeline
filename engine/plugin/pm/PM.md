@@ -58,12 +58,13 @@ The PM seat, in any harness that can run a shell command (harness-specific tips:
 
 ## Upgrading from 4.1.1
 Let running seats hand back first.
+- Run `mp docs update` first: the project keeps its own copies of this handbook, the role pages and the WI pages, and an engine upgrade does not replace them. Then read the core of this handbook again.
 - Rename `closingChecks` in `config.json` to `fullSuite`. The old key is still read when `fullSuite` is absent; `mp config` says which key it read.
 - `mp pm deliver` runs no command. The integration task's Reviewer runs the full suite, and you decide about another run before closing (see "The end of a mission").
 - An environment change no longer takes proof off anything. Runs recorded by 4.1.0 (run method v1) still do not count: if you never renewed them, run `mp pm renew` once.
 - Run `mp pm clean` once: it frees the checkouts and scratch directories 4.1.1 left under `.mission-pipeline/tmp/` and reports the space.
-- Plans already in effect keep their tasks and commands. A task that lists a full-suite command still runs it at hand-back, and a task that writes nothing still gets a Constructor. An integration task with nothing to write that was not dispatched yet runs without a Constructor.
-- A revision of such a plan is checked against the new mechanical rules: every task writes something (except an integration task or an experiment), and no task lists the full suite among its commands. Until then, `mp` skips full-suite commands at hand-back on that plan's cards: the integration task's Reviewer runs the suite with `full-run`. The Architect fixes those tasks, which changes their cards: they restart (notice `plan-revision-restarts-work`).
+- Plans already in effect keep their tasks, but `mp` never runs a full-suite command at a hand-back, on their cards too: the hand-back notes the command it skipped, and only the integration task's Reviewer runs the suite, with `full-run`. A plan with no integration task (one implementation task) has then run no suite when the work is done: decide about a full run before closing. A task that writes nothing still gets a Constructor. An integration task with nothing to write that was not dispatched yet runs without a Constructor.
+- A revision of such a plan is checked against the new mechanical rules: every task writes something (except an integration task or an experiment), and no task lists the full suite among its commands. The Architect fixes those tasks, which changes their cards: they restart (notice `plan-revision-restarts-work`).
 - The Claude Code adapter no longer runs `mp pm next` at session start.
 
 ## Upgrading from 4.1.0

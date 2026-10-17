@@ -62,6 +62,13 @@ const SUITE = [{ id: 'suite', command: 'node suite.js' }];
 const SUITE_JS = "const { add } = require('./src/add.js');\nconsole.log('TAP version 13');\nconsole.log(add(2, 3) === 5 ? 'ok 1 - the whole suite' : 'not ok 1 - the whole suite');\nprocess.exit(add(2, 3) === 5 ? 0 : 1);\n";
 const IDENT = { name: 'mp test', email: 'mp@test' };
 
+/** A card without its embedded role page (the role page describes every kind of Reviewer, full-run included): its own task part, commands and hand-back. */
+function ownPart(text: string): string {
+  const i = text.indexOf('# This task');
+  assert.ok(i >= 0, 'the card has its own task part');
+  return text.slice(i);
+}
+
 let p: ProcessProject | null = null;
 afterEach(() => {
   const q = p;
@@ -308,7 +315,7 @@ describe('4: the integration Reviewer runs the full suite, last', () => {
     await construct(p, 'impl', IMPL);
     // the implementation task's Reviewer: no full-run on its card, the command refused
     const ri = await reviewer(p, 'impl');
-    assert.doesNotMatch(seatCard(ctx, ri.dispatch).text, /full-run/);
+    assert.doesNotMatch(ownPart(seatCard(ctx, ri.dispatch).text), /full-run/);
     await assert.rejects(seatFullRun(ctx, ri.dispatch), /has no `full-run` command/);
     const ai = await handBack(ctx, ri.dispatch, reviewerPass(ri.card));
     assert.ok(ai.kind === 'recorded' && ai.outcome === 'accepted', JSON.stringify(ai));
@@ -460,7 +467,7 @@ describe('5: full-run markers and fullRunStatus', () => {
     // a later accepted product (no full suite configured: the integration Reviewer is offered no full-run)
     const integCandidate = await construct(p, 'integ', APP);
     const rv = await reviewer(p, 'integ');
-    assert.doesNotMatch(seatCard(ctx, rv.dispatch).text, /full-run/, 'no full suite configured: no full-run');
+    assert.doesNotMatch(ownPart(seatCard(ctx, rv.dispatch).text), /full-run/, 'no full suite configured: no full-run');
     const a = await handBack(ctx, rv.dispatch, reviewerPass(rv.card));
     assert.ok(a.kind === 'recorded' && a.outcome === 'accepted', JSON.stringify(a));
     await pmNext(ctx);
