@@ -21,6 +21,8 @@ import { ensureWorkspace } from '../src/git/workspace.ts';
 import { appendRecords, commitStop, currentDelivery, deliveryInfo, initMemory, loopState, openIntents, openMemory, recordDelivery, withdrawDelivery } from '../src/memory/index.ts';
 import { commitOn, fixture, IDENT, M, recordedDelivery, rejectsCode, sh, words, write, type Fixture } from './git41-fixtures.ts';
 import { tempDir } from './memory-fixtures.ts';
+import { builders } from './labels-fixtures.ts';
+import { pmClose, pmMission, processContext } from '../src/process/index.ts';
 
 const POSIX = process.platform !== 'win32';
 
@@ -54,7 +56,7 @@ function labels(f: Fixture): LabelView {
 }
 
 function request(op: string, over: Partial<DeliverRequest> = {}): DeliverRequest {
-  return { mission: M, delivery: op, targetBranch: 'main', selected: [{ kind: 'object', id: 'o1' as ObjectVersionId }], closingChecks: [], author: IDENT, committer: IDENT, ...over };
+  return { mission: M, delivery: op, targetBranch: 'main', selected: [{ kind: 'object', id: 'o1' as ObjectVersionId }], author: IDENT, committer: IDENT, ...over };
 }
 
 function delivered(r: DeliveryResult): Extract<DeliveryResult, { kind: 'delivered' }> {
@@ -124,6 +126,30 @@ test('a selected module touched by a user commit on the target is delivered as n
     assert.deepEqual(r.record.proof?.notFullyProven.map((n) => [n.id, n.reasons.map((x) => x.kind)]), [['o1', ['content-changed']]]);
     assert.equal(f.git('show', `${r.record.commit}:src/user.txt`), 'a user commit inside the write scope');
     assert.equal(alerts(f, 'WI-07').length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('4.1.2 (D-11): the close lists an output the delivery proved not fully proven on the delivered tree, with its reason, though its own label is proven', async () => {
+  const f = fixture({ files: { 'src/a.txt': 'a\n' } });
+  try {
+    await product(f, 'o1');
+    // the version itself is accepted and proven (a passing review)
+    f.m.write({}, (tx) => appendRecords(tx, [builders(f.m).judge('j1', 'o1')]));
+    advance(f, 'user', { 'src/user.txt': 'a user commit inside the write scope\n' });
+    const r = delivered(await deliver(f.ctx, request('d1'), { labels: labels(f) }));
+    assert.deepEqual(r.record.proof?.notFullyProven.map((n) => [n.id, n.reasons.map((x) => x.kind)]), [['o1', ['content-changed']]]);
+    const ctx = processContext(f.m, { git: f.ctx.git, observe: () => ({ os: 'testos', osVersion: '1', arch: 'x64', versions: {} }) });
+    pmMission(ctx, M);
+    const closed = await pmClose(ctx, M, { mode: 'full' });
+    const entry = closed.doc.delivered?.entries.find((e) => e.object === 'o1');
+    assert.equal(entry?.label, 'proven', 'the version\'s own label');
+    assert.deepEqual(entry?.notFullyProven, ['content-changed'], 'the delivery\'s own proof result, reused');
+    assert.ok(closed.risks.includes('not proven: o1 (delivered in d1): not fully proven on the delivered tree (content-changed)'), JSON.stringify(closed.risks));
+    assert.match(closed.message, /Not proven: o1 \(delivered in d1\): not fully proven on the delivered tree \(content-changed\)/);
+    assert.doesNotMatch(closed.message, /Not proven: none/);
+    assert.equal(closed.mode, 'full', 'nothing blocks the close');
   } finally {
     f.cleanup();
   }
@@ -204,12 +230,12 @@ test('a grant unblocks an exhausted delivery-rebuild loop', async () => {
     let prev = 'd1';
     for (const n of [1, 2, 3]) {
       advance(f, `m${n}`);
-      prev = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: prev, closingChecks: [], author: IDENT, committer: IDENT }, { labels: labels(f) })).record.delivery;
+      prev = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: prev, author: IDENT, committer: IDENT }, { labels: labels(f) })).record.delivery;
     }
     advance(f, 'm4');
-    assert.equal((await rebuildDelivery(f.ctx, { mission: M, delivery: prev, closingChecks: [], author: IDENT, committer: IDENT }, { labels: labels(f) })).kind, 'rebuild-limit-exhausted');
+    assert.equal((await rebuildDelivery(f.ctx, { mission: M, delivery: prev, author: IDENT, committer: IDENT }, { labels: labels(f) })).kind, 'rebuild-limit-exhausted');
     f.m.write({}, (tx) => appendRecords(tx, [{ kind: 'loop.grant', lineage: 'delivery:m1:d1', loop: 'delivery-rebuild', by: 'secretary', extra: 2, reason: tx.data.put('the branch was busy with a release') } as BaseRecord]));
-    const r = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: prev, closingChecks: [], author: IDENT, committer: IDENT }, { labels: labels(f) }));
+    const r = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: prev, author: IDENT, committer: IDENT }, { labels: labels(f) }));
     assert.deepEqual([r.record.delivery, r.record.rebuilds], ['d1-r4', 4]);
   } finally {
     f.cleanup();

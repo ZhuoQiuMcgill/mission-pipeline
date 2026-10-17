@@ -11,7 +11,7 @@ import { memoryPorts } from './flow-memory-fixtures.ts';
 import { checkoutMain, initRepo, makeFixture, rawCommit } from './git-fixtures.test.ts';
 import { builders } from './labels-fixtures.ts';
 
-test('T1 real git: full close refuses the recorded prerequisite missing from an accepted legacy start', async () => {
+test('T1 real git: the close records the prerequisite missing from an accepted legacy start (4.1.2: never refused)', async () => {
   const fx = makeFixture('final-close');
   try {
     const dir = initRepo(fx, 'repo');
@@ -37,7 +37,9 @@ test('T1 real git: full close refuses the recorded prerequisite missing from an 
         { kind: 'flow.event', mission: 'm1', line: 'task:b', event: 'accepted', key: '1', body: tx.data.put(JSON.stringify({ product: 'bad', judgment: 'jb' })) },
       ] as never);
     });
-    await assert.rejects(async () => pmClose(w.ctx, 'm1', { mode: 'full' }), (e) => e instanceof ProcessError && e.code === 'NOT_READY' && /bad.*a2 at a\/f/.test(e.message) && /mp pm next/.test(e.message));
+    const full = await pmClose(w.ctx, 'm1', { mode: 'full' });
+    assert.ok(full.doc.startRisks.some((r) => /bad.*a2 at a\/f/.test(r) && /mp pm next/.test(r)), JSON.stringify(full.doc.startRisks));
+    assert.ok(full.doc.unfinished.planTasks.includes('b'));
     const closed = await pmClose(w.ctx, 'm1', { mode: 'with-risk' });
     assert.ok(closed.risks.some((r) => /bad.*a2 at a\/f/.test(r)));
   } finally {

@@ -24,20 +24,27 @@
 //   are listed so the seat sees what was left out. A seat that switched its HEAD
 //   to a branch, or reset it off the base, is refused too (decision 17).
 // - Checkouts (§5.3, decision 10): a commit materialized into a fresh directory
-//   under `.mission-pipeline/tmp/` (a verification run's `tmp/<run>/`, a seat's
-//   `tmp/<dispatch>/checkout/`) from the commit's objects alone: no worktree is
-//   registered and no untracked or ignored file of any worktree is in it.
-//   Removed after use. A run's checkout is also a git repository of its own,
-//   positioned at the commit, that borrows the project's objects
-//   (checkoutRepository.ts): the commands run there ask git about the candidate,
-//   never about the enclosing project's work tree. A seat's reading checkout is
-//   plain files.
+//   under `.mission-pipeline/tmp/` (a verification run's `tmp/<run>/`) from the
+//   commit's objects alone: no worktree is registered and no untracked or ignored
+//   file of any worktree is in it. Removed after use. A run's checkout is also a
+//   git repository of its own, positioned at the commit, that borrows the
+//   project's objects (checkoutRepository.ts): the commands run there ask git
+//   about the candidate, never about the enclosing project's work tree.
+// - Shared reading checkouts (4.1.2): the seats that read one commit share one
+//   plain-file checkout, `tmp/checkouts/<commit>/`, its files read-only. It is built
+//   in a temporary sibling and renamed into place only when complete, so a reader
+//   never sees a partial tree and two builders never write the same path; the
+//   process layer decides when it goes (its last holder is over).
+// - Every scratch directory made here has an owner (memory/scratch.ts): the
+//   process that made it holds its owner lock for its whole life, so the sweep
+//   removes what a killed process left, never what a running one is using.
 
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import type { GitOid } from '../common/ids.ts';
 import { inWriteScope } from '../delivery/writeScope.ts';
 import { LedgerError, PATH_ID, type Memory, type MemoryPaths } from '../memory/index.ts';
+import { holdOwner, moveToTrash, ownedTempDir, releaseOwner, removeOwned } from '../memory/scratch.ts';
 import { decodePath, discoverRepo, gitOid, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
 import { GitError, GitExitError, type PlainGit } from './plainGit.ts';
 import { attachCheckoutRepository, checkoutSetupGit } from './checkoutRepository.ts';
@@ -83,10 +90,29 @@ export function runCheckoutDir(paths: MemoryPaths, run: string): string {
   return join(paths.tmp, run);
 }
 
-/** `.mission-pipeline/tmp/<dispatch>/checkout` for `mp seat <id> checkout` (decision 10). */
+/** `.mission-pipeline/tmp/<dispatch>/checkout`: the private seat checkout of 4.1.1 (a leftover there goes with `tmp/<dispatch>/`). */
 export function seatCheckoutDir(paths: MemoryPaths, dispatch: string): string {
   checkDispatch(dispatch);
   return join(paths.tmp, dispatch, 'checkout');
+}
+
+/** `.mission-pipeline/tmp/<dispatch>`: the dispatch's hand-back files (decision 7). */
+export function dispatchTmpDir(paths: MemoryPaths, dispatch: string): string {
+  checkDispatch(dispatch);
+  return join(paths.tmp, dispatch);
+}
+
+/** The directory of the shared reading checkouts (4.1.2): `.mission-pipeline/tmp/checkouts`. */
+export function sharedCheckoutsRoot(paths: MemoryPaths): string {
+  return join(paths.tmp, 'checkouts');
+}
+
+const FULL_COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/** `.mission-pipeline/tmp/checkouts/<commit>`: the one reading checkout of `commit` that seats share (4.1.2). */
+export function sharedCheckoutDir(paths: MemoryPaths, commit: string): string {
+  if (!FULL_COMMIT.test(commit)) throw new LedgerError('BAD_REQUEST', `a shared checkout is named by a full commit id, not ${JSON.stringify(commit)}`);
+  return join(sharedCheckoutsRoot(paths), commit);
 }
 
 function real(p: string): string {
@@ -333,7 +359,7 @@ export async function collectCandidate(ctx: GitContext, req: CollectRequest): Pr
     if (anc.code !== 0) return { kind: 'head-moved', head, branch: null, detail: `HEAD ${head} does not descend from the base ${base}: the worktree was reset or switched to another base` };
   }
 
-  const scratch = mkdtempSync(join(memory.paths.tmp, `collect-${req.dispatch}-`));
+  const scratch = ownedTempDir(memory.paths, `collect-${req.dispatch}-`);
   let attributes: AttributeEvaluator | null = null;
   try {
     // Which paths differ from the base, judged on the files' actual content (§5.3, decision 17): a
@@ -418,7 +444,7 @@ export async function collectCandidate(ctx: GitContext, req: CollectRequest): Pr
     throw e;
   } finally {
     attributes?.dispose();
-    rmSync(scratch, { recursive: true, force: true });
+    removeOwned(memory.paths, scratch);
   }
 }
 
@@ -442,7 +468,7 @@ export type WorktreeComparison =
  */
 export async function compareToCommit(ctx: GitContext, root: string, commit: string): Promise<WorktreeComparison> {
   if (!existsSync(root)) return { state: 'undetermined', reason: `${root} does not exist` };
-  const scratch = mkdtempSync(join(ctx.memory.paths.tmp, 'compare-'));
+  const scratch = ownedTempDir(ctx.memory.paths, 'compare-');
   let attributes: AttributeEvaluator | null = null;
   try {
     const { git } = ctx;
@@ -489,7 +515,7 @@ export async function compareToCommit(ctx: GitContext, root: string, commit: str
     throw e;
   } finally {
     attributes?.dispose();
-    rmSync(scratch, { recursive: true, force: true });
+    removeOwned(ctx.memory.paths, scratch);
   }
 }
 
@@ -542,13 +568,26 @@ function insideDir(child: string, parent: string): boolean {
  * is MissingObjectsError (representation.ts). `repository`: the checkout is also
  * a git repository at the commit (a run's checkout: checkoutRepository.ts),
  * removed with it; nothing is written to the project's repository.
+ * This process owns `dir` until removeCheckout (4.1.2): a checkout a killed
+ * process left is swept, one in use never is.
  */
 export async function checkoutCommit(ctx: GitContext, req: { readonly commit: string; readonly dir: string; readonly description?: TransformDescription; readonly repository?: boolean }): Promise<Checkout> {
   const tmp = ctx.memory.paths.tmp;
   if (!insideDir(req.dir, tmp)) throw new LedgerError('BAD_REQUEST', `a checkout goes under ${tmp}, not ${req.dir}`);
   mkdirSync(tmp, { recursive: true });
-  rmSync(req.dir, { recursive: true, force: true });
-  const scratch = mkdtempSync(join(tmp, 'checkout-attr-'));
+  holdOwner(ctx.memory.paths, req.dir);
+  try {
+    rmSync(req.dir, { recursive: true, force: true });
+    return await materializeInto(ctx, req);
+  } catch (e) {
+    removeOwned(ctx.memory.paths, req.dir);
+    throw e;
+  }
+}
+
+/** The materialization of checkoutCommit into an existing or absent `dir` (its caller owns it). */
+async function materializeInto(ctx: GitContext, req: { readonly commit: string; readonly dir: string; readonly description?: TransformDescription; readonly repository?: boolean }): Promise<Checkout> {
+  const scratch = ownedTempDir(ctx.memory.paths, 'checkout-attr-');
   let attributes: AttributeEvaluator | null = null;
   try {
     // AttributeEvaluator also initializes a repository, before the run's .git exists.
@@ -560,19 +599,78 @@ export async function checkoutCommit(ctx: GitContext, req: { readonly commit: st
     const manifest = await materializeSnapshot({ git, repo, commit: req.commit, attributes, dest: req.dir });
     if (req.repository === true) await attachCheckoutRepository(ctx.git, repo, { dir: req.dir, commit: manifest.commit, description });
     return { dir: req.dir, commit: manifest.commit, manifest, unsupported: manifest.unsupported };
-  } catch (e) {
-    rmSync(req.dir, { recursive: true, force: true });
-    throw e;
   } finally {
     attributes?.dispose();
-    rmSync(scratch, { recursive: true, force: true });
+    removeOwned(ctx.memory.paths, scratch);
   }
 }
 
-/** Remove a checkout after use (its run, or the seat's dispatch, is over), its own `.git` included. Only directories under `tmp/`. */
+/** Remove a checkout after use (its run, or the seat's dispatch, is over), its own `.git` included; its ownership ends. Only directories under `tmp/`. */
 export function removeCheckout(ctx: GitContext, dir: string): { readonly removed: boolean } {
   if (!insideDir(dir, ctx.memory.paths.tmp)) throw new LedgerError('BAD_REQUEST', `only checkouts under ${ctx.memory.paths.tmp} are removed, not ${dir}`);
-  if (!existsSync(dir)) return { removed: false };
-  rmSync(dir, { recursive: true, force: true });
+  if (!existsSync(dir)) {
+    releaseOwner(ctx.memory.paths, dir);
+    return { removed: false };
+  }
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // A file still in use (an open handle, a scanner): the run that used it is never failed for
+    // this. The owner record stays, so the sweep (mp pm next) removes it once its owner is gone.
+    releaseOwner(ctx.memory.paths, dir, { keepFile: true });
+    return { removed: false };
+  }
+  releaseOwner(ctx.memory.paths, dir);
   return { removed: true };
+}
+
+/**
+ * Every file under `root` loses its write permission (links are left as they are): a seat cannot
+ * change a file another seat reads. Directories stay writable, so the tree is removed like any
+ * other (`rm -rf`, a fixture's cleanup) and nothing here needs special handling to go.
+ */
+function makeFilesReadOnly(root: string): void {
+  const visit = (p: string): void => {
+    const st = lstatSync(p);
+    if (st.isSymbolicLink()) return;
+    if (st.isDirectory()) for (const name of readdirSync(p)) visit(join(p, name));
+    else chmodSync(p, st.mode & 0o555);
+  };
+  visit(root);
+}
+
+/**
+ * The shared reading checkout of `commit` (4.1.2): `tmp/checkouts/<commit>/`, plain files made
+ * read-only. Built when absent: materialized into a temporary sibling this process owns, then
+ * renamed into place in one step; a builder that finds the place taken (another process
+ * finished first) removes its own copy and answers with the one in place. The caller serializes
+ * builders and removers of one commit and records who holds it (process layer).
+ */
+export async function ensureSharedCheckout(ctx: GitContext, commit: string, o: { readonly description?: TransformDescription } = {}): Promise<{ readonly dir: string; readonly built: boolean }> {
+  const dir = sharedCheckoutDir(ctx.memory.paths, commit);
+  if (existsSync(dir)) return { dir, built: false };
+  const root = sharedCheckoutsRoot(ctx.memory.paths);
+  const building = ownedTempDir(ctx.memory.paths, `.build-${commit.slice(0, 12)}-`, root);
+  try {
+    await materializeInto(ctx, { commit, dir: building, ...(o.description !== undefined ? { description: o.description } : {}) });
+    makeFilesReadOnly(building);
+    try {
+      renameSync(building, dir);
+    } catch (e) {
+      if (!existsSync(dir)) throw e;
+      return { dir, built: false }; // another process put it in place first: this copy goes (finally)
+    }
+    return { dir, built: true };
+  } finally {
+    removeOwned(ctx.memory.paths, building);
+  }
+}
+
+/**
+ * Take the shared checkout of `commit` away (its caller checked, under the commit's lock, that
+ * nobody holds it): renamed into the trash in one step; the caller deletes the trash
+ * (memory/scratch.ts removeTree), and what it leaves is the sweep's. Null: there was none.
+ */
+export function trashSharedCheckout(ctx: GitContext, commit: string): string | null {
+  return moveToTrash(ctx.memory.paths, sharedCheckoutDir(ctx.memory.paths, commit));
 }

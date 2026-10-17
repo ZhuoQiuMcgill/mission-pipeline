@@ -205,15 +205,18 @@ describe('review r1 #3: mp pm close goes through the process layer (pmClose)', (
   });
   after(() => p.cleanup());
 
-  it('a full close with work unfinished is refused; with-risk closes and holds the queued step (not cancelled)', async () => {
+  it('4.1.2 (D-11): a full close with work unfinished is not refused: it closes, lists the work, and holds the queued step (not cancelled)', async () => {
     const ready = (await cli(p.dir, ['pm', 'next', '--json'])).json.result.ready as Array<{ step: string }>;
     assert.equal(ready.length, 1);
     const full = await cli(p.dir, ['pm', 'close', 'm1', '--mode', 'full', '--json']);
-    assert.equal(full.code, 3, full.out);
-    assert.match(full.json.error.message, /unfinished/);
-    const risk = await cli(p.dir, ['pm', 'close', 'm1', '--mode', 'with-risk', '--json']);
-    assert.equal(risk.code, 0, risk.err);
-    assert.equal(risk.json.result.mode, 'with-risk');
+    assert.equal(full.code, 0, full.out);
+    assert.equal(full.json.result.mode, 'full');
+    assert.deepEqual(full.json.result.doc.unfinished.queued, [ready[0]!.step]);
+    const text = await cli(p.dir, ['pm', 'close', 'm1']);
+    assert.equal(text.code, 0, text.err);
+    assert.match(text.out, /closed \(with-risk\)/, 'the mode defaults to with-risk');
+    assert.match(text.out, /Delivered: nothing/);
+    assert.match(text.out, /Unfinished: /);
     const next = (await cli(p.dir, ['pm', 'next', '--json'])).json.result;
     assert.equal(next.ready.length, 0);
     assert.deepEqual(next.held.map((h: { step: string }) => h.step), [ready[0]!.step], 'the production step is held, not cancelled');

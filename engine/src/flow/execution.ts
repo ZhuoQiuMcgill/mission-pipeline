@@ -60,8 +60,8 @@ import {
   type FlowCtx,
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
-import { DetailedTask, PLAN_LINE, RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, taskIdProblems, taskLine, type DetailedPlanDoc, type ReviewNeededBody } from './plandoc.ts';
-import { detailedPlanOf, internalError, latestEffective, standardLine, planAnswersReplan, contestedProduction, type EffectiveBody } from './planning.ts';
+import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, type EffectiveBody } from './planning.ts';
 import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
 import { carryOut, closing, commitCarrying, decisionFor, escalateToUser, markApplied, openEscalations, raiseEscalation, type DecisionBody, type EscalationBody } from './secretary.ts';
@@ -71,12 +71,24 @@ interface SpecBody {
   readonly dplan: string;
   readonly hash: string;
 }
+/** Who reopened an accepted task (4.1.2): an integration task's review (D-6) or a repair (D-10). */
+export type ReopenSource =
+  | { readonly kind: 'review'; readonly integration: string; readonly review: string; readonly attempt: number }
+  | { readonly kind: 'repair'; readonly repair: string };
 interface ReworkBody {
   /** The new attempt number. */
   readonly k: number;
-  readonly reason: 'reviewer' | 'secretary' | 'respec' | 'replan' | 'program';
+  /** "reopen": an accepted task reopened (D-6, D-10); "rebuild": an integration task that builds again on its reopened dependencies' new work. */
+  readonly reason: 'reviewer' | 'secretary' | 'respec' | 'replan' | 'program' | 'reopen' | 'rebuild';
   readonly issues: readonly string[];
   readonly instructions: readonly string[];
+  readonly reopen?: ReopenSource;
+}
+/** An integration review's reopen (task line event "reopen", key the integration's attempt): the decision record; each named task's new attempt follows it (carryReopens). */
+interface ReopenBody {
+  readonly k: number;
+  readonly review: string;
+  readonly tasks: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly issue: string; readonly evidence?: string }>;
 }
 interface DispatchedBody {
   /** Exact products used to compose this attempt's start; absent in pre-upgrade dispatches. */
@@ -88,6 +100,8 @@ interface DispatchedBody {
   readonly dplan: string;
   /** A later attempt whose start was laid anew over its dependencies' current products: that snapshot, its product's origin (Appendix M). */
   readonly origin?: string;
+  /** An integration task with nothing to write: no Constructor ran, the start snapshot is the candidate (4.1.2). */
+  readonly noConstructor?: true;
 }
 interface ProductBody extends ProductVersion {
   readonly k: number;
@@ -104,12 +118,17 @@ interface ReviewBody {
   readonly issues: readonly string[];
   /** Ownership transferred by the Reviewer; context for the next seat, never work to fix here. */
   readonly deferred?: readonly string[];
+  /** An integration review's reopen (D-6): the dependencies whose work causes the failure. */
+  readonly reopen?: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly evidence?: string }>;
 }
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
 export const taskLineage = (mission: string, task: string): string => safeId(`task.${mission}.${idPart(task)}`);
-/** A task's card identity under a plan: a spec records it, and a different one is a re-plan of the task (taskStep). */
-export const taskCardHash = (t: DetailedTask): string => shortHash(DetailedTask.parse(t));
+/** A task's card identity under a plan: a spec records it, and a different one is a re-plan of the task (taskStep; plandoc.ts). */
+export { taskCardHash };
+
+/** An integration task with nothing to write gets no Constructor (4.1.2): its candidate is its start snapshot. */
+export const noConstructor = (t: Pick<DetailedTask, 'kind' | 'writeScope'>): boolean => t.kind === 'integration' && t.writeScope.length === 0;
 const conTask = (mission: string, task: string, k: number): string => safeId(`con.${mission}.${idPart(task)}.${k}`);
 const revTask = (mission: string, task: string, k: number, m: number): string => safeId(`rev.${mission}.${idPart(task)}.${k}${m > 0 ? `.r${m}` : ''}`);
 
@@ -255,7 +274,7 @@ async function legacyPins(ctx: FlowCtx, line: Line, k: number): Promise<{ readon
   const current = dispatches.find((e) => e.body.k === k);
   if (current === undefined || current.body.prerequisites !== undefined) return null;
   const start = current;
-  const stored = await detailedPlanOf(ctx, start.body.dplan);
+  const stored = await planOf(ctx, start.body.dplan);
   // Dispatch ids encode the task injectively; the plan task is supplied by the line's dispatch.
   const dispatchedTask = stored?.plan.tasks.find((t) => conTask(ctx.mission, t.id, start.body.k) === start.key);
   if (dispatchedTask === undefined) throw new Error(`the dispatched plan ${start.body.dplan} has no task for ${start.key}`);
@@ -269,8 +288,10 @@ async function legacyPins(ctx: FlowCtx, line: Line, k: number): Promise<{ readon
 export async function executionStep(ctx: FlowCtx): Promise<void> {
   const eff = await latestEffective(ctx);
   if (eff === null) return;
-  const stored = await detailedPlanOf(ctx, eff.dplan);
-  if (stored === null) return internalError(ctx, `exec:${eff.dplan}`, `the effective detailed plan ${eff.dplan} is not in the ledger`);
+  const raw = await detailedPlanOf(ctx, eff.dplan);
+  if (raw === null) return internalError(ctx, `exec:${eff.dplan}`, `the effective detailed plan ${eff.dplan} is not in the ledger`);
+  // the plan in effect: its version's tasks plus the tasks repair amendments added (4.1.2, D-10)
+  const stored = { ...raw, plan: amendedPlan(raw.plan, eff.amendments) };
   // a closed mission's production is held (4.1 §6.7); a re-review after an environment change is
   // post-close work (it keeps an accepted product proven for a delivery) and goes on
   if (await missionClosed(ctx)) {
@@ -282,6 +303,8 @@ export async function executionStep(ctx: FlowCtx): Promise<void> {
     await supersededStep(ctx, eff);
     return;
   }
+  // reopen decisions (an integration review's, a repair's) carried out before the tasks move (restartable)
+  await carryReopens(ctx, stored.plan);
   const kept: KeptReport = { review: [], successors: null };
   try {
     for (const t of stored.plan.tasks) await taskStep(ctx, eff, stored.plan, t, kept);
@@ -365,7 +388,7 @@ async function rereviewStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlan
     if (line.one('review', last.body.rev) === null && (await taskView(ctx, last.body.rev)).kind === 'absent') {
       return submitReviewer(ctx, eff, plan, t, line, k, last.body.rev, product, last.body.runs, { duties: rereviewDuties(t, k, requests.find((r) => r.key === last.body.request)?.body.reason ?? 'an environment change'), afterClose: 'audit' });
     }
-    const verdict = await rereviewResult(ctx, t, line, last.body, product, lineage);
+    const verdict = await rereviewResult(ctx, plan, t, line, last.body, product, lineage);
     // waiting for its Reviewer, or sent back to the Constructor (the next attempt takes over)
     if (verdict === 'pending' || verdict === 'rework') return;
     const lastRequest = requests.find((r) => r.key === last.body.request);
@@ -419,7 +442,7 @@ async function revisedBases(ctx: FlowCtx, judgment: string): Promise<Array<{ rea
 }
 
 /** The verdict of a re-review round, once its Reviewer handed back (recorded on the task line), or "pending". */
-async function rereviewResult(ctx: FlowCtx, t: DetailedTask, line: Line, r: RereviewBody, product: ProductBody, lineage: string): Promise<ReviewBody['verdict'] | 'pending'> {
+async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask, line: Line, r: RereviewBody, product: ProductBody, lineage: string): Promise<ReviewBody['verdict'] | 'pending'> {
   const lineName = taskLine(t.id);
   let review = line.one<ReviewBody>('review', r.rev);
   if (review === null) {
@@ -436,8 +459,10 @@ async function rereviewResult(ctx: FlowCtx, t: DetailedTask, line: Line, r: Rere
         await commit(ctx, `flow:reaccepted:${ctx.mission}:${r.rev}`, { events: [ev(ctx, lineName, 'reaccepted', `${r.k}:${r.n}`, { k: r.k, product: product.object, judgment: review.judgment })] });
         break;
       case 'rework':
+        // an integration review that names the dependencies at fault reopens them (D-6)
+        if (t.kind === 'integration' && (review.reopen ?? []).length > 0) await reopenFromReview(ctx, plan, t, r.k, r.rev, review, product);
         // the new evidence does not hold: the Constructor redoes the task (the next attempt)
-        await rework(ctx, t, r.k, review.issues, [], `rework:${r.k}:re${r.n}`);
+        else await rework(ctx, t, r.k, review.issues, [], `rework:${r.k}:re${r.n}`);
         break;
       case 'needs-decision':
         await raiseEscalation(ctx, {
@@ -596,6 +621,11 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
 
   if (eff.mode === 'fast' && await contestedProduction(ctx, eff, plan, t)) return;
 
+  // an integration review reopened dependencies (D-6): this attempt waits until each is accepted again (one
+  // given up is told to the PM), and builds on their new work too (a dependency reached only through another
+  // one is laid over it: no cascade)
+  const reopened = await reopenedProducts(ctx, plan, t, line);
+  if (reopened === null) return;
   // gate: dependencies accepted; stable mode: proven
   const deps: string[] = [];
   for (const d of t.dependsOn) {
@@ -603,6 +633,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     if (p === null) return;
     deps.push(p);
   }
+  for (const p of reopened) if (!deps.includes(p)) deps.push(p);
   if (eff.mode === 'stable') {
     const labels = await ctx.ports.evaluator.labels([eff.dplan, ...deps]);
     if ([eff.dplan, ...deps].some((x) => labels.labels[x] !== 'proven')) return;
@@ -611,6 +642,14 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   // the Constructor
   const con = conTask(ctx.mission, t.id, k);
   let product = line.one<ProductBody>('product', String(k));
+  // (a 4.1.1 read-only integration attempt whose Constructor was already dispatched keeps it)
+  if (product === null && noConstructor(t) && line.one('dispatched', con) === null) {
+    // an integration task with nothing to write (4.1.2): no Constructor; the program records its start
+    // snapshot (the dependencies' products laid over the base) as its product, which is not a judgment
+    product = await integrationStart(ctx, eff, t, k, con, deps);
+    if (product === null) return;
+    line = await readLine(ctx, t.id);
+  }
   if (product === null) {
     const view = await taskView(ctx, con);
     if (view.kind === 'absent') return submitConstructor(ctx, eff, plan, t, line, k, con, deps);
@@ -676,8 +715,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       return actionRefused(ctx, `${product.object}:verify`, e);
     }
     if (v === 'pending') return;
-    runs = [...v];
-    await commit(ctx, `flow:verified:${ctx.mission}:${product.object}`, { events: [ev(ctx, lineName, 'verified', String(k), { runs })] });
+    runs = await commitVerified(ctx, lineName, k, product.object, [...v]);
   }
 
   // the Reviewer (a re-review after an answered "needs decision")
@@ -697,22 +735,250 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       await commit(ctx, `flow:accepted:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'accepted', String(k), { k, product: product.object, judgment: review.judgment })] });
       return;
     case 'rework':
+      // an integration review that names the dependencies at fault reopens them (D-6); the integration does not absorb the fix
+      if (t.kind === 'integration' && (review.reopen ?? []).length > 0) return reopenFromReview(ctx, plan, t, k, rev, review, product);
+      // nothing to write here: a rework cannot be done by this task (refused at hand-back; an older card): the Secretary decides
+      if (startOnly(line, product)) return reviewerNeedsDecision(ctx, t, k, rev, review, product, `a rework of integration task ${t.id}, which writes nothing, names no dependency to reopen`);
       return rework(ctx, t, k, review.issues, [], `rework:${k}`);
     case 'needs-decision':
-      await raiseEscalation(ctx, {
-        id: `rnd.${rev}`,
-        source: 'reviewer-needs-decision',
-        lineage,
-        subject: `task:${t.id}`,
-        summary: `The Reviewer of task ${t.id} (attempt ${k}) needs a decision: the standards are unclear or in conflict.`,
-        reasons: [...review.issues],
-        options: ['answer', 'rework', 'replan', 'ask-user'],
-        items: t.requirementItems,
-        facts: { task: t.id, attempt: k, product: product.object, issues: review.issues },
-        handover: { from: rev, objects: [product.object] },
-      });
-      return;
+      return reviewerNeedsDecision(ctx, t, k, rev, review, product, null);
   }
+}
+
+/** The guard code of a "verified" event another writer recorded first (commitVerified). */
+const VERIFIED_FIRST = 'VERIFIED_FIRST';
+
+/**
+ * Attempt k's "verified" event (4.1.2): the Constructor's hand-back records its runs as this event
+ * in its own process (seat.ts recordVerified), so the flow normally reads it and runs nothing. When
+ * both reach it together, the first writer wins: the flow writes only while the event is absent
+ * (in its write), and otherwise adopts the recorded runs; nothing conflicts.
+ */
+async function commitVerified(ctx: FlowCtx, lineName: string, k: number, object: string, runs: VerificationRun[]): Promise<VerificationRun[]> {
+  const kept = async (): Promise<VerificationRun[] | null> => (await eventOf<{ runs: VerificationRun[] }>(ctx, lineName, 'verified', String(k)))?.body.runs ?? null;
+  const first = await kept();
+  if (first !== null) return first;
+  try {
+    await commit(ctx, `flow:verified:${ctx.mission}:${object}`, {
+      events: [ev(ctx, lineName, 'verified', String(k), { runs })],
+      guard: { absent: [{ mission: ctx.mission, line: lineName, event: 'verified', key: String(k) }], code: VERIFIED_FIRST, message: `attempt ${k} of ${lineName} was verified by another writer first` },
+    });
+    return runs;
+  } catch (e) {
+    if ((e as { code?: string }).code !== VERIFIED_FIRST) throw e;
+    const adopted = await kept();
+    if (adopted === null) throw e;
+    return adopted;
+  }
+}
+
+/** Whether a product is an integration task's start snapshot: no Constructor ran for its attempt (4.1.2). */
+function startOnly(line: Line, product: ProductBody): boolean {
+  return line.one<DispatchedBody>('dispatched', product.task)?.noConstructor === true;
+}
+
+/** A Reviewer's "needs decision" goes to the Secretary; a task with no Constructor offers no rework (its fix is a dependency's). */
+async function reviewerNeedsDecision(ctx: FlowCtx, t: DetailedTask, k: number, rev: string, review: ReviewBody, product: ProductBody, why: string | null): Promise<void> {
+  await raiseEscalation(ctx, {
+    id: `rnd.${rev}`,
+    source: 'reviewer-needs-decision',
+    lineage: taskLineage(ctx.mission, t.id),
+    subject: `task:${t.id}`,
+    summary: why === null ? `The Reviewer of task ${t.id} (attempt ${k}) needs a decision: the standards are unclear or in conflict.` : `The Reviewer of task ${t.id} (attempt ${k}) needs a decision: ${why}.`,
+    reasons: [...review.issues],
+    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'replan', 'ask-user'] : ['answer', 'rework', 'replan', 'ask-user'],
+    items: t.requirementItems,
+    facts: { task: t.id, attempt: k, product: product.object, issues: review.issues },
+    handover: { from: rev, objects: [product.object] },
+  });
+}
+
+// ---------------------------------------------------------------- integration tasks, reopening (4.1.2, D-6)
+
+/**
+ * The start snapshot of an integration task with nothing to write, recorded as its product (4.1.2):
+ * the dependencies' products laid over the base, pinned as the attempt's prerequisites, with the
+ * Reviewer contract of any product. No seat writes it and no judgment is made by the program. A
+ * conflict between the dependencies' products builds nothing: the task waits with a notice (ruling 6).
+ */
+async function integrationStart(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, k: number, con: string, deps: readonly string[]): Promise<ProductBody | null> {
+  let snap: Awaited<ReturnType<typeof ctx.ports.scheduler.snapshot>>;
+  try {
+    snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: `integration-${t.id}`, products: deps });
+  } catch (e) {
+    if ((e as { code?: string }).code === 'conflict') {
+      await notify(ctx, {
+        category: 'integration-start-conflict',
+        wi: null,
+        key: `${con}:start`,
+        trigger: `the start snapshot of integration task ${t.id} (attempt ${k}) cannot be built: ${(e as Error).message}`,
+        defaultAction: `only task ${t.id} waits (tried again on every pass, so a dependency accepted again can clear it); nothing is built on part of the work. A repair that reopens the dependency whose work conflicts, or a re-plan, routes the work (ruling 6)`,
+        detail: { task: t.id, attempt: k, dependencies: deps, conflicts: (e as { detail?: unknown }).detail ?? null },
+      });
+      return null;
+    }
+    await actionRefused(ctx, `${con}:start`, e);
+    return null;
+  }
+  const products = snap.products ?? (await ctx.ports.scheduler.composition(deps));
+  let pv: ProductVersion;
+  try {
+    pv = await ctx.ports.scheduler.product({
+      mission: ctx.mission,
+      module: t.module ?? t.id,
+      task: con,
+      dispatch: con,
+      candidate: snap.commit,
+      base: snap.commit,
+      writeScope: [],
+      taskType: t.kind,
+      prerequisites: products,
+      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx)) as never, reliesOn: [eff.dplan] as never }],
+      predecessor: null,
+      // its start is the snapshot itself: the dependencies' products laid over the base (not the
+      // commit's parent), so its start holds them on the final tree (delivery, ruling 2)
+      origin: snap.commit,
+    });
+  } catch (e) {
+    await actionRefused(ctx, `${con}:start`, e);
+    return null;
+  }
+  const product: ProductBody = { ...pv, k, dispatch: con, task: con, decisions: [] };
+  const dispatched: DispatchedBody = { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, prerequisites: [...products], predecessor: null, origin: snap.commit, noConstructor: true };
+  // the start and the product it is are one write (the attempt's pin and its candidate)
+  await commit(ctx, `flow:integration-start:${ctx.mission}:${con}`, { events: [ev(ctx, taskLine(t.id), 'dispatched', con, dispatched), ev(ctx, taskLine(t.id), 'product', String(k), product)] });
+  return product;
+}
+
+/** The latest reopen of each dependency an integration review reopened under the task's current card. */
+function reopenEntries(line: Line): Map<string, { readonly task: string; readonly attempt: number; readonly product: string; readonly issue: string; readonly evidence?: string }> {
+  const spec = line.all('spec').at(-1)?.revision ?? 0;
+  const out = new Map<string, { readonly task: string; readonly attempt: number; readonly product: string; readonly issue: string; readonly evidence?: string }>();
+  for (const e of line.all<ReopenBody>('reopen')) if (e.revision > spec) for (const x of e.body.tasks) out.set(x.task, x);
+  return out;
+}
+
+/**
+ * The current accepted products of the dependencies the task's integration reviews reopened, or null
+ * while one of them is not accepted again since (its new attempt, or the Secretary after its rework
+ * loop is used up). A reopened task the plan in effect no longer has is left out; one given up keeps
+ * the integration waiting, told to the PM (a re-plan or a repair routes the work).
+ */
+async function reopenedProducts(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask, line: Line): Promise<string[] | null> {
+  const out: string[] = [];
+  for (const x of reopenEntries(line).values()) {
+    if (!plan.tasks.some((p) => p.id === x.task)) continue;
+    const dep = await readLine(ctx, x.task);
+    if (dep.abandoned) {
+      await notify(ctx, {
+        category: 'reopened-task-abandoned',
+        wi: WI.loopExhausted,
+        key: `${t.id}:${x.task}:${x.attempt}`,
+        trigger: `integration task ${t.id} waits for task ${x.task}, which its review reopened, but ${x.task} was given up`,
+        defaultAction: `only task ${t.id} waits; the rest of the mission continues. A re-plan (mp pm plan submit) or a repair (mp pm repair) routes the work that the reopen asked for`,
+        detail: { task: t.id, reopened: x.task, attempt: x.attempt, issue: x.issue },
+      });
+      return null;
+    }
+    if (dep.k <= x.attempt) return null;
+    const p = await acceptedProduct(ctx, x.task);
+    if (p === null) return null;
+    out.push(p);
+  }
+  return out;
+}
+
+/**
+ * An integration review that traces the failure to dependencies (D-6): the decision record (the
+ * task line's "reopen") and the integration's next attempt, which waits for them, are one write;
+ * each named task's new attempt follows (carryReopens, restartable). A named task no longer accepted
+ * (it moved since the card was built) is left out; with none left, the Secretary decides.
+ */
+async function reopenFromReview(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask, k: number, rev: string, review: ReviewBody, product: ProductBody): Promise<void> {
+  const lineName = taskLine(t.id);
+  const entries: Array<ReopenBody['tasks'][number]> = [];
+  const skipped: string[] = [];
+  for (const x of review.reopen ?? []) {
+    const dep = await readLine(ctx, x.task);
+    const acc = dep.abandoned || !plan.tasks.some((p) => p.id === x.task) ? null : currentAcceptance(dep, dep.k);
+    if (acc === null) {
+      skipped.push(x.task);
+      continue;
+    }
+    entries.push({ task: x.task, attempt: dep.k, product: acc.product, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) });
+  }
+  if (entries.length === 0) return reviewerNeedsDecision(ctx, t, k, rev, review, product, `its review reopens ${skipped.join(', ')}, which ${skipped.length === 1 ? 'is' : 'are'} not accepted any more`);
+  const body: ReopenBody = { k, review: rev, tasks: entries };
+  const rebuild: ReworkBody = {
+    k: k + 1,
+    reason: 'rebuild',
+    issues: startOnly(await readLine(ctx, t.id), product) ? [] : [...review.issues],
+    instructions: [`The integration review ${rev} reopened ${entries.map((e) => e.task).join(', ')}: this attempt starts once ${entries.length === 1 ? 'it is' : 'they are'} accepted again, from the new work.`],
+    reopen: { kind: 'review', integration: t.id, review: rev, attempt: k },
+  };
+  await commit(ctx, `flow:reopen:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'reopen', String(k), body), ev(ctx, lineName, 'rework', String(k + 1), rebuild)] });
+  if (skipped.length > 0) {
+    await notify(ctx, {
+      category: 'reopen-skipped',
+      wi: null,
+      key: `${rev}:${skipped.join(',')}`,
+      trigger: `the review ${rev} of integration task ${t.id} reopens ${skipped.join(', ')}, which ${skipped.length === 1 ? 'is' : 'are'} not accepted any more`,
+      defaultAction: `the other named tasks are reopened (${entries.map((e) => e.task).join(', ')}); the integration builds again on their new work`,
+      detail: { task: t.id, review: rev, skipped },
+    });
+  }
+  await carryReopens(ctx, plan);
+}
+
+/** One reopened task's new attempt (D-6, D-10), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. */
+async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, attempt: number, issue: string, instruction: string, key: string, source: ReopenSource): Promise<void> {
+  const t = plan.tasks.find((x) => x.id === taskId);
+  // the plan in effect no longer has it (a re-plan dropped it): the reopen is moot
+  if (t === undefined) return;
+  const line = await readLine(ctx, taskId);
+  // it moved on (its new attempt is this one, or a re-plan restarted it), or it was given up: nothing to do
+  if (line.abandoned || line.k !== attempt || line.one('accepted', String(attempt)) === null) return;
+  const verdict = line.one<{ proceed: boolean }>('loop-verdict', key);
+  if (verdict !== null && !verdict.proceed) return; // its rework loop is used up: the escalation raised then decides
+  await rework(ctx, t, attempt, [issue], [instruction], key, { reason: 'reopen', reopen: source });
+}
+
+/**
+ * The reopen decisions carried out (D-6: an integration review's; D-10: a repair's): each named
+ * task gets its new attempt once. Run on every pass, so a crash between a decision and its effects
+ * loses nothing. The reopened task's other dependents keep their products and their proof (no
+ * cascade): the integration's full run checks the combination.
+ */
+async function carryReopens(ctx: FlowCtx, plan: DetailedPlanDoc): Promise<void> {
+  for (const e of await ctx.ports.ledger.events<ReopenBody>({ mission: ctx.mission, event: 'reopen' })) {
+    if (!e.line.startsWith('task:')) continue;
+    const integration = e.line.slice('task:'.length);
+    for (const x of e.body.tasks) {
+      const issue = `${x.issue}${x.evidence !== undefined ? ` (evidence: ${x.evidence})` : ''}`;
+      const instruction = `Reopened by the review ${e.body.review} of integration task ${integration} (attempt ${e.body.k}): fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted); the integration task builds again on your new work.`;
+      await reopenTask(ctx, plan, x.task, x.attempt, issue, instruction, `reopen:${integration}:${e.body.k}`, { kind: 'review', integration, review: e.body.review, attempt: e.body.k });
+    }
+  }
+  const repairs = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((r) => [r.key, r.body]));
+  for (const e of await eventsOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided')) {
+    const r = repairs.get(e.body.repair);
+    for (const x of e.body.reopen) {
+      const instruction = `Reopened by repair ${e.body.repair}${r !== undefined ? ` (${r.kind}; the user's words ${r.words}: "${r.text}")` : ''}: fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted).`;
+      await reopenTask(ctx, plan, x.task, x.attempt, x.issue, instruction, `reopen:repair:${e.body.repair}`, { kind: 'repair', repair: e.body.repair });
+    }
+  }
+}
+
+/** The repairs a task's work answers (D-10): the repair that added the task, and the one that reopened this attempt. */
+async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<RepairRef[]> {
+  const ids = new Set<string>();
+  const added = repairOfTask(eff.amendments, t.id);
+  if (added !== null) ids.add(added);
+  const rw = line.one<ReworkBody>('rework', String(k));
+  if (rw?.reopen?.kind === 'repair') ids.add(rw.reopen.repair);
+  if (ids.size === 0) return [];
+  const all = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
+  return all.filter((r) => ids.has(r.key)).map((r) => repairRef(r.body));
 }
 
 /** A Reviewer's accepted hand-back as the task line's "review" event (null: it carries no judgment, a defect told to the PM). */
@@ -729,7 +995,8 @@ async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string,
     ...r.issue_responses.filter((i) => i.response === 'not-fixed').map((i) => `issue ${i.issue} not fixed: ${i.reason}`),
   ];
   const deferred = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`);
-  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}) };
+  const reopen = (r.reopen ?? []).map((x) => ({ task: x.task, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) }));
+  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}) };
   for (const answer of r.issue_responses.filter((i) => i.response === 'deferred')) {
     await notify(ctx, {
       category: 'reviewer-issue-deferred',
@@ -1070,7 +1337,8 @@ async function rebindReview(
       kept.successors = null;
       break;
     case 'rework':
-      await rework(ctx, t, k, review.issues, [], `rework:${k}:${rev}`);
+      if (t.kind === 'integration' && (review.reopen ?? []).length > 0) await reopenFromReview(ctx, plan, t, k, rev, review, product);
+      else await rework(ctx, t, k, review.issues, [], `rework:${k}:${rev}`);
       break;
     case 'needs-decision':
       await raiseEscalation(ctx, {
@@ -1129,14 +1397,14 @@ function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typ
 }
 
 /** A Reviewer rework: counted (initial + 2); exhausted → WI-08 and the Secretary. */
-async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly string[], instructions: readonly string[], key: string): Promise<void> {
+async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly string[], instructions: readonly string[], key: string, o: { readonly reason?: ReworkBody['reason']; readonly reopen?: ReopenSource } = {}): Promise<void> {
   const lineName = taskLine(t.id);
   const lineage = taskLineage(ctx.mission, t.id);
   const r = await countedReturn(ctx, { line: lineName, key, lineage, loop: 'rework', signature: shortHash([...issues].sort()) });
   if (r.proceed) {
     const line = await readLine(ctx, t.id);
     const deferred = await deferredInstructions(ctx, line, k);
-    await commit(ctx, `flow:rework:${ctx.mission}:task:${idPart(t.id)}:${k + 1}`, { events: [ev(ctx, lineName, 'rework', String(k + 1), { k: k + 1, reason: instructions.length > 0 ? 'secretary' : 'reviewer', issues: [...issues], instructions: [...instructions, ...deferred] } satisfies ReworkBody)] });
+    await commit(ctx, `flow:rework:${ctx.mission}:task:${idPart(t.id)}:${k + 1}`, { events: [ev(ctx, lineName, 'rework', String(k + 1), { k: k + 1, reason: o.reason ?? (instructions.length > 0 ? 'secretary' : 'reviewer'), issues: [...issues], instructions: [...instructions, ...deferred], ...(o.reopen !== undefined ? { reopen: o.reopen } : {}) } satisfies ReworkBody)] });
     return;
   }
   const v = r.status;
@@ -1349,7 +1617,7 @@ async function droppedStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanD
     if (last === undefined) continue;
     if (line.all<{ dplan: string }>('dropped').some((d) => d.revision > last.revision)) continue;
     if (!line.abandoned) {
-      const stored = await detailedPlanOf(ctx, last.body.dplan);
+      const stored = await planOf(ctx, last.body.dplan);
       const t = stored?.plan.tasks.find((x) => x.id === id);
       if (t !== undefined) await cancelAttempt(ctx, t, line.k, 'dropped by the new plan');
     }
@@ -1430,8 +1698,10 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   ].join('\n');
   // the Constructor's worktree is created at this commit when it is dispatched (§5.3); the write paths are the task's write scope
   const workspace = { snapshot: snap.commit, writablePaths: [...t.writeScope] };
+  const repairs = await repairsOfWork(ctx, eff, t, line, k);
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: await decisionQuotes(ctx, t), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
+    ...(repairs.length > 0 ? { repairs } : {}),
     seat: 'constructor',
     workspace,
     goal: t.goal,
@@ -1477,6 +1747,8 @@ function handoverOfConstructor(ctx: FlowCtx, eff: EffectiveBody, line: Line, k: 
     const review = line.all<ReviewBody>('review').filter((r) => r.body.k === k - 1).at(-1);
     if (review !== undefined) return { from: review.body.task, objects: [eff.dplan], step: `the Reviewer's rework of task ${t.id}, attempt ${k - 1}` };
   }
+  // reopened by an integration review (D-6): that Reviewer hands it over
+  if (rw !== null && rw.reason === 'reopen' && rw.reopen?.kind === 'review') return { from: rw.reopen.review, objects: [eff.dplan], step: `the review ${rw.reopen.review} of integration task ${rw.reopen.integration} reopened task ${t.id}` };
   if (rw !== null) return { objects: [eff.dplan], step: `attempt ${k} of task ${t.id} (${rw.reason})` };
   return { from: eff.dplan.startsWith('dplan.') ? `arch.${eff.dplan.slice('dplan.'.length)}` : null, objects: [eff.dplan], step: `task ${t.id} of the detailed plan ${eff.dplan}` };
 }
@@ -1539,10 +1811,18 @@ async function submitReviewer(
     }
   }
   const m = line.all('reanswer').filter((x) => x.key.startsWith(`${k}:`)).length;
+  // 4.1.2 (item 7): the previous Reviewer of this task, its verdict and its reasons
+  const previousReview = await previousReviewOf(ctx, line, task);
+  // 4.1.2 (D-6): an integration task's review sees each dependency's product and the paths it changed, and may reopen one
+  const startOnlyAttempt = startOnly(line, product);
+  const integration = t.kind === 'integration' ? { hasConstructor: !startOnlyAttempt, dependencies: await dependencyProducts(ctx, plan, t) } : undefined;
+  const rw = line.one<ReworkBody>('rework', String(k));
+  const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
+  const repairs = await repairsOfWork(ctx, eff, t, line, k);
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
-      duties: o.duties ?? `Judge the candidate of task ${t.id} (attempt ${k}${m > 0 ? `, review ${m + 1} after a decision` : ''}) against each standard, independently.`,
+      duties: o.duties ?? `Judge the candidate of task ${t.id} (attempt ${k}${m > 0 ? `, review ${m + 1} after a decision` : ''}) against each standard, independently.${reopened}`,
       decisionQuotes: reviewerDecisionQuotes(ctx.mission, await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, await currentConstraints(ctx), k, taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'))),
       constraints: [...cardConstraintsList, ...await cardConstraints(ctx, t, new Set(['instruction']))],
     }),
@@ -1557,6 +1837,9 @@ async function submitReviewer(
     declaredCommands: t.verificationCommands.map((x) => ({ ...x })),
     selfReportedGaps: gaps,
     openIssues,
+    ...(previousReview !== null ? { previousReview } : {}),
+    ...(integration !== undefined ? { integration } : {}),
+    ...(repairs.length > 0 ? { repairs } : {}),
     binding: {
       judgment: `j.${task}`,
       bases: c.putList(currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')))),
@@ -1587,9 +1870,100 @@ async function submitReviewer(
         ? { from: o.handover.from, objects: [...o.handover.objects], step: o.handover.step }
         : o.afterClose !== undefined
           ? { from: null, objects: [product.object], step: `a re-review of ${product.object} after an environment change (mp pm renew)` }
-          : { from: product.task, objects: [product.object], step: `the candidate of task ${t.id}, attempt ${k}` },
+          : startOnlyAttempt
+            ? { from: null, objects: [product.object], step: `the start snapshot of integration task ${t.id}, attempt ${k} (it writes nothing: no Constructor)` }
+            : { from: product.task, objects: [product.object], step: `the candidate of task ${t.id}, attempt ${k}` },
   });
   ctx.progressed = true;
+}
+
+/** The previous Reviewer of the task (any attempt, before this review task): its verdict, each standard it did not find met, with the reason, and its findings. */
+async function previousReviewOf(ctx: FlowCtx, line: Line, current: string): Promise<NonNullable<ReviewerCard['previousReview']> | null> {
+  const prev = line.all<ReviewBody>('review').filter((r) => r.body.task !== current).at(-1);
+  if (prev === undefined) return null;
+  const result = ((await ctx.ports.scheduler.status(prev.body.task))?.handBack?.result ?? null) as ReviewerResult | null;
+  const unmet = result !== null
+    ? result.judgments.filter((j) => j.met !== 'yes').map((j) => ({ standard: j.standard, met: j.met as 'no' | 'unclear', reason: j.reason }))
+    // a result not readable any more: the recorded issue lines stand in ("[S1] not met: why")
+    : prev.body.issues.flatMap((i) => { const m = /^\[([^\]]+)\] (not met|unclear): (.*)$/s.exec(i); return m === null ? [] : [{ standard: m[1]!, met: (m[2] === 'not met' ? 'no' : 'unclear') as 'no' | 'unclear', reason: m[3]! }]; });
+  const findings = result !== null ? [...result.findings] : prev.body.issues.filter((i) => i.startsWith('finding: ')).map((i) => i.slice('finding: '.length));
+  return { review: prev.body.task, attempt: prev.body.k, verdict: prev.body.verdict, unmet, findings };
+}
+
+/** The paths a task's product changed, as recorded with its product event (a re-bound version brings its predecessor's change). */
+function changedPathsOf(line: Line, product: string): string[] {
+  const own = line.all<ProductBody>('product').find((p) => p.body.object === product);
+  if (own !== undefined) return [...own.body.changedPaths];
+  const rb = line.all<RebindBody>('rebind').find((r) => r.body.product === product);
+  return rb === undefined ? [] : changedPathsOf(line, rb.body.from);
+}
+
+/** An integration task's dependencies (direct and through other tasks) with their accepted products and the paths those changed (D-6 tracing aid). */
+async function dependencyProducts(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask): Promise<NonNullable<ReviewerCard['integration']>['dependencies']> {
+  const byId = new Map(plan.tasks.map((x) => [x.id, x]));
+  const seen = new Set<string>();
+  const order: string[] = [];
+  const visit = (id: string): void => {
+    for (const d of byId.get(id)?.dependsOn ?? []) {
+      if (seen.has(d)) continue;
+      seen.add(d);
+      order.push(d);
+      visit(d);
+    }
+  };
+  visit(t.id);
+  const out: Array<NonNullable<ReviewerCard['integration']>['dependencies'][number]> = [];
+  for (const id of order) {
+    const p = await acceptedProduct(ctx, id);
+    if (p === null) continue;
+    const line = await readLine(ctx, id);
+    out.push({ task: id, product: p, attempt: line.k, direct: t.dependsOn.includes(id), changedPaths: changedPathsOf(line, p) });
+  }
+  return out;
+}
+
+/**
+ * Which accepted products of the mission changed each path (`mp seat <id> owners`, the integration
+ * review's and the repair's tracing aid): from the paths recorded with each product, through the
+ * task lines' acceptances (current or earlier). A path ending in "/" or "/**" names a directory.
+ */
+export async function pathOwners(ctx: FlowCtx, paths: readonly string[]): Promise<Array<{ readonly path: string; readonly owners: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly current: boolean; readonly paths: readonly string[] }> }>> {
+  const tasks = new Set<string>();
+  for (const e of await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')) for (const t of e.body.tasks) tasks.add(t);
+  const accepted: Array<{ task: string; attempt: number; product: string; current: boolean; changed: readonly string[] }> = [];
+  for (const id of tasks) {
+    const line = await readLine(ctx, id);
+    const now = lineAcceptance(line.events).product;
+    for (const a of line.all<{ k: number; product: string }>('accepted')) accepted.push({ task: id, attempt: a.body.k, product: a.body.product, current: a.body.product === now, changed: changedPathsOf(line, a.body.product) });
+    for (const r of line.all<ReboundBody>('rebound')) accepted.push({ task: id, attempt: r.body.k, product: r.body.product, current: r.body.product === now, changed: changedPathsOf(line, r.body.product) });
+  }
+  return paths.map((path) => {
+    const dir = path.endsWith('/**') ? path.slice(0, -3) : path.endsWith('/') ? path.slice(0, -1) : null;
+    const hit = (p: string): boolean => (dir === null ? p === path : p === dir || p.startsWith(`${dir}/`));
+    return { path, owners: accepted.filter((a) => a.changed.some(hit)).map((a) => ({ task: a.task, attempt: a.attempt, product: a.product, current: a.current, paths: a.changed.filter(hit) })) };
+  });
+}
+
+/**
+ * An accepted product built on a version its dependency has since replaced (4.1.2, D-6 no cascade):
+ * its prerequisites that are a task's earlier accepted version, with that task's version now. The
+ * read says so honestly; nothing is re-reviewed or rebuilt for it (the integration's full run checks
+ * the combination). Pure: from the task lines' events and the product's recorded prerequisites.
+ */
+export function builtOnOlder(prerequisites: readonly string[], lines: ReadonlyMap<string, Line['events']>): Array<{ readonly prerequisite: string; readonly task: string; readonly attempt: number; readonly newer: string }> {
+  const out: Array<{ prerequisite: string; task: string; attempt: number; newer: string }> = [];
+  for (const [task, events] of lines) {
+    const line = new Line(events);
+    const versions = new Map(line.all<{ k: number; product: string }>('accepted').map((a) => [a.body.product, a.body.k]));
+    for (const r of line.all<ReboundBody>('rebound')) versions.set(r.body.product, r.body.k);
+    const now = lineAcceptance(events);
+    if (now.product === null) continue;
+    for (const p of prerequisites) {
+      const k = versions.get(p);
+      if (k !== undefined && p !== now.product && now.k > k) out.push({ prerequisite: p, task, attempt: k, newer: now.product });
+    }
+  }
+  return out;
 }
 
 /** The objects a product version's Reviewer contract relies on (the plan in effect for a version without a contract). */

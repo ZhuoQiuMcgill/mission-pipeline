@@ -3,7 +3,8 @@
 //   snapshot    the commit a seat reads: the mission's base (the target branch's head) or a given
 //               commit, with accepted product versions laid over it (a dependent task sees its
 //               prerequisites, 5.3) by the delivery's overlay (delivery/candidate.ts); the card
-//               names the commit, `mp seat <id> checkout` materializes it. A later attempt's start
+//               names the commit, `mp seat <id> checkout` materializes it (the snapshot itself writes
+//               nothing to disk: only its commit is used, 4.1.2). A later attempt's start
 //               (carry): the previous candidate, or, when its dependencies' products changed, the
 //               previous version's whole change laid over their current snapshot (Appendix M)
 //   product     the product version of a Constructor's candidate commit (5.1): its content is the
@@ -15,25 +16,29 @@
 //               with the same content and source, its origin recorded, its own prerequisites and
 //               review contracts
 //   verify      the declared runs on a clean checkout of the candidate (§5.3; reused when §6.5 allows;
-//               "pending", with nothing run or recorded, while another mp process executes them)
+//               "pending", with nothing run or recorded, while another mp process executes them, and
+//               while a stop covers the work: §6.6, it resumes once the stop is released). 4.1.2
+//               (D-4, D-5, D-7): never a command of the project's full suite, whatever the task kind
+//               or the card's age: the suite is the integration Reviewer's `mp seat <id> full-run`,
+//               recorded with a full-run marker
 //   findSymbol  3.5: a file of a commit names a symbol (read-only, no model)
 //   history     3.4: the git log and past run durations, for the Architect's card
 // Every action is idempotent: a product version is recorded once per object id, a snapshot of the
 // same inputs is the same commit, a verification is reused.
 
-import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { canonicalJson } from '../common/hash.ts';
+import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
 import type { GitOid, MissionId, ModuleId, ObjectVersionId, ProofUnitId } from '../common/ids.ts';
 import type { ObjectVersionRecord } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import { buildCandidate, landedVersions, startHolds, versionOrigin } from '../delivery/candidate.ts';
 import { buildManifest, type DeliveryManifest } from '../delivery/manifest.ts';
+import { deriveScope, scopeStopped } from '../delivery/scope.ts';
 import { memoryProofView } from '../delivery/memoryView.ts';
 import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
-import { AttributeEvaluator, MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
+import { MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
 import { appendRecords, factById, LedgerError } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
 import type { ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../flow/ports.ts';
@@ -56,6 +61,20 @@ export const productObjectId = (task: string): string => safeId(`prod.${task}`);
 interface Shared {
   repo: Promise<RepoLayout> | null;
   description: Promise<TransformDescription> | null;
+}
+
+/**
+ * The commands of a task the program runs at hand-back and in the flow's verification (4.1.2, D-4,
+ * D-5, D-7): its declared commands without the project's full suite (by normalized text and working directory), for every
+ * task kind and every card, a 4.1.1 plan's included. The suite is left to the integration review.
+ */
+export function verificationCommands<C extends { readonly command: string | readonly string[]; readonly cwd?: string }>(suite: readonly SuiteCommand[], commands: readonly C[]): C[] {
+  return commands.filter((c) => !isFullSuiteCommand(suite, c.command, c.cwd));
+}
+
+/** Whether a stop covers the work of `mission` (§6.6; the delivery's scope resolver): its verification waits until the stop is released. */
+export function verificationStopped(ctx: ProcessContext, mission: MissionId): boolean {
+  return ctx.memory.read((db) => scopeStopped(db, deriveScope(db, mission)));
 }
 
 /** Resolve the prerequisite closure and whole proof units; the delivery overlay orders them by prerequisites.
@@ -151,18 +170,17 @@ export function gitActions(ctx: ProcessContext): GitActions {
       manifest = compose(view, given);
     }
     const products = manifest.entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
-    const scratch = mkdtempSync(join(ctx.memory.paths.tmp, 'snapshot-'));
-    let attributes: AttributeEvaluator | null = null;
     try {
       const layout = await repo();
-      attributes = await AttributeEvaluator.create(ctx.git, layout, await description(), scratch);
+      // 4.1.2: only the commit is used; nothing is materialized, so no scratch directory or
+      // attribute repository is made (the description alone checks the versions rest on it)
       const r = await buildCandidate({
         git: ctx.git,
         repo: layout,
         manifest,
         base: gitOid(base),
-        attributes,
-        snapshotDir: join(scratch, 'overlay'),
+        attributes: { description: await description() },
+        materialize: 'none',
         message: message ?? `mission-pipeline: snapshot of ${mission} with ${products.join(', ')}`,
         author: ctx.ident(0),
         committer: ctx.ident(0),
@@ -178,9 +196,6 @@ export function gitActions(ctx: ProcessContext): GitActions {
     } catch (e) {
       if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
       throw e;
-    } finally {
-      attributes?.dispose();
-      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
@@ -310,12 +325,17 @@ export function gitActions(ctx: ProcessContext): GitActions {
       const ids = req.commands.map((c) => c.id);
       const dup = [...new Set(ids.filter((x, i) => ids.indexOf(x) !== i))];
       if (dup.length > 0) throw new ActionError('conflict', `the verification commands of ${req.object} repeat ids (${dup.join(', ')}); nothing was run or recorded`, { object: req.object, duplicates: dup });
-      if (req.commands.length === 0) return [];
+      // the project's full suite is never run here (a 4.1.1 plan, an integration task, a card in flight):
+      // it is left to the integration review, whose full run leaves a marker (D-5, D-7)
+      const commands = verificationCommands(ctx.fullSuite, req.commands);
+      if (commands.length === 0) return [];
+      // a stop stops (§6.6): nothing executes in its scope; the step waits, as for runs in progress
+      if (verificationStopped(ctx, req.mission)) return 'pending';
       try {
         const r = await runOnCommit(ctx, {
           mission: req.mission,
           commit: req.snapshot,
-          commands: req.commands,
+          commands,
           purpose: `verification of ${req.object}`,
           declaration: { by: 'mp', checkout: 'clean', declared: true },
           fields: { object: req.object },

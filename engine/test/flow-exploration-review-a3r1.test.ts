@@ -165,10 +165,10 @@ describe('review r1 #2: a pending direction question gates convergence and accep
 });
 
 describe('review r1 #3: an experiment\'s evidence is bound to the environment of its runs', () => {
-  test('the reviewer\'s repro: an environment change takes the proof away; the evidence runs again and the same position judges again', async () => {
+  test('the reviewer\'s repro (4.1.2): an environment change keeps the proof (older environment); on the PM\'s word the evidence runs again and the same position judges again', async () => {
     const { currentEnvironment, forgetObservedEnvironment, ENV_LINE } = await import('../src/evaluator/index.ts');
     const { flowCtx } = await import('../src/flow/context.ts');
-    const { explorationStep } = await import('../src/flow/exploration/step.ts');
+    const { explorationStep, EXPLORATION_REOPEN_REQUESTED } = await import('../src/flow/exploration/step.ts');
     const { blind, recheckAll } = await import('./flow-exploration-fixtures.ts');
     const w = await world();
     const ports = { ledger: w.ledger, scheduler: w.scheduler, evaluator: w.evaluator };
@@ -207,10 +207,12 @@ describe('review r1 #3: an experiment\'s evidence is bound to the environment of
 
     // the machine changes (the reviewer's repro: another OS and architecture)
     forgetObservedEnvironment(w.memory.projectDir);
-    currentEnvironment(w.memory, { observe: () => ({ os: 'changed', osVersion: '2', arch: 'arm64', versions: {} }) });
-    assert.notEqual((await w.evaluator.labels([v])).labels[v], 'proven', 'the observation needs a rerun: not proven any more');
-
-    // the way back: the same evidence execution runs again, blind, under the current identity
+    const moved = currentEnvironment(w.memory, { observe: () => ({ os: 'changed', osVersion: '2', arch: 'arm64', versions: {} }) });
+    assert.equal((await w.evaluator.labels([v])).labels[v], 'proven', '4.1.2: the observation from the older environment still counts');
+    await pump();
+    assert.equal((await explorationState(w, M, w.x)).stopped?.reason, 'converged', 'not reopened by itself');
+    // the PM's word: the same evidence execution runs again, blind, under the current identity
+    await w.ledger.append('test:reopen-word', { events: [{ mission: M, line: `exploration:${w.x}`, event: EXPLORATION_REOPEN_REQUESTED, key: moved.identity, body: { environment: moved.identity, words: null, by: 'pm' } }] });
     await pump();
     s = await explorationState(w, M, w.x);
     assert.equal(s.stopped, null, 'reopened for the re-judgment');
@@ -382,8 +384,9 @@ describe('review r2 #4: a round passes only on a recorded pass', () => {
 });
 
 describe('review r2 #5: one evidence resolver', () => {
-  test('a research exploration proven → the environment identity changes → its attempt runs again → the attacker re-checks → proven again', async () => {
+  test('a research exploration proven → the environment identity changes (still proven) → on the PM\'s word its attempt runs again → the attacker re-checks → proven', async () => {
     const { currentEnvironment, forgetObservedEnvironment } = await import('../src/evaluator/index.ts');
+    const { EXPLORATION_REOPEN_REQUESTED } = await import('../src/flow/exploration/step.ts');
     const { blind } = await import('./flow-exploration-fixtures.ts');
     const w = await world({ product: 'answer', research: true, question: 'Does it hold?' });
     await w.advance();
@@ -405,8 +408,9 @@ describe('review r2 #5: one evidence resolver', () => {
     assert.equal((await w.evaluator.labels([v])).labels[v], 'proven');
 
     forgetObservedEnvironment(w.memory.projectDir);
-    currentEnvironment(w.memory, { observe: () => ({ os: 'changed', osVersion: '2', arch: 'arm64', versions: {} }) });
-    assert.notEqual((await w.evaluator.labels([v])).labels[v], 'proven');
+    const moved = currentEnvironment(w.memory, { observe: () => ({ os: 'changed', osVersion: '2', arch: 'arm64', versions: {} }) });
+    assert.equal((await w.evaluator.labels([v])).labels[v], 'proven', '4.1.2: still proven (older environment)');
+    await w.ledger.append('test:reopen-word', { events: [{ mission: M, line: `exploration:${w.x}`, event: EXPLORATION_REOPEN_REQUESTED, key: moved.identity, body: { environment: moved.identity, words: null, by: 'pm' } }] });
     await pumpStep(w);
     const rerun = cardOf<{ evidence: { id: string; attempt: string | null } }>(w, 'constructor-experiment');
     assert.deepEqual([rerun.evidence.id, rerun.evidence.attempt], ['xpe.M1.E1.2', 'A1'], 'the registered attempt runs again');

@@ -6,15 +6,16 @@ import { resolveBases, resolveConstraints, resolveItems } from '../../memory/dom
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
 import { taskCardHash, taskLineage } from '../../flow/execution.ts';
-import { DetailedPlanDoc, PmPlanDoc, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
+import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
+import type { EffectiveBody } from '../../flow/planning.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
 import type { EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
-import { constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed } from './dynamic.ts';
+import { constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints } from './dynamic.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
-import type { ArchitectDecomposeCard, ArchitectFeasibilityCard } from './architect.ts';
+import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectRepairCard } from './architect.ts';
 import type { SecretaryCard } from './secretary.ts';
 import type { AuditNodeCard, AuditChainCard } from './auditor.ts';
 import type { AuthorCard, ReaderCard, InterpreterCard } from './researcher.ts';
@@ -22,7 +23,7 @@ import type { ExperimentCard } from './experiment.ts';
 import type { CrititorCard } from './crititor.ts';
 import type { StabilizerCard } from './stabilizer.ts';
 
-type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
+type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
 
 function pages<T extends { revision: number }>(read: (after: number) => readonly T[]): T[] {
   const out: T[] = [];
@@ -39,6 +40,8 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
     case 'researcher-reader':
     case 'researcher-interpreter':
     case 'constructor-experiment':
+    // a repair's Architect step: its plan inputs are fixed at queue time; the flow discards a hand-back on a plan no longer in effect
+    case 'architect-repair':
       return spec;
     case 'crititor':
     case 'stabilizer':
@@ -73,8 +76,10 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
     const id = e.line.slice('task:'.length);
     const subject = card.seat === 'secretary' ? card.request.subject : undefined;
     if (taskLineage(mission, id) !== spec.lineage && subject !== `task:${id}`) continue;
-    const obj = object((e.body as { dplan: string }).dplan);
-    if (obj !== undefined) task = DetailedPlanDoc.parse((JSON.parse(data.text(obj.content)) as StoredDetailedPlan).plan).tasks.find((t) => t.id === id);
+    const dplan = (e.body as { dplan: string }).dplan;
+    const obj = object(dplan);
+    // the plan as it is in effect: its version's tasks plus the tasks repairs added (4.1.2, D-10)
+    if (obj !== undefined) task = amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(obj.content)) as StoredDetailedPlan).plan), latestEffectiveOf<EffectiveBody>(events, dplan)?.amendments).tasks.find((t) => t.id === id);
     cardHash = (e.body as { hash: string }).hash;
     break;
   }
@@ -97,7 +102,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       // is superseded: the flow's next pass cancels the step (re-planned or dropped).
       const eff = planInEffect(events);
       const stored = eff === undefined ? undefined : object(eff.dplan);
-      const plan = stored === undefined ? undefined : DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan);
+      const plan = stored === undefined || eff === undefined ? undefined : amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
       const current = task === undefined ? undefined : plan?.tasks.find((t) => t.id === task!.id);
       if (eff === undefined || plan === undefined || current === undefined || taskCardHash(current) !== cardHash) throw new ProcessError('NOT_READY', `Constructor step ${spec.task} was superseded: the plan in effect${eff === undefined ? '' : ` (${eff.dplan})`} does not hold its card; run mp pm next.`);
       task = current;
@@ -141,6 +146,8 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
     case 'calibrator-2':
     case 'architect-feasibility':
     case 'architect-decompose': {
+      // the Architect's card shows the constraints in force (4.1.2, item 7), by the queue-time builder's selection
+      if (card.seat === 'architect-decompose') card.constraints = planningConstraints(constraints, mission);
       const obj = card.seat === 'architect-decompose' ? undefined : object(card.target);
       const withdrawn = obj === undefined ? null : withdrawnPlanReason(obj, ix);
       if (withdrawn !== null) throw new ProcessError('NOT_READY', withdrawn);

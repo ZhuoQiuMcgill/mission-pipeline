@@ -1,7 +1,7 @@
 {
-  "description": "Optional adapter for Claude Code (Mission Pipeline 4.1 works without it): at session start, print the PM handbook core and `mp pm next`; on every prompt, record the user's words with `mp pm say` (the PM's own `mp pm say` of the same text records nothing new). It acts only in a project with .mission-pipeline/ and never blocks a prompt.",
+  "description": "Optional adapter for Claude Code (Mission Pipeline 4.1 works without it): at session start, print a neutral pointer (the PM reads its handbook and runs mp pm next; a seat follows its card) and run nothing; on every prompt, record the user's words with `mp pm say` (the PM's own `mp pm say` of the same text records nothing new). It acts only in a project with .mission-pipeline/ and never blocks a prompt.",
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/claude-code.mjs\" session-start", "timeout": 120 }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/claude-code.mjs\" session-start", "timeout": 10 }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/claude-code.mjs\" user-prompt-submit", "timeout": 30 }] }]
   }
 }

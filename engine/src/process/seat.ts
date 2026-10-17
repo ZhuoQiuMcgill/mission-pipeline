@@ -6,7 +6,9 @@
 //   card              the card leaf as the seat received it (hash-checked)
 //   read              one page of a material: its leaf, hash-checked (a missing or edited leaf is
 //                     reported, never served); the page read is recorded (must-read tracking)
-//   checkout          the commit the card names, materialized into tmp/<dispatch>/checkout/
+//   checkout          the commit the card names, in the read-only checkout that the seats reading
+//                     that commit share, tmp/checkouts/<commit>/ (4.1.2: held by this dispatch while
+//                     it is in flight; removed when its last holder is over, housekeeping.ts)
 //   rerun             a declared command of the card on a clean checkout: a sampling run with a
 //                     new run id every time (§6.5, scenario 13)
 //   request-evidence  a hand-back that asks for evidence (decision 13): it ends the dispatch with
@@ -15,20 +17,27 @@
 //                     tmp/<dispatch>/: checked against the role's rules (a refused hand-back does
 //                     not count and keeps the worktree; the seat fixes it and runs it again,
 //                     decision 14), the report filed as the leaf dispatches/<d>/report.md, the
-//                     records appended in the same write, then the process advanced.
+//                     records appended in the same write, then the process advanced. Once it is
+//                     recorded, tmp/<dispatch>/ is removed and the dispatch's checkout holds end.
+//   full-run          (an integration task's Reviewer, when the project declares a full suite) the
+//                     full suite on a clean checkout of the candidate, last, once nothing visible is
+//                     wrong (4.1.2, D-5, D-6; fullRuns.ts); its runs become citable by the dispatch
 // A Constructor's hand-back first collects its candidate from its worktree (A4, decision 17),
 // then `mp` runs the card's verification commands on a clean checkout of the candidate (§5.3)
-// and removes the worktree once the hand-back is accepted.
+// and removes the worktree once the hand-back is accepted. Those runs are recorded as the flow's
+// "verified" event of that attempt in the same process (4.1.2: the flow reads it and never runs
+// them again); the first writer of that event wins, the other adopts it.
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
-import { checkoutCommit, seatCheckoutDir, type Collection } from '../git/workspace.ts';
+import type { Collection } from '../git/workspace.ts';
 import { continuationCheck, type ContinuationRequest } from '../evaluator/index.ts';
 import {
   appendRecords,
+  assertNotStopped,
   recordContinuationCheck,
   dispatchInfo,
   dispatchLeaf,
@@ -46,19 +55,25 @@ import {
 } from '../memory/index.ts';
 import { supersededRecheck, type PmBatchBody, type RecheckBody } from '../flow/planning.ts';
 import { SECRETARY_LINE } from '../flow/plandoc.ts';
-import { EvidenceRequestSchema, rerunCommands, seatCommandsOf } from '../seat/card.ts';
+import { EvidenceRequestSchema, isIntegrationCard, rerunCommands, rerunnableCommands, seatCommandsOf } from '../seat/card.ts';
+import { isFullSuiteCommand } from '../common/fullSuite.ts';
 import type { ReviewerCard } from '../seat/card.ts';
 import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/common.ts';
 import { handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
 import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
-import { productObjectId } from './actions.ts';
+import { productObjectId, verificationStopped } from './actions.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
 import { runOnCommit, type RecordedRun } from './runs.ts';
+import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
+import { tagScope } from '../delivery/scope.ts';
+import { pathOwners } from '../flow/execution.ts';
+import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
+import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
 
 // ---------------------------------------------------------------- the dispatch's card and materials
 
@@ -102,8 +117,9 @@ function inFlight(v: DispatchView, what: string): void {
   if (v.info.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${v.info.dispatch} is ${v.info.state === 'released' ? `released (${v.info.released})` : 'handed back'}: ${what} is for a dispatch in flight`);
 }
 
-function allows(v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'request-evidence'): void {
-  if (!seatCommandsOf(v.card).includes(command)) throw new ProcessError('NOT_ALLOWED', `the ${v.card.seat} card of dispatch ${v.info.dispatch} has no \`${command}\` command (its commands: ${seatCommandsOf(v.card).join(', ')})`);
+function allows(ctx: ProcessContext, v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'owners' | 'request-evidence' | 'full-run'): void {
+  const commands = seatCommandsOf(v.card, { fullSuite: ctx.fullSuite });
+  if (!commands.includes(command)) throw new ProcessError('NOT_ALLOWED', `the ${v.card.seat} card of dispatch ${v.info.dispatch} has no \`${command}\` command (its commands: ${commands.join(', ')})`);
 }
 
 /**
@@ -112,7 +128,7 @@ function allows(v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'reque
  */
 export function seatRead(ctx: ProcessContext, dispatch: string, material: string, page = 1): { readonly material: string; readonly page: number; readonly pages: number; readonly mustRead: boolean; readonly text: string } {
   const v = dispatchView(ctx, dispatch);
-  allows(v, 'read');
+  allows(ctx, v, 'read');
   const materials = ((v.card['materials'] as MaterialRef[] | undefined) ?? []);
   const m = materials.find((x) => x.id === material);
   if (m === undefined) throw new ProcessError('NOT_ALLOWED', `"${material}" is not a material on the card (materials: ${materials.map((x) => x.id).join(', ') || 'none'})`);
@@ -130,6 +146,21 @@ export function seatRead(ctx: ProcessContext, dispatch: string, material: string
   return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read)' : ''}\n${materialPage(r.text, page)}` };
 }
 
+/**
+ * `mp seat <id> owners <path>...` (4.1.2, D-6 tracing aid): which accepted products of the mission
+ * changed each path, from their recorded changed paths (execution.ts pathOwners, the one resolver).
+ */
+export async function seatOwners(ctx: ProcessContext, dispatch: string, paths: readonly string[]): Promise<{ readonly dispatch: string; readonly owners: Awaited<ReturnType<typeof pathOwners>>; readonly text: string }> {
+  const v = dispatchView(ctx, dispatch);
+  allows(ctx, v, 'owners');
+  if (paths.length === 0) throw new ProcessError('NOT_ALLOWED', 'name at least one path (a directory ends in "/")');
+  const owners = await pathOwners(flowCtx(ctx.ports(), v.info.mission as MissionId), paths);
+  const text = owners
+    .map((o) => `${o.path}: ${o.owners.length === 0 ? 'no accepted product changed it' : o.owners.map((x) => `${x.task} attempt ${x.attempt} (${x.product}${x.current ? '' : ', an earlier accepted version'})${x.paths.length > 1 || x.paths[0] !== o.path ? `: ${x.paths.join(', ')}` : ''}`).join('; ')}`)
+    .join('\n');
+  return { dispatch, owners, text };
+}
+
 /** The commit (or project-relative path) a card names. */
 function cardSnapshot(v: DispatchView): string | null {
   const w = v.card['workspace'] as { snapshot?: string } | undefined;
@@ -138,16 +169,21 @@ function cardSnapshot(v: DispatchView): string | null {
 
 const COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
-/** `mp seat <id> checkout` (decision 10): the commit the card names, materialized into tmp/<dispatch>/checkout/. */
+/**
+ * `mp seat <id> checkout` (decision 10; 4.1.2): the commit the card names, in the read-only
+ * checkout the seats reading that commit share, `tmp/checkouts/<commit>/` (built once, atomically);
+ * the path is printed. This dispatch holds it while in flight.
+ */
 export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promise<{ readonly path: string; readonly commit: string | null }> {
   const v = dispatchView(ctx, dispatch);
-  allows(v, 'checkout');
+  allows(ctx, v, 'checkout');
   const snap = cardSnapshot(v);
   if (snap === null) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to read`);
   if (!COMMIT.test(snap)) return { path: join(ctx.projectDir, ...snap.split('/')), commit: null };
-  const dir = seatCheckoutDir(ctx.memory.paths, dispatch);
-  const c = await checkoutCommit(ctx.gitCtx, { commit: snap, dir });
-  return { path: c.dir, commit: c.commit };
+  // a dispatch that is over holds nothing: its checkout would have no holder
+  inFlight(v, 'a checkout');
+  const c = await holdSharedCheckout(ctx, v.info, snap);
+  return { path: c.path, commit: c.commit };
 }
 
 /**
@@ -156,10 +192,15 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promi
  */
 export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<{ readonly run: string; readonly passed: boolean; readonly summary: string; readonly leaf: string | null }> {
   const v = dispatchView(ctx, dispatch);
+  // a stop stops (§6.6): nothing is run in its scope, refused before any other refusal
+  ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this rerun'));
   inFlight(v, 'a rerun');
-  allows(v, 'rerun');
-  const c = rerunCommands(v.card).find((x) => x.id === commandId);
-  if (c === undefined) throw new ProcessError('NOT_ALLOWED', `"${commandId}" is not a declared command on the card (ids: ${rerunCommands(v.card).map((x) => x.id).join(', ')})`);
+  allows(ctx, v, 'rerun');
+  const suiteCommand = rerunCommands(v.card).find((x) => x.id === commandId && isFullSuiteCommand(ctx.fullSuite, x.command, x.cwd));
+  // 4.1.2 (D-5, D-7): the project's full suite is the integration Reviewer's full run, recorded with a marker
+  if (suiteCommand !== undefined) throw new ProcessError('NOT_ALLOWED', `"${commandId}" is the project's full suite: it is not rerun from a card; ${isIntegrationCard(v.card) ? `run it with \`mp seat ${dispatch} full-run\`` : 'it is left to the integration review (its Reviewer runs `mp seat <id> full-run`)'}`);
+  const c = rerunnableCommands(v.card, { fullSuite: ctx.fullSuite }).find((x) => x.id === commandId);
+  if (c === undefined) throw new ProcessError('NOT_ALLOWED', `"${commandId}" is not a declared command on the card (ids: ${rerunnableCommands(v.card, { fullSuite: ctx.fullSuite }).map((x) => x.id).join(', ')})`);
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
   const r = await runOnCommit(ctx, {
@@ -182,13 +223,91 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
   return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf };
 }
 
+/** An integration task's Reviewer card (the flow marks it; `full-run` is offered when the project declares a full suite). */
+function integrationReview(ctx: ProcessContext, card: DispatchView['card']): boolean {
+  return isIntegrationCard(card) && ctx.fullSuite.length > 0;
+}
+
+/**
+ * `mp seat <id> full-run` (4.1.2, D-5, D-6): an integration task's Reviewer has `mp` run the full
+ * suite on a clean checkout of its candidate (fullRuns.ts runFullSuite: a passing full run on the
+ * same tree and environment is reused, nothing executed); the marker cites the dispatch and its
+ * runs become citable as evidence:<id> by this dispatch. The card asks for it last, once nothing
+ * visible is wrong.
+ */
+export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promise<{ readonly marker: FullRunMarker; readonly reused: boolean }> {
+  const v = dispatchView(ctx, dispatch);
+  // a stop stops (§6.6): no suite is run in its scope, refused before any other refusal
+  ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this full run'));
+  inFlight(v, 'a full run');
+  allows(ctx, v, 'full-run');
+  const snap = cardSnapshot(v);
+  if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
+  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag) });
+}
+
+/**
+ * The integration Reviewer's pass (4.1.2, D-6): when the project declares a full suite, a "pass"
+ * cites a passing full run of its candidate (its tree, the current suite); rework and
+ * needs-decision need none. Empty: nothing to refuse.
+ */
+function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
+  if (!integrationReview(ctx, v.card)) return [];
+  const r = fields as { verdict?: unknown; judgments?: Array<{ evidence?: unknown }> } | null;
+  if (r === null || typeof r !== 'object' || r.verdict !== 'pass') return [];
+  const snap = cardSnapshot(v);
+  if (snap === null || !COMMIT.test(snap)) return [];
+  const cited = new Set((Array.isArray(r.judgments) ? r.judgments : []).flatMap((j) => (Array.isArray(j?.evidence) ? j.evidence : [])).filter((e): e is string => typeof e === 'string' && e.startsWith('evidence:')).map((e) => e.slice('evidence:'.length)));
+  let tree: string;
+  try {
+    tree = treeOf(ctx, snap);
+  } catch (e) {
+    return [`verdict: an integration task's "pass" cites a passing full run of its candidate, and the candidate's tree cannot be read here (${(e as Error).message})`];
+  }
+  const data = ctx.memory.data;
+  const passing = ctx.memory.read((db) => passingFullRunEvidence(db, data, tree, suiteHash(ctx.fullSuite)));
+  if ([...cited].some((e) => passing.has(e))) return [];
+  return [`verdict: an integration task's "pass" cites a passing full run of its candidate: when nothing visible is wrong, run \`mp seat ${v.info.dispatch} full-run\` and cite its runs as evidence:<id>; if the change or the local results already show a problem, hand back "rework" (or "needs-decision") without a full run`];
+}
+
+/** The plan task line and attempt of a Constructor dispatch's task: the flow's "dispatched" event keyed by it (execution.ts submitConstructor), or null. */
+function constructorAttempt(ctx: ProcessContext, mission: string, task: string): { readonly line: string; readonly k: number } | null {
+  const data = ctx.memory.data;
+  return ctx.memory.read((db) => {
+    const row = db.stmt("SELECT line, body FROM flow_events WHERE mission = ? AND event = 'dispatched' AND key = ? AND line LIKE 'task:%' ORDER BY revision LIMIT 1").get(mission, task) as { line: string; body: string } | undefined;
+    if (row === undefined) return null;
+    const k = (JSON.parse(data.text(row.body)) as { k?: unknown }).k;
+    return typeof k === 'number' && Number.isSafeInteger(k) ? { line: row.line, k } : null;
+  });
+}
+
+/**
+ * The hand-back's runs as the flow's "verified" event of that attempt (4.1.2 item 1): the flow
+ * pass reads it and never executes them again. One writer wins: an event already there (the flow
+ * wrote it first) is kept and nothing is written; the flow adopts this one when it comes second.
+ */
+export function recordVerified(ctx: ProcessContext, v: DispatchView, runs: readonly VerificationRun[]): 'recorded' | 'kept' | 'no-attempt' {
+  const at = constructorAttempt(ctx, v.info.mission, v.info.task);
+  if (at === null) return 'no-attempt';
+  const key = String(at.k);
+  return ctx.memory.write({ op: `handback-verified:${v.info.dispatch}`, payload: { dispatch: v.info.dispatch, line: at.line, k: at.k } }, (tx) => {
+    if (flowEventExists(tx, { mission: v.info.mission, line: at.line, event: 'verified', key })) return 'kept' as const;
+    appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: at.line, event: 'verified', key, body: tx.data.put(canonicalJson({ runs })) as ContentHash }]);
+    return 'recorded' as const;
+  });
+}
+
 // ---------------------------------------------------------------- hand-backs
 
 /** The files of a hand-back, which must be in `.mission-pipeline/tmp/<dispatch>/` (decision 7). */
 function readHandBackFile(ctx: ProcessContext, dispatch: string, file: string, what: string): string {
   const dir = join(ctx.memory.paths.tmp, dispatch);
   const abs = isAbsolute(file) ? file : resolve(ctx.projectDir, file);
-  if (!existsSync(abs)) throw new ProcessError('BAD_FILE', `the ${what} file ${file} does not exist (write it to .mission-pipeline/tmp/${dispatch}/)`);
+  if (!existsSync(abs)) {
+    // 4.1.2: tmp/<dispatch>/ is removed once a hand-back is recorded
+    if (ctx.memory.read((db) => dispatchInfo(db, dispatch))?.handbackHash != null) throw new ProcessError('NOT_ALLOWED', `dispatch ${dispatch} was already handed back (its files in .mission-pipeline/tmp/${dispatch}/ were removed once it was recorded): you are done`);
+    throw new ProcessError('BAD_FILE', `the ${what} file ${file} does not exist (write it to .mission-pipeline/tmp/${dispatch}/)`);
+  }
   let real: string;
   let realDir: string;
   try {
@@ -349,7 +468,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(data, v.info);
     if (prior !== null && prior.seat === seatHash) {
-      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: [] };
+      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch) };
     }
     throw new LedgerError('FACT_CONFLICT', `dispatch ${dispatch} already handed back other content: one hand-back per dispatch`);
   }
@@ -371,13 +490,14 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const problems = [
       ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not read (mp seat ${dispatch} read <material> --page <n>)`),
       ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}) }),
+      ...integrationPassProblems(ctx, v, input.fields),
     ];
     const unique = [...new Set(problems)];
     if (unique.length > 0) return refuse(ctx, dispatch, 'handback', unique);
     if (entry.exportsProduct === true) {
       const ws = v.card['workspace'] as { snapshot: string; writablePaths: readonly string[] };
       const ident = ctx.ident(v.info.createdAt);
-      const c = await ctx.workspaces().collect({ dispatch, base: ws.snapshot, writePaths: ws.writablePaths, message: `mission-pipeline: ${v.info.task} (dispatch ${dispatch}, mission ${v.info.mission})`, author: ident, committer: ident });
+      const c = await ctx.workspaces().collect({ dispatch, base: ws.snapshot, writePaths: ws.writablePaths, message: `mission-pipeline: ${v.info.task} (dispatch ${dispatch}, mission ${v.info.mission})`, author: ident, committer: ctx.committer(v.info.createdAt) });
       if (c.kind !== 'candidate') return refuse(ctx, dispatch, 'handback', collectionProblems(c));
       candidate = { commit: c.commit, base: c.base, changedPaths: [...new Set([...c.added, ...c.modified, ...c.deleted, ...c.modeChanged])].sort(), ignored: c.ignored.paths, ignoredTotal: c.ignored.total };
     }
@@ -414,11 +534,19 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   });
   const notes: string[] = out.closed ? [`mission ${v.info.mission} closed before this hand-back: it is recorded, not accepted; the step waits until the mission is opened again`] : [];
   if (out.moot !== null) notes.push(`${out.moot} before this hand-back: it is recorded, not accepted, and nothing it decides is carried out`);
+  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
+  notes.push(...dispatchOver(ctx, dispatch));
   let verification: VerificationRun[] | null = null;
   if (out.accepted && entry.exportsProduct === true && candidate !== null) {
     // §5.3: the program's runs on a clean checkout of the candidate are the evidence
     const commands = ((v.card['verificationCommands'] as Array<{ id: string; command: string; cwd?: string }> | undefined) ?? []);
-    try {
+    // 4.1.2 (D-4, D-5, D-7): the project's full suite on the card is not run here (actions.ts verify)
+    const suite = commands.filter((c) => isFullSuiteCommand(ctx.fullSuite, c.command, c.cwd));
+    if (suite.length > 0) notes.push(`${suite.map((c) => c.id).join(', ')} ${suite.length === 1 ? 'is' : 'are'} the project's full suite: not run at hand-back; it is left to the integration review (its Reviewer's mp seat <id> full-run)`);
+    // a stop stops (§6.6): the runs wait until it is released
+    if (verificationStopped(ctx, v.info.mission as MissionId)) {
+      notes.push('a stop covers this work: the verification runs of this candidate wait until it is released; mp pm next runs them then');
+    } else try {
       const runs = await ctx.actions().verify({ mission: v.info.mission as MissionId, object: productObjectId(v.info.task), snapshot: candidate.commit, commands });
       // "pending": another mp process advancing the flow is running these very runs; the hand-back
       // stays recorded once, nothing runs twice, and the result reaches the flow when they are recorded
@@ -426,6 +554,12 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       else {
         verification = [...runs];
         for (const r of runs) if ('setupFailure' in r && typeof r.setupFailure === 'string') notes.push(r.setupFailure);
+        // 4.1.2: these runs are the flow's "verified" event of this attempt, so the flow never runs them again
+        try {
+          recordVerified(ctx, v, runs);
+        } catch (e) {
+          notes.push(`the verification result could not be handed to the process now (${(e as Error).message}); mp pm next reuses the recorded runs`);
+        }
       }
     } catch (e) {
       notes.push(`the verification runs could not run now (${(e as Error).message}); mp runs them again on the next step`);
@@ -499,7 +633,7 @@ function collectionProblems(c: Exclude<Collection, { kind: 'candidate' }>): stri
 /** `mp seat <id> request-evidence --request <file.json> --notes <file.md>` (decision 13): a hand-back of kind "needs evidence". */
 export async function seatRequestEvidence(ctx: ProcessContext, dispatch: string, files: { readonly request: string; readonly notes: string; readonly filler?: Filler | null }): Promise<HandBackAnswer> {
   const v = dispatchView(ctx, dispatch);
-  allows(v, 'request-evidence');
+  allows(ctx, v, 'request-evidence');
   const notesText = readHandBackFile(ctx, dispatch, files.notes, 'notes');
   let req: unknown;
   try {
@@ -520,7 +654,7 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
   const seatHash = sha256(canonicalJson({ report: input.notes, request: parsed.data }));
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(ctx.memory.data, v.info);
-    if (prior !== null && prior.seat === seatHash) return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: null, verification: null, notes: [] };
+    if (prior !== null && prior.seat === seatHash) return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: null, verification: null, notes: dispatchOver(ctx, dispatch) };
     throw new LedgerError('FACT_CONFLICT', `dispatch ${dispatch} already handed back other content: one hand-back per dispatch`);
   }
   const runs = ctx.memory.read((db) => dispatchRuns(db, ctx.memory.data, v.info));
@@ -542,16 +676,22 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
     const r = recordHandback(tx, { dispatch, report: input.notes, result: doc, filler: input.filler ?? null });
     return { outcome: r.outcome, report: r.report };
   });
-  const notes: string[] = [];
+  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
+  const notes: string[] = dispatchOver(ctx, dispatch);
   if (input.advance !== false) await advanceQuietly(ctx, v, notes);
   return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate: null, verification: null, notes };
 }
 
-/** Advance the mission's process after a hand-back (§5.1 step 4); a flow error is the PM's (a notice), never the seat's. */
+/**
+ * Advance the mission's process after a hand-back (§5.1 step 4); a flow error is the PM's (a notice), never
+ * the seat's. A seat-side pass (4.1.2): what the seat's sandbox could not write is left to the PM's next
+ * step with a note, and raises no WI-20 notice; any other error still does.
+ */
 async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<void> {
   try {
     // the work this hand-back hands over is recorded as handed over by it (§3.2, U-13)
-    await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` });
+    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, { seatSide: true });
+    for (const r of reports) for (const e of r.errors) if (e.sandbox !== undefined) notes.push(`left to the PM: this seat's sandbox could not write ${e.sandbox}`);
   } catch (e) {
     notes.push(`the process will advance on the PM's next step (${(e as Error).message})`);
   }

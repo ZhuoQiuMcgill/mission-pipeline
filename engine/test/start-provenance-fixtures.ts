@@ -98,7 +98,8 @@ export function provenancePorts() {
       if (known === null) {
         const files = new Map(entries(req.base).map((e) => [e.path, e]));
         for (const path of paths) files.set(path, { path, mode: '100644', type: 'blob', oid: oid(blob++) });
-        objects.put([...files.values()], req.base, req.candidate as GitOid);
+        // a candidate the fixture already holds (an integration task's start snapshot) keeps its own parent, as in git
+        if (!objects.trees.has(req.candidate)) objects.put([...files.values()], req.base, req.candidate as GitOid);
         await ports.ledger.append(`fixture:placed:${object}`, { records: [{
           kind: 'object.version', object: object as ObjectVersionId, objectKind: 'product', mission: req.mission, module: req.module as never,
           content: ports.memory.data.put(writeScopeDocument([...files.values()], req.writeScope)),

@@ -16,7 +16,7 @@ import { validateRecord } from '../src/common/validate.ts';
 import { memoryProofView } from '../src/delivery/memoryView.ts';
 import { compose } from '../src/process/actions.ts';
 import '../src/evaluator/index.ts';
-import { ENV_LINE, forgetObservedEnvironment, runClassOf, type EnvironmentParts } from '../src/evaluator/index.ts';
+import { ENV_LINE, forgetObservedEnvironment, RUN_FIELD, RUN_METHOD, runClassOf, type EnvironmentParts } from '../src/evaluator/index.ts';
 import type { FlowNotice, FlowTask, ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../src/flow/ports.ts';
 import type { ScriptedOutcome, ScriptedScheduler } from '../src/flow/scripted.ts';
 import { appendRecords, factById, initMemory, LedgerError, listDispatches, openMemory, recordWords, type Memory } from '../src/memory/index.ts';
@@ -155,7 +155,8 @@ function fakeActions(ctx: ProcessContext, k: FakeKnobs): GitActions {
         envLine: ENV_LINE,
         envSnapshot: env.identity,
         runClass: runClassOf({ by: 'mp', checkout: 'clean', declared: true, network: false, sampled: (req.commands[i] as { sampled?: boolean }).sampled === true }),
-        fields: { exit: r.passed ? '0' : '1', status: 'completed', candidate: req.snapshot, command: r.command },
+        // a run of the current run method (4.1.2: an older method never counts)
+        fields: { exit: r.passed ? '0' : '1', status: 'completed', candidate: req.snapshot, command: r.command, [RUN_FIELD.method]: RUN_METHOD },
       }));
       if (records.length > 0) ctx.memory.write({ op: `fake-verify:${req.object}`, payload: { object: req.object } }, (tx) => appendRecords(tx, records));
       verified.set(req.object, runs);

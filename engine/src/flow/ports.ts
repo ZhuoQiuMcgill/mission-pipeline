@@ -16,6 +16,7 @@
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import type { BaseRecord, BaseRecordKind, Committed, ListRef, LoopKind, ReviewContract } from '../common/records.ts';
 import type { DecidingView, Label } from '../evaluator/semantics.ts';
+import type { SuiteCommand } from '../common/fullSuite.ts';
 
 // ---------------------------------------------------------------- content
 
@@ -386,10 +387,21 @@ export interface FlowEvaluatorPort {
   ops(ids: readonly string[]): Promise<{ readonly revision: number; readonly states: Readonly<Record<string, { readonly allProven: boolean; readonly executedAsOf: number | null } | null>> }>;
 }
 
-/** The three ports together, plus the clock. */
+/**
+ * What the project's configuration declares that the flows read (4.1.2): its local test commands
+ * (`verificationCommands`) and its full suite (`fullSuite`, or the 4.1.1 alias `closingChecks`:
+ * src/common/fullSuite.ts). Absent: none declared.
+ */
+export interface FlowProject {
+  readonly localCommands: readonly SuiteCommand[];
+  readonly fullSuite: readonly SuiteCommand[];
+}
+
+/** The three ports together, plus the clock and the project's declared commands. */
 export interface FlowPorts {
   readonly ledger: FlowLedgerPort;
   readonly scheduler: FlowSchedulerPort;
   readonly evaluator: FlowEvaluatorPort;
   readonly now?: () => number;
+  readonly project?: FlowProject;
 }

@@ -8,6 +8,8 @@ import type { Project } from '../project.ts';
 import { markAsked, readStatus, SHOW_KINDS, showItem, statusText } from '../status.ts';
 import { entryLines, resolveSubtasks } from '../layers.ts';
 import { buildGraph, chain, resolveNodes, tree, walk } from '../tree.ts';
+import { fullRunMarkers } from '../../process/index.ts';
+import { fullRunLines } from './seat.ts';
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -160,4 +162,19 @@ const treeCmd: Command = {
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd];
+const fullRuns: Command = {
+  group: 'read',
+  name: ['full-runs'],
+  summary: "a mission's full-run markers, newest first: when each full suite ran, on which commit and tree, under which environment, its result, and who decided it",
+  usage: 'mp read full-runs <mission>',
+  flags: {},
+  async run(c, args) {
+    const p = P(c);
+    const m = positional(args, 0, 'mission');
+    const markers = p.ctx.memory.read((db) => fullRunMarkers(db, p.ctx.memory.data, m));
+    const text = markers.length === 0 ? `Mission ${m} has no full run recorded.` : [`Full runs of mission ${m} (newest first): ${markers.length}`, ...markers.flatMap((x) => fullRunLines(x))].join('\n');
+    return ok(text, { mission: m, markers });
+  },
+};
+
+export const READ_COMMANDS: readonly Command[] = [status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];

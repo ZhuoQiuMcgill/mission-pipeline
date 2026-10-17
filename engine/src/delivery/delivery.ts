@@ -4,14 +4,14 @@
 //   1-2  the manifest and the one-version-per-path check (manifest.ts), over the
 //        memory's records with the stored labels (memoryView.ts);
 //   3    the candidate on the target branch's current commit B (candidate.ts),
-//        materialized into a fresh `tmp/<run>/`: the canonical candidate, a
-//        clean checkout with nothing of any worktree in it;
-//   4    the proof check on the final candidate tree (candidate.ts);
-//   5    the closing checks: the declared commands, run in that clean checkout
-//        (ClosingRunner; plain shell by default), which is first made a git
-//        repository at the candidate that borrows the repository's objects
-//        (checkoutRepository.ts; nothing is written to the repository itself),
-//        removed afterwards;
+//        built from objects only (4.1.2: nothing is materialized; no tree is
+//        written to disk and deleted unread);
+//   4    the proof check on the final candidate tree (candidate.ts): the
+//        evidence inputs are hashed from the candidate's objects with the same
+//        conversion a clean checkout applies (candidateFileHashes);
+//   5    (4.1.2, D-7) no command runs here: whether a full run of the project's
+//        suite is worth it at the end is the PM's call (`mp pm full-run`); the
+//        delivery records the full-run status of its tree (DeliverDeps.fullRun);
 //   6    the delivery ref `refs/mission-pipeline/delivered/<mission>/<op>`:
 //        authorized as an intent first (stops, git-writes hold, not withdrawn
 //        or superseded), then created with `git update-ref <ref> <D> ""` (only
@@ -30,15 +30,11 @@
 // ledgerAuthority.ts. The program never updates refs/heads/, a worktree or an
 // index here: landing (land.ts) is separate.
 
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { canonicalJson, sha256 } from '../common/hash.ts';
+import { canonicalJson } from '../common/hash.ts';
 import type { AlertId, ContentHash, GitOid, MissionId, ObjectVersionId, OpId } from '../common/ids.ts';
 import { EVALUATOR_INPUT_KINDS, type BaseRecord } from '../common/records.ts';
 import { discoverRepo, gitOid, type Ident } from '../git/objects.ts';
-import { attachCheckoutRepository } from '../git/checkoutRepository.ts';
-import { withoutRepositoryLocators, type PlainGit } from '../git/plainGit.ts';
+import type { PlainGit } from '../git/plainGit.ts';
 import { deliveryRef } from '../git/refs.ts';
 import { AttributeEvaluator, MissingObjectsError, readTransformDescription, RepresentationError } from '../git/representation.ts';
 import type { GitContext } from '../git/workspace.ts';
@@ -65,9 +61,10 @@ import {
   type ScopeTag,
   type WriteTx,
 } from '../memory/index.ts';
+import { ownedTempDir, removeOwned } from '../memory/scratch.ts';
 import { noticeExternalWork } from './external.ts';
 import { assertScopeNotStopped, deriveScope, tagScope, unionWork, type WorkScope } from './scope.ts';
-import { buildCandidate, checkCandidateProofs, landedVersions, type OverlayConflict, type ProofCheck } from './candidate.ts';
+import { buildCandidate, checkCandidateProofs, landedVersions, type OverlayConflict, type ProofCheck, type ProofMismatch } from './candidate.ts';
 import { buildManifest, type DeliveryManifest, type ManifestConflict } from './manifest.ts';
 import { memoryProofView, type LabelView } from './memoryView.ts';
 import type { DeliveryTarget } from './proofView.ts';
@@ -75,12 +72,7 @@ import type { DeliveryTarget } from './proofView.ts';
 /** Decision 16 (6.5): rebuilds on a moved base per delivery, before the Secretary or the maintainer grants more (LOOP_CAPS). */
 export const DELIVERY_REBUILD_LOOP = 'delivery-rebuild';
 
-/** A closing check declared in config.json: a command line run with the platform's shell, or an argv run as it is. */
-export interface ClosingCheck {
-  readonly id: string;
-  readonly command: string | readonly string[];
-}
-
+/** A closing check's outcome as a 4.1.1 delivery recorded it (4.1.2: `deliver` runs no command; kept for reading those documents). */
 export interface ClosingOutcome {
   readonly id: string;
   readonly passed: boolean;
@@ -93,53 +85,40 @@ export interface ClosingOutcome {
   readonly tail: string;
 }
 
-/** Runs the declared closing checks in the candidate's clean checkout (package A3 may record them as runs). */
-export interface ClosingRunner {
-  run(req: { readonly mission: MissionId; readonly delivery: string; readonly commit: GitOid; readonly dir: string; readonly checks: readonly ClosingCheck[] }): Promise<readonly ClosingOutcome[]> | readonly ClosingOutcome[];
-}
-
-/**
- * The default runner: each command in `dir`, one after another, with the platform's shell (§9),
- * without the variables that would point git at another repository than the checkout's own.
- */
-export const shellClosingRunner: ClosingRunner = {
-  run({ dir, checks }) {
-    const env = withoutRepositoryLocators(process.env);
-    return checks.map((c) => {
-      const argv = typeof c.command === 'string' ? null : c.command;
-      const r =
-        argv === null
-          ? spawnSync(c.command as string, { cwd: dir, shell: true, env, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
-          : spawnSync(argv[0]!, argv.slice(1), { cwd: dir, env, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
-      const out = Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)]);
-      const passed = r.error === undefined && r.status === 0;
-      const tail = passed ? '' : (r.error !== undefined ? String(r.error.message) + '\n' : '') + out.toString('utf8').split(/\r?\n/).slice(-20).join('\n');
-      return { id: c.id, passed, exitCode: r.status, run: null, outputHash: sha256(out), tail };
-    });
-  },
-};
-
 export interface DeliverRequest {
   readonly mission: MissionId;
   /** The delivery's id (its op): letters, digits and "-", 1 to 64; new, or the id of a delivery to finish. */
   readonly delivery: string;
   readonly targetBranch: string;
   readonly selected: readonly DeliveryTarget[];
-  readonly closingChecks: readonly ClosingCheck[];
   readonly author: Ident;
   readonly committer: Ident;
   /** The delivery this one rebuilds on a moved base (WI-05): the rebuild is counted on its loop first. */
   readonly rebuildOf?: string | null;
   /** W-<n>: the maintainer's words that asked for the delivery (decision 1); recorded with it. */
   readonly words?: string | null;
+  /** The delivery commit's subject (one line); default "Delivery <id> of mission <m> (...) as of revision <n>". */
+  readonly message?: string | null;
+  /**
+   * 4.1.2: build and proof-check the candidate exactly as a delivery would, then stop: no delivery
+   * ref, no record, no rebuild counted, no notice of external work (`mp pm full-run` runs the full
+   * suite on it). The result is `{ kind: 'candidate' }`.
+   */
+  readonly candidateOnly?: boolean;
   readonly filler?: Filler | null;
+}
+
+/** The full-run status of a delivery's tree as recorded with it (4.1.2, D-7): a line for people and the resolver's answer. */
+export interface DeliveryFullRun {
+  readonly line: string;
+  readonly status: unknown;
 }
 
 export interface DeliverDeps {
   /** The stored labels; a function opens them afresh (after they changed during the delivery, §4.1). */
   readonly labels: LabelView | (() => LabelView);
-  /** Default: shellClosingRunner. */
-  readonly closing?: ClosingRunner;
+  /** The full-run status of the candidate's tree, recorded with the delivery (process layer: fullRunStatus). */
+  readonly fullRun?: (candidate: { readonly commit: GitOid; readonly tree: GitOid }) => DeliveryFullRun | Promise<DeliveryFullRun>;
   /** Test hooks: a crash before the delivery ref's git step, or after it and before its record. */
   readonly hooks?: { readonly beforeRef?: () => void; readonly afterRef?: () => void };
 }
@@ -154,7 +133,10 @@ export interface DeliveredRecord {
   /** The delivery document in the data table (what the record names). */
   readonly manifest: ContentHash;
   readonly proof: ProofCheck | null;
-  readonly checks: readonly ClosingOutcome[];
+  /** The delivery commit's tree (null for a delivery recorded before 4.1.2). */
+  readonly tree: GitOid | null;
+  /** The full-run status of that tree when the delivery was made (null before 4.1.2, or when not asked). */
+  readonly fullRun: DeliveryFullRun | null;
   /** Rebuilds used on this delivery's loop so far. */
   readonly rebuilds: number;
 }
@@ -172,8 +154,8 @@ export type DeliveryResult =
   | { readonly kind: 'description-mismatch'; readonly versions: readonly ObjectVersionId[] }
   /** WI-13: git or LFS objects the candidate needs are not local; never fetched. */
   | { readonly kind: 'objects-unavailable'; readonly code: string; readonly objects: readonly string[]; readonly paths: readonly string[] }
-  /** Step 5 (WI-21): no delivery ref; the candidate commit is kept; no automatic rebuild. */
-  | { readonly kind: 'checks-failed'; readonly base: GitOid; readonly commit: GitOid; readonly outcomes: readonly ClosingOutcome[]; readonly proof: ProofCheck }
+  /** `candidateOnly`: the candidate a delivery would deliver, built and proof-checked; nothing recorded, no ref. */
+  | { readonly kind: 'candidate'; readonly base: GitOid; readonly commit: GitOid; readonly tree: GitOid; readonly proof: ProofCheck }
   /** Decision 16 (WI-08): the rebuilds are used up; the delivery ref already made (the delivery rebuilt from), if any, is left. */
   | { readonly kind: 'rebuild-limit-exhausted'; readonly rebuilds: number; readonly limit: number; readonly leftRef: string | null; readonly detail: string }
   /** WI-20: the delivery ref exists and points elsewhere: never overwritten (deliver again under a new id). */
@@ -231,10 +213,47 @@ interface DeliveryDocument {
   readonly capabilities: readonly string[];
   readonly entries: readonly { readonly id: string; readonly mission: string; readonly unit: string | null; readonly label: string; readonly paths: readonly string[] }[];
   readonly proof: ProofCheck;
-  readonly checks: readonly ClosingOutcome[];
+  /** The closing checks a 4.1.1 delivery ran (absent from 4.1.2 on: deliver runs no command). */
+  readonly checks?: readonly ClosingOutcome[];
+  /** 4.1.2: the delivery commit's subject as asked (`--message`), kept for a rebuild; null: the default. */
+  readonly message?: string | null;
+  /** 4.1.2: the delivery commit's tree. */
+  readonly tree?: string;
+  /** 4.1.2: the full-run status of that tree when the delivery was made. */
+  readonly fullRun?: DeliveryFullRun | null;
 }
 
-function documentOf(m: Memory, d: DeliveryInfo): DeliveryDocument | null {
+/** One reason the delivery's proof check gave for "not fully proven", as the report leaf and the closing snapshot show it. */
+export function proofReasonText(r: ProofMismatch): string {
+  return r.kind === 'start-lacks-prerequisite' ? `${r.kind}: ${r.missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')}` : r.kind === 'built-on-superseded' ? `built on ${r.prerequisite}; delivered with ${r.deliveredWith}` : r.kind;
+}
+
+/**
+ * What a reader of a recorded delivery needs from its document (the closing snapshot): its entries, and the
+ * proof check it recorded on the delivered tree (the outputs delivered as not fully proven, with their
+ * reasons); null for a delivery not made by this mp.
+ */
+export function deliveryDocument(data: { text(hash: string): string }, d: DeliveryInfo): {
+  readonly root: string;
+  readonly entries: ReadonlyArray<{ readonly id: string; readonly unit: string | null; readonly label: string }>;
+  readonly notFullyProven: ReadonlyArray<{ readonly id: string; readonly reasons: readonly string[] }>;
+  readonly tree: string | null;
+  readonly words: string | null;
+  readonly fullRun: DeliveryFullRun | null;
+} | null {
+  const doc = documentOf({ data }, d);
+  if (doc === null) return null;
+  return {
+    root: doc.root,
+    entries: doc.entries.map((e) => ({ id: e.id, unit: e.unit, label: e.label })),
+    notFullyProven: (doc.proof?.notFullyProven ?? []).map((n) => ({ id: n.id, reasons: n.reasons.map(proofReasonText) })),
+    tree: doc.tree ?? null,
+    words: doc.words,
+    fullRun: doc.fullRun ?? null,
+  };
+}
+
+function documentOf(m: { readonly data: { text(hash: string): string } }, d: DeliveryInfo): DeliveryDocument | null {
   if (d.manifest === null) return null;
   try {
     const doc = JSON.parse(m.data.text(d.manifest)) as DeliveryDocument;
@@ -270,11 +289,12 @@ function reportLeaf(doc: DeliveryDocument, ref: string, rebuilds: number): strin
     '',
     `- Proven: ${doc.proof.proven.length === 0 ? 'none' : doc.proof.proven.join(', ')}`,
     ...(doc.proof.deliveredBy ?? []).map((d) => `- ${d.version}: ${d.path} is delivered by ${d.by}`),
-    ...doc.proof.notFullyProven.map((n) => `- Not fully proven: ${n.id} (${n.reasons.map((r) => r.kind === 'start-lacks-prerequisite' ? `${r.kind}: ${r.missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')}` : r.kind).join(', ')})`),
+    ...doc.proof.notFullyProven.map((n) => `- Not fully proven: ${n.id} (${n.reasons.map(proofReasonText).join(', ')})`),
     '',
-    '## Closing checks',
+    '## Full suite',
     '',
-    ...(doc.checks.length === 0 ? ['- none declared'] : doc.checks.map((c) => `- ${c.id}: ${c.passed ? 'passed' : `failed (exit ${c.exitCode ?? 'none'})`}, output sha256 ${c.outputHash}`)),
+    `- ${doc.fullRun?.line ?? 'full-run status not recorded'}`,
+    '- No command ran at this delivery: a full run at the end is the PM\'s call (`mp pm full-run`).',
     '',
   ];
   return lines.join('\n');
@@ -309,7 +329,8 @@ function recordOf(doc: DeliveryDocument, ref: string, manifest: ContentHash, reb
     ref,
     manifest,
     proof: doc.proof,
-    checks: doc.checks,
+    tree: doc.tree !== undefined ? gitOid(doc.tree) : null,
+    fullRun: doc.fullRun ?? null,
     rebuilds,
   };
 }
@@ -439,8 +460,11 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
   const ref = deliveryRef(req.mission, req.delivery as OpId);
   if (req.words !== undefined && req.words !== null && m.read((db) => wordsEntry(db, req.words!)) === null) throw new LedgerError('BAD_REQUEST', `no words entry ${req.words}`);
 
+  const only = req.candidateOnly === true;
+  if (only && req.rebuildOf !== undefined && req.rebuildOf !== null) throw new LedgerError('BAD_REQUEST', 'a candidate-only build rebuilds no delivery');
+
   // Already delivered (a repeated command): its record, as it is.
-  const known = m.read((db) => deliveryInfo(db, req.mission, req.delivery));
+  const known = only ? null : m.read((db) => deliveryInfo(db, req.mission, req.delivery));
   if (known !== null && known.recordedRev !== null) {
     const doc = documentOf(m, known);
     if (doc === null) throw new LedgerError('BAD_REQUEST', `delivery ${req.delivery} of mission ${req.mission} is recorded, but not by this mp`);
@@ -448,7 +472,7 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
   }
   // A delivery whose ref was already created is completed first: a ref at its D is recorded even under a
   // stop or the git-writes hold (nothing is written to git); only a new git write is checked against them.
-  const resumed = resumeRef(ctx, req, ref, deps);
+  const resumed = only ? null : resumeRef(ctx, req, ref, deps);
   if (resumed !== null) return resumed;
   m.read((db) => assertScopeNotStopped(db, deliveryScope(db, req.mission, []), 'this delivery'));
   m.assertGitWrites('a delivery');
@@ -468,7 +492,7 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
     notice(m, `delivery.${req.mission}.${req.delivery}.rebuild`, 'WI-05', 'delivery-rebuild', {
       trigger: `the target branch ${req.targetBranch} moved off the base of delivery ${req.rebuildOf}: the candidate is rebuilt on ${now ?? '(absent)'} as delivery ${req.delivery}`,
       facts: { previous: req.rebuildOf, base: prev.base, now, rebuilds: counted.total, limit: rebuildsUsed(m, req.mission, root).limit },
-      defaultAction: 'the candidate is rebuilt (manifest, proof check, closing checks again), counted; the previous delivery ref is kept; a rebuilt candidate whose content changed needs re-acceptance (WI-07)',
+      defaultAction: 'the candidate is rebuilt (manifest and proof check again), counted; the previous delivery ref is kept; a rebuilt candidate whose content changed needs re-acceptance (WI-07)',
     });
   }
 
@@ -489,9 +513,9 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
   const sources = (): string[] => manifest.entries.map((e) => e.object.mission);
   m.read((db) => assertScopeNotStopped(db, deliveryScope(db, req.mission, sources()), 'this delivery'));
 
-  // This call's own scratch directory: concurrent deliveries never share or remove each other's.
-  mkdirSync(m.paths.tmp, { recursive: true });
-  const scratch = mkdtempSync(join(m.paths.tmp, `deliver-${req.mission}-${req.delivery}-`));
+  // This call's own scratch directory (its attribute repository only; 4.1.2: owned, so the sweep
+  // removes it after a crash): concurrent deliveries never share or remove each other's.
+  const scratch = ownedTempDir(m.paths, `deliver-${req.mission}-${req.delivery}-`);
   let attributes: AttributeEvaluator | null = null;
   let reopens = 0;
   try {
@@ -511,17 +535,13 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
       const base = readBranch(git, m.projectDir, req.targetBranch);
       if (base === null) throw new LedgerError('BAD_REQUEST', `the target branch ${req.targetBranch} does not exist`);
       // WI-03: external work in a write scope of a mission in flight is noticed (never merged, never blocking).
-      if (attempt === 1) await noticeExternalWork(ctx, { mission: req.mission, delivery: req.delivery, base, targetBranch: req.targetBranch, at: 'delivery' });
-      // Step 3, in a clean run directory: the canonical candidate is the checkout the checks run in.
-      const runDir = join(scratch, `candidate-${attempt}`);
-      let c: Awaited<ReturnType<typeof buildCandidate>>;
-      try {
-        // a version recorded without its origin finds it down its predecessors, as this view has them (Appendix H)
-        const v = view;
-        c = await buildCandidate({ git, repo, manifest, base, attributes, snapshotDir: runDir, message: describe(req, manifest), author: req.author, committer: req.committer, versionOf: (id) => v.object(id), alreadyLaid: await landedVersions(git, repo, m, base, (id) => v.object(id)) });
-      } catch (e) {
+      if (attempt === 1 && !only) await noticeExternalWork(ctx, { mission: req.mission, delivery: req.delivery, base, targetBranch: req.targetBranch, at: 'delivery' });
+      // Step 3: the canonical candidate, built from objects (4.1.2: nothing is materialized).
+      // Git or LFS objects that are not local (WI-13), found while building it or while hashing the
+      // evidence inputs on it (step 4), give the same result: nothing is delivered, nothing fetched.
+      const unavailable = (e: unknown): DeliveryResult | null => {
         const lfs = e instanceof RepresentationError && (e.code === 'lfs-object-missing' || e.code === 'lfs-object-corrupt');
-        if (!(e instanceof MissingObjectsError) && !lfs) throw e;
+        if (!(e instanceof MissingObjectsError) && !lfs) return null;
         const objects = e instanceof MissingObjectsError ? e.objects : [];
         notice(m, `delivery.${req.mission}.${req.delivery}.objects`, 'WI-13', 'delivery-objects-missing', {
           trigger: `the delivery candidate needs objects that are not usable locally: ${e.message}`,
@@ -529,6 +549,16 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
           defaultAction: 'nothing is delivered and nothing is fetched; once the objects are local the delivery is started again',
         });
         return { kind: 'objects-unavailable', code: e.code, objects, paths: e.paths };
+      };
+      let c: Awaited<ReturnType<typeof buildCandidate>>;
+      try {
+        // a version recorded without its origin finds it down its predecessors, as this view has them (Appendix H)
+        const v = view;
+        c = await buildCandidate({ git, repo, manifest, base, attributes, materialize: 'none', message: describe(req, manifest), author: req.author, committer: req.committer, versionOf: (id) => v.object(id), alreadyLaid: await landedVersions(git, repo, m, base, (id) => v.object(id)) });
+      } catch (e) {
+        const r = unavailable(e);
+        if (r === null) throw e;
+        return r;
       }
       if (c.kind === 'conflict') return { kind: 'conflict', base: c.base, conflicts: c.conflicts };
       if (c.kind === 'description-mismatch') {
@@ -540,26 +570,18 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
         return { kind: 'description-mismatch', versions: c.versions };
       }
       const candidate = c.candidate;
-      // Step 4, then step 5 in the clean checkout; the run directory goes afterwards.
-      const proof = await checkCandidateProofs({ git, repo, view, manifest, candidate });
-      let outcomes: readonly ClosingOutcome[];
+      // Step 4, on the candidate's objects. Step 5 (4.1.2, D-7): no command runs here.
+      let proof: ProofCheck;
       try {
-        // The checks ask git about the candidate: the run directory is a repository at it, borrowing the objects.
-        if (req.closingChecks.length > 0) await attachCheckoutRepository(git, repo, { dir: runDir, commit: candidate.commit, description });
-        outcomes = await (deps.closing ?? shellClosingRunner).run({ mission: req.mission, delivery: req.delivery, commit: candidate.commit, dir: runDir, checks: req.closingChecks });
-      } finally {
-        rmSync(runDir, { recursive: true, force: true });
+        proof = await checkCandidateProofs({ git, repo, view, manifest, candidate, attributes });
+      } catch (e) {
+        const r = unavailable(e);
+        if (r === null) throw e;
+        return r;
       }
-      const ran = new Set(outcomes.map((o) => o.id));
-      const all = [...outcomes, ...req.closingChecks.filter((x) => !ran.has(x.id)).map((x) => ({ id: x.id, passed: false, exitCode: null, run: null, outputHash: sha256(''), tail: 'not run' }))];
-      if (all.some((o) => !o.passed)) {
-        notice(m, `delivery.${req.mission}.${req.delivery}.checks.${attempt}`, 'WI-21', 'delivery-closing-checks-failed', {
-          trigger: `closing checks failed on the delivery candidate ${candidate.commit} (base ${base}): ${all.filter((o) => !o.passed).map((o) => o.id).join(', ')}`,
-          facts: { base, commit: candidate.commit, failed: all.filter((o) => !o.passed) },
-          defaultAction: 'no delivery ref is created; the candidate commit is kept; no automatic rebuild',
-        });
-        return { kind: 'checks-failed', base, commit: candidate.commit, outcomes: all, proof };
-      }
+      if (only) return { kind: 'candidate', base, commit: candidate.commit, tree: candidate.tree, proof };
+      // the full-run status of this tree, recorded with the delivery (an honest label; nothing is run)
+      const fullRun = (await deps.fullRun?.({ commit: candidate.commit, tree: candidate.tree })) ?? null;
 
       // Moved while it was built and checked: rebuild on the new base, counted first.
       const now = readBranch(git, m.projectDir, req.targetBranch);
@@ -585,7 +607,9 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
         capabilities: m.read((db) => deliveryScope(db, req.mission, sources()).capabilities),
         entries: manifest.entries.map((e) => ({ id: e.object.id, mission: e.object.mission, unit: e.unit, label: e.label, paths: e.object.paths })),
         proof,
-        checks: all,
+        message: req.message ?? null,
+        tree: candidate.tree,
+        fullRun,
       };
       const docHash = m.data.put(canonicalJson(doc));
       const intent = m.read((db) => {
@@ -639,7 +663,7 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
     }
   } finally {
     attributes?.dispose();
-    rmSync(scratch, { recursive: true, force: true });
+    removeOwned(m.paths, scratch);
   }
 }
 
@@ -653,9 +677,12 @@ function exhausted(m: Memory, req: DeliverRequest, root: string, leftRef: string
   return { kind: 'rebuild-limit-exhausted', rebuilds: st.used, limit: st.limit, leftRef, detail };
 }
 
+/** The delivery commit's message: the subject asked for (`--message`, its first line), else the default; then the manifest. */
 function describe(req: DeliverRequest, manifest: DeliveryManifest): string {
   const lines = manifest.entries.map((e) => `  ${e.object.id}${e.unit !== null ? ` (unit ${e.unit})` : ''}: ${e.label}`);
-  return `Delivery ${req.delivery} of mission ${req.mission} (${manifest.selected.map((t) => t.id).join(', ')}) as of revision ${manifest.revision}\n\n${lines.join('\n')}\n`;
+  const asked = (req.message ?? '').split(/\r?\n/)[0]!.trim();
+  const subject = asked !== '' ? asked : `Delivery ${req.delivery} of mission ${req.mission} (${manifest.selected.map((t) => t.id).join(', ')}) as of revision ${manifest.revision}`;
+  return `${subject}\n\n${asked !== '' ? `Delivery ${req.delivery} of mission ${req.mission} as of revision ${manifest.revision}:\n` : ''}${lines.join('\n')}\n`;
 }
 
 /**
@@ -667,7 +694,7 @@ function describe(req: DeliverRequest, manifest: DeliveryManifest): string {
  */
 export async function rebuildDelivery(
   ctx: GitContext,
-  req: { readonly mission: MissionId; readonly delivery: string; readonly closingChecks: readonly ClosingCheck[]; readonly author: Ident; readonly committer: Ident; readonly filler?: Filler | null },
+  req: { readonly mission: MissionId; readonly delivery: string; readonly author: Ident; readonly committer: Ident; readonly filler?: Filler | null },
   deps: DeliverDeps,
 ): Promise<DeliveryResult> {
   const m = ctx.memory;
@@ -678,7 +705,7 @@ export async function rebuildDelivery(
   const next = `${doc.root}-r${rebuildsUsed(m, req.mission, doc.root).used + 1}`.slice(0, 64);
   return deliver(
     ctx,
-    { mission: req.mission, delivery: next, targetBranch: prev.target, selected: doc.selected, closingChecks: req.closingChecks, author: req.author, committer: req.committer, rebuildOf: req.delivery, words: doc.words ?? null, filler: req.filler ?? null },
+    { mission: req.mission, delivery: next, targetBranch: prev.target, selected: doc.selected, author: req.author, committer: req.committer, rebuildOf: req.delivery, words: doc.words ?? null, message: doc.message ?? null, filler: req.filler ?? null },
     deps,
   );
 }

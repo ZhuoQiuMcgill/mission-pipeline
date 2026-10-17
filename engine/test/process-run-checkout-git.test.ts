@@ -247,15 +247,13 @@ describe('a run checkout is a git repository at its candidate', () => {
     const product = `prod.con.${M}.impl.1` as ObjectVersionId;
     const w = pmSay(ctx, 'Deliver it.');
     const configBefore = p.git('config', '--local', '--list');
-    const del = await pmDeliver(ctx, { mission: M, delivery: 'v1', selected: [{ kind: 'object', id: product }], closingChecks: [{ id: 'probe', command: pr.command }], words: w.words });
+    const del = await pmDeliver(ctx, { mission: M, delivery: 'v1', selected: [{ kind: 'object', id: product }], words: w.words });
     assert.equal(del.kind, 'delivered', JSON.stringify(del));
     if (del.kind !== 'delivered') return;
-    assert.equal(del.record.checks[0]?.passed, true);
-    const closing = pr.answers();
-    assert.equal(closing.length, 3, 'the closing check ran');
-    assertSeesCandidate(p, closing[2]!, del.record.commit, base);
-    assert.equal(closing[2]!.log[1], base, "the delivery candidate's parent is the target branch");
-    assert.ok(!existsSync(closing[2]!.root), "the delivery's run directory is removed");
+    // 4.1.2 (D-7): the delivery runs no command; it records the full-run status of its tree
+    assert.equal(pr.answers().length, 2, 'no command ran at the delivery');
+    assert.equal(del.record.fullRun?.line, 'full suite never run');
+    assert.equal(p.git('rev-parse', `${del.record.commit}^`), base, "the delivery candidate's parent is the target branch");
     assert.equal(p.git('config', '--local', '--list'), configBefore);
     assert.ok(!p.git('worktree', 'list', '--porcelain').includes(join('.mission-pipeline', 'tmp')), 'no checkout is a registered worktree');
     assert.deepEqual(readdirSync(join(p.dir, '.mission-pipeline', 'tmp')).filter((n) => /^(run|rerun|deliver)-/.test(n)), [], 'no run checkout is left');

@@ -117,7 +117,7 @@ describe('P3: re-check identity, input, deciding judgment and exits', () => {
     await revise(w, 'revision two'); await recheck(w); await engine.reconcile(M);
     const c = w.scheduler.card<Calibrator1Card>('cal1.m1.1.c1'); await w.scheduler.run(c.task, { handBack: cal1Fail(c, 'e1', 'contradicts-user') }); await engine.reconcile(M);
     const eff = (await w.ledger.events<EffectiveBody>({ mission: M, line: 'plan', event: 'effective' })).at(-1)!.body;
-    const plan = detailedPlan(M); const independent = { ...plan.tasks[0]!, id: 'independent', dependsOn: [], requirementItems: [], provenance: { planElement: 'e2' } };
+    const plan = detailedPlan(M); const independent = { ...plan.tasks[0]!, id: 'independent', dependsOn: [], requirementItems: [], provenance: { planElements: ['e2'] } };
     assert.equal(await contestedProduction(flowCtx(w, M), eff, plan, plan.tasks.find((t) => t.id === 'impl')!), true);
     assert.equal(await contestedProduction(flowCtx(w, M), eff, plan, independent), false);
   });

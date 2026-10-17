@@ -25,8 +25,9 @@
 // Every decision is applied once (the ruling's id is the escalation's; markApplied).
 //
 // Settling is once per opening, not once per exploration (code review r1 #3 carried through): a
-// rerun after an environment change reopens a converged exploration, and from then on it is not
-// settled; every stop after the reopening is routed exactly like a first stop (a settle, an
+// rerun after an environment change (4.1.2: only on the PM's word, `mp pm reopen-exploration`; an
+// environment change alone raises the notice exploration-older-environment) reopens a converged
+// exploration, and from then on it is not settled; every stop after the reopening is routed exactly like a first stop (a settle, an
 // escalation to the Secretary, or a step that is ready). The current settle (machine.ts `settled`)
 // is the one recorded since the last reopening; every reader here and in the decision layer uses it.
 
@@ -128,7 +129,7 @@ export async function explorationStep(ctx: FlowCtx): Promise<void> {
     if (await applyDecisions(ctx, x)) ctx.progressed = true;
     const r = await advanceExploration(ports, mission, x, 64, (q, st) => onFailedTask(ctx, x, q, st));
     if (r.steps > 0) ctx.progressed = true;
-    // a convergence on evidence recorded under another environment identity reopens before it settles
+    // a convergence on evidence recorded under another environment identity: a notice; reopened only on the PM's word (4.1.2)
     if (await rerunStale(ctx, x)) ctx.progressed = true;
     if (await routeStop(ctx, x)) ctx.progressed = true;
     if (await routeQuestions(ctx, x)) ctx.progressed = true;
@@ -136,12 +137,20 @@ export async function explorationStep(ctx: FlowCtx): Promise<void> {
   }
 }
 
+/** The PM's word to reopen a settled exploration after an environment change (line "exploration:<x>", key: the environment identity it was given under). */
+export const EXPLORATION_REOPEN_REQUESTED = 'reopen-requested';
+/** The notice that a settled exploration rests on executions from an older environment (4.1.2: not reopened automatically). */
+export const EXPLORATION_OLDER_ENVIRONMENT = 'exploration-older-environment';
+
 /**
  * Code review r1 #3 (4.1 §6.5, decision 11): a converged version whose standing rests on runs
  * recorded under another environment identity (an experiment's evidence is bound to the identity
- * of the runs it cites; readings are not). The way back is the evidence-execution step: those
- * executions run again with the same request, then the same position judges the version again
- * with the new records (a re-check round by the attacker, then its Stabilizer).
+ * of the runs it cites; readings are not). 4.1.2 (D-1): those runs still count, so the exploration
+ * is not reopened by itself: the PM is told (EXPLORATION_OLDER_ENVIRONMENT) and reopens it on its
+ * word (`mp pm reopen-exploration`, EXPLORATION_REOPEN_REQUESTED under the current identity). Then
+ * the way back is the evidence-execution step: those executions run again with the same request,
+ * then the same position judges the version again with the new records (a re-check round by the
+ * attacker, then its Stabilizer).
  */
 async function rerunStale(ctx: FlowCtx, x: string): Promise<boolean> {
   const s = await explorationState(ctx.ports, ctx.mission, x);
@@ -162,6 +171,20 @@ async function rerunStale(ctx: FlowCtx, x: string): Promise<boolean> {
   if (stale.length === 0) return false;
   const evidence = stale.map((r) => r.evidence as string).sort();
   const environment = current.get(stale[0]!.envLine)!;
+  const asked = (await ctx.ports.ledger.events({ mission: ctx.mission, line: explorationLine(x), event: EXPLORATION_REOPEN_REQUESTED })).some((e) => e.key === environment);
+  if (!asked) {
+    // told once per exploration, environment and set of executions (the notice's identity); nothing changes
+    await ctx.ports.ledger.notify({
+      mission: ctx.mission,
+      category: EXPLORATION_OLDER_ENVIRONMENT,
+      wi: null,
+      key: `${x}:${environment.slice(0, 24)}:${sha256(canonicalJson(evidence)).slice(0, 16)}`,
+      trigger: `exploration ${x}${s.settled !== null ? ', settled,' : ''} rests on ${evidence.length} evidence execution(s) recorded under an older environment identity (a move or a changed tool version)`,
+      defaultAction: `nothing is reopened: they still count and are shown as "older environment"; the conclusion stands. If the change matters for this question, \`mp pm reopen-exploration ${ctx.mission} ${x}\` reruns those executions under this environment and the attacker re-checks the same version`,
+      detail: { exploration: x, evidence, environment, settled: s.settled?.key ?? null },
+    });
+    return false;
+  }
   // the PM is told before the event that reopens it (a crash in between sends the same notice again: a no-op)
   await ctx.ports.ledger.notify({
     mission: ctx.mission,

@@ -9,7 +9,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - **Node**: the node *(required)*: its id, kind, current label and paths; the positions to fill *(required)*, each with why it is backfilled (missing, undecided, not current, coverage), its basis items with their current text, its object constraints with the paths to review, and the prior judgment; the runs you may cite; the declared commands you may rerun; materials (for an old-engine boundary node, its archived evidence).
 - **Chain**: the chain *(required)*: the chain object, the endpoint, the nodes, the branches left out; the user's words in force for the endpoint, verbatim *(required)*; the seams (where two nodes meet: an interface, a call, a data format); the runs you may cite; the declared commands; materials (more than 30 seams: the complete table is a must-read material).
 
-`mp seat <id> checkout` puts the commit your card names in a directory and prints its path, for reading. `mp seat <id> rerun <command>` runs a declared command again; every rerun executes and gets a new run id, which you may cite.
+`mp seat <id> checkout` prints the path of a read-only directory holding the commit your card names, for reading. Other seats reading the same commit share it: never write there. `mp seat <id> rerun <command>` runs a declared command again; every rerun executes and gets a new run id, which you may cite.
 
 ## What you hand back
 Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`), and these fields:

@@ -36,13 +36,14 @@
 import { canonicalJson } from '../common/hash.ts';
 import type { MissionId } from '../common/ids.ts';
 import type { ListRef } from '../common/records.ts';
-import { judgmentStates, labelStatus } from '../evaluator/index.ts';
+import { judgmentStates, labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof, olderEnvironmentRun, recordedEnvironment } from '../evaluator/index.ts';
 import type { Db } from '../memory/index.ts';
-import { PLAN_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
+import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
+import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { age, clip, filler as fillerText, short } from './render.ts';
 
-export type NodeKind = 'mission' | 'words' | 'requirement' | 'constraint' | 'plan' | 'object' | 'task' | 'dispatch' | 'judgment' | 'run' | 'commit' | 'delivery' | 'landing' | 'escalation' | 'decision' | 'exploration' | 'stop';
+export type NodeKind = 'mission' | 'words' | 'requirement' | 'constraint' | 'plan' | 'object' | 'task' | 'dispatch' | 'judgment' | 'run' | 'commit' | 'delivery' | 'landing' | 'escalation' | 'decision' | 'exploration' | 'stop' | 'repair';
 
 export interface GNode {
   readonly key: string;
@@ -95,6 +96,7 @@ const KIND_LABEL: Readonly<Record<NodeKind, string>> = {
   decision: 'decision',
   exploration: 'exploration',
   stop: 'stop',
+  repair: 'repair',
 };
 
 type Json = Record<string, any>;
@@ -174,6 +176,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
     // ---- labels, judgment currency
     const labels = new Map((db.stmt('SELECT target, label FROM lbl_labels').all() as Array<{ target: string; label: string }>).map((r) => [r.target, r.label]));
     const recomputing = labelStatus(db).recomputing;
+    // 4.1.2: a label resting on runs from an older environment identity, and such a run, read "older environment" (renew.ts: the one resolver)
+    const currentEnv = recordedEnvironment(db)?.identity ?? null;
+    const olderTargets = olderEnvironmentProof(db).targets;
+    const olderNote = (id: string): string => (olderTargets.has(id) ? ` (${OLDER_ENVIRONMENT})` : '');
 
     // ---- who issued each PM command (§3.2 item 13): the PM actions' results name what they made
     const pmFiller = new Map<string, string>();
@@ -287,7 +293,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       const okind = String(rec['objectKind']);
       n.title ||= `${okind}${rec['module'] ? ` of module ${rec['module']}` : ''}${Array.isArray(rec['scope']?.['paths']) && okind !== 'plan' ? `: ${clip((rec['scope']['paths'] as string[]).join(', '), 100)}` : ''}`;
       const l = labels.get(id);
-      n.state = l === undefined ? 'no label yet' : `${l}${recomputing ? ' (recomputing)' : ''}`;
+      n.state = l === undefined ? 'no label yet' : `${l}${olderNote(id)}${recomputing ? ' (recomputing)' : ''}`;
       if (typeof rec['predecessor'] === 'string') edge(n.key, objKey(rec['predecessor']), 'revises');
       for (const c of (rec['reviews'] ?? []) as Json[]) {
         for (const r of (c['reliesOn'] ?? []) as string[]) edge(n.key, objKey(r), 'relies on');
@@ -407,6 +413,11 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           const n = target === null ? undefined : nodes.get(objKey(target));
           const what = f.event === 'cal1' ? 'Calibrator ①' : f.event === 'cal2' ? 'Calibrator ②' : 'feasibility review';
           if (n !== undefined) addCheck(n, `${what}: ${String(b['outcome'] ?? b['verdict'] ?? '?')} (${handingDispatch(String(b['task'])) ?? '?'})`);
+        } else if (f.event === 'effective' && typeof b['dplan'] === 'string' && f.key.includes('#a')) {
+          // 4.1.2 (D-10): a repair's amendment of the plan in effect (the same plan version)
+          const n = nodes.get(objKey(b['dplan']));
+          const last = ((b['amendments'] ?? []) as Json[]).at(-1);
+          if (n !== undefined && last !== undefined) addCheck(n, `amended by repair ${String(last['repair'])}: adds ${((last['tasks'] ?? []) as Json[]).map((t) => String(t['id'])).join(', ')}`);
         } else if (f.event === 'effective' && typeof b['dplan'] === 'string') {
           const n = nodes.get(objKey(b['dplan']));
           if (n !== undefined) n.state = `${n.state ?? ''}; in effect (tasks ${((b['tasks'] ?? []) as string[]).join(', ')})`.replace(/^; /, '');
@@ -506,7 +517,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'consumed' && typeof b['version'] === 'string' && b['changed'] === true) {
           const n = objNode(b['version'], f.rev);
           n.title ||= `exploration version (${String(b['kind'])})`;
-          if (!n.state) n.state = labels.has(b['version']) ? String(labels.get(b['version'])) : 'submitted';
+          if (!n.state) n.state = labels.has(b['version']) ? `${String(labels.get(b['version']))}${olderNote(b['version'])}` : 'submitted';
           edge(n.key, `exploration:${x}`, 'version of');
           const d = typeof b['task'] === 'string' ? handingDispatch(b['task']) : null;
           if (d !== null) {
@@ -525,6 +536,29 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           const n = nodes.get(`exploration:${x}`);
           if (n !== undefined) n.state = 'reopened: its evidence executions run again after an environment change';
         }
+      } else if (f.line === REPAIRS_LINE) {
+        // 4.1.2 (D-10): a repair the user found, and what it caused
+        const id = `${f.mission}/${f.key}`;
+        if (f.event === 'repair') {
+          const n = node('repair', id, f.mission, f.rev, `${String(b['kind'] ?? '')}: "${clip(String(b['text'] ?? ''), 120)}"`);
+          const about = b['about'] as Json | null;
+          n.state = about?.['kind'] === 'exploration' ? `reopened exploration ${String(about['id'])} for one more round` : 'recorded: an Architect repair step amends the plan in effect';
+          n.by = `the user (${String(b['words'] ?? '')}), recorded by ${pmBy.get(n.key) ?? 'the PM via `mp pm repair`'}`;
+          if (typeof b['words'] === 'string') {
+            node('words', b['words'], null, 0);
+            edge(n.key, `words:${b['words']}`, 'the user said in');
+          }
+          if (about?.['kind'] === 'exploration') edge(n.key, `exploration:${f.mission}/${String(about['id'])}`, 'reopens');
+        } else if (f.event === 'decided') {
+          const n = nodes.get(`repair:${id}`);
+          if (n !== undefined) {
+            const add = (b['add'] ?? []) as string[];
+            const reopen = ((b['reopen'] ?? []) as Json[]).map((x) => String(x['task']));
+            n.state = `decided: ${add.length > 0 ? `adds ${add.join(', ')}` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.join(', ')}` : 'reopens no task'} (plan ${String(b['dplan'] ?? '')})`;
+            addCheck(n, 'mechanical checks passed (D-10: no Calibrator, no feasibility review)');
+            if (typeof b['dplan'] === 'string') edge(n.key, objKey(b['dplan']), 'amends');
+          }
+        }
       } else if (f.line.startsWith('dispatch:') && f.event === 'refused') {
         const n = nodes.get(`dispatch:${f.line.slice('dispatch:'.length)}`);
         const problems = (b['problems'] ?? []) as string[];
@@ -538,6 +572,58 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           n.by = 'mp (closing checks of `mp pm deliver`)';
           n.leaves.push(...leafOf(f.rev, /\/runs\//));
           edge(n.key, `delivery:${f.mission}/${f.line.slice('delivery:'.length)}`, 'closing check of');
+        }
+      }
+    }
+
+    // ---- 4.1.2: the work repairs and integration reviews caused, and products built on a version since replaced
+    {
+      const repairOf = new Map<string, string>();
+      for (const f of flows) {
+        if (f.line !== PLAN_LINE || f.event !== 'effective') continue;
+        for (const a of (f.body['amendments'] ?? []) as Json[]) for (const t of (a['tasks'] ?? []) as Json[]) repairOf.set(`${f.mission}\n${String(t['id'])}`, String(a['repair']));
+      }
+      const taskLines = new Map<string, Map<string, Array<{ revision: number; event: string; key: string; body: unknown }>>>();
+      for (const f of flows) {
+        if (!f.line.startsWith('task:')) continue;
+        const m = taskLines.get(f.mission) ?? new Map<string, Array<{ revision: number; event: string; key: string; body: unknown }>>();
+        const xs = m.get(f.line.slice('task:'.length)) ?? [];
+        xs.push({ revision: f.rev, event: f.event, key: f.key, body: f.body });
+        m.set(f.line.slice('task:'.length), xs);
+        taskLines.set(f.mission, m);
+      }
+      for (const [mission, lines] of taskLines) {
+        for (const [task, events] of lines) {
+          const reworks = new Map(events.filter((e) => e.event === 'rework').map((e) => [e.key, e.body as Json]));
+          for (const e of events) {
+            if (e.event === 'product') {
+              const b = e.body as Json;
+              const n = typeof b['object'] === 'string' ? nodes.get(objKey(b['object'])) : undefined;
+              if (n === undefined) continue;
+              const added = repairOf.get(`${mission}\n${task}`);
+              if (added !== undefined && nodes.has(`repair:${mission}/${added}`)) edge(n.key, `repair:${mission}/${added}`, 'added by');
+              const rw = reworks.get(e.key);
+              const src = (rw?.['reopen'] ?? null) as Json | null;
+              if (rw?.['reason'] === 'reopen' && src?.['kind'] === 'repair') {
+                addCheck(n, `reopened by repair ${String(src['repair'])}`);
+                if (nodes.has(`repair:${mission}/${String(src['repair'])}`)) edge(n.key, `repair:${mission}/${String(src['repair'])}`, 'answers');
+              } else if (rw?.['reason'] === 'reopen' && src?.['kind'] === 'review') addCheck(n, `reopened by the review ${String(src['review'])} of integration task ${String(src['integration'])}`);
+              if (b['noConstructor'] === true || events.some((d) => d.event === 'dispatched' && d.key === b['task'] && (d.body as Json)['noConstructor'] === true)) addCheck(n, 'the start snapshot of an integration task that writes nothing (no Constructor)');
+            } else if (e.event === 'reopen') {
+              const b = e.body as Json;
+              const prod = (events.find((x) => x.event === 'product' && x.key === e.key)?.body as Json | undefined)?.['object'];
+              const n = typeof prod === 'string' ? nodes.get(objKey(prod)) : undefined;
+              if (n !== undefined) addCheck(n, `its review ${String(b['review'])} reopened ${((b['tasks'] ?? []) as Json[]).map((x) => `${String(x['task'])} (attempt ${String(x['attempt'])})`).join(', ')}`);
+            }
+          }
+          // an accepted product built on a version its dependency has since replaced: said, never rebuilt (no cascade)
+          const now = lineAcceptance(events);
+          if (now.product === null) continue;
+          const n = nodes.get(objKey(now.product));
+          if (n === undefined) continue;
+          for (const o of builtOnOlder(list(objects.get(now.product)?.['prerequisites']), lines)) {
+            addCheck(n, `built on ${o.prerequisite} (task ${o.task}, attempt ${o.attempt}); ${o.task} has a newer accepted version ${o.newer} (not rebuilt: the integration's full run checks the combination)`);
+          }
         }
       }
     }
@@ -646,6 +732,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       const n = node('run', id, obj !== null ? (objects.get(obj)?.['mission'] ?? null) : null, Number(r.rev));
       n.title ||= `${String(rec['runClass'])} run: ${clip(String(fields['command'] ?? ''), 80)}`;
       n.state = fields['status'] === 'completed' && String(fields['exit']) === '0' ? 'passed' : `failed (${String(fields['status'] ?? '?')}, exit ${String(fields['exit'] ?? '?')})`;
+      if (olderEnvironmentRun({ envLine: String(rec['envLine'] ?? ''), envSnapshot: String(rec['envSnapshot'] ?? '') }, currentEnv)) n.state += ` (${OLDER_ENVIRONMENT})`;
       n.checks = runChecks(fields);
       n.by = disp !== null ? `mp, rerun by dispatch ${disp}` : del !== null ? 'mp (closing checks)' : `mp (${String(fields['purpose'] ?? 'declared run')})`;
       if (r.op !== null) n.leaves.push(...(leavesByOp.get(r.op) ?? []).filter((l) => /\/runs\//.test(l)));
@@ -677,6 +764,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       if (refOnly.has(String(r['delivery']))) n.state += ', delivered as a ref only';
       const checks = (doc?.['checks'] ?? []) as Json[];
       if (checks.length > 0) n.checks = `closing checks ${checks.filter((c) => c['passed'] === true).length}/${checks.length} passed`;
+      // 4.1.2: no command runs at delivery; the full-run status of its tree as recorded then
+      else if (typeof (doc?.['fullRun'] as Json | undefined)?.['line'] === 'string') n.checks = `no command ran; at delivery: ${String((doc!['fullRun'] as Json)['line'])}`;
       for (const s of (doc?.['selected'] ?? []) as Json[]) {
         const t = String(s['id'] ?? '');
         if (objects.has(t)) edge(n.key, objKey(t), 'delivers');
@@ -822,7 +911,7 @@ export function resolveNodes(g: Graph, ctx: ProcessContext, raw: string, kinds?:
   const id = raw.trim();
   const direct = g.nodes.get(id);
   if (direct !== undefined) return [direct];
-  const byId = [...g.nodes.values()].filter((n) => (kinds === undefined || kinds.includes(n.kind)) && (n.id === id || (n.kind === 'delivery' && n.id.endsWith(`/${id}`)) || ((n.kind === 'escalation' || n.kind === 'decision' || n.kind === 'exploration') && n.id.endsWith(`/${id}`))));
+  const byId = [...g.nodes.values()].filter((n) => (kinds === undefined || kinds.includes(n.kind)) && (n.id === id || (n.kind === 'delivery' && n.id.endsWith(`/${id}`)) || ((n.kind === 'escalation' || n.kind === 'decision' || n.kind === 'exploration' || n.kind === 'repair') && n.id.endsWith(`/${id}`))));
   if (byId.length > 0) return byId.filter((n) => n.kind !== 'decision' || !byId.some((x) => x.kind === 'escalation'));
   // a requirement line: its latest version
   const versions = [...g.nodes.values()].filter((n) => n.kind === 'requirement' && n.id.startsWith(`${id}.v`));
@@ -977,6 +1066,7 @@ const LAYER: Readonly<Record<NodeKind, number>> = {
   stop: 2,
   requirement: 2,
   constraint: 2,
+  repair: 2,
   exploration: 3,
   plan: 3,
   escalation: 4,

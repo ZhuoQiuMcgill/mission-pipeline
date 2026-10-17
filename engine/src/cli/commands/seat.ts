@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { parseFiller, seatCard, seatCheckout, seatHandback, seatRead, seatRequestEvidence, seatRerun, type HandBackAnswer } from '../../process/index.ts';
+import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, type FullRunMarker, type HandBackAnswer } from '../../process/index.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
 import { CliError, EXIT, refused, usage } from '../errors.ts';
@@ -27,12 +27,15 @@ function fileArg(c: RunContext, f: string): string {
   return existsSync(here) ? here : f;
 }
 
-function answerResult(a: HandBackAnswer): CommandResult {
+function answerResult(a: HandBackAnswer, p?: Project): CommandResult {
   if (a.kind === 'refused') {
     return ok([`Hand-back of ${a.dispatch} refused (it does not count; fix these and run the same command again):`, ...a.problems.map((x) => `- ${x}`)].join('\n'), a, EXIT.REFUSED);
   }
+  // a Constructor's worktree is removed after its hand-back: a shell that sat in it fails its next command (4.1.2)
+  const removed = a.candidate !== null && p !== undefined && !existsSync(join(p.ctx.memory.paths.worktrees, a.dispatch));
+  const gone = removed ? '; your worktree has been removed — if your shell was inside it, the next command\'s error is expected' : '';
   const lines = [
-    a.repeated ? `Hand-back of ${a.dispatch} was already recorded: nothing new.` : a.outcome === 'accepted' ? `Hand-back of ${a.dispatch} recorded.` : `Hand-back of ${a.dispatch} recorded but not accepted (${a.outcome === 'after-release' ? 'the dispatch was released before it arrived' : 'a stop covers it'}).`,
+    a.repeated ? `Hand-back of ${a.dispatch} was already recorded: nothing new${gone}.` : a.outcome === 'accepted' ? `Hand-back of ${a.dispatch} recorded${gone}.` : `Hand-back of ${a.dispatch} recorded but not accepted (${a.outcome === 'after-release' ? 'the dispatch was released before it arrived' : 'a stop covers it'})${gone}.`,
     ...(a.report !== null ? [`Report: .mission-pipeline/${a.report}`] : []),
     ...(a.candidate !== null ? [`Candidate commit ${a.candidate.commit} on base ${a.candidate.base}: ${a.candidate.changedPaths.join(', ') || 'no changes'}`] : []),
     ...(a.candidate !== null && a.candidate.ignored.length > 0 ? [`Ignored files inside your write paths were not collected: ${a.candidate.ignored.join(', ')}${a.candidate.ignoredTotal > a.candidate.ignored.length ? ` (and ${a.candidate.ignoredTotal - a.candidate.ignored.length} more)` : ''}`] : []),
@@ -73,14 +76,14 @@ const read: Command = {
 const checkout: Command = {
   group: 'seat',
   name: ['checkout'],
-  summary: 'put the commit your card names in a directory and print its path (read there; nothing changed there is kept)',
+  summary: 'print the path of a read-only directory holding the commit your card names (shared with the other seats reading that commit; read there, never write)',
   usage: 'mp seat <dispatch> checkout',
   flags: {},
   async run(c, args) {
     const r = await seatCheckout(P(c).ctx, dispatchOf(args));
     const note =
       r.commit !== null
-        ? `\n(commit ${r.commit}: a file snapshot without git metadata; git commands there reach the project's repository, so use the commit: git -C ${P(c).dir} show ${r.commit}, or git -C ${P(c).dir} diff ${r.commit}^ ${r.commit} for a candidate's change)`
+        ? `\n(commit ${r.commit}: a read-only file snapshot without git metadata, shared with the other seats reading this commit; do not write there. git commands there reach the project's repository, so use the commit: git -C ${P(c).dir} show ${r.commit}, or git -C ${P(c).dir} diff ${r.commit}^ ${r.commit} for a candidate's change)`
         : '';
     return ok(`${r.path}${note}`, r);
   },
@@ -96,6 +99,52 @@ const rerun: Command = {
   async run(c, args) {
     const r = await seatRerun(P(c).ctx, dispatchOf(args), positional(args, 1, 'command id (on your card)'));
     return ok(`Run ${r.run}: ${r.passed ? 'passed' : 'failed'} — ${r.summary}${r.leaf !== null ? `\nSummary: .mission-pipeline/${r.leaf}` : ''}\nCite it as your card says: evidence:${r.run} (a judgment) or run:${r.run} (a blind experiment).`, r, 0);
+  },
+};
+
+/** A full-run marker as lines for people (the seat's full-run answer, `mp read full-runs`). */
+export function fullRunLines(m: FullRunMarker): string[] {
+  const head = `Full run ${m.id}: ${m.passed ? 'passed' : 'FAILED'} on commit ${m.commit} (tree ${m.tree.slice(0, 12)}), environment ${m.environment.slice(0, 12)}, by ${m.by === 'pm' ? 'the PM' : `the Reviewer ${m.cites.dispatch ?? ''}`.trim()}${m.reusedFrom !== null ? `; reuses the passing full run ${m.reusedFrom} on the same tree (nothing ran)` : ''}`;
+  return [
+    head,
+    ...m.commands.map((c) => `  [${c.id}] ${c.command}${c.cwd !== '.' ? ` (in ${c.cwd})` : ''}: ${c.passed ? 'passed' : 'failed'} (exit ${c.exit}) — evidence:${c.evidence}${c.executed ? '' : ' (reused)'}${c.setupFailure !== undefined ? ` — ${c.setupFailure}` : ''}`),
+    ...(m.cites.words !== null || m.cites.authority !== null ? [`  decided by: ${m.cites.words !== null ? `the user's words ${m.cites.words}` : `authorization ${m.cites.authority}`}${m.cites.reason !== null ? `; reason: ${m.cites.reason}` : ''}`] : []),
+    ...(m.leaf !== null ? [`  summary: .mission-pipeline/${m.leaf}`] : []),
+  ];
+}
+
+const fullRun: Command = {
+  group: 'seat',
+  name: ['full-run'],
+  summary: "an integration task's Reviewer: mp runs the project's full suite on a clean checkout of your candidate (last, once nothing visible is wrong); a passing run on the same tree is reused",
+  usage: 'mp seat <dispatch> full-run',
+  flags: {},
+  decides: true,
+  async run(c, args) {
+    const d = dispatchOf(args);
+    const r = await seatFullRun(P(c).ctx, d);
+    const m = r.marker;
+    const lines = [
+      ...fullRunLines(m),
+      ...m.failing.flatMap((f) => [`--- last lines of ${f.id}:`, f.tail]),
+      m.passed
+        ? `Cite its runs in your judgments as evidence:<id> (${m.commands.map((x) => `evidence:${x.evidence}`).join(', ')}).`
+        : `It failed: trace the failure to the task whose change caused it (the last lines above, the run summary; mp seat ${d} owners <path>... lists which accepted products changed a path) and hand back "rework" with reopen: [{ "task", "issue", "evidence" }] naming that task: the fix belongs to that task, not to this integration task. "needs-decision" only for a failure no dependency explains.`,
+    ];
+    return ok(lines.join('\n'), r, 0);
+  },
+};
+
+const owners: Command = {
+  group: 'seat',
+  name: ['owners'],
+  summary: 'which accepted products of this mission changed each path (an integration review or a repair traces a failure with it)',
+  usage: 'mp seat <dispatch> owners <path>...   (a directory ends in "/")',
+  flags: {},
+  async run(c, args) {
+    const d = dispatchOf(args);
+    const r = await seatOwners(P(c).ctx, d, args.positionals.slice(1));
+    return ok(r.text, r);
   },
 };
 
@@ -150,7 +199,7 @@ const handback: Command = {
     } else if (flagStr(args, 'result-json') !== null) throw usage('--result-json goes with --stdin');
     if (report === null || result === null) throw usage("--stdin (your report on stdin, the fields as its last ```json block), or --report <file.md> --result <file.json>");
     const a = await seatHandback(P(c).ctx, d, { report: fileArg(c, report), result: fileArg(c, result), ...(f !== null ? { filler: parseFiller(f) } : {}) });
-    return answerResult(a);
+    return answerResult(a, P(c));
   },
 };
 
@@ -177,4 +226,4 @@ const requestEvidence: Command = {
   },
 };
 
-export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, handback, requestEvidence];
+export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, fullRun, owners, handback, requestEvidence];

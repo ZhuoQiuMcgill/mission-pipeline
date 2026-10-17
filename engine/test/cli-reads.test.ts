@@ -82,27 +82,32 @@ describe('mp read on an exploration with a Stabilizer round', () => {
   });
 });
 
-describe('mp pm renew after an environment change (§6.5, decision 18)', () => {
+describe('an environment change (§6.5; 4.1.2: labelled, not invalidated; renew is the PM\'s explicit tool)', () => {
   const p = processProject();
   after(() => p.cleanup());
 
-  it('next reports the change and offers renew; renew reruns the declared commands and restores the proof', async () => {
+  it('next reports the change once as a notice, offers no renew step; the reads show "older environment"; renew still reruns the declared commands', async () => {
     await addMissionToReview(p, 'm2');
     await step(p.ctx, 'reviewer', (c) => reviewerPass(c));
     const product = 'prod.con.m2.impl.1';
     const before = await cli(p.dir, ['read', 'show', 'object', product, '--json']);
-    assert.match(before.json.result.items[0].node.state, /^proven/);
+    assert.match(before.json.result.items[0].node.state, /^proven$/);
     const next = await cli(p.dir, ['pm', 'next', '--json'], { env: ENV_B });
     assert.equal(next.code, 0, next.err);
     assert.ok(next.json.problems.some((x: { code: string }) => x.code === 'ENVIRONMENT'), JSON.stringify(next.json.problems));
-    assert.ok(next.json.result.renew !== null && next.json.result.renew.candidates >= 1, JSON.stringify(next.json.result.renew));
-    assert.match((await cli(p.dir, ['pm', 'next'], { env: ENV_B })).out, /Ready: mp pm renew/);
+    assert.equal(next.json.result.renew, undefined, 'no renew step');
+    assert.ok(next.json.result.olderEnvironmentRuns >= 1);
+    assert.ok(next.json.result.notices.some((n: { category: string }) => n.category === 'environment-older-runs'));
+    assert.doesNotMatch((await cli(p.dir, ['pm', 'next'], { env: ENV_B })).out, /Ready: mp pm renew/);
+    const shown = await cli(p.dir, ['read', 'show', 'object', product, '--json'], { env: ENV_B });
+    assert.match(shown.json.result.items[0].node.state, /^proven \(older environment\)$/);
+    assert.match((await cli(p.dir, ['read', 'status', '--no-mark'], { env: ENV_B })).out, /rest on \d+ run\(s\) from an older environment/);
     const r = await cli(p.dir, ['pm', 'renew', '--json'], { env: ENV_B });
     assert.equal(r.code, 0, r.err);
     assert.ok(r.json.result.reruns.length >= 1 && r.json.result.reruns.every((x: { passed: boolean }) => x.passed), JSON.stringify(r.json.result));
     await cli(p.dir, ['pm', 'next'], { env: ENV_B });
     const now = await cli(p.dir, ['read', 'show', 'object', product, '--json'], { env: ENV_B });
-    assert.match(now.json.result.items[0].node.state, /^proven/);
+    assert.match(now.json.result.items[0].node.state, /^proven$/, 'renewed under this environment: no longer from an older one');
   });
 });
 

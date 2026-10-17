@@ -30,13 +30,15 @@ describe('mp init', () => {
     assert.deepEqual(readdirSync(join(mp, 'pm', 'wi')).filter((f) => f.startsWith('WI-')).map((f) => f.slice(0, 5)).sort(), [...WI_41].sort());
     assert.ok(existsSync(join(mp, 'pm', 'wi', 'INDEX.md')));
     const installed = JSON.parse(readFileSync(join(mp, 'pm', 'installed.json'), 'utf8')) as { mp: string; files: Record<string, string> };
-    assert.equal(installed.mp, '4.1.1');
+    assert.equal(installed.mp, '4.1.2');
     assert.ok(Object.keys(installed.files).includes('roles/constructor.md'));
     const cfg = JSON.parse(readFileSync(join(mp, 'config.json'), 'utf8'));
     assert.equal(cfg.format, 'mp41.config.v1');
     assert.equal(cfg.targetBranch, 'main');
     assert.deepEqual(cfg.environment.versionCommands, ['node --version'], 'a package.json declares node');
-    assert.deepEqual(cfg.closingChecks, []);
+    // 4.1.2: mp init writes the full suite under its own key; closingChecks is only read as its deprecated alias
+    assert.deepEqual(cfg.fullSuite, []);
+    assert.equal(cfg.closingChecks, undefined);
     assert.equal((await cli(p.dir, ['config'])).code, 0);
     assert.match(readFileSync(join(p.dir, '.git', 'info', 'exclude'), 'utf8'), /\.mission-pipeline\//);
     const claude = readFileSync(join(p.dir, 'CLAUDE.md'), 'utf8');

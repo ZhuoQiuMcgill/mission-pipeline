@@ -6,20 +6,23 @@ import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 //               dispatches removed, the process advanced; then, notices first (marked delivered):
 //               the ready steps (seat, task, mission, purpose, parallel), the steps held (a stop,
 //               a lease, the git-writes hold), what waits on the user, the dispatches in flight
-//               with their age, and "renew N" after an environment change (decision 18)
+//               with their age. 4.1.2: after an environment change, no renew step; one notice per
+//               change names how many runs current proof rests on are from older environments
 //   pmDispatch  claims a ready step once (A1 claimDispatch): the dispatch id, the card leaf
 //               `missions/<m>/dispatches/<d>/card.md`, its material leaves, its leases; a
 //               Constructor's worktree is created at the card's commit (A4)
 //   pmRelease   `--ended` / `--abandoned` (§5.4): the worktree removed or kept; the step queued
 //               again at once, counted on the lineage's re-dispatch loop (decision 15: two
 //               re-dispatches, then WI-08 and the Secretary)
-//   pmRenew     after an environment change: the declared commands of the affected runs rerun on
-//               clean checkouts; equal outputs renew the evidence (A2 recordRenewedRun)
+//   pmRenew     the PM's explicit tool after an environment change (never a ready step, 4.1.2):
+//               the declared commands of the affected runs rerun on clean checkouts; equal outputs
+//               renew the evidence (A2 recordRenewedRun)
 //   pmDrain     A2's drain (WI-32)
 //   pmStop      a stop, written before anything queued; "stop recorded; N dispatches in flight"
 // and the PM's flow commands (requirements with their verbatim quote, constraints, PM plan
 // batches, answers, grants, legalization), each followed by advancing the process, plus the
-// delivery (A4 deliver with this package's LabelView and ClosingRunner) and the landing.
+// delivery (A4 deliver with this package's LabelView and the full-run status of the candidate's
+// tree; no command runs, 4.1.2 D-7), the WI-05 rebuild and the landing.
 // Every write of an `mp pm` command carries the command and the PM's filler (§3.2 item 13).
 
 import { mkdirSync } from 'node:fs';
@@ -32,7 +35,7 @@ import { replacementFollowsOriginal } from '../evaluator/renew.ts';
 import { reusableMethodRun } from '../evaluator/runs.ts';
 import { effectiveEvidence } from '../evaluator/semantics.ts';
 import { StoredIndex } from '../evaluator/store.ts';
-import { deliver, type ClosingCheck, type DeliveryResult } from '../delivery/delivery.ts';
+import { deliver, rebuildDelivery, type DeliveryFullRun, type DeliveryResult } from '../delivery/delivery.ts';
 import type { DeliveryTarget } from '../delivery/proofView.ts';
 import { land, recoverLandings, type LandingResult, type RecoveryReport } from '../git/land.ts';
 import {
@@ -66,6 +69,8 @@ import {
 } from '../memory/index.ts';
 import { recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
 import { submitPmBatch } from '../flow/planning.ts';
+import { recordRepair } from '../flow/repair.ts';
+import type { RepairKind } from '../flow/plandoc.ts';
 import { answerEscalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
 import { RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, type ReviewNeededBody } from '../flow/plandoc.ts';
 import { scopesOverlap } from '../flow/mechanical.ts';
@@ -82,8 +87,12 @@ import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
-import { closingRunner, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
-import { heldByClose } from './close.ts';
+import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { fullRunLine, heldByClose } from './close.ts';
+import { fullRunStatus } from './fullRuns.ts';
+import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
+import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/scope.ts';
+import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
 import { materialLeaf } from './seat.ts';
 
 // ---------------------------------------------------------------- shared
@@ -131,6 +140,8 @@ export function purposeOf(card: { readonly seat: string } & Readonly<Record<stri
       return `decompose PM plan ${c['pmPlan']?.object} (round ${c['pmPlan']?.round})`;
     case 'architect-feasibility':
       return `feasibility review of ${c['target']}`;
+    case 'architect-repair':
+      return clip(`repair ${c['repair']?.id} (${c['repair']?.kind}) of plan ${c['dplan']}: ${c['repair']?.text}`);
     case 'secretary':
       return clip(`decide ${c['request']?.id} (${c['request']?.source}): ${c['request']?.summary}`);
     case 'crititor':
@@ -206,8 +217,8 @@ export interface NextReport {
   readonly held: readonly HeldStep[];
   readonly waitingOnUser: readonly UserWait[];
   readonly inFlight: readonly InFlight[];
-  /** Decision 18: after an environment change, `mp pm renew` is a ready step with the number of affected candidates. */
-  readonly renew: { readonly candidates: number; readonly reviews: number } | null;
+  /** 4.1.2: the runs current proof rests on that were recorded under an older environment identity (they still count; `mp pm renew` is never a ready step; a notice tells the PM once per change). */
+  readonly olderEnvironmentRuns: number;
   readonly labels: { readonly recomputing: boolean; readonly toVisit: number; readonly toRecompute: number; readonly since: number | null };
   readonly landings: RecoveryReport | null;
   /** Flow steps that failed this time (each also a WI-20 notice). */
@@ -314,18 +325,25 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
     landings = null;
   }
   tidyWorktrees(ctx);
+  // 4.1.2: scratch nobody alive owns, the tmp/ of dispatches that are over, unheld checkouts (bounded)
+  try {
+    sweepTmp(ctx, { budgetMs: SWEEP_BUDGET_MS });
+  } catch {
+    /* housekeeping: tried again on the next call */
+  }
   const errors: string[] = [];
   for (const r of await advance(ctx)) for (const e of r.errors) errors.push(`${r.mission} ${e.step}: ${e.message}`);
+  // 4.1.2: an environment change is told once (runs from older environments still count), never a ready step
+  const olderEnvironmentRuns = noticeOlderEnvironment(ctx);
   const steps = readSteps(ctx);
   const data = ctx.memory.data;
   const notices = ctx.memory.read((db) => listNotices(db, data)).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
   if (o.markDelivered !== false) markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
-  const ren = ctx.memory.read((db) => renewalCandidates(db));
   const st = ctx.memory.read((db) => labelStatus(db));
   return {
     notices,
     ...steps,
-    renew: ren.affected > 0 || ren.reviews.length > 0 ? { candidates: ren.affected, reviews: ren.reviews.length } : null,
+    olderEnvironmentRuns,
     labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since },
     landings,
     errors,
@@ -377,7 +395,7 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       const refreshed = tx.data.put(canonicalJson(spec));
       const n = Number((tx.stmt('SELECT COUNT(*) AS n FROM dispatches').get() as { n: number }).n) + 1;
       const dispatch = `D-${n}`;
-      const card = renderSeatCard(spec.card, { dispatch, projectDir: ctx.projectDir });
+      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite });
       const claimed = claimDispatch(tx, { dispatch, task: step, seat: spec.card.seat, capabilities: spec.capabilities, filler, worktree: entry.exportsProduct === true, card });
       // the materials as leaves (§5.2): `mp seat <id> read` reads them, hash-checked
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
@@ -425,6 +443,8 @@ export interface Released {
   readonly attempts: number;
   readonly allowed: number;
   readonly worktree: 'removed' | 'kept' | 'none';
+  /** What could not be removed now (the dispatch's tmp/ directory, a checkout it held); mp pm next tries again. */
+  readonly notes?: readonly string[];
 }
 
 /** `mp pm release <id> --ended | --abandoned` (§5.4, WI-28). */
@@ -469,8 +489,10 @@ export async function pmRelease(ctx: ProcessContext, dispatch: string, how: 'end
       worktree = 'kept';
     }
   }
+  // 4.1.2: a released dispatch's tmp/<dispatch>/ goes, and the checkouts only it held
+  const notes = dispatchOver(ctx, dispatch);
   await advance(ctx, d.mission, { dispatch: null, task: null, step: `mp pm release ${dispatch} --${how}` });
-  return { dispatch, how, ...r, worktree };
+  return { dispatch, how, ...r, worktree, ...(notes.length > 0 ? { notes } : {}) };
 }
 
 // ---------------------------------------------------------------- mp pm renew, drain, stop
@@ -512,7 +534,16 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
     group.push(cand);
     groups.set(key, group);
   }
+  // a stop stops (§6.6): a renew executes suites, so every group's scope (the delivery's resolver) is checked
+  // before any group runs, and each group again right before it runs (a renew can run many; a stop recorded
+  // meanwhile refuses the rest). The refusal is thrown, never counted as a skipped run.
+  const scopeOf = (originals: ReadonlyArray<(typeof c.candidates)[number]>): WorkScope => renewScope(ctx, originals);
+  const scopes = new Map([...groups.values()].map((g) => [g, scopeOf(g)]));
+  ctx.memory.read((db) => {
+    for (const s of scopes.values()) assertScopeNotStopped(db, s, 'this renewal');
+  });
   for (const originals of groups.values()) {
+    ctx.memory.read((db) => assertScopeNotStopped(db, scopes.get(originals)!, 'this renewal'));
     try {
       const first = originals[0]!;
       const fields = byEvidence.get(first.evidence)!.fields;
@@ -609,6 +640,23 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
   return { environment: c.environment, reruns, reviews: c.reviews, skipped, reviewSteps: needed.length };
 }
 
+/**
+ * The stop scope of one renewal group (§6.6): the missions of the object versions its judgments decide
+ * and the mission its runs belong to, with their dispatches' capabilities (delivery/scope.ts deriveScope).
+ */
+function renewScope(ctx: ProcessContext, originals: ReadonlyArray<{ readonly evidence: string; readonly judgments: ReadonlyArray<{ readonly target: string }> }>): WorkScope {
+  const missions = new Set<string>();
+  for (const cand of originals) {
+    for (const j of cand.judgments) {
+      const m = missionOfObject(ctx, j.target);
+      if (m !== null) missions.add(m);
+    }
+  }
+  const own = missionOfEvidence(ctx, originals[0]!.evidence);
+  const [lead, ...rest] = [...(own !== 'project' ? [own] : []), ...missions];
+  return ctx.memory.read((db) => deriveScope(db, (lead ?? own) as MissionId, rest));
+}
+
 /** The mission of an object version, or null. */
 function missionOfObject(ctx: ProcessContext, object: string): string | null {
   return ctx.memory.read((db) => (db.stmt("SELECT json_extract(record, '$.mission') AS m FROM log WHERE kind = 'object.version' AND json_extract(record, '$.object') = ? LIMIT 1").get(object) as { m: string | null } | undefined)?.m ?? null);
@@ -701,16 +749,42 @@ export async function pmRequirement(
   return { version };
 }
 
+/**
+ * `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<reason>" [--about <task|exploration>]`
+ * (4.1.2, D-9, D-10): the user tried the product and found a problem. The reason must occur verbatim in
+ * the words entry (the requirement items' check); the PM chooses the kind. About an exploration it
+ * reopens it for one more round; otherwise an Architect repair step amends the plan in effect.
+ */
+export async function pmRepair(ctx: ProcessContext, req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null }> {
+  ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
+  const mission = req.mission as MissionId;
+  let about: { kind: 'task' | 'exploration'; id: string } | null = null;
+  if (req.about !== undefined) {
+    const isExploration = ctx.memory.read((db) => flowEvents(db, { mission, line: `exploration:${req.about}`, event: 'defined', limit: 1 }).length > 0);
+    about = { kind: isExploration ? 'exploration' : 'task', id: req.about };
+  }
+  let r: { readonly id: string; readonly repeated: boolean };
+  try {
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about });
+  } catch (e) {
+    if (e instanceof LedgerError || e instanceof ProcessError) throw e;
+    throw new LedgerError('BAD_REQUEST', (e as Error).message);
+  }
+  await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm repair ${r.id}` });
+  return { repair: r.id, repeated: r.repeated, about };
+}
+
 /** `mp pm requirement withdraw <mission> <item> --reason ...`. */
 export async function pmWithdrawRequirement(ctx: ProcessContext, req: { readonly mission: string; readonly item: string; readonly reason: string }): Promise<void> {
   await withdrawItem(ctx.ports(), { mission: req.mission as MissionId, item: req.item, reason: req.reason });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm requirement withdraw' });
 }
 
-/** `mp pm constraint add <mission> <constraint> --kind object|instruction --text ... [--paths] [--task-types]`. */
-export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string }): Promise<{ readonly version: string }> {
+/** `mp pm constraint add <mission> <constraint> --kind object|instruction --text ... [--paths] [--task-types] [--words W-<n>]`. */
+export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string; readonly words?: string }): Promise<{ readonly version: string }> {
   const scope: ConstraintScope = { ...req.scope, ...(req.missionScope !== undefined ? { mission: req.missionScope } : {}) };
-  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope });
+  if (req.words !== undefined) wordsText(ctx, req.words);
+  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope, ...(req.words !== undefined ? { words: req.words } : {}) });
   await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint' });
   return { version };
 }
@@ -779,15 +853,26 @@ export async function pmLegalizationState(ctx: ProcessContext, req: { readonly m
 
 // ---------------------------------------------------------------- delivery and landing (A4, with this package's labels and runs)
 
-/** `mp pm deliver <mission> --outputs ... --words W-<n>` (§6.7): A4's deliver with the stored labels and the closing checks as runs. */
+/** The full-run status of a delivery candidate's tree (P1's resolver), with its line for people (D-7). */
+function deliveryFullRun(ctx: ProcessContext, mission: string): (c: { readonly tree: string }) => DeliveryFullRun {
+  return (c) => {
+    const status = fullRunStatus(ctx, mission, c.tree);
+    return { line: fullRunLine(status), status };
+  };
+}
+
+/**
+ * `mp pm deliver <mission> --outputs ... --words W-<n> [--message <subject>]` (§6.7; 4.1.2, D-7): A4's
+ * deliver with the stored labels. No command runs: the delivery records the full-run status of its
+ * tree, and a full run at the end is the PM's call.
+ */
 export async function pmDeliver(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly delivery: string; readonly selected: readonly DeliveryTarget[]; readonly closingChecks?: readonly ClosingCheck[]; readonly words?: string | null; readonly targetBranch?: string; readonly rebuildOf?: string | null },
+  req: { readonly mission: string; readonly delivery: string; readonly selected: readonly DeliveryTarget[]; readonly words?: string | null; readonly targetBranch?: string; readonly rebuildOf?: string | null; readonly message?: string | null; readonly candidateOnly?: boolean },
 ): Promise<DeliveryResult> {
   ctx.environment();
   // §4.1: a call first does one bounded label batch (the labels must reflect the log before a decision that needs "proven")
   settleLabels(ctx);
-  const ident = ctx.ident();
   return deliver(
     ctx.gitCtx,
     {
@@ -795,15 +880,23 @@ export async function pmDeliver(
       delivery: req.delivery,
       targetBranch: req.targetBranch ?? ctx.targetBranch,
       selected: req.selected,
-      closingChecks: req.closingChecks ?? [],
-      author: ident,
-      committer: ident,
+      author: ctx.ident(),
+      committer: ctx.committer(),
       ...(req.words !== undefined ? { words: req.words } : {}),
       ...(req.rebuildOf !== undefined ? { rebuildOf: req.rebuildOf } : {}),
+      ...(req.message !== undefined && req.message !== null ? { message: req.message } : {}),
+      ...(req.candidateOnly === true ? { candidateOnly: true } : {}),
       filler: ctx.filler,
     },
-    { labels: () => labelView(ctx), closing: closingRunner(ctx) },
+    { labels: () => labelView(ctx), fullRun: deliveryFullRun(ctx, req.mission) },
   );
+}
+
+/** WI-05 default after a landing found the target branch moved: the delivery rebuilt on the new base (counted, decision 16). */
+export async function pmRebuild(ctx: ProcessContext, req: { readonly mission: string; readonly delivery: string }): Promise<DeliveryResult> {
+  ctx.environment();
+  settleLabels(ctx);
+  return rebuildDelivery(ctx.gitCtx, { mission: req.mission as MissionId, delivery: req.delivery, author: ctx.ident(), committer: ctx.committer(), filler: ctx.filler }, { labels: () => labelView(ctx), fullRun: deliveryFullRun(ctx, req.mission) });
 }
 
 /** `mp pm land <delivery> --words W-<n>` (§6.7): A4's fast-forward landing from the recorded base. */

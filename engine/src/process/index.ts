@@ -2,7 +2,7 @@
 // calls. Importing it registers the labels extension (A2) before any memory is opened.
 //
 //   const ctx = openProcess(projectDir, { filler });     // one per mp command
-//   const next = await pmNext(ctx);                        // notices, ready steps, in flight, renew N
+//   const next = await pmNext(ctx);                        // notices, ready steps, in flight
 //   const d = pmDispatch(ctx, next.ready[0].step, { filledBy: 'claude-code/opus' });
 //   ... the PM's harness starts the seat with d.prompt ...
 //   await seatHandback(ctx, d.dispatch, { report, result });
@@ -28,12 +28,14 @@ export {
   pmDrain,
   pmGrant,
   pmLand,
+  pmRebuild,
   pmLegalizationState,
   pmLegalize,
   pmNext,
   pmPlan,
   pmRelease,
   pmRenew,
+  pmRepair,
   pmRequirement,
   pmSay,
   pmStartLegalization,
@@ -63,11 +65,17 @@ export {
   seatRead,
   seatRequestEvidence,
   seatRerun,
+  seatFullRun,
+  seatOwners,
   type CandidateInfo,
   type DispatchView,
   type HandBackAnswer,
   type HandBackInput,
 } from './seat.ts';
 export { DISPATCH_LINE, MemoryFlowEvaluator, MemoryFlowLedger, MemoryFlowScheduler, REDISPATCH_LOOP, handbackDoc, memoryFlowPorts, noticeAlertId, raiseNotice, taskStatus, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
-export { CLOSE_MODES, allowedAfterClose, heldByClose, missionState, pmClose, pmMission, type CloseMode, type Closed } from './close.ts';
-export { CWD_FIELD, normalizeCwd, runCwd, closingRunner, newRunId, runLeaf, runOnCommit, RunInProgress, shellRunner, tapResults, type CommandOutcome, type CommandRunner, type DeclaredCommand, type RecordedRun } from './runs.ts';
+export { CLOSE_MODES, allowedAfterClose, fullRunLine, heldByClose, missionState, pmClose, pmMission, snapshotLines, type CloseMode, type Closed, type CloseSnapshot } from './close.ts';
+export { acceptedOutputs, deliveryIdFor, pmFinish, targetKey, type Finished } from './finish.ts';
+export { cardForSeat, noticeOlderEnvironment, OLDER_ENVIRONMENT_NOTICE, pmReopenExploration } from './environmentLabels.ts';
+export { FULL_RUN_EVENT, FULL_RUNS_LINE, fullRunMarkers, fullRunStatus, passingFullRunEvidence, pmFullRun, runFullSuite, suiteHash, treeOf, type FullRunBody, type FullRunCites, type FullRunCommand, type FullRunMarker, type FullRunResult, type FullRunStatus, type PmFullRunRequest } from './fullRuns.ts';
+export { CWD_FIELD, normalizeCwd, runCwd, commandLine, FULL_RUN_TAIL, LOCAL_TAIL, newRunId, runLeaf, runOnCommit, RunInProgress, shellRunner, tail, tapResults, type CommandOutcome, type CommandRunner, type DeclaredCommand, type RecordedRun, type TailLimit } from './runs.ts';
+export { pmClean, sweepTmp, type CleanReport, type SweepReport, type SweptEntry } from './housekeeping.ts';

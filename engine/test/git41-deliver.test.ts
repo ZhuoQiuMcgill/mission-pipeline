@@ -1,7 +1,8 @@
-// Design 4.1 §6.7, §11 scenario 9, decision 16; WI-05, WI-08, WI-20, WI-21:
+// Design 4.1 §6.7, §11 scenario 9, decision 16; WI-05, WI-08, WI-20; 4.1.2 D-7:
 // delivery with plain git over the project memory: manifest, candidate on the
-// target's current commit, proof check, closing checks in a clean checkout,
-// the delivery ref; rebuilds on a moved base, counted, then the ref is left.
+// target's current commit, proof check, the full-run status of its tree (no
+// command runs), the delivery ref; rebuilds on a moved base, counted, then the
+// ref is left.
 
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -9,7 +10,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { id, type ObjectVersionId, type StopId } from '../src/common/ids.ts';
 import type { BaseRecord } from '../src/common/records.ts';
-import { deliver, rebuildDelivery, shellClosingRunner, type ClosingRunner, type DeliverRequest, type DeliveryResult } from '../src/delivery/delivery.ts';
+import { deliver, rebuildDelivery, type DeliverRequest, type DeliveryFullRun, type DeliveryResult } from '../src/delivery/delivery.ts';
 import type { LabelView } from '../src/delivery/memoryView.ts';
 import { writeScopeDocument } from '../src/delivery/writeScope.ts';
 import { land } from '../src/git/land.ts';
@@ -54,7 +55,7 @@ function labels(f: Fixture, over: Partial<LabelView> = {}): LabelView {
 }
 
 function request(op: string, over: Partial<DeliverRequest> = {}): DeliverRequest {
-  return { mission: M, delivery: op, targetBranch: 'main', selected: [{ kind: 'object', id: 'o1' as ObjectVersionId }], closingChecks: [], author: IDENT, committer: IDENT, ...over };
+  return { mission: M, delivery: op, targetBranch: 'main', selected: [{ kind: 'object', id: 'o1' as ObjectVersionId }], author: IDENT, committer: IDENT, ...over };
 }
 
 function delivered(r: DeliveryResult): Extract<DeliveryResult, { kind: 'delivered' }> {
@@ -69,7 +70,7 @@ function advance(f: Fixture, name: string): string {
   return c;
 }
 
-test('delivery setup runs no global hooks and a closing check update-ref runs the hook normally', { skip: !POSIX }, async () => {
+test('delivery setup runs no global hooks: none has run when the candidate is built and proof-checked', { skip: !POSIX }, async () => {
   const f = fixture({ files: FILES });
   const saved = process.env['GIT_CONFIG_GLOBAL'];
   const scratch = tempDir('mp-deliver-hooks-');
@@ -84,17 +85,14 @@ test('delivery setup runs no global hooks and a closing check update-ref runs th
     const global = join(scratch, 'gitconfig');
     writeFileSync(global, `[core]\n\thooksPath = ${JSON.stringify(hooks)}\n`);
     process.env['GIT_CONFIG_GLOBAL'] = global;
-    const closing: ClosingRunner = {
-      run(req) {
-        assert.equal(existsSync(marker), false, 'no reference transaction hook during attribute or checkout setup');
-        return shellClosingRunner.run(req);
-      },
+    let reached = false;
+    const fullRun = (): DeliveryFullRun => {
+      reached = true;
+      assert.equal(existsSync(marker), false, 'no reference transaction hook during attribute setup or the candidate build');
+      return { line: 'full suite never run', status: null };
     };
-    const r = delivered(await deliver(f.ctx, request('hook-test', {
-      closingChecks: [{ id: 'hook', command: `test ! -e ${shellQuote(marker)} && git update-ref refs/heads/check-hook HEAD && test -s ${shellQuote(marker)}` }],
-    }), { labels: labels(f), closing }));
-    assert.equal(r.record.checks[0]!.passed, true);
-    assert.match(readFileSync(marker, 'utf8'), /refs\/heads\/check-hook/);
+    delivered(await deliver(f.ctx, request('hook-test'), { labels: labels(f), fullRun }));
+    assert.equal(reached, true);
   } finally {
     if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
     else process.env['GIT_CONFIG_GLOBAL'] = saved;
@@ -103,18 +101,22 @@ test('delivery setup runs no global hooks and a closing check update-ref runs th
   }
 });
 
-test('a delivery: the candidate on main’s current commit, proven, its closing checks run in a clean checkout, the delivery ref created and recorded once', { skip: !POSIX }, async () => {
+test('a delivery: the candidate on main’s current commit, proven, no command run, its full-run status recorded, the delivery ref created and recorded once', { skip: !POSIX }, async () => {
   const f = fixture({ files: FILES });
   try {
     const B = f.git('rev-parse', 'main');
     await product(f);
     write(f.dir, 'untracked.txt', 'untracked in the main worktree\n');
     write(f.dir, 'main.log', 'ignored in the main worktree\n');
-    // The run directory is a repository of its own at the candidate (on B), never the project's worktree.
-    const checks = [{ id: 'clean', command: `test -f src/c.txt && test ! -e untracked.txt && test ! -e main.log && test "$(git rev-parse --show-toplevel)" = "$(pwd -P)" && test "$(git rev-parse HEAD^)" = ${B} && git diff-index --quiet HEAD --` }];
     const asked = words(f.m, 'deliver the feature');
     await assert.rejects(deliver(f.ctx, request('d1', { words: 'W-99' }), { labels: labels(f) }), /no words entry/);
-    const r = delivered(await deliver(f.ctx, request('d1', { closingChecks: checks, words: asked }), { labels: labels(f) }));
+    // D-7: the delivery asks for the full-run status of its tree and runs nothing
+    const asks: Array<{ commit: string; tree: string }> = [];
+    const fullRun = (c: { commit: string; tree: string }): DeliveryFullRun => {
+      asks.push(c);
+      return { line: 'full suite never run', status: { last: null, sameTree: false, changedSince: null } };
+    };
+    const r = delivered(await deliver(f.ctx, request('d1', { words: asked }), { labels: labels(f), fullRun }));
     const rec = r.record;
     assert.equal(rec.base, B);
     assert.equal(rec.ref, 'refs/mission-pipeline/delivered/m1/d1');
@@ -122,12 +124,17 @@ test('a delivery: the candidate on main’s current commit, proven, its closing 
     assert.equal(f.git('rev-parse', `${rec.commit}^@`), B, 'a fast-forward of the base');
     assert.equal(f.git('show', `${rec.commit}:src/a.txt`), 'A1');
     assert.equal(f.git('show', `${rec.commit}:file2.txt`), 'x');
-    assert.deepEqual([rec.proof?.proven, rec.checks.map((c) => [c.id, c.passed]), rec.rebuilds], [['o1'], [['clean', true]], 0]);
+    assert.deepEqual([rec.proof?.proven, rec.rebuilds], [['o1'], 0]);
+    assert.equal(rec.tree, f.git('rev-parse', `${rec.commit}^{tree}`));
+    assert.deepEqual(asks, [{ commit: rec.commit, tree: rec.tree }]);
+    assert.equal(rec.fullRun?.line, 'full suite never run');
     const info = deliveryInfo(f.m, M, 'd1');
     assert.deepEqual([info?.state, info?.commit, info?.base, info?.target], ['recorded', rec.commit, B, 'main']);
     const leaf = readFileSync(join(f.m.paths.root, 'missions', 'm1', 'deliveries', 'd1.md'), 'utf8');
     assert.match(leaf, /Delivery commit: [0-9a-f]{40}/);
     assert.match(leaf, new RegExp(`Asked for in ${asked}`));
+    assert.match(leaf, /## Full suite\n\n- full suite never run\n- No command ran at this delivery/);
+    assert.doesNotMatch(leaf, /Closing checks/);
     assert.ok(!existsSync(join(f.m.paths.tmp, 'deliver-d1')), 'the run directory is removed');
     assert.equal(f.git('rev-parse', 'main'), B, 'delivery never moves the target branch');
     assert.equal(f.m.read((db) => openIntents(db)).length, 0);
@@ -143,15 +150,10 @@ test('a delivery: the candidate on main’s current commit, proven, its closing 
   }
 });
 
-test('closing checks failing: no ref, nothing recorded (WI-21); labels recomputing: nothing built; a stop and held git writes refuse', { skip: !POSIX }, async () => {
+test('labels recomputing: nothing built; not proven delivered with its label; a stop and held git writes refuse', { skip: !POSIX }, async () => {
   const f = fixture({ files: FILES });
   try {
     await product(f);
-    const failed = await deliver(f.ctx, request('d1', { closingChecks: [{ id: 'fails', command: 'echo broken >&2; exit 3' }] }), { labels: labels(f) });
-    assert.equal(failed.kind, 'checks-failed');
-    if (failed.kind === 'checks-failed') assert.deepEqual([failed.outcomes[0]?.exitCode, failed.outcomes[0]?.tail.trim()], [3, 'broken']);
-    assert.equal(deliveryInfo(f.m, M, 'd1'), null);
-    assert.throws(() => f.git('rev-parse', '--verify', 'refs/mission-pipeline/delivered/m1/d1'));
     assert.deepEqual(await deliver(f.ctx, request('d2'), { labels: labels(f, { recomputing: true }) }), { kind: 'recomputing' });
     const notProven = delivered(await deliver(f.ctx, request('d3'), { labels: labels(f, { labelOf: () => 'not-fully-proven' }) }));
     assert.deepEqual(notProven.record.proof?.notFullyProven.map((n) => n.id), ['o1']);
@@ -167,19 +169,40 @@ test('closing checks failing: no ref, nothing recorded (WI-21); labels recomputi
   }
 });
 
-test('the target moved while the candidate was checked: rebuilt on the new base, counted (decision 16)', { skip: !POSIX }, async () => {
+test('4.1.2: --message sets the delivery commit\'s subject; a candidate-only build records nothing and creates no ref', { skip: !POSIX }, async () => {
+  const f = fixture({ files: FILES });
+  try {
+    await product(f);
+    const only = await deliver(f.ctx, request('c1', { candidateOnly: true }), { labels: labels(f) });
+    assert.equal(only.kind, 'candidate', JSON.stringify(only));
+    if (only.kind !== 'candidate') return;
+    assert.equal(only.tree, f.git('rev-parse', `${only.commit}^{tree}`));
+    assert.equal(f.git('show', `${only.commit}:src/a.txt`), 'A1');
+    assert.equal(deliveryInfo(f.m, M, 'c1'), null);
+    assert.equal(f.m.read((db) => openIntents(db)).length, 0);
+    assert.throws(() => f.git('rev-parse', '--verify', 'refs/mission-pipeline/delivered/m1/c1'));
+    const r = delivered(await deliver(f.ctx, request('d1', { message: 'feat: the o1 change' }), { labels: labels(f) }));
+    assert.equal(f.git('log', '-1', '--format=%s', r.record.commit), 'feat: the o1 change');
+    assert.match(f.git('log', '-1', '--format=%b', r.record.commit), /Delivery d1 of mission m1 as of revision \d+:\n  o1: proven/);
+    const plain = delivered(await deliver(f.ctx, request('d2'), { labels: labels(f) }));
+    assert.match(f.git('log', '-1', '--format=%s', plain.record.commit), /^Delivery d2 of mission m1 \(o1\) as of revision \d+$/, 'the default subject stays');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('the target moved while the candidate was built: rebuilt on the new base, counted (decision 16)', { skip: !POSIX }, async () => {
   const f = fixture({ files: FILES });
   try {
     await product(f);
     let calls = 0;
     let moved = '';
-    const racing: ClosingRunner = {
-      run(req) {
-        if (calls++ === 0) moved = advance(f, 'during-checks');
-        return shellClosingRunner.run(req);
-      },
+    // the full-run status is asked after the candidate is built and proof-checked, before the base is read again
+    const racing = (): DeliveryFullRun => {
+      if (calls++ === 0) moved = advance(f, 'during-checks');
+      return { line: 'full suite never run', status: null };
     };
-    const r = delivered(await deliver(f.ctx, request('d1', { closingChecks: [{ id: 'ok', command: 'true' }] }), { labels: labels(f), closing: racing }));
+    const r = delivered(await deliver(f.ctx, request('d1'), { labels: labels(f), fullRun: racing }));
     assert.equal(r.record.base, moved);
     assert.equal(r.record.rebuilds, 1);
     assert.equal(f.git('show', `${r.record.commit}:other/during-checks.txt`), 'during-checks');
@@ -199,19 +222,19 @@ test('a landing on a moved branch rebuilds the delivery (WI-05), 3 times per del
     const moved = await land(f.ctx, { mission: M, delivery: 'd1', words: w });
     assert.equal(moved.kind, 'base-moved');
     assert.equal(f.git('rev-parse', 'main') !== d1.record.commit, true, 'nothing merged');
-    const r1 = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: 'd1', closingChecks: [], author: IDENT, committer: IDENT }, { labels: labels(f) }));
+    const r1 = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: 'd1', author: IDENT, committer: IDENT }, { labels: labels(f) }));
     assert.deepEqual([r1.record.delivery, r1.record.rebuilds, r1.record.base], ['d1-r1', 1, f.git('rev-parse', 'main')]);
     const landed = await land(f.ctx, { mission: M, delivery: 'd1-r1', words: w });
     assert.equal(landed.kind, 'landed');
     let prev = 'd1-r1';
     for (const n of [2, 3]) {
       advance(f, `m${n}`);
-      const r = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: prev, closingChecks: [], author: IDENT, committer: IDENT }, { labels: labels(f) }));
+      const r = delivered(await rebuildDelivery(f.ctx, { mission: M, delivery: prev, author: IDENT, committer: IDENT }, { labels: labels(f) }));
       assert.deepEqual([r.record.delivery, r.record.rebuilds], [`d1-r${n}`, n]);
       prev = r.record.delivery;
     }
     advance(f, 'm4');
-    const out = await rebuildDelivery(f.ctx, { mission: M, delivery: prev, closingChecks: [], author: IDENT, committer: IDENT }, { labels: labels(f) });
+    const out = await rebuildDelivery(f.ctx, { mission: M, delivery: prev, author: IDENT, committer: IDENT }, { labels: labels(f) });
     assert.equal(out.kind, 'rebuild-limit-exhausted');
     if (out.kind !== 'rebuild-limit-exhausted') return;
     assert.deepEqual([out.rebuilds, out.limit, out.leftRef], [3, 3, 'refs/mission-pipeline/delivered/m1/d1-r3']);

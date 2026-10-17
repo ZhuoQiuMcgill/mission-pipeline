@@ -5,8 +5,9 @@
 // Notices are shown, never marked: only `mp pm next` marks them delivered.
 
 import type { MissionId } from '../common/ids.ts';
-import { labelSummary, recordedEnvironment } from '../evaluator/index.ts';
+import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
+import { PLAN_LINE } from '../flow/plandoc.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
 import type { Project } from './project.ts';
@@ -31,6 +32,8 @@ export interface Layer0 {
   readonly labels: { readonly recomputing: boolean; readonly toVisit: number; readonly toRecompute: number; readonly counts: Readonly<Record<string, number>>; readonly proofDebt: number; readonly cycles: number };
   readonly landingsOpen: ReadonlyArray<{ intent: string; delivery: string | null }>;
   readonly environment: string | null;
+  /** 4.1.2: current proof resting on runs recorded under an older environment identity (it still counts; shown "older environment"). */
+  readonly olderEnvironment: { readonly runs: number; readonly targets: number };
   readonly since: { readonly revision: number; readonly changes: Readonly<Record<string, number>> } | null;
 }
 
@@ -83,6 +86,7 @@ export function layer0(p: Project, inScope: (mission: string, subject: string) =
     const notices = listNotices(db, data).map((n) => ({ id: n.id, wi: n.wi, state: n.state, trigger: clip(n.trigger, 160), mission: n.mission }));
     const sum = labelSummary(db);
     const env = recordedEnvironment(db);
+    const older = olderEnvironmentProof(db);
     const c = cursor(db, ASKED_CURSOR);
     let since: Layer0['since'] = null;
     if (c !== null) {
@@ -108,6 +112,7 @@ export function layer0(p: Project, inScope: (mission: string, subject: string) =
         .filter((i) => i.kind === 'landing')
         .map((i) => ({ intent: i.intent, delivery: i.delivery?.op ?? null })),
       environment: env?.identity ?? null,
+      olderEnvironment: { runs: older.runs.size, targets: older.targets.size },
       since,
     };
   });
@@ -134,7 +139,7 @@ export function layer0Text(l: Layer0): string {
     .join(', ');
   lines.push(`Labels: ${counts || 'none yet'}${l.labels.recomputing ? `; recomputing (${l.labels.toVisit} to visit, ${l.labels.toRecompute} to recompute)` : ''}${l.labels.proofDebt > 0 ? `; proof debt ${l.labels.proofDebt}` : ''}${l.labels.cycles > 0 ? `; ${l.labels.cycles} dependency cycle(s) (WI-16)` : ''}`);
   if (l.landingsOpen.length > 0) lines.push(...section('Landing intents open', l.landingsOpen.map((i) => `${i.intent} (delivery ${i.delivery ?? '?'}): WI-06`)));
-  lines.push(`Environment identity: ${l.environment === null ? 'not recorded yet' : short(l.environment)}`);
+  lines.push(`Environment identity: ${l.environment === null ? 'not recorded yet' : short(l.environment)}${l.olderEnvironment.runs > 0 ? `; ${l.olderEnvironment.targets} label(s) rest on ${l.olderEnvironment.runs} run(s) from an ${OLDER_ENVIRONMENT} (they still count; mp pm renew reruns them if the PM decides)` : ''}`);
   return lines.join('\n');
 }
 
@@ -260,6 +265,21 @@ export async function showItem(p: Project, kind: string, id: string): Promise<Sh
       extraJson['delivery'] = info;
       extraJson['landingIntents'] = intents;
     }
+  }
+  if (kind === 'plan') {
+    // the mechanical checks' failure texts, as the flow recorded them (the event's own body; 4.1.2)
+    const checks = ctx.memory.read((db) =>
+      found.filter((n) => n.mission !== null).flatMap((n) =>
+        flowEvents(db, { mission: n.mission as MissionId, line: PLAN_LINE, event: 'mechanical-check', limit: 10_000 })
+          .filter((e) => e.key === n.id)
+          .map((e) => ({ plan: n.id, ...(JSON.parse(ctx.memory.data.text(e.body)) as { ok?: boolean; failures?: string[]; orderChanges?: string[] }) })),
+      ),
+    );
+    for (const c of checks) {
+      if (c.ok === true && (c.orderChanges ?? []).length === 0) continue;
+      extra.push(...section(`  mechanical checks of ${c.plan}: ${c.ok === true ? 'passed' : `failed (${(c.failures ?? []).length})`}`, [...(c.failures ?? []).map((f) => `  failed: ${f}`), ...(c.orderChanges ?? []).map((o) => `  order change (to the Secretary): ${o}`)]));
+    }
+    extraJson['mechanicalChecks'] = checks;
   }
   if (kind === 'dispatch' && found[0] !== undefined) {
     const d = found[0].id;

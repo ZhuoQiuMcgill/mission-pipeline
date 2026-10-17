@@ -28,12 +28,14 @@ import { canonicalJson } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, OpId } from '../../common/ids.ts';
 import { type EvidenceRecord, type JudgmentRecord, type ObjectVersionRecord, type ProofUnitRecord, type ReviewContract } from '../../common/records.ts';
 import { type Label } from '../../evaluator/semantics.ts';
+import { runCounts } from '../../evaluator/runs.ts';
 import { SEAMS_ON_CARD, seamTable, type AuditChainCard, type AuditChainResult, type AuditNodeCard, type AuditNodeResult, type AuditPositionT } from '../../seat/cards/auditor.ts';
 import { CARD_FORMAT, materialPageCount, type MaterialRef } from '../../seat/cards/common.ts';
 import { SEAT_CAPABILITIES, basisIndex, flowCtx, idPart, type FlowCtx } from '../context.ts';
 import type { AnyCard, FlowPorts, FlowTaskStatus } from '../ports.ts';
 import { handleFailure } from '../failures.ts';
 import { detailedPlanOf, type EffectiveBody } from '../planning.ts';
+import { amendedPlan } from '../plandoc.ts';
 import { PLAN_LINE, REQUIREMENTS_LINE } from '../plandoc.ts';
 import { currentConstraints, currentItems, requirementSetLine } from '../requirements.ts';
 import { cancelSecretarySteps, carryGuard, closing, markApplied, openEscalations } from '../secretary.ts';
@@ -563,11 +565,9 @@ function materialOf(ctx: FlowCtx, id: string, title: string, hash: string): Mate
 }
 
 /**
- * Evidence the Auditor may cite (11.1; 4.1 §6.5: a run is reused while its environment identity is
- * current, otherwise it is rerun): the runs the existing judgments on these targets used, plus the
- * given ones, that still apply (bound to the current snapshot of their environment line and not
- * revoked, 5.2). A run that needs a rerun is left off: citing it would make the Auditor's own
- * judgment not current.
+ * Evidence the Auditor may cite (11.1): the runs the existing judgments on these targets used, plus
+ * the given ones, that still count (runCounts, the evaluator's own rule: 4.1.2 counts a run from an
+ * older environment identity, not one from an older run method) and are not revoked.
  */
 async function evidenceFor(ctx: FlowCtx, targets: ReadonlySet<string>, extra: readonly string[]): Promise<Array<{ id: string; command: string; summary: string }>> {
   const ids = new Set<string>(extra);
@@ -578,7 +578,7 @@ async function evidenceFor(ctx: FlowCtx, targets: ReadonlySet<string>, extra: re
   const revoked = new Set((await ctx.ports.ledger.records(['evidence.revoked'])).map((c) => c.record.evidence as string));
   return [...ids].sort().flatMap((id) => {
     const r = recs.get(id);
-    if (r === undefined || revoked.has(id) || envCurrent.get(r.envLine) !== r.envSnapshot) return [];
+    if (r === undefined || revoked.has(id) || !runCounts(r, envCurrent.get(r.envLine))) return [];
     const f = Object.entries(r.fields).slice(0, 6).map(([k, v]) => `${k}=${v.length > 60 ? `${v.slice(0, 57)}...` : v}`);
     return [{ id, command: r.fields['command'] ?? '(recorded run)', summary: `${r.runClass} run: ${f.join(', ')}` }];
   });
@@ -609,7 +609,8 @@ async function taskOfProduct(ctx: FlowCtx, object: string): Promise<{ readonly t
     let commands: Array<{ id: string; command: string; cwd?: string }> = [];
     for (const f of await ctx.ports.ledger.events<EffectiveBody>({ mission: ctx.mission, line: PLAN_LINE, event: 'effective' })) {
       const d = await detailedPlanOf(ctx, f.body.dplan);
-      const t = d?.plan.tasks.find((x) => x.id === task);
+      // the plan with the tasks its repairs added (4.1.2, D-10): the effective event lists them
+      const t = d === null ? undefined : amendedPlan(d.plan, f.body.amendments).tasks.find((x) => x.id === task);
       if (t !== undefined) commands = t.verificationCommands.map((c) => ({ id: c.id, command: c.command, ...(c.cwd !== undefined ? { cwd: c.cwd } : {}) }));
     }
     return { task, commands };

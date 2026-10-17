@@ -19,6 +19,7 @@ import {
   recordRenewal,
   recordRenewedRun,
   RUN_FIELD,
+  RUN_METHOD,
   VERSION_OUTPUT_MAX,
 } from '../src/evaluator/index.ts';
 import { appendRecords, commitProofOp, LedgerError, type Memory, type WriteTx } from '../src/memory/index.ts';
@@ -91,10 +92,11 @@ test('finding 2: recompute verifies the log first: a changed event is refused (C
     const { m } = p;
     const env = currentEnvironment(m, { observe: machine('linux') }).identity;
     const b = builders(m);
-    w(m, (tx) => appendRecords(tx, [b.evidence('E', 'old'), b.product('P'), b.judge('J', 'P', { evidence: ['E'] }), b.pending('op', ['P'])]));
+    // 4.1.2: a run of an older run method never counts (an older environment identity alone would)
+    w(m, (tx) => appendRecords(tx, [b.evidence('E', env, 'declared', { exit: '0', [RUN_FIELD.candidate]: 'a'.repeat(40), [RUN_FIELD.command]: 'npm test', [RUN_FIELD.method]: 'v1' }), b.product('P'), b.judge('J', 'P', { evidence: ['E'] }), b.pending('op', ['P'])]));
     assert.deepEqual(labelsOf(m, ['P']), { P: 'not-fully-proven' });
     // A damaged copy: a non-tail event changed without its hash.
-    m.connection.prepare("UPDATE log SET record = json_set(record, '$.envSnapshot', ?) WHERE kind = 'evidence'").run(env);
+    m.connection.prepare("UPDATE log SET record = json_set(record, '$.fields.runMethod', ?) WHERE kind = 'evidence'").run(RUN_METHOD);
     assert.equal(codeOf(() => recompute(m)), 'CHAIN_BROKEN');
     assert.deepEqual(labelsOf(m, ['P']), { P: 'not-fully-proven' }, 'the labels were not rebuilt from it');
     assert.notEqual(codeOf(() => w(m, (tx) => commitProofOp(tx, { opId: 'op' as never }))), 'ok');
@@ -162,11 +164,12 @@ test('finding 4: a renewal needs a rerun of the same candidate content and the s
     const { m } = p;
     const linux = currentEnvironment(m, { observe: machine('linux') }).identity;
     const b = builders(m);
-    const run = (candidate: string, command: string): Record<string, string> => ({ exit: '0', [RUN_FIELD.candidate]: candidate, [RUN_FIELD.command]: command });
+    const run = (candidate: string, command: string): Record<string, string> => ({ exit: '0', [RUN_FIELD.candidate]: candidate, [RUN_FIELD.command]: command, [RUN_FIELD.method]: RUN_METHOD });
     w(m, (tx) => appendRecords(tx, [b.evidence('E', linux, 'declared', run('a'.repeat(40), 'npm test')), b.product('P'), b.judge('J', 'P', { evidence: ['E'] })]));
     forgetObservedEnvironment(m.projectDir);
     const win = currentEnvironment(m, { observe: machine('win32') }).identity;
-    assert.deepEqual(labelsOf(m, ['P']), { P: 'not-fully-proven' });
+    // 4.1.2: the run from an older environment still counts; the renewal rules below still hold for the PM's explicit renew
+    assert.deepEqual(labelsOf(m, ['P']), { P: 'proven' });
     // Another candidate, another command, a longer command: none renews.
     for (const [id, fields] of [
       ['X1', run('b'.repeat(40), 'true')],
@@ -181,7 +184,7 @@ test('finding 4: a renewal needs a rerun of the same candidate content and the s
     const out = w(m, (tx) => recordRenewal(tx, { judgment: 'J' as never, original: 'E' as never, replacement: 'X5' as never }));
     assert.equal(out.renewed, false);
     assert.equal(codeOf(() => w(m, (tx) => appendRecords(tx, [{ kind: 'evidence.renewal', judgment: 'J', original: 'E', replacement: 'X5' } as never]))), 'RENEWAL_REFUSED');
-    assert.deepEqual(labelsOf(m, ['P']), { P: 'not-fully-proven' });
+    assert.deepEqual(labelsOf(m, ['P']), { P: 'proven' }, 'still the original run');
     // The real rerun renews.
     const ok = w(m, (tx) => recordRenewedRun(tx, { original: 'E' as never, run: b.evidence('E2', win, 'declared', run('a'.repeat(40), 'npm test')) as never }));
     assert.deepEqual(ok.renewed, ['J']);

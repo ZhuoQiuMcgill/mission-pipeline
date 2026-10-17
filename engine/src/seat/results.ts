@@ -57,6 +57,10 @@ export const ReviewerResultShape = {
   })).describe('Answer every listed issue on this version, including previously deferred issues. For deferred include both owner and reason; repeating a deferral does not require rework.'),
   findings: z.array(z.string()).describe('Problems outside the standards (they become issue records).'),
   verdict: z.enum(['pass', 'rework', 'needs-decision']),
+  reopen: z
+    .array(z.object({ task: z.string().min(1).describe('A dependency listed on your card.'), issue: z.string().min(1).describe('What is wrong in its work.'), evidence: z.string().optional().describe('The run or file that shows it.') }))
+    .optional()
+    .describe('Integration tasks only, with verdict "rework": the dependencies whose work causes the failure (a failing full suite included; `mp seat <id> owners <path>` traces a path to its task). Each gets a new attempt with the issue on its card; this task then builds again on their fixed work. A failure no dependency explains: verdict "needs-decision", without reopen.'),
 };
 
 const ConstructorResultSchema = z.object(ConstructorResultShape);
@@ -213,6 +217,29 @@ function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultCont
     if (i.response === 'deferred' && (!i.owner?.trim() || !i.reason.trim())) out.push(`issue_responses: deferred issue "${i.issue}" needs an owner and a reason`);
   }
   if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes')) out.push('verdict: "pass" leaves a standard not met or unclear');
+  out.push(...reopenProblems(card, r));
+  return out;
+}
+
+/** 4.1.2 (D-6): the reopen rules of a hand-back. */
+function reopenProblems(card: ReviewerCard, r: ReviewerResult): string[] {
+  const out: string[] = [];
+  const reopen = r.reopen ?? [];
+  const g = card.integration;
+  if (reopen.length > 0) {
+    if (g === undefined) return ['reopen: only an integration task\'s Reviewer reopens a dependency; hand back without reopen'];
+    if (r.verdict !== 'rework') out.push('reopen: goes with verdict "rework"');
+    const deps = new Set(g.dependencies.map((d) => d.task));
+    const named = reopen.map((x) => x.task);
+    for (const t of new Set(named)) {
+      if (!deps.has(t)) out.push(`reopen: task "${t}" is not a dependency of this integration task with an accepted product (dependencies: ${[...deps].join(', ') || 'none'})`);
+      if (named.filter((x) => x === t).length > 1) out.push(`reopen: task "${t}" is named more than once: one entry per task`);
+    }
+    for (const x of reopen) if (x.issue.trim() === '') out.push(`reopen: give the issue of task "${x.task}"`);
+  }
+  if (g !== undefined && !g.hasConstructor && r.verdict === 'rework' && reopen.length === 0) {
+    out.push('verdict: this integration task writes nothing and has no Constructor: a "rework" must reopen a dependency (reopen: [{ "task", "issue" }]); otherwise hand back "needs-decision"');
+  }
   return out;
 }
 

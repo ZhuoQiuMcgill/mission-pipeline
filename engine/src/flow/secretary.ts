@@ -22,7 +22,7 @@ import { validateRecord } from '../common/validate.ts';
 import type { CardBinding } from '../seat/cards/common.ts';
 import type { DecisionOption, EscalationSource, SecretaryCard, SecretaryResult } from '../seat/cards/secretary.ts';
 import { cardBase, commit, currentVersions, basisIndex, ev, eventOf, eventsOf, flowCtx, judgmentRecordOf, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
-import { DetailedPlanDoc, PLAN_LINE, SECRETARY_LINE, type StoredDetailedPlan } from './plandoc.ts';
+import { DetailedPlanDoc, PLAN_LINE, SECRETARY_LINE, amendedPlan, latestEffectiveOf, type AmendmentEntry, type StoredDetailedPlan } from './plandoc.ts';
 import type { AppendGuard, FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, currentConstraints } from './requirements.ts';
 import { WI } from './wi.ts';
@@ -132,7 +132,9 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
   const spec = taskId === null ? undefined : (await eventsOf<{ dplan: string }>(ctx, `task:${taskId}`, 'spec')).at(-1)?.body;
   const obj = spec === undefined ? null : await ctx.ports.ledger.objectVersion(spec.dplan);
   const detailed = obj === null ? null : JSON.parse(ctx.ports.ledger.content.get(obj.content)) as StoredDetailedPlan;
-  const task = detailed === null ? undefined : DetailedPlanDoc.parse(detailed.plan).tasks.find((t) => t.id === taskId);
+  // the plan as it is in effect: its version's tasks plus the tasks repairs added (4.1.2, D-10)
+  const amendments = spec === undefined ? undefined : latestEffectiveOf<{ dplan: string; amendments?: readonly AmendmentEntry[] }>(await eventsOf(ctx, PLAN_LINE, 'effective'), spec.dplan)?.amendments;
+  const task = detailed === null ? undefined : amendedPlan(DetailedPlanDoc.parse(detailed.plan), amendments).tasks.find((t) => t.id === taskId);
   const inputs = secretaryInputs(ctx.mission, e, items, allConstraints, await ctx.ports.ledger.events({ mission: ctx.mission }), task, !(await ctx.ports.ledger.loop(e.lineage, 'env-retry')).secretaryGrantUsed, (text) => ctx.ports.ledger.content.put(text));
   let position: SecretaryCard['position'] = null;
   if (e.position) {

@@ -48,6 +48,7 @@ import type {
   Revision,
 } from '../common/ids.ts';
 import { continuationInputsHash, decodeConstraintCheck, fixKey, reviewPosition } from '../common/records.ts';
+import { runCounts } from './runs.ts';
 import type {
   BasisVersionRecord,
   ConstraintCheck,
@@ -518,11 +519,16 @@ const isConstraintKind = (ix: IndexView, v: string): boolean => {
   return k === 'constraint' || k === 'instruction';
 };
 
-/** 5.2: applicable iff bound to the current snapshot of its environment line and not revoked. */
+/**
+ * 5.2: applicable iff bound to the current snapshot of its environment line and not revoked. 4.1.2
+ * (D-1, the honest record): a run on the 4.1 environment line (ENV_LINE) recorded under another
+ * environment identity still counts; every read labels it "older environment" instead. Only a run
+ * recorded under an older run method does not count (olderRunMethod: invalidation by cause).
+ */
 export function evidenceApplicable(ix: IndexView, e: EvidenceId): boolean {
   const ev = ix.evidence.get(e);
   if (!ev || ix.revoked.has(e)) return false;
-  return ix.envCurrent.get(ev.envLine) === ev.envSnapshot;
+  return runCounts(ev, ix.envCurrent.get(ev.envLine));
 }
 
 /**
@@ -565,12 +571,12 @@ function envSnapshotBefore(ix: IndexView, line: EnvLineId, beforeRev: number): E
   return undefined;
 }
 
-/** 5.2 evidence applicability as the records stood before `beforeRev`. */
+/** 5.2 evidence applicability as the records stood before `beforeRev` (the same 4.1.2 rule as evidenceApplicable). */
 function evidenceApplicableBefore(ix: IndexView, e: EvidenceId, beforeRev: number): boolean {
   const ev = ix.evidence.get(e);
   if (!ev || (ix.evidenceRev.get(e) ?? Infinity) >= beforeRev) return false;
   if ((ix.revokedRev.get(e) ?? Infinity) < beforeRev) return false;
-  return envSnapshotBefore(ix, ev.envLine, beforeRev) === ev.envSnapshot;
+  return runCounts(ev, envSnapshotBefore(ix, ev.envLine, beforeRev));
 }
 
 export type PositionState = { readonly state: 'none' } | { readonly state: 'pass' | 'fail' | 'undecided'; readonly by: JudgmentInfo };

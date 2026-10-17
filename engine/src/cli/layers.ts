@@ -49,7 +49,7 @@
 // line, not a subtask.
 
 import type { MissionId } from '../common/ids.ts';
-import { labelStatus } from '../evaluator/index.ts';
+import { labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof } from '../evaluator/index.ts';
 import { flowCtx } from '../flow/context.ts';
 import { bySeat, taskLineage } from '../flow/execution.ts';
 import { latestEffective } from '../flow/planning.ts';
@@ -194,7 +194,9 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     const labels = new Map((db.stmt('SELECT target, label, rev FROM lbl_labels').all() as Array<{ target: string; label: string; rev: number }>).map((r) => [r.target, { label: r.label, rev: Number(r.rev) }]));
     const status = labelStatus(db);
     const stops = activeStopScopes(db);
-    return { flows, steps, dispatches, labels, status, stops };
+    // 4.1.2: labels resting on runs from an older environment identity read "older environment" (renew.ts: the one resolver)
+    const olderTargets = olderEnvironmentProof(db).targets;
+    return { flows, steps, dispatches, labels, status, stops, olderTargets };
   });
   const times = new Map<number, number | null>();
   const timeOf = (rev: number): number | null => {
@@ -291,7 +293,8 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
         // the label of the current attempt's product (a rework's earlier product is history)
         const current = Number(latest!.body['k'] ?? attempt) === attempt;
         const settled = last !== undefined && ['accepted', 'reaccepted', 'rereview', 'basis-revised', 'rebind', 'rebound'].includes(last.event);
-        if (current && (settled || pl.label === 'negated' || pl.label === 'basis-withdrawn')) label = `${label}, product ${pl.label}${recomputingNote}`;
+        const older = raw.olderTargets.has(product!) ? ` (${OLDER_ENVIRONMENT})` : '';
+        if (current && (settled || pl.label === 'negated' || pl.label === 'basis-withdrawn')) label = `${label}, product ${pl.label}${older}${recomputingNote}`;
       }
       const ds = dispatchesOf(steps);
       for (const d of ds) rev = Math.max(rev, d.rev);
@@ -339,7 +342,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
         const pl = artifact === null ? undefined : raw.labels.get(artifact);
         if (pl === undefined) return '';
         rev = Math.max(rev, pl.rev);
-        return `, product ${pl.label}${recomputingNote}`;
+        return `, product ${pl.label}${artifact !== null && raw.olderTargets.has(artifact) ? ` (${OLDER_ENVIRONMENT})` : ''}${recomputingNote}`;
       };
       let label: string;
       if (current !== null) {

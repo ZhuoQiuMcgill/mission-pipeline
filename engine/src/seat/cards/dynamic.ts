@@ -1,6 +1,6 @@
 import type { CurrentItem, ConstraintBody, ItemVersionBody } from '../../flow/requirements.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
-import type { DetailedTask } from '../../flow/plandoc.ts';
+import { elementsOf, type DetailedTask } from '../../flow/plandoc.ts';
 import type { DecisionBody, EscalationBody } from '../../flow/secretary.ts';
 import { scopesOverlap } from '../../flow/mechanical.ts';
 import { canonicalJson } from '../../common/hash.ts';
@@ -28,6 +28,11 @@ export function constraintsForTask(constraints: readonly ConstraintBody[], task:
     return c.kind === 'object' ? (c.scope.taskTypes.length === 0 || c.scope.taskTypes.includes(task.kind)) && paths
       : c.scope.taskTypes.length > 0 ? c.scope.taskTypes.includes(task.kind) || (c.scope.paths.some((p) => p !== '**') && paths) : paths;
   });
+}
+
+/** The constraints an Architect's card shows (4.1.2, item 7): every object constraint and instruction in the mission's scope (a plan covers every path). */
+export function planningConstraints(constraints: readonly ConstraintBody[], mission: string): Array<{ id: string; text: string; kind: 'object' | 'instruction' }> {
+  return constraints.filter((c) => c.scope.mission === undefined || c.scope.mission === mission).map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
 }
 
 /** Shared selection for queued and dispatched cards, including answers under the current spec only. */
@@ -89,6 +94,8 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
   const batches = events.filter((b) => b.line === 'plan' && b.event === 'pm-batch');
   const decisionQuotes = decisions.map((i) => i.text);
   return {
+    // 4.1.2 (item 7): the earlier decisions on the same line, so a ruling is not made again blind
+    earlierDecisions: earlierDecisionsOf(e, events),
     decisionQuotes,
     constraints: constraints.map((c) => ({ id: c.line, kind: c.kind, text: c.text })),
     authorizations: auths.map((a) => ({ id: a.line, version: a.version, quote: a.source.kind === 'words' ? a.source.quote : a.text, notifyCondition: a.notifyCondition })),
@@ -102,6 +109,34 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('current-facts', 'Current escalation facts', canonicalJson({ escalation: e, items: selectedItems, authorizations: auths, constraints, decisions: decisionQuotes, task: task ?? null, taskState: task === undefined ? [] : events.filter((x) => x.line === `task:${task.id}`).map((x) => ({ event: x.event, key: x.key, body: x.body })) }), 'record'),
     ],
   };
+}
+
+/**
+ * The earlier Secretary decisions on the same subject (a task line, a plan, an exploration, a repair):
+ * the decision in effect for each other escalation (the user's answer first), its reason, and whether
+ * the owning flow carried it out, or closed it as superseded. Shared by the queue-time builder and the
+ * claim-time refresh.
+ */
+export function earlierDecisionsOf(e: EscalationBody, events: readonly FlowEvent[]): Array<{ escalation: string; source: string; option: string; by: string; reason: string; applied: 'carried out' | 'not carried out yet' | 'closed as superseded' }> {
+  const out: Array<{ escalation: string; source: string; option: string; by: string; reason: string; applied: 'carried out' | 'not carried out yet' | 'closed as superseded' }> = [];
+  for (const x of events) {
+    if (x.line !== 'secretary' || x.event !== 'escalation') continue;
+    const esc = x.body as EscalationBody;
+    if (esc.id === e.id || esc.subject !== e.subject) continue;
+    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || (a.event === 'decision' && (a.body as DecisionBody).escalation === esc.id)));
+    const d = (answers.find((a) => a.event === 'user-answer') ?? answers.at(-1))?.body as DecisionBody | undefined;
+    const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id)?.body as { what?: { option?: string } } | undefined;
+    if (d === undefined && applied?.what?.option !== 'superseded') continue;
+    out.push({
+      escalation: esc.id,
+      source: esc.source,
+      option: d?.option ?? '(none)',
+      by: d?.by ?? 'nobody',
+      reason: d?.reason ?? '',
+      applied: applied === undefined ? 'not carried out yet' : applied.what?.option === 'superseded' ? 'closed as superseded' : 'carried out',
+    });
+  }
+  return out;
 }
 
 /**
@@ -126,9 +161,9 @@ export function taskUsesDispute(mission: string, items: readonly CurrentItem[], 
   const rests = (t: DetailedTask): boolean => {
     if (seen.has(t.id)) return false;
     seen.add(t.id);
-    const origin = t.provenance;
-    const element = origin === 'architect' ? undefined : pm.elements.find((e) => e.id === origin.planElement);
-    if (t.requirementItems.some((i) => contested.has(i)) || element?.items.some((i) => contested.has(`item.${mission}.${i}`)) || (element !== undefined && negated.includes(element.id))) return true;
+    // every element the task covers counts (4.1.2: a task may cover several)
+    const covered = elementsOf(t.provenance).flatMap((id) => pm.elements.filter((e) => e.id === id));
+    if (t.requirementItems.some((i) => contested.has(i)) || covered.some((element) => element.items.some((i) => contested.has(`item.${mission}.${i}`)) || negated.includes(element.id))) return true;
     return t.dependsOn.some((id) => { const dep = plan.tasks.find((x) => x.id === id); return dep !== undefined && rests(dep); });
   };
   return rests(task);

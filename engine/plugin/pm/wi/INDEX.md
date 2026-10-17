@@ -11,12 +11,12 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-05: The target branch moved: the delivery candidate is rebuilt on a new base
 - WI-06: A landing did not complete, or a landing intent is left open (A / in progress / B / C)
 - WI-07: A selected output's content changed on the delivery candidate
-- WI-08: A lineage's automatic loop is exhausted, or repeats the same failure (incl. an exploration's round budget)
+- WI-08: A lineage's automatic loop is exhausted, or repeats the same failure (incl. an exploration's round budget, and a reopened task given up)
 - WI-13: Unsupported repository format or content transform, or git objects a step needs are missing
 - WI-16: A dependency cycle
 - WI-19: The transform description changed after acceptance
 - WI-20: Inconsistent program records or namespace, or an internal error
-- WI-21: The delivery candidate's closing checks failed
+- WI-21: A full run at the end failed
 - WI-23: A re-plan dropped or changed a task that has work in flight
 - WI-24: The Secretary could not decide: you and the user decide (mp pm answer)
 - WI-25: A legalization cannot complete: a broken link, a failed backfill, or the chain not accepted
@@ -28,5 +28,7 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-32: Recomputing the labels does not finish (mp pm drain)
 - WI-33: An exploration awaits a ruling: the Stabilizer found a shift of direction or a drift
 - WI-34: A plan’s current pass judgments leave applicable object constraints uncovered; re-check the PM plan or submit an agreed changed plan
+
+Integration start conflict (notice `integration-start-conflict`, no WI page): only that integration task waits, tried again on every pass; a repair that reopens the dependency whose work conflicts (`mp pm repair ... --about <task>`), or a re-plan, routes it.
 
 Constraint maintenance: `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` (project-wide by default); `mp pm constraint withdraw <id> --words W-n` keeps the record and removes its force.

@@ -52,6 +52,8 @@ export interface ConstraintBody {
   readonly kind: 'object' | 'instruction';
   readonly text: string;
   readonly scope: ConstraintScope;
+  /** The words entry the constraint came from (4.1.2, `mp pm constraint add --words`), when given. */
+  readonly words?: string;
 }
 
 export interface CurrentItem extends ItemVersionBody {
@@ -213,7 +215,7 @@ export async function setContested(ctx: FlowCtx, line: string, contested: boolea
  */
 export async function recordConstraint(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope },
+  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly words?: string },
 ): Promise<string> {
   const ctx = flowCtx(ports, req.mission);
   const line = constraintLine(req.constraint);
@@ -233,7 +235,7 @@ export async function recordConstraint(
     });
     return cur;
   }
-  const body: ConstraintBody = { line, version, kind: req.kind, text: req.text, scope: req.scope };
+  const body: ConstraintBody = { line, version, kind: req.kind, text: req.text, scope: req.scope, ...(req.words !== undefined ? { words: req.words } : {}) };
   await commit(ctx, `flow:constraint:${req.mission}:${version}`, {
     events: [ev(ctx, REQUIREMENTS_LINE, 'constraint', version, body)],
     records: [{ kind: 'basis.version', basisKind: req.kind === 'object' ? 'constraint' : 'instruction', line: line as BasisLineId, version: version as BasisVersionId, mission: req.mission, scope: req.scope }],

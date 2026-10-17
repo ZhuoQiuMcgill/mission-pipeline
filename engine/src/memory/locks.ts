@@ -53,7 +53,10 @@ export class ProcessLock {
 function acquire(locksDir: string, name: string, waitMs: number): ProcessLock | null {
   if (!NAME.test(name)) throw new LedgerError('BAD_REQUEST', `a lock name is 1 to 64 lowercase letters, digits and "-", starting with a letter: ${JSON.stringify(name)}`);
   mkdirSync(locksDir, { recursive: true });
-  const file = join(locksDir, `${name}.lock`);
+  return acquireFile(join(locksDir, `${name}.lock`), name, waitMs);
+}
+
+function acquireFile(file: string, name: string, waitMs: number): ProcessLock | null {
   const db = new DatabaseSync(file);
   try {
     setBusyTimeout(db, waitMs);
@@ -76,4 +79,13 @@ export function lock(locksDir: string, name: string, opts: { readonly waitMs: nu
   const l = acquire(locksDir, name, opts.waitMs);
   if (l === null) throw new LedgerError('LOCKED', `the ${name} lock is held by another mp process (waited ${opts.waitMs} ms)`);
   return l;
+}
+
+/**
+ * The same lock held in a file the caller names (4.1.2: the owner of a scratch directory under
+ * `tmp/`, `memory/scratch.ts`): taken if it is free now; null when another holder has it. The
+ * file's directory must exist.
+ */
+export function tryLockFile(file: string): ProcessLock | null {
+  return acquireFile(file, file, 0);
 }

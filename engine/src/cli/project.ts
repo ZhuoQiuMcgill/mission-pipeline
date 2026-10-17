@@ -9,12 +9,14 @@
 //   3. landing intents left without a result are checked (A4 recoverLandings): "landing in
 //      progress" while another `mp` holds the landing lock, else each judged by its target ref;
 //   4. before a command that decides on labels: the environment identity is observed (A2), and a
-//      change is reported (`mp pm renew` restores proof without a seat).
+//      change is reported (4.1.2: runs under an older identity still count, labelled "older
+//      environment"; `mp pm renew` stays an explicit PM tool).
 //
 // The PM's commands are attributed to the latest PM session (`mp pm session --filled-by`, decision
 // 8) and recorded as PM actions under an operation id: the same id again with the same arguments
 // replays the recorded result; with other arguments it is refused (OP_CONFLICT).
 
+import { fullSuiteOf } from '../common/fullSuite.ts';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
@@ -22,7 +24,7 @@ import { recoverLandings, type LandingResult } from '../git/land.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import { pmAction, recordPmAction, type Filler, type Memory } from '../memory/index.ts';
 import { openProcess, type ProcessContext, type ProcessOptions } from '../process/index.ts';
-import { defaultConfig, readConfig, type ProjectConfig } from './config.ts';
+import { commitIdentities, defaultConfig, readConfig, type ProjectConfig } from './config.ts';
 import { CliError, EXIT, errorMessage, wi41 } from './errors.ts';
 
 export interface CliIo {
@@ -135,7 +137,11 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   const config = o.readsConfig === false ? defaultConfig({ targetBranch: 'main', versionCommands: [] }) : readConfig(dir);
   const startedAt = Date.now();
   const git = io.process?.git ?? PlainGit.create();
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, filler: o.filler ?? null, ...(io.process ?? {}) });
+  // the identity of the commits mp writes: config `commit` (4.1.2); a test's process options still win
+  const ids = commitIdentities(config);
+  // the project's commands, read once from the config into the context (4.1.2): its full suite
+  // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {
@@ -157,7 +163,7 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
     if (o.decides || (o.recover !== false && problems.some((x) => x.code === 'MOVED'))) {
       try {
         const env = ctx.environment();
-        if (env.changed && env.previous !== null) problems.push({ code: 'ENVIRONMENT', wi: null, message: `the environment identity changed (${env.previous.slice(0, 12)} → ${env.identity.slice(0, 12)}): runs under the old identity need a rerun; \`mp pm next\` offers \`mp pm renew\`` });
+        if (env.changed && env.previous !== null) problems.push({ code: 'ENVIRONMENT', wi: null, message: `the environment identity changed (${env.previous.slice(0, 12)} → ${env.identity.slice(0, 12)}): runs recorded under the old identity still count and are shown as "older environment"; nothing is rerun unless the PM decides to (\`mp pm renew\`)` });
       } catch (e) {
         if ((e as { code?: string }).code !== 'CHAIN_BROKEN') problems.push({ code: 'ENVIRONMENT', wi: null, message: `the environment identity could not be observed: ${errorMessage(e)}` });
       }

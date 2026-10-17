@@ -3,14 +3,14 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { id, type ObjectVersionId, type StopId } from '../src/common/ids.ts';
 import type { BaseRecord } from '../src/common/records.ts';
-import { deliver, shellClosingRunner, type DeliverRequest, type DeliveryResult } from '../src/delivery/delivery.ts';
+import { deliver, type DeliverRequest, type DeliveryFullRun, type DeliveryResult } from '../src/delivery/delivery.ts';
 import type { LabelView } from '../src/delivery/memoryView.ts';
 import { writeScopeDocument } from '../src/delivery/writeScope.ts';
 import { land, recoverLandings } from '../src/git/land.ts';
@@ -56,7 +56,7 @@ function labels(f: Fixture, over: Partial<LabelView> = {}): LabelView {
 }
 
 function request(op: string, over: Partial<DeliverRequest> = {}): DeliverRequest {
-  return { mission: M, delivery: op, targetBranch: 'main', selected: [{ kind: 'object', id: 'o1' as ObjectVersionId }], closingChecks: [], author: IDENT, committer: IDENT, ...over };
+  return { mission: M, delivery: op, targetBranch: 'main', selected: [{ kind: 'object', id: 'o1' as ObjectVersionId }], author: IDENT, committer: IDENT, ...over };
 }
 
 function collect(f: Fixture, dispatch: string, writePaths: string[], base = f.base) {
@@ -71,28 +71,29 @@ function pending(): { promise: Promise<void>; resolve: () => void } {
 
 // ---------------------------------------------------------------- #1
 
-test('#1 two deliveries running at once each check their own candidate, in their own directory', { skip: !POSIX }, async () => {
+test('#1 two deliveries running at once each build and record their own candidate, in their own directory', { skip: !POSIX }, async () => {
   const f = fixture({ files: { 'src/a.txt': 'base\n' } });
   try {
     await product(f, 'o1', M, { 'src/a.txt': 'BAD\n' });
     await product(f, 'o2', 'm2', { 'src/a.txt': 'GOOD\n' });
-    const req = (mission: string, object: string): DeliverRequest => request('d1', { mission: mission as typeof M, selected: [{ kind: 'object', id: object as ObjectVersionId }], closingChecks: [{ id: 'must-be-GOOD', command: 'test "$(cat src/a.txt)" = GOOD' }] });
+    const req = (mission: string, object: string): DeliverRequest => request('d1', { mission: mission as typeof M, selected: [{ kind: 'object', id: object as ObjectVersionId }] });
     const reached1 = pending();
-    const reached2 = pending();
     const go1 = pending();
-    let dir1 = '';
-    let dir2 = '';
-    const first = deliver(f.ctx, req(M, 'o1'), { labels: labels(f), closing: { async run(r) { dir1 = r.dir; reached1.resolve(); await go1.promise; return shellClosingRunner.run(r); } } });
+    const asked: string[] = [];
+    // the first delivery waits after its candidate is built and proof-checked, while the second one runs whole
+    const first = deliver(f.ctx, req(M, 'o1'), { labels: labels(f), fullRun: async (c) => { asked.push(c.commit); reached1.resolve(); await go1.promise; return { line: 'never run', status: null }; } });
     await reached1.promise;
-    const second = deliver(f.ctx, req('m2', 'o2'), { labels: labels(f), closing: { async run(r) { dir2 = r.dir; reached2.resolve(); return shellClosingRunner.run(r); } } });
-    await reached2.promise;
+    const second = deliver(f.ctx, req('m2', 'o2'), { labels: labels(f), fullRun: (c) => { asked.push(c.commit); return { line: 'never run', status: null }; } });
     const r2 = await second;
     go1.resolve();
     const r1 = await first;
-    assert.notEqual(dir1, dir2);
-    assert.equal(r1.kind, 'checks-failed', 'the BAD candidate is checked as BAD');
+    assert.equal(r1.kind, 'delivered');
     assert.equal(r2.kind, 'delivered');
-    assert.equal(deliveryInfo(f.m, M, 'd1'), null);
+    if (r1.kind !== 'delivered' || r2.kind !== 'delivered') return;
+    assert.equal(f.git('show', `${r1.record.commit}:src/a.txt`), 'BAD', 'each delivery carries its own candidate');
+    assert.equal(f.git('show', `${r2.record.commit}:src/a.txt`), 'GOOD');
+    assert.deepEqual(asked, [r1.record.commit, r2.record.commit], 'the first asked first, and finished after the second');
+    assert.equal(readdirSync(f.m.paths.tmp).filter((x) => x.startsWith('deliver-')).length, 0, 'each scratch directory is removed by its own delivery');
   } finally {
     f.cleanup();
   }
@@ -115,8 +116,8 @@ test('#2 a delivery-ref intent is never closed because the ref is absent: a late
     child.kill('SIGKILL');
     await exited;
     assert.equal(f.m.read((db) => openIntents(db)).length, 1);
-    // The retry: the same create-only update of the same D, no rebuild (these closing checks would fail).
-    const retry = await deliver(f.ctx, request('d1', { closingChecks: [{ id: 'fail', command: 'exit 1' }] }), { labels: labels(f) });
+    // The retry: the same create-only update of the same D, no rebuild (a rebuild would ask for a new full-run status).
+    const retry = await deliver(f.ctx, request('d1'), { labels: labels(f), fullRun: (): DeliveryFullRun => { throw new Error('the retry rebuilt the candidate'); } });
     assert.equal(retry.kind === 'delivered' && retry.recovered, true, JSON.stringify(retry));
     const D = retry.kind === 'delivered' ? retry.record.commit : '';
     for (let i = 0; i < 200 && !existsSync(`${mark}.done`); i++) await sleep(50);
@@ -313,11 +314,9 @@ test('#8 the final authorization re-checks the labels: recomputing waits; a labe
     let frontier = false;
     const r = await deliver(f.ctx, request('d1'), {
       labels: labels(f, { recomputingIn: () => frontier }),
-      closing: {
-        run(req) {
-          frontier = true;
-          return shellClosingRunner.run(req);
-        },
+      fullRun: () => {
+        frontier = true;
+        return { line: 'never run', status: null };
       },
     });
     assert.deepEqual(r, { kind: 'recomputing' });
@@ -332,11 +331,10 @@ test('#8 the final authorization re-checks the labels: recomputing waits; a labe
         opened++;
         return labels(f);
       },
-      closing: {
-        async run(req) {
-          if (runs++ === 0) await product(f, 'o9', M, { 'src/z.txt': 'z\n' });
-          return shellClosingRunner.run(req);
-        },
+      fullRun: async () => {
+        // an evaluator input committed after the proof check, before the authorization
+        if (runs++ === 0) await product(f, 'o9', M, { 'src/z.txt': 'z\n' });
+        return { line: 'never run', status: null };
       },
     });
     assert.equal(second.kind, 'delivered');
