@@ -21,6 +21,8 @@ Three parts, and nothing else:
 - **A seat is a role, not a model.** Calibrators check the plan against your words, an Architect breaks it into tasks, Constructors build them in their own git worktrees, Reviewers accept them, Researchers and Crititors run explorations with a Stabilizer after every attack round, a Secretary decides escalations within your authority, an Auditor legalizes a lineage when you ask. Any model in any harness can fill any seat; who filled it is recorded and invalidates nothing.
 - **Your words are the root.** The PM records every message verbatim as a words entry; requirement items must quote it verbatim. `mp read why <anything>` walks from a delivered commit back to the words it rests on.
 - **Proof is the program's.** Verification runs on a clean checkout of the candidate commit; the labels (proven, not fully proven, refuted, …) are computed from the records and stored. Only important design decisions come back to you.
+- **You guide the direction; you never accept details.** The PM reports when the work is done. You try the result and name what to repair (`mp pm repair`), or say "close and merge" once: `mp pm finish` delivers, lands and closes on those words. Closing never refuses: the record says what is proven, what is not, and whether the full suite ran on the delivered tree.
+- **The full suite runs where it matters.** Constructors run local tests. An integration task's Reviewer runs the project's full suite (`fullSuite` in `config.json`) last, once nothing visible is wrong; a failure reopens the task that caused it. Every full run leaves a marker, and the PM decides with you whether another run is worth it before closing.
 - **Stops take effect at once.** `mp pm stop` is written before anything else; nothing in its scope is dispatched, accepted or landed afterwards.
 - **Landing never merges.** A delivery fast-forwards your target branch from the base it was proven on, or leaves a delivery ref for you.
 - **Security, logins and spending are your harness's business.** No sandbox, no credentials, no metering.
@@ -38,13 +40,13 @@ cd /path/to/your/project
 mp init --pointer both  # adds one line to CLAUDE.md and AGENTS.md pointing the PM to its handbook
 ```
 
-Then open your project with any agent harness (Claude Code, Codex, …) and tell it what you want. It acts as the PM: it reads `.mission-pipeline/pm/PM.md`, runs `mp pm session --filled-by "<harness>/<model>"`, and works through `mp pm next`.
+Then open your project with any agent harness (Claude Code, Codex, …) and tell it what you want. It acts as the PM: it reads `.mission-pipeline/pm/PM.md`, runs `mp pm session --filled-by "<harness>/<model>"`, and works through `mp pm next`. `mp` removes its own checkouts when it is done with them; `mp pm clean` frees what is left and reports the space (run it once after upgrading from 4.1.1).
 
-Known issue in 4.1.1: an object constraint recorded while a plan review runs, or after the plans are proven, holds stable production until the PM takes one of the two exits of WI-34 (see the [CHANGELOG](CHANGELOG.md)).
+Known issue since 4.1.1: an object constraint recorded while a plan review runs, or after the plans are proven, holds stable production until the PM takes one of the two exits of WI-34 (see the [CHANGELOG](CHANGELOG.md)).
 
 ## Documentation
 
-- [engine/README.md](engine/README.md): install, `mp init`, the PM's loop, seats, the memory folder, the tree reads, platforms and known limitations.
+- [engine/README.md](engine/README.md): install, `mp init` and `config.json` (`fullSuite`, `commit`), the PM's loop, seats, the memory folder and its `tmp/` layout, the tree reads, harness notes, platforms and known limitations.
 - [`docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md`](docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md): the design contract.
 - [CHANGELOG.md](CHANGELOG.md).
 

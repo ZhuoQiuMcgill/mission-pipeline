@@ -11,6 +11,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The related authorizations, verbatim, with when the user wants to be told *(required)*; the requirement items involved; the alignment record (materials).
 - The options `mp` can carry out for this escalation, each with its outcome *(required)*.
 - Whether your one extra grant on this lineage is still available.
+- The earlier decisions on the same subject: each escalation, its option, who chose it, the reason, and whether it was carried out. Decide this one knowing them.
 - When the decision rules on a negated review position: that position and the negation.
 
 Escalations come from: Calibrator ② (unfaithful mappings, important additions); the feasibility review (unresolved items); the Reviewer (`needs-decision`); the Constructor (questions that need a decision); the Stabilizer (a finding that shifts direction, a drifting round, an exploration that has not converged within its round budget); `mp` (a loop exhausted, an order change, a step that needs disposition).

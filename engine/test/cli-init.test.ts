@@ -30,7 +30,7 @@ describe('mp init', () => {
     assert.deepEqual(readdirSync(join(mp, 'pm', 'wi')).filter((f) => f.startsWith('WI-')).map((f) => f.slice(0, 5)).sort(), [...WI_41].sort());
     assert.ok(existsSync(join(mp, 'pm', 'wi', 'INDEX.md')));
     const installed = JSON.parse(readFileSync(join(mp, 'pm', 'installed.json'), 'utf8')) as { mp: string; files: Record<string, string> };
-    assert.equal(installed.mp, '4.1.1');
+    assert.equal(installed.mp, '4.1.2');
     assert.ok(Object.keys(installed.files).includes('roles/constructor.md'));
     const cfg = JSON.parse(readFileSync(join(mp, 'config.json'), 'utf8'));
     assert.equal(cfg.format, 'mp41.config.v1');

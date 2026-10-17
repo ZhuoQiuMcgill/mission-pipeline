@@ -1,6 +1,6 @@
 {
   "name": "@mission-pipeline/engine",
-  "version": "4.1.1",
+  "version": "4.1.2",
   "private": true,
   "description": "Mission Pipeline 4.1: the mp command line over a neutral project memory (SQLite skeleton + Markdown leaves), role descriptions and a process. Any harness and model can fill any seat.",
   "type": "module",

@@ -7,7 +7,7 @@
 //                           plans (each task's card carries the commands `mp` runs, §5.3)
 //   fullSuite               the project's full test suite (4.1.2, D-4..D-7): run by `mp` for an
 //                           integration Reviewer (`mp seat <id> full-run`), by the PM's decision
-//                           (`mp pm full-run`), and by the delivery; optional, with no default
+//                           (`mp pm full-run`); never by a delivery or a hand-back; optional, with no default
 //   closingChecks           the 4.1.1 key, read as a deprecated alias of `fullSuite` when that is
 //                           absent (fullSuiteOf, src/common/fullSuite.ts); `mp config` says which
 //   commandTimeoutMs        per declared command
