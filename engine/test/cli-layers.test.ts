@@ -15,7 +15,7 @@ import type { MissionId } from '../src/common/ids.ts';
 import { drain } from '../src/evaluator/index.ts';
 import { cal1Pass, cal2Escalate, cal2Pass } from '../src/flow/scripted.ts';
 import { answerEscalation } from '../src/flow/secretary.ts';
-import { pmAnswer, pmDispatch, pmMission, pmNext, pmPlan, pmRelease, pmRequirement, pmSay, pmWithdrawRequirement, type ProcessContext } from '../src/process/index.ts';
+import { pmAnswer, pmDispatch, pmMission, pmNext, pmPlan, pmRelease, pmReopenExploration, pmRequirement, pmSay, pmWithdrawRequirement, type ProcessContext } from '../src/process/index.ts';
 import { dispatchView, recordEvidenceRequest, seatCheckout, seatRerun } from '../src/process/seat.ts';
 import type { CrititorCard } from '../src/seat/cards/crititor.ts';
 import type { AuthorCard } from '../src/seat/cards/researcher.ts';
@@ -422,13 +422,20 @@ describe('review round 2: an exploration from its machine state and its product 
   after(() => sweepThenClean(ps));
   const PROBE = { files: { 'probe.js': "console.log('status: ok');\n" } };
 
-  it('a converged exploration reopened after a move: not "concluded" while its evidence is re-checked, the product not fully proven; concluded again after the re-check', async () => {
+  it('a converged exploration reopened after a move on the PM\'s word: not "concluded" while its evidence is re-checked, the product from an older environment; concluded again after the re-check', async () => {
     const p = fresh(PROBE);
     const { drive } = await convergedOnExperiment(p, 'm2');
     const first = await cli(p.dir, ['read', 'status', '--json']);
     assert.match(exploreEntry(first)?.label ?? '', /^concluded: conclusion \(converged\), product proven/, JSON.stringify(first.json.result.changed));
-    // the folder opens on another machine; the PM's next step
+    // the folder opens on another machine; the PM's next step: a notice, nothing reopened (4.1.2)
     p.reopen(ENV_B);
+    const told = await cli(p.dir, ['pm', 'next', '--json'], { env: ENV_B });
+    assert.equal(told.code, 0, told.err);
+    assert.ok(!told.json.result.ready.some((r: { kind: string }) => r.kind === 'constructor-experiment'), JSON.stringify(told.json.result.ready));
+    assert.ok(told.json.result.notices.some((n: { category: string }) => n.category === 'exploration-older-environment'), JSON.stringify(told.json.result.notices));
+    // the PM judges the change matters: its word reopens it
+    const word = await cli(p.dir, ['pm', 'reopen-exploration', 'm2', 'X1'], { env: ENV_B });
+    assert.equal(word.code, 0, word.err);
     const nx = await cli(p.dir, ['pm', 'next', '--json'], { env: ENV_B });
     assert.equal(nx.code, 0, nx.err);
     assert.ok(nx.json.result.ready.some((r: { kind: string }) => r.kind === 'constructor-experiment'), JSON.stringify(nx.json.result.ready));
@@ -436,7 +443,7 @@ describe('review round 2: an exploration from its machine state and its product 
     const x = exploreEntry(st);
     assert.ok(x !== undefined, JSON.stringify(st.json.result.changed));
     assert.doesNotMatch(x.label, /^concluded/);
-    assert.match(x.label, /; concluded earlier: conclusion \(converged\), re-checking its evidence after an environment change, product not-fully-proven/);
+    assert.match(x.label, /; concluded earlier: conclusion \(converged\), re-checking its evidence after an environment change, product proven \(older environment\)/);
     assert.deepEqual((await cli(p.dir, ['read', 'blocked', '--json'], { env: ENV_B })).json.result.blocked, []);
     // the rerun, the attacker's re-check and its Stabilizer: concluded again, the product proven
     await experiment(p);
@@ -445,7 +452,7 @@ describe('review round 2: an exploration from its machine state and its product 
     assert.match(exploreEntry(again)?.label ?? '', /^concluded: conclusion \(converged\), product proven/, JSON.stringify(again.json.result.changed));
   });
 
-  it("labels drained without the flow advancing: the exploration is a change through its product label's revision", async () => {
+  it('4.1.2: an environment change alone changes no label: the conclusion stays, its product shown from an older environment, and it is no change of the exploration', async () => {
     const p = fresh(PROBE);
     await convergedOnExperiment(p, 'm2');
     const first = await cli(p.dir, ['read', 'status', '--json']);
@@ -454,10 +461,10 @@ describe('review round 2: an exploration from its machine state and its product 
     p.ctx.environment();
     drain(p.ctx.memory);
     const st = await cli(p.dir, ['read', 'status', '--json', '--no-mark'], { env: ENV_B });
-    const x = exploreEntry(st);
-    assert.ok(x !== undefined, JSON.stringify(st.json.result.changed));
-    assert.match(x.label, /, product not-fully-proven/);
-    assert.ok(x.changedRev > before.changedRev);
+    const all = (await resolveSubtasks(p.ctx)).entries.find((e) => e.kind === 'exploration' && e.id === 'X1')!;
+    assert.match(all.label, /^concluded: conclusion \(converged\), product proven \(older environment\)/);
+    assert.equal(all.changedRev, before.changedRev, 'no label moved');
+    assert.equal(exploreEntry(st), undefined, 'not a change since the last ask');
   });
 
   it('the Secretary hands the decision to the user: mp read blocked says to ask the user; after mp pm answer it is carried out; then nothing is blocked', async () => {
@@ -536,8 +543,11 @@ const RECHECK = (resolved: 'yes' | 'no') => (c: CrititorCard) => ({ findings: []
 const REVISE = (c: AuthorCard) => ({ step: 'submit', message: 'v2', artifact: 'v2: an LFU cache', dispositions: c.openFindings.map((f) => ({ finding: f.id, action: 'revise', note: 'changed' })), directionQuestions: [], attempts: [] });
 
 /** After the move: the rerun, then the attacker's re-check of the rebuttal on its new record. */
-async function moveAndRecheck(p: ProcessProject, resolved: 'yes' | 'no'): Promise<void> {
+async function moveAndRecheck(p: ProcessProject, mission: string, resolved: 'yes' | 'no'): Promise<void> {
   p.reopen(ENV_B);
+  await pmNext(p.ctx);
+  // 4.1.2: reopened only on the PM's word
+  await pmReopenExploration(p.ctx, { mission, exploration: 'X1' });
   await pmNext(p.ctx);
   await experiment(p);
   await pmNext(p.ctx);
@@ -631,7 +641,7 @@ describe('review round 3: history is not current state', () => {
   it('reopened after a move, the re-check fails and the budget runs out: the machine stop, the conclusion only as history', async () => {
     const p = fresh(PROBE);
     await convergedOnExperiment(p, 'm2', 3);
-    await moveAndRecheck(p, 'no');
+    await moveAndRecheck(p, 'm2', 'no');
     for (let i = 0; i < 6; i++) {
       const k = (await pmNext(p.ctx)).ready[0]?.kind;
       if (k === 'stabilizer') await step(p.ctx, 'stabilizer', STABILIZE);
@@ -646,7 +656,7 @@ describe('review round 3: history is not current state', () => {
   it('reopened after a move, the Stabilizer judges the round drifting and the user gives it up: settled again as no conclusion, the earlier conclusion as history', async () => {
     const p = fresh(PROBE);
     await convergedOnExperiment(p, 'm5', 3);
-    await moveAndRecheck(p, 'yes');
+    await moveAndRecheck(p, 'm5', 'yes');
     await pmNext(p.ctx);
     await step(p.ctx, 'stabilizer', (c: StabilizerCard) => ({ ...STABILIZE(c), round: { verdict: 'drifting', reason: 'moved away', question: 'is the question still the same?' } }));
     await pmNext(p.ctx);
@@ -662,7 +672,7 @@ describe('review round 3: history is not current state', () => {
   it('reopened after a move, the re-check fails, rounds remain, it converges on a new version: concluded on the new product, the earlier conclusion as history', async () => {
     const p = fresh(PROBE);
     await convergedOnExperiment(p, 'm3', 6);
-    await moveAndRecheck(p, 'no');
+    await moveAndRecheck(p, 'm3', 'no');
     for (let i = 0; i < 12; i++) {
       const k = (await pmNext(p.ctx)).ready[0]?.kind;
       if (k === 'stabilizer') await step(p.ctx, 'stabilizer', STABILIZE);

@@ -12,6 +12,7 @@ import type { MissionId, ModuleId } from '../common/ids.ts';
 import { Command, Continuation, Interface, Item, ListRefSchema, Workspace, commonCardFields, list, renderCommon } from './cards/common.ts';
 import { SEAT_COMMANDS, seatCardEntry, type SeatCommand } from './cards/registry.ts';
 import { roleText } from './cards/roles.ts';
+import type { SuiteCommand } from '../common/fullSuite.ts';
 
 export { Continuation };
 
@@ -48,6 +49,12 @@ export const ReviewerCardSchema = z.object({
   verificationRuns: z.array(z.object({ evidence: z.string().min(1), command: z.string(), summary: z.string() })),
   /** Commands the Reviewer may have `mp` rerun on the candidate (`mp seat <id> rerun`). */
   declaredCommands: z.array(Command),
+  /**
+   * An integration task (4.1.2, D-5, D-6): the Reviewer judges the whole. When the project declares a
+   * full suite, its card offers `mp seat <id> full-run` (last, once nothing visible is wrong), and a
+   * pass cites a passing full run of the candidate.
+   */
+  integration: z.boolean().optional(),
   selfReportedGaps: z.array(Item),
   openIssues: z.array(z.object({ issue: z.string().min(1), text: z.string() })),
   /** The judgment's binding inputs, fixed by the card's contract (5.2). */
@@ -153,8 +160,18 @@ const SEAT_TITLE: Readonly<Record<string, string>> = {
   auditor: 'Auditor',
 };
 
+/** What the project declares that changes a card's commands: its full suite (config.json `fullSuite`, fullSuiteOf). */
+export interface CardProject {
+  readonly fullSuite?: readonly SuiteCommand[];
+}
+
+/** An integration task's Reviewer card in a project that declares a full suite: it gets `mp seat <id> full-run` (4.1.2). */
+export function offersFullRun(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: CardProject = {}): boolean {
+  return card.seat === 'reviewer' && card['integration'] === true && (o.fullSuite?.length ?? 0) > 0;
+}
+
 /** The `mp seat <id>` commands a card's seat gets (§4.1: the command list is part of its card). */
-export function seatCommandsOf(card: { readonly seat: string } & Readonly<Record<string, unknown>>): SeatCommand[] {
+export function seatCommandsOf(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: CardProject = {}): SeatCommand[] {
   const e = seatCardEntry(card.seat);
   const out = new Set<SeatCommand>(SEAT_COMMANDS[e.toolProfile]);
   // a seat that reads a commit and works in no worktree of its own can check it out
@@ -165,7 +182,8 @@ export function seatCommandsOf(card: { readonly seat: string } & Readonly<Record
   if (card['allowAsyncEvidence'] === true) out.add('request-evidence');
   if (rerunCommands(card).length > 0) out.add('rerun');
   else out.delete('rerun');
-  const order: readonly SeatCommand[] = ['card', 'read', 'checkout', 'rerun', 'request-evidence', 'handback'];
+  if (offersFullRun(card, o)) out.add('full-run');
+  const order: readonly SeatCommand[] = ['card', 'read', 'checkout', 'rerun', 'request-evidence', 'full-run', 'handback'];
   return order.filter((c) => out.has(c));
 }
 
@@ -175,11 +193,11 @@ export function rerunCommands(card: Readonly<Record<string, unknown>>): Array<{ 
   return Array.isArray(declared) ? (declared as Array<{ id: string; command: string; cwd?: string }>) : [];
 }
 
-function commandLines(card: { readonly seat: string } & Readonly<Record<string, unknown>>, dispatch: string): string[] {
+function commandLines(card: { readonly seat: string } & Readonly<Record<string, unknown>>, dispatch: string, o: CardProject = {}): string[] {
   const f = handBackFiles(dispatch);
   const ws = card['workspace'] as { snapshot?: string } | undefined;
   const lines: string[] = [];
-  for (const c of seatCommandsOf(card)) {
+  for (const c of seatCommandsOf(card, o)) {
     switch (c) {
       case 'card':
         lines.push(`\`mp seat ${dispatch} card\`: this card.`);
@@ -192,6 +210,9 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         break;
       case 'rerun':
         lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunCommands(card).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite.`);
+        break;
+      case 'full-run':
+        lines.push(`\`mp seat ${dispatch} full-run\`: \`mp\` runs the project's full suite (${(o.fullSuite ?? []).map((x) => x.id).join(', ')}) in order on a clean checkout of this candidate and records it with a full-run marker; a passing full run already recorded on the same tree and environment is reused (nothing runs). Cite its runs as evidence:<id>. Run it last, only when nothing visible is wrong.`);
         break;
       case 'request-evidence':
         lines.push(`\`mp seat ${dispatch} request-evidence --stdin\`: ask for an evidence execution: your notes (what you need to continue) on stdin, ending with the request as a fenced json block (the JSON schema below); or \`mp seat ${dispatch} request-evidence --request ${f.request} --notes ${f.notes}\` with two files. It ends this dispatch; a new card brings your notes back with the results.`);
@@ -209,7 +230,7 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
  * `dispatches/<dispatch>/card.md`, printed by `mp seat <dispatch> card`. `projectDir`: the
  * project whose role pages are used (its own copy, else the installed page).
  */
-export function renderSeatCard(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: { readonly dispatch: string; readonly projectDir?: string | null }): string {
+export function renderSeatCard(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: { readonly dispatch: string; readonly projectDir?: string | null } & CardProject): string {
   const e = seatCardEntry(card.seat);
   const parsed = e.schema.parse(card) as { readonly seat: string; readonly task: string; readonly mission: string; readonly workspace?: { snapshot: string; writablePaths: readonly string[] } };
   const f = handBackFiles(o.dispatch);
@@ -221,7 +242,10 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
       : ws !== undefined && ws.snapshot !== ''
         ? `## What you read\nThe project at commit ${ws.snapshot} (\`mp seat ${o.dispatch} checkout\`).\n\n`
         : '';
-  const evidence = seatCommandsOf(card).includes('request-evidence') ? `\nAn evidence request (the last fenced json block of your notes on \`mp seat ${o.dispatch} request-evidence --stdin\`, or the file \`${f.request}\`) matches this JSON schema:\n\n\`\`\`json\n${JSON.stringify(z.toJSONSchema(EvidenceRequestSchema), null, 2)}\n\`\`\`\n` : '';
+  const fullRun = offersFullRun(card, o)
+    ? `\n\n## The full suite (an integration task)\nYou judge the whole change. Check the cheapest things first:\n- look at the change and the local results above first;\n- if something is visibly wrong, hand back "rework" (or "needs-decision") without a full run;\n- only when nothing visible is wrong, run \`mp seat ${o.dispatch} full-run\` (the full suite: ${(o.fullSuite ?? []).map((x) => `[${x.id}] ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`).join('; ')}), and cite its runs as evidence:<id>.\nA "pass" must cite a passing full run of this candidate; without one the hand-back is refused. When the full suite fails, trace the failure to the task whose change caused it (the run summary keeps the last 400 lines of each failing command), name that task in your findings and hand back "needs-decision": the fix belongs to that task, and this integration task does not absorb it.`
+    : '';
+  const evidence = seatCommandsOf(card, o).includes('request-evidence') ? `\nAn evidence request (the last fenced json block of your notes on \`mp seat ${o.dispatch} request-evidence --stdin\`, or the file \`${f.request}\`) matches this JSON schema:\n\n\`\`\`json\n${JSON.stringify(z.toJSONSchema(EvidenceRequestSchema), null, 2)}\n\`\`\`\n` : '';
   return [
     `# ${SEAT_TITLE[e.seat] ?? e.seat} card: dispatch ${o.dispatch}`,
     '',
@@ -235,11 +259,11 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
     '',
     '# This task',
     '',
-    `${where}${e.render(parsed)}`.trimEnd(),
+    `${where}${e.render(parsed)}`.trimEnd() + fullRun,
     '',
     '## Your commands',
     '',
-    ...commandLines(card, o.dispatch).map((l) => `- ${l}`),
+    ...commandLines(card, o.dispatch, o).map((l) => `- ${l}`),
     '',
     'Use only these `mp` commands; read and write files with your harness\'s own tools.',
     '',

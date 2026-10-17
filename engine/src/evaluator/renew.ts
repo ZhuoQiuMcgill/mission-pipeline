@@ -5,8 +5,11 @@
 // - Reuse: only a declared run is reused, for the same candidate content, the
 //   same command and the same environment identity (`findReusableRun`). A
 //   sampling run is never reused.
-// - Renewal: after a change, the deciding judgments whose evidence in force was
-//   recorded under another identity are "needs rerun" (labels.ts). `mp pm
+// - 4.1.2 (D-1, the honest record): after a change, a run recorded under another
+//   identity still counts (semantics.ts evidenceApplicable); every read marks
+//   it, and the labels resting on it, "older environment" (olderEnvironmentProof,
+//   olderEnvironmentRun). Only an older run method invalidates (olderRunMethod).
+// - Renewal stays the PM's explicit tool, never a ready step: `mp pm
 //   renew` (package A3) reruns the declared commands of `renewalCandidates` on
 //   clean checkouts of their candidates and records each new run with
 //   `recordRenewedRun`. The new run must rerun the same candidate content, the
@@ -86,22 +89,29 @@ export interface RenewalCandidates {
   readonly affected: number;
 }
 
+/** One run in force for deciding judgments, recorded under another environment identity than the current one. */
+interface OlderRun {
+  readonly evidence: EvidenceId;
+  readonly environment: string;
+  readonly judgments: readonly RenewalJudgment[];
+  readonly commits: readonly string[];
+}
+
 /**
- * What `mp pm renew` must rerun (§6.5): every run in force for a deciding
- * judgment that was recorded under an environment identity other than the
- * current one (and is not revoked), grouped by run.
+ * The one walk over runs from older environments (4.1.2: they still count; reads label them, and
+ * `mp pm renew` may rerun them): every run on ENV_LINE recorded under an identity other than the
+ * current one (and not revoked) that a deciding judgment's evidence in force is, with those
+ * judgments. renewalCandidates and olderEnvironmentProof read it; nothing derives it another way.
  */
-export function renewalCandidates(db: Db): RenewalCandidates {
+function olderRuns(db: Db): { readonly environment: string | null; readonly runs: readonly OlderRun[]; readonly ix: StoredIndex | null } {
   const env = recordedEnvironment(db)?.identity ?? null;
-  if (env === null) return { environment: null, candidates: [], reviews: [], affected: 0 };
+  if (env === null) return { environment: null, runs: [], ix: null };
   const ix = new StoredIndex(db);
-  const runs = db
+  const rows = db
     .stmt('SELECT evidence, env_snapshot FROM lbl_evidence e WHERE env_line = ? AND env_snapshot <> ? AND NOT EXISTS (SELECT 1 FROM lbl_revoked v WHERE v.evidence = e.evidence) ORDER BY evidence')
     .all(ENV_LINE, env) as Array<{ evidence: EvidenceId; env_snapshot: string }>;
-  const candidates: RenewalCandidate[] = [];
-  const reviews: RenewalJudgment[] = [];
-  const affected = new Set<string>();
-  for (const run of runs) {
+  const out: OlderRun[] = [];
+  for (const run of rows) {
     const ev = ix.evidence.get(run.evidence)!;
     const judgments: RenewalJudgment[] = [];
     const commits = new Set<string>();
@@ -114,27 +124,70 @@ export function renewalCandidates(db: Db): RenewalCandidates {
       if (!j.evidence.some((e) => effectiveEvidence(ix, j, e as EvidenceId) === run.evidence)) continue;
       const sampled = usesSampledFields(j.evidenceUse);
       const reason = ev.runClass !== 'declared' ? `a ${ev.runClass} run is never renewed` : sampled !== null ? `${sampled.reason}${sampled.field ? ` (${sampled.field})` : ''}` : j.evidenceUse.fields.length === 0 ? 'no declared fields' : null;
-      const entry: RenewalJudgment = { judgment: j.judgment, target: j.target, review: j.review, renewable: reason === null, reason };
-      judgments.push(entry);
-      if (reason !== null) reviews.push(entry);
+      judgments.push({ judgment: j.judgment, target: j.target, review: j.review, renewable: reason === null, reason });
       const c = ix.objects.get(j.target as never)?.source?.commit;
       if (c !== undefined) commits.add(c);
     }
-    if (!judgments.some((j) => j.renewable)) continue;
+    if (judgments.length > 0) out.push({ evidence: run.evidence, environment: run.env_snapshot, judgments, commits: [...commits].sort() });
+  }
+  return { environment: env, runs: out, ix };
+}
+
+/**
+ * What `mp pm renew` must rerun (§6.5): every run in force for a deciding
+ * judgment that was recorded under an environment identity other than the
+ * current one (and is not revoked), grouped by run. 4.1.2: those runs still
+ * count; renew is the PM's explicit tool, never a ready step.
+ */
+export function renewalCandidates(db: Db): RenewalCandidates {
+  const older = olderRuns(db);
+  const ix = older.ix;
+  if (older.environment === null || ix === null) return { environment: null, candidates: [], reviews: [], affected: 0 };
+  const candidates: RenewalCandidate[] = [];
+  const reviews: RenewalJudgment[] = [];
+  const affected = new Set<string>();
+  for (const run of older.runs) {
+    for (const j of run.judgments) if (!j.renewable) reviews.push(j);
+    if (!run.judgments.some((j) => j.renewable)) continue;
+    const ev = ix.evidence.get(run.evidence)!;
     const candidate = Object.hasOwn(ev.fields, 'candidate') ? ev.fields['candidate']! : null;
     candidates.push({
       evidence: run.evidence,
       candidate,
       command: Object.hasOwn(ev.fields, 'command') ? ev.fields['command']! : null,
       cwd: runCwdOf(ev.fields),
-      commits: [...commits].sort(),
-      environment: run.env_snapshot,
-      judgments,
+      commits: run.commits,
+      environment: run.environment,
+      judgments: run.judgments,
     });
-    affected.add(candidate ?? (commits.size > 0 ? [...commits].sort().join(',') : run.evidence));
+    affected.add(candidate ?? (run.commits.length > 0 ? run.commits.join(',') : run.evidence));
   }
-  return { environment: env, candidates, reviews, affected: affected.size };
+  return { environment: older.environment, candidates, reviews, affected: affected.size };
 }
+
+/**
+ * 4.1.2 (D-1, the honest record): what current proof rests on runs from an older environment —
+ * the runs, and the targets (object versions, proof units) whose deciding judgments rest on them.
+ * They still count; every read that shows such a label or run marks it "older environment".
+ */
+export function olderEnvironmentProof(db: Db): { readonly environment: string | null; readonly runs: ReadonlySet<string>; readonly targets: ReadonlySet<string>; readonly judgments: number } {
+  const older = olderRuns(db);
+  const targets = new Set<string>();
+  const judgments = new Set<string>();
+  for (const r of older.runs) for (const j of r.judgments) {
+    targets.add(j.target);
+    judgments.add(j.judgment);
+  }
+  return { environment: older.environment, runs: new Set(older.runs.map((r) => r.evidence as string)), targets, judgments: judgments.size };
+}
+
+/** 4.1.2: whether one run was recorded under an older environment identity than `current` (a read labels it "older environment"). */
+export function olderEnvironmentRun(rec: { readonly envLine: string; readonly envSnapshot: string }, current: string | null): boolean {
+  return current !== null && rec.envLine === ENV_LINE && rec.envSnapshot !== current;
+}
+
+/** The label a read shows for a run or a label resting on runs from an older environment. */
+export const OLDER_ENVIRONMENT = 'older environment';
 
 export type RenewalOutcome = { readonly renewed: true } | { readonly renewed: false; readonly reason: string; readonly field?: string };
 

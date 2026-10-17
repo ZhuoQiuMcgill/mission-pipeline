@@ -29,6 +29,7 @@ import {
   renewalCandidates,
   rerunMismatch,
   RUN_FIELD,
+  RUN_METHOD,
   runClassOf,
   sampleRunId,
 } from '../src/evaluator/index.ts';
@@ -188,19 +189,19 @@ test('the gate refuses a decision in a process that has not observed the environ
   }
 });
 
-test('scenario 7: a proven product moved to another machine is not fully proven; a rerun with equal declared outputs renews it; a timing judgment needs a Reviewer', () => {
+test('scenario 7 (4.1.2): a proven product moved to another machine stays proven (older environment); an explicit rerun with equal declared outputs renews it; a timing judgment cannot be renewed', () => {
   const p = labelProject();
   try {
     const { m } = p;
     const b = builders(m);
     const linux = currentEnvironment(m, { observe: machine('linux') }).identity;
     const commit = 'a'.repeat(40);
-    const fields = { exit: '0', out: 'h1', durationMs: '120', [RUN_FIELD.candidate]: commit, [RUN_FIELD.command]: 'npm test' };
+    const fields = { exit: '0', out: 'h1', durationMs: '120', [RUN_FIELD.candidate]: commit, [RUN_FIELD.command]: 'npm test', [RUN_FIELD.method]: RUN_METHOD };
     w(m, (tx) =>
       appendRecords(tx, [
         b.basis('S', 'S.v1', 'standard'),
         b.evidence('E1', linux, 'declared', fields),
-        b.evidence('B1', linux, 'sampling', { exit: '0', 'time:wall': '7', [RUN_FIELD.candidate]: commit, [RUN_FIELD.command]: 'npm run bench' }),
+        b.evidence('B1', linux, 'sampling', { exit: '0', 'time:wall': '7', [RUN_FIELD.candidate]: commit, [RUN_FIELD.command]: 'npm run bench', [RUN_FIELD.method]: RUN_METHOD }),
         b.product('P', { commit, reviews: [{ review: 'reviewer' }, { review: 'perf' }] }),
         b.judge('J', 'P', { evidence: ['E1'], bases: ['S.v1'], fields: ['exit', 'out'] }),
         b.judge('JT', 'P', { evidence: ['B1'], bases: ['S.v1'], fields: ['exit', 'time:wall'], review: 'perf' }),
@@ -213,7 +214,8 @@ test('scenario 7: a proven product moved to another machine is not fully proven;
     forgetObservedEnvironment(m.projectDir);
     const win = currentEnvironment(m, { observe: machine('win32') });
     assert.equal(win.changed, true);
-    assert.deepEqual(m.read((db) => decisionLabels(db, ['P', 'Q'])), { P: 'not-fully-proven', Q: 'not-fully-proven' }, 'needs rerun: never unaccepted, history unchanged');
+    // 4.1.2 (D-1): runs from an older environment still count; reads label them "older environment"
+    assert.deepEqual(m.read((db) => decisionLabels(db, ['P', 'Q'])), { P: 'proven', Q: 'proven' }, 'an environment change alone invalidates nothing; history unchanged');
     assert.equal(m.read((db) => recordsByKind(db, { kinds: ['judgment'] })).length, 3);
 
     // What `mp pm renew` must rerun, and what needs a Reviewer.
@@ -234,9 +236,9 @@ test('scenario 7: a proven product moved to another machine is not fully proven;
     const ok = w(m, (tx) => recordRenewedRun(tx, { original: 'E1' as never, run: b.evidence('E1.win', win.identity, 'declared', { ...fields, durationMs: '310' }) as never }));
     assert.deepEqual([...ok.renewed].sort(), ['J', 'JQ']);
     assert.deepEqual(m.read((db) => decisionLabels(db, ['Q'])), { Q: 'proven' });
-    assert.deepEqual(m.read((db) => decisionLabels(db, ['P'])), { P: 'not-fully-proven' }, 'its performance position needs a new judgment');
+    assert.deepEqual(m.read((db) => decisionLabels(db, ['P'])), { P: 'proven' }, 'its performance position rests on the older run until a new judgment');
     // A sampling run is never renewed, even with equal fields.
-    w(m, (tx) => appendRecords(tx, [b.evidence('B2', win.identity, 'sampling', { exit: '0', 'time:wall': '7', [RUN_FIELD.candidate]: commit, [RUN_FIELD.command]: 'npm run bench' })]));
+    w(m, (tx) => appendRecords(tx, [b.evidence('B2', win.identity, 'sampling', { exit: '0', 'time:wall': '7', [RUN_FIELD.candidate]: commit, [RUN_FIELD.command]: 'npm run bench', [RUN_FIELD.method]: RUN_METHOD })]));
     assert.deepEqual(
       w(m, (tx) => recordRenewal(tx, { judgment: 'JT' as never, original: 'B1' as never, replacement: 'B2' as never })),
       { renewed: false, reason: 'not-declared' },
@@ -245,10 +247,10 @@ test('scenario 7: a proven product moved to another machine is not fully proven;
     w(m, (tx) => appendRecords(tx, [b.judge('JT2', 'P', { evidence: ['B2'], bases: ['S.v1'], fields: ['exit', 'time:wall'], review: 'perf' })]));
     assert.deepEqual(m.read((db) => decisionLabels(db, ['P'])), { P: 'proven' });
     assert.deepEqual(m.read((db) => renewalCandidates(db)).candidates, []);
-    // Back on Linux: the renewed runs need a rerun there, and the original renews again in the other direction.
+    // Back on Linux: the renewed runs are from an older environment there (still counted); renew could rerun them.
     forgetObservedEnvironment(m.projectDir);
     currentEnvironment(m, { observe: machine('linux') });
-    assert.deepEqual(m.read((db) => decisionLabels(db, ['Q'])), { Q: 'not-fully-proven' });
+    assert.deepEqual(m.read((db) => decisionLabels(db, ['Q'])), { Q: 'proven' });
     assert.deepEqual(m.read((db) => renewalCandidates(db)).candidates.map((c) => c.evidence), ['E1.win']);
   } finally {
     p.cleanup();
@@ -291,10 +293,10 @@ test('the mechanical regression check counts only a declared run (5.6 with "decl
     assert.equal(m.read((db) => fixStates(db, [fixKey('N', 'P')])).states[fixKey('N', 'P')], 'unfixed', 'a sampling run does not count');
     w(m, (tx) => appendRecords(tx, [b.evidence('R2', env, 'declared', ok), coverage('R2') as never]));
     assert.equal(m.read((db) => fixStates(db, [fixKey('N', 'P')])).states[fixKey('N', 'P')], 'fixed');
-    // After an environment change the declared run needs a rerun: the fix is no longer shown as mechanically fixed.
+    // 4.1.2: after an environment change the declared run still counts (older environment): the fix stays mechanically fixed.
     forgetObservedEnvironment(m.projectDir);
     currentEnvironment(m, { observe: machine('darwin') });
-    assert.equal(m.read((db) => fixStates(db, [fixKey('N', 'P')])).states[fixKey('N', 'P')], 'unfixed');
+    assert.equal(m.read((db) => fixStates(db, [fixKey('N', 'P')])).states[fixKey('N', 'P')], 'fixed');
   } finally {
     p.cleanup();
   }
@@ -302,7 +304,7 @@ test('the mechanical regression check counts only a declared run (5.6 with "decl
 
 test('the working directory is part of a run\'s identity (cwd, missing = \'.\'): reuse, rerun checks and renewal match it', () => {
   // The rerun check: missing reads as the project root.
-  const base = { exit: '0', [RUN_FIELD.candidate]: 'c'.repeat(40), [RUN_FIELD.command]: 'npm test' };
+  const base = { exit: '0', [RUN_FIELD.candidate]: 'c'.repeat(40), [RUN_FIELD.command]: 'npm test', [RUN_FIELD.method]: RUN_METHOD };
   assert.equal(rerunMismatch(base, { ...base, [RUN_FIELD.cwd]: '.' }, true), null);
   assert.equal(rerunMismatch({ ...base, [RUN_FIELD.cwd]: 'pkg/a' }, { ...base, [RUN_FIELD.cwd]: 'pkg/a' }, true), null);
   assert.match(rerunMismatch({ ...base, [RUN_FIELD.cwd]: 'pkg/a' }, base, true) ?? '', /working directory/);
@@ -328,10 +330,41 @@ test('the working directory is part of a run\'s identity (cwd, missing = \'.\'):
     assert.equal(m.read((db) => renewalCandidates(db)).candidates.find((c) => c.evidence === 'ROOT'), undefined, 'no judgment rests on the root run');
     refused(() => w(m, (tx) => recordRenewedRun(tx, { original: 'SUB' as never, run: b.evidence('SUB.root', win, 'declared', base) as never })), 'BAD_REQUEST', /working directory/);
     refused(() => w(m, (tx) => appendRecords(tx, [b.evidence('SUB.b', win, 'declared', { ...base, [RUN_FIELD.cwd]: 'pkg/b' }), { kind: 'evidence.renewal', judgment: 'J', original: 'SUB', replacement: 'SUB.b' } as never])), 'RENEWAL_REFUSED', /working directory/);
-    assert.equal(m.read((db) => decisionLabels(db, ['P'])).P, 'not-fully-proven');
+    // 4.1.2: the run in pkg/a, from an older environment, still counts
+    assert.equal(m.read((db) => decisionLabels(db, ['P'])).P, 'proven');
     const ok = w(m, (tx) => recordRenewedRun(tx, { original: 'SUB' as never, run: b.evidence('SUB.win', win, 'declared', { ...base, [RUN_FIELD.cwd]: 'pkg/a' }) as never }));
     assert.deepEqual(ok.renewed, ['J']);
     assert.equal(m.read((db) => decisionLabels(db, ['P'])).P, 'proven');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('4.1.2: a run of an older run method never counts (invalidation by cause); a current-method run from an older environment does', () => {
+  const p = labelProject();
+  try {
+    const { m } = p;
+    const b = builders(m);
+    const linux = currentEnvironment(m, { observe: machine('linux') }).identity;
+    const commit = 'e'.repeat(40);
+    const run = (method: string | null) => ({ exit: '0', [RUN_FIELD.candidate]: commit, [RUN_FIELD.command]: 'npm test', ...(method !== null ? { [RUN_FIELD.method]: method } : {}) });
+    w(m, (tx) =>
+      appendRecords(tx, [
+        b.evidence('V2', linux, 'declared', run(RUN_METHOD)),
+        b.evidence('V1', linux, 'declared', run('v1')),
+        b.evidence('NONE', linux, 'declared', run(null)),
+        b.product('P2', { commit }),
+        b.judge('J2', 'P2', { evidence: ['V2'] }),
+        b.product('P1', { commit }),
+        b.judge('J1', 'P1', { evidence: ['V1'] }),
+        b.product('P0', { commit }),
+        b.judge('J0', 'P0', { evidence: ['NONE'] }),
+      ]),
+    );
+    assert.deepEqual(m.read((db) => decisionLabels(db, ['P2', 'P1', 'P0'])), { P2: 'proven', P1: 'not-fully-proven', P0: 'not-fully-proven' });
+    forgetObservedEnvironment(m.projectDir);
+    currentEnvironment(m, { observe: machine('win32') });
+    assert.deepEqual(m.read((db) => decisionLabels(db, ['P2', 'P1', 'P0'])), { P2: 'proven', P1: 'not-fully-proven', P0: 'not-fully-proven' });
   } finally {
     p.cleanup();
   }

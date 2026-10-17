@@ -2,7 +2,7 @@
 // 18): an interrupted dispatch released --abandoned and dispatched again (counted), a late
 // hand-back recorded and not accepted, the re-dispatch loop used up (WI-08, the Secretary); a
 // stop with dispatches in flight; a sampling rerun executing every time; an environment change
-// restored by `mp pm renew`.
+// (4.1.2: proof stays, labelled "older environment"; `mp pm renew` is the PM's explicit tool).
 
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -113,7 +113,7 @@ describe('process: stops (§6.6)', () => {
 });
 
 describe('process: sampling reruns and renewal (§6.5, scenario 7 and 13)', () => {
-  it('mp seat rerun executes every time with a new run id; after an environment change mp pm renew restores proven', async () => {
+  it('mp seat rerun executes every time with a new run id; after an environment change proof stays (older environment) and mp pm renew still reruns on the PM\'s word', async () => {
     p = processProject();
     const mark = join(p.dir, '..', 'reruns.txt');
     writeFileSync(mark, '');
@@ -144,8 +144,11 @@ describe('process: sampling reruns and renewal (§6.5, scenario 7 and 13)', () =
       // another machine: a new mp process observes another environment identity
       ctx = p.reopen(ENV_B);
       const next = await pmNext(ctx);
-      assert.equal(ctx.memory.read((db) => decisionLabels(db, [product]))[product], 'not-fully-proven', 'its runs need a rerun under the new identity');
-      assert.ok(next.renew !== null && next.renew.candidates >= 1, 'decision 18: renew N is offered');
+      // 4.1.2: runs from an older environment still count; no renew step, one notice naming them
+      assert.equal(ctx.memory.read((db) => decisionLabels(db, [product]))[product], 'proven', 'its runs, from an older environment, still count');
+      assert.ok(next.olderEnvironmentRuns >= 1);
+      assert.ok(next.notices.some((n) => n.category === 'environment-older-runs'), 'the PM is told once');
+      // renew stays the PM's explicit tool
       const ren = await pmRenew(ctx);
       assert.ok(ren.reruns.length >= 1, JSON.stringify(ren));
       assert.ok(ren.reruns.every((x) => x.passed));

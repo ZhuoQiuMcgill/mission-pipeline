@@ -264,7 +264,9 @@ test('one environment change reaches a chain of 100,000 objects, and back: drain
       kind: 'judgment', judgment: j, review: 'reviewer', executor: 'reviewer', target, verdict, evidence: ['E'], bases: [], constraints: [], reliesOn: [],
       issues: [], revokes: null, extends: null, evidenceUse: { fields: ['exit'], statisticalOrExternal: false }, superseded: [],
     });
-    mirror.append([{ kind: 'env.snapshot', line: 'env', snapshot: 's1' }, { kind: 'evidence', evidence: 'E', envLine: 'env', envSnapshot: 's1', runClass: 'declared', fields: { exit: '0' } }]);
+    // a v51 environment line other than 4.1's ENV_LINE: there a snapshot change still invalidates (4.1.2 only labels
+    // a run on ENV_LINE "older environment"), so one change still propagates through the whole chain
+    mirror.append([{ kind: 'env.snapshot', line: 'lab', snapshot: 's1' }, { kind: 'evidence', evidence: 'E', envLine: 'lab', envSnapshot: 's1', runClass: 'declared', fields: { exit: '0' } }]);
     const t0 = performance.now();
     for (let i = 0; i < N; i += 500) mirror.append(Array.from({ length: Math.min(500, N - i) }, (_, k) => i + k).flatMap((k) => [obj(k), jdg(`J${k}`, `C${k}`)]));
     const built = pmDrain(m);
@@ -272,7 +274,7 @@ test('one environment change reaches a chain of 100,000 objects, and back: drain
     assert.equal(mirror.state().targets.get(`C${N - 1}`)?.label, 'proven');
     const last = [`C0`, `C${N / 2}`, `C${N - 1}`];
     // Down: one environment change; every run under it stops applying, the whole chain loses its proof.
-    mirror.append([{ kind: 'env.snapshot', line: 'env', snapshot: 's2' }]);
+    mirror.append([{ kind: 'env.snapshot', line: 'lab', snapshot: 's2' }]);
     assert.equal(m.read((db) => labelStatus(db)).recomputing, true);
     assert.deepEqual(m.read((db) => decisionLabels(db, last)), Object.fromEntries(last.map((x) => [x, 'recomputing'])));
     const t1 = performance.now();
@@ -281,7 +283,7 @@ test('one environment change reaches a chain of 100,000 objects, and back: drain
     assert.deepEqual(m.read((db) => decisionLabels(db, last)), Object.fromEntries(last.map((x) => [x, 'not-fully-proven'])));
     mirror.state();
     // Up: the environment comes back.
-    mirror.append([{ kind: 'env.snapshot', line: 'env', snapshot: 's1' }]);
+    mirror.append([{ kind: 'env.snapshot', line: 'lab', snapshot: 's1' }]);
     const t2 = performance.now();
     const up = pmDrain(m);
     const upMs = performance.now() - t2;

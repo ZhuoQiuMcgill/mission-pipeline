@@ -37,7 +37,7 @@ import { PLAN_LINE } from '../src/flow/plandoc.ts';
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { openEscalations } from '../src/flow/secretary.ts';
 import { assertExits as exitsOf, drained, frontier, seedFanout, sweepThenClean } from './exploration-exits.ts';
-import { pmAnswer, pmClose, pmDispatch, pmMission, pmNext, pmPlan, pmRelease, pmRequirement, pmSay, readSteps } from '../src/process/index.ts';
+import { pmAnswer, pmClose, pmDispatch, pmMission, pmNext, pmPlan, pmRelease, pmReopenExploration, pmRequirement, pmSay, readSteps } from '../src/process/index.ts';
 import { dispatchView, recordEvidenceRequest, seatCheckout, seatRerun } from '../src/process/seat.ts';
 import type { CrititorCard } from '../src/seat/cards/crititor.ts';
 import type { AuthorCard } from '../src/seat/cards/researcher.ts';
@@ -165,9 +165,18 @@ async function convergedOnExperiment(p: ProcessProject, m: string, o: { rounds: 
   return { evidence, words: w, plan };
 }
 
+/**
+ * A move (another environment identity) and the PM's word that reopens the exploration (4.1.2: an
+ * environment change alone only raises a notice; the runs from the older environment still count).
+ */
+async function moveTo(p: ProcessProject, m: string, env: EnvironmentParts): Promise<void> {
+  p.reopen(env);
+  await pmReopenExploration(p.ctx, { mission: m, exploration: X });
+}
+
 /** After the move (another environment identity): the rerun of the experiment, then the attacker's re-check of the rebuttal on its new record. */
 async function moveAndRecheck(p: ProcessProject, m: string, resolved: 'yes' | 'no', env: EnvironmentParts = ENV_B): Promise<void> {
-  p.reopen(env);
+  await moveTo(p, m, env);
   const s = await assertExits(p, m, 'reopened');
   assert.equal(s.settled, null, 'reopened: nothing is current');
   assert.equal((await settledArtifactProven(p.ctx.ports(), m as MissionId, X)).proven, false, 'reopened: the decision layer plans nothing from the earlier conclusion');
@@ -213,6 +222,28 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
   after(() => {
     setLabelBatchLimit(null);
     sweepThenClean(ps);
+  });
+
+  it('4.1.2: a move alone does not reopen a settled exploration: a notice, the conclusion and its proof stand; the PM\'s word reopens it once', async () => {
+    const p = fresh();
+    await convergedOnExperiment(p, 'm0', { rounds: 3 });
+    p.reopen(ENV_B);
+    const nx = await pmNext(p.ctx);
+    const s = await assertExits(p, 'm0', 'moved, not reopened');
+    assert.equal(s.settled?.key, X, 'still settled');
+    assert.deepEqual(lineEvents(p, 'm0', 'rerun'), []);
+    assert.ok(!nx.ready.some((r) => r.kind === 'constructor-experiment'), 'nothing reruns by itself');
+    assert.ok(notices(p).includes('exploration-older-environment'));
+    assert.ok(!notices(p).includes('exploration-reopened'));
+    assert.equal((await settledArtifactProven(p.ctx.ports(), 'm0' as MissionId, X)).proven, true, 'its product stays proven (older environment)');
+    await pmNext(p.ctx);
+    assert.equal(notices(p).filter((n) => n === 'exploration-older-environment').length, 1, 'told once');
+    const word = await pmReopenExploration(p.ctx, { mission: 'm0', exploration: X });
+    assert.equal(word.requested, true);
+    assert.equal((await pmReopenExploration(p.ctx, { mission: 'm0', exploration: X })).requested, false, 'the same word again is a no-op');
+    await assertExits(p, 'm0', 'reopened on the PM\'s word');
+    assert.equal(lineEvents(p, 'm0', 'rerun').length, 1);
+    assert.ok(notices(p).includes('exploration-reopened'));
   });
 
   it('a: the re-check passes: settled again on the same version, proven again, not routed again', async () => {
@@ -299,7 +330,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
     await convergedOnExperiment(p, 'm13', { rounds: 3, type: 'direction' });
     const routing = `explore.m13.${X}`;
     const sec = pmDispatch(p.ctx, `sec.${routing}`).dispatch;
-    p.reopen(ENV_B);
+    await moveTo(p, 'm13', ENV_B);
     await assertExits(p, 'm13', 'reopened');
     const rerunOp = p.ctx.memory.read((db) => (db.stmt("SELECT op FROM log WHERE kind = 'flow.event' AND json_extract(record, '$.event') = 'rerun' AND json_extract(record, '$.line') = ?").get(`exploration:${X}`) as { op: string }).op);
     const closeOp = p.ctx.memory.read((db) => (db.stmt("SELECT op FROM log WHERE kind = 'flow.event' AND json_extract(record, '$.event') = 'applied' AND json_extract(record, '$.key') = ?").get(routing) as { op: string }).op);
@@ -360,7 +391,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
   it('a close while reopened: the closing snapshot names the exploration as not settled, not its earlier conclusion', async () => {
     const p = fresh();
     await convergedOnExperiment(p, 'm10', { rounds: 3 });
-    p.reopen(ENV_B);
+    await moveTo(p, 'm10', ENV_B);
     await assertExits(p, 'm10', 'reopened');
     const doc = await closeSnapshot(p, 'm10');
     assert.deepEqual(doc.unfinished.explorations, [X]);
@@ -390,7 +421,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
   it('e: the rerun execution is given up (its dispatches released until exhausted): a failed record, the re-check goes on, the stop escalates, abandoned: settled', async () => {
     const p = fresh();
     await convergedOnExperiment(p, 'm6', { rounds: 3 });
-    p.reopen(ENV_B);
+    await moveTo(p, 'm6', ENV_B);
     await assertExits(p, 'm6', 'reopened');
     for (let i = 0; i < 6; i++) {
       const r = (await pmNext(p.ctx)).ready.find((x) => x.kind === 'constructor-experiment');
@@ -417,7 +448,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
   it('e2: the re-check attacker\'s task is given up outside the flow: the WI-28 stop escalation; restarted, it re-checks and settles again', async () => {
     const p = fresh();
     await convergedOnExperiment(p, 'm7', { rounds: 3 });
-    p.reopen(ENV_B);
+    await moveTo(p, 'm7', ENV_B);
     await experiment(p);
     const att = await readyOf(p.ctx, 'crititor');
     assert.equal(await p.ctx.ports().scheduler.cancel(att.step), true);
@@ -435,13 +466,13 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
   it('f: a second environment change while the re-check runs: reopened again before it settles; settled once after the second re-check', async () => {
     const p = fresh();
     await convergedOnExperiment(p, 'm8', { rounds: 3 });
-    p.reopen(ENV_B);
+    await moveTo(p, 'm8', ENV_B);
     await assertExits(p, 'm8', 'reopened on B');
     await experiment(p);
     // the re-check is in flight when the folder moves again
     const r = await readyOf(p.ctx, 'crititor');
     const d = pmDispatch(p.ctx, r.step);
-    p.reopen(ENV_C);
+    await moveTo(p, 'm8', ENV_C);
     readAll(p.ctx, d.dispatch);
     const a = await handBack(p.ctx, d.dispatch, RECHECK('yes')(dispatchView(p.ctx, d.dispatch).card as unknown as CrititorCard));
     assert.equal(a.kind, 'recorded', JSON.stringify(a));
@@ -468,7 +499,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
     assert.ok(notices(p).includes('exploration-changed-after-settling'));
     assert.deepEqual(lineEvents(p, 'm9', 'redefined'), []);
     // reopened by the move: not settled, so the definition in force applies, and a change while reopened too
-    p.reopen(ENV_B);
+    await moveTo(p, 'm9', ENV_B);
     await assertExits(p, 'm9', 'reopened');
     assert.deepEqual(lineEvents(p, 'm9', 'redefined'), ['2'], 'the definition in force applies once it is reopened');
     await pmPlan(p.ctx, { mission: 'm9', words: [words], plan: plan(3, { attackScope: ['internal contradiction', 'gets stuck'], budget: { rounds: 5, micros: null } }) });

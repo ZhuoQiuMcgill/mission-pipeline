@@ -174,7 +174,8 @@ for (const commands of [declared, mixed]) {
       assert.match(result.reruns[0]!.refused[0]!.reason, /field-differs/);
       assert.equal(result.reviewSteps, 1);
       assert.equal(ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as never, line: 'renew', event: 'review-needed' })).length, 1);
-      assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], 'not-fully-proven');
+      // 4.1.2: the original run, from an older environment, still counts until a Reviewer judges again
+      assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], 'proven');
     } finally { p.cleanup(); }
   });
 }
@@ -222,7 +223,8 @@ test('renew refuses a replacement that does not become the effective evidence', 
     assert.deepEqual(result.reruns.flatMap((r) => r.renewed), []);
     assert.match(result.reruns[0]!.refused[0]!.reason, /did not make the replacement effective/);
     assert.equal(result.reviewSteps, 1);
-    assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], 'not-fully-proven');
+    // 4.1.2: the original run, from an older environment, still counts
+    assert.equal(ctx.memory.read((db) => decisionLabels(db, ['P']))['P'], 'proven');
     // The existing forward edge is now connected: a retry can replace its endpoint
     // with a real fresh run. That recovery, in turn, has a no-op second renew.
     assert.deepEqual((await settledRenew(ctx)).reruns.flatMap((r) => r.renewed), ['J']);
