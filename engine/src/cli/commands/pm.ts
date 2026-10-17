@@ -5,7 +5,6 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
-import { fullSuiteOf } from '../../common/fullSuite.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
 import { ITEM_ID, missionIdProblem } from '../../common/ids.ts';
 import { LOOP_KINDS, type LoopKind } from '../../common/records.ts';
@@ -822,7 +821,7 @@ const fullRun: Command = {
       `Candidate ${short(r.candidate)} (what mp pm deliver would build for ${r.outputs.join(', ')}; nothing was delivered).`,
       ...fullRunLines(r.marker),
       ...r.marker.failing.flatMap((f) => [`--- last lines of ${f.id}:`, f.tail]),
-      r.marker.passed ? 'Report the result to the user; mp pm deliver reuses this run for the same tree.' : 'It failed: trace the failure to its task (mp read full-runs, the run summary) and have that task repaired; report to the user.',
+      r.marker.passed ? 'Report the result to the user; a delivery of the same tree shows this run (mp pm deliver, mp pm finish): nothing runs again.' : 'It failed (WI-21): trace the failure to its task (mp read full-runs, the run summary), report to the user, and repair that task (mp pm repair) or merge on their words.',
     ];
     return ok(lines.join('\n'), { mission: m, ...r }, r.marker.passed ? 0 : EXIT.REFUSED);
   },

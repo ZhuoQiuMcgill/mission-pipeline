@@ -46,7 +46,6 @@ import { RUN_METHOD } from '../evaluator/environment.ts';
 import { reusableMethodRun } from '../evaluator/runs.ts';
 import { withoutRepositoryLocators } from '../git/plainGit.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir } from '../git/workspace.ts';
-import type { ClosingCheck, ClosingOutcome, ClosingRunner } from '../delivery/delivery.ts';
 import { appendRecords, LedgerError, tryLock, type ProcessLock, type WriteTx } from '../memory/index.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
@@ -394,56 +393,3 @@ async function executeRuns(
   return { run, runs: executed, reused: false, leaf, result };
 }
 
-// ---------------------------------------------------------------- the delivery's closing checks
-
-/**
- * The closing checks of a delivery (§6.7 step 5) as runs (A4's ClosingRunner): run by `mp` in the
- * candidate's clean checkout `deliver` made (a repository at the delivery candidate, like a run's
- * checkout: delivery.ts), each one recorded with its run summary leaf and a
- * flow event of the delivery (line `delivery:<d>`), outside reuse and the run lock,
- * never as an evidence record: a closing check
- * is no judgment's evidence, and a label input written while the delivery is built would move the
- * labels under it (A4 checks that none arrived since it read them).
- */
-export function closingRunner(ctx: ProcessContext): ClosingRunner {
-  return {
-    run(req: { readonly mission: MissionId; readonly delivery: string; readonly commit: string; readonly dir: string; readonly checks: readonly ClosingCheck[] }): readonly ClosingOutcome[] {
-      const env = ctx.environment();
-      const run = newRunId('close');
-      const recorded: RecordedRun[] = [];
-      const outcomes: ClosingOutcome[] = [];
-      for (const c of req.checks) {
-        const command = commandLine(c.command);
-        // a full-suite command read as a closing check (4.1.2: fullSuiteOf) may name its working directory
-        const rel = normalizeCwd((c as { readonly cwd?: string }).cwd);
-        const cwd = rel === '.' ? req.dir : join(req.dir, ...rel.split('/'));
-        if (rel !== '.') mkdirSync(cwd, { recursive: true });
-        const out = ctx.runner({ command, cwd, timeoutMs: ctx.commandTimeoutMs });
-        const fields = fieldsOf(out, { [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: command, commandId: c.id.slice(0, 200), run, purpose: `closing checks of delivery ${req.delivery}`, delivery: req.delivery });
-        const id = `${run}.${idPart(c.id)}`;
-        const passed = fields['status'] === 'completed' && fields['exit'] === '0';
-        const t = passed ? '' : tail(out.output, { lines: 20, bytes: LOCAL_TAIL.bytes });
-        recorded.push({ evidence: id, command: { id: c.id, command }, passed, summary: summaryOf(fields), fields, tail: t, reused: false });
-        outcomes.push({ id: c.id, passed, exitCode: out.exitCode, run: id, outputHash: fields['output']!, tail: t });
-      }
-      if (recorded.length > 0) {
-        const text = summaryLeaf({ run, mission: req.mission, commit: req.commit, purpose: `closing checks of delivery ${req.delivery}`, runClass: 'declared', environment: env, runs: recorded });
-        ctx.memory.write({ op: `run:${run}`, payload: { run, checks: recorded.map((r) => r.evidence) } }, (tx) => {
-          tx.leaves.writeDocument(runLeaf(req.mission, run), text);
-          appendRecords(
-            tx,
-            recorded.map((r): BaseRecord => ({
-              kind: 'flow.event',
-              mission: req.mission as MissionId,
-              line: `delivery:${req.delivery}`,
-              event: 'closing-run',
-              key: r.evidence,
-              body: tx.data.put(canonicalJson({ run, check: r.command.id, command: r.command.command, passed: r.passed, fields: r.fields, environment: env.identity })) as never,
-            })),
-          );
-        });
-      }
-      return outcomes;
-    },
-  };
-}

@@ -4,9 +4,11 @@
 //   1-2  the manifest and the one-version-per-path check (manifest.ts), over the
 //        memory's records with the stored labels (memoryView.ts);
 //   3    the candidate on the target branch's current commit B (candidate.ts),
-//        materialized into a fresh `tmp/<run>/`: the canonical candidate, a
-//        clean checkout with nothing of any worktree in it;
-//   4    the proof check on the final candidate tree (candidate.ts);
+//        built from objects only (4.1.2: nothing is materialized; no tree is
+//        written to disk and deleted unread);
+//   4    the proof check on the final candidate tree (candidate.ts): the
+//        evidence inputs are hashed from the candidate's objects with the same
+//        conversion a clean checkout applies (candidateFileHashes);
 //   5    (4.1.2, D-7) no command runs here: whether a full run of the project's
 //        suite is worth it at the end is the PM's call (`mp pm full-run`); the
 //        delivery records the full-run status of its tree (DeliverDeps.fullRun);
@@ -28,14 +30,11 @@
 // ledgerAuthority.ts. The program never updates refs/heads/, a worktree or an
 // index here: landing (land.ts) is separate.
 
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { canonicalJson, sha256 } from '../common/hash.ts';
+import { canonicalJson } from '../common/hash.ts';
 import type { AlertId, ContentHash, GitOid, MissionId, ObjectVersionId, OpId } from '../common/ids.ts';
 import { EVALUATOR_INPUT_KINDS, type BaseRecord } from '../common/records.ts';
 import { discoverRepo, gitOid, type Ident } from '../git/objects.ts';
-import { withoutRepositoryLocators, type PlainGit } from '../git/plainGit.ts';
+import type { PlainGit } from '../git/plainGit.ts';
 import { deliveryRef } from '../git/refs.ts';
 import { AttributeEvaluator, MissingObjectsError, readTransformDescription, RepresentationError } from '../git/representation.ts';
 import type { GitContext } from '../git/workspace.ts';
@@ -62,6 +61,7 @@ import {
   type ScopeTag,
   type WriteTx,
 } from '../memory/index.ts';
+import { ownedTempDir, removeOwned } from '../memory/scratch.ts';
 import { noticeExternalWork } from './external.ts';
 import { assertScopeNotStopped, deriveScope, tagScope, unionWork, type WorkScope } from './scope.ts';
 import { buildCandidate, checkCandidateProofs, landedVersions, type OverlayConflict, type ProofCheck, type ProofMismatch } from './candidate.ts';
@@ -72,15 +72,7 @@ import type { DeliveryTarget } from './proofView.ts';
 /** Decision 16 (6.5): rebuilds on a moved base per delivery, before the Secretary or the maintainer grants more (LOOP_CAPS). */
 export const DELIVERY_REBUILD_LOOP = 'delivery-rebuild';
 
-/**
- * A closing check declared in config.json: a command line run with the platform's shell, or an argv run as it is.
- * 4.1.2: `deliver` no longer runs any; the type and the runners stay for the full runs (P1) to reuse.
- */
-export interface ClosingCheck {
-  readonly id: string;
-  readonly command: string | readonly string[];
-}
-
+/** A closing check's outcome as a 4.1.1 delivery recorded it (4.1.2: `deliver` runs no command; kept for reading those documents). */
 export interface ClosingOutcome {
   readonly id: string;
   readonly passed: boolean;
@@ -92,32 +84,6 @@ export interface ClosingOutcome {
   /** The last lines of a failing command. */
   readonly tail: string;
 }
-
-/** Runs the declared closing checks in the candidate's clean checkout (package A3 may record them as runs). */
-export interface ClosingRunner {
-  run(req: { readonly mission: MissionId; readonly delivery: string; readonly commit: GitOid; readonly dir: string; readonly checks: readonly ClosingCheck[] }): Promise<readonly ClosingOutcome[]> | readonly ClosingOutcome[];
-}
-
-/**
- * The default runner: each command in `dir`, one after another, with the platform's shell (§9),
- * without the variables that would point git at another repository than the checkout's own.
- */
-export const shellClosingRunner: ClosingRunner = {
-  run({ dir, checks }) {
-    const env = withoutRepositoryLocators(process.env);
-    return checks.map((c) => {
-      const argv = typeof c.command === 'string' ? null : c.command;
-      const r =
-        argv === null
-          ? spawnSync(c.command as string, { cwd: dir, shell: true, env, maxBuffer: 256 * 1024 * 1024, windowsHide: true })
-          : spawnSync(argv[0]!, argv.slice(1), { cwd: dir, env, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
-      const out = Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)]);
-      const passed = r.error === undefined && r.status === 0;
-      const tail = passed ? '' : (r.error !== undefined ? String(r.error.message) + '\n' : '') + out.toString('utf8').split(/\r?\n/).slice(-20).join('\n');
-      return { id: c.id, passed, exitCode: r.status, run: null, outputHash: sha256(out), tail };
-    });
-  },
-};
 
 export interface DeliverRequest {
   readonly mission: MissionId;
@@ -547,9 +513,9 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
   const sources = (): string[] => manifest.entries.map((e) => e.object.mission);
   m.read((db) => assertScopeNotStopped(db, deliveryScope(db, req.mission, sources()), 'this delivery'));
 
-  // This call's own scratch directory: concurrent deliveries never share or remove each other's.
-  mkdirSync(m.paths.tmp, { recursive: true });
-  const scratch = mkdtempSync(join(m.paths.tmp, `deliver-${req.mission}-${req.delivery}-`));
+  // This call's own scratch directory (its attribute repository only; 4.1.2: owned, so the sweep
+  // removes it after a crash): concurrent deliveries never share or remove each other's.
+  const scratch = ownedTempDir(m.paths, `deliver-${req.mission}-${req.delivery}-`);
   let attributes: AttributeEvaluator | null = null;
   let reopens = 0;
   try {
@@ -570,16 +536,12 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
       if (base === null) throw new LedgerError('BAD_REQUEST', `the target branch ${req.targetBranch} does not exist`);
       // WI-03: external work in a write scope of a mission in flight is noticed (never merged, never blocking).
       if (attempt === 1 && !only) await noticeExternalWork(ctx, { mission: req.mission, delivery: req.delivery, base, targetBranch: req.targetBranch, at: 'delivery' });
-      // Step 3, in a clean run directory: the canonical candidate, read by the proof check.
-      const runDir = join(scratch, `candidate-${attempt}`);
-      let c: Awaited<ReturnType<typeof buildCandidate>>;
-      try {
-        // a version recorded without its origin finds it down its predecessors, as this view has them (Appendix H)
-        const v = view;
-        c = await buildCandidate({ git, repo, manifest, base, attributes, snapshotDir: runDir, message: describe(req, manifest), author: req.author, committer: req.committer, versionOf: (id) => v.object(id), alreadyLaid: await landedVersions(git, repo, m, base, (id) => v.object(id)) });
-      } catch (e) {
+      // Step 3: the canonical candidate, built from objects (4.1.2: nothing is materialized).
+      // Git or LFS objects that are not local (WI-13), found while building it or while hashing the
+      // evidence inputs on it (step 4), give the same result: nothing is delivered, nothing fetched.
+      const unavailable = (e: unknown): DeliveryResult | null => {
         const lfs = e instanceof RepresentationError && (e.code === 'lfs-object-missing' || e.code === 'lfs-object-corrupt');
-        if (!(e instanceof MissingObjectsError) && !lfs) throw e;
+        if (!(e instanceof MissingObjectsError) && !lfs) return null;
         const objects = e instanceof MissingObjectsError ? e.objects : [];
         notice(m, `delivery.${req.mission}.${req.delivery}.objects`, 'WI-13', 'delivery-objects-missing', {
           trigger: `the delivery candidate needs objects that are not usable locally: ${e.message}`,
@@ -587,6 +549,16 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
           defaultAction: 'nothing is delivered and nothing is fetched; once the objects are local the delivery is started again',
         });
         return { kind: 'objects-unavailable', code: e.code, objects, paths: e.paths };
+      };
+      let c: Awaited<ReturnType<typeof buildCandidate>>;
+      try {
+        // a version recorded without its origin finds it down its predecessors, as this view has them (Appendix H)
+        const v = view;
+        c = await buildCandidate({ git, repo, manifest, base, attributes, materialize: 'none', message: describe(req, manifest), author: req.author, committer: req.committer, versionOf: (id) => v.object(id), alreadyLaid: await landedVersions(git, repo, m, base, (id) => v.object(id)) });
+      } catch (e) {
+        const r = unavailable(e);
+        if (r === null) throw e;
+        return r;
       }
       if (c.kind === 'conflict') return { kind: 'conflict', base: c.base, conflicts: c.conflicts };
       if (c.kind === 'description-mismatch') {
@@ -598,12 +570,14 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
         return { kind: 'description-mismatch', versions: c.versions };
       }
       const candidate = c.candidate;
-      // Step 4; the run directory goes afterwards. Step 5 (4.1.2, D-7): no command runs here.
+      // Step 4, on the candidate's objects. Step 5 (4.1.2, D-7): no command runs here.
       let proof: ProofCheck;
       try {
-        proof = await checkCandidateProofs({ git, repo, view, manifest, candidate });
-      } finally {
-        rmSync(runDir, { recursive: true, force: true });
+        proof = await checkCandidateProofs({ git, repo, view, manifest, candidate, attributes });
+      } catch (e) {
+        const r = unavailable(e);
+        if (r === null) throw e;
+        return r;
       }
       if (only) return { kind: 'candidate', base, commit: candidate.commit, tree: candidate.tree, proof };
       // the full-run status of this tree, recorded with the delivery (an honest label; nothing is run)
@@ -689,7 +663,7 @@ export async function deliver(ctx: GitContext, req: DeliverRequest, deps: Delive
     }
   } finally {
     attributes?.dispose();
-    rmSync(scratch, { recursive: true, force: true });
+    removeOwned(m.paths, scratch);
   }
 }
 

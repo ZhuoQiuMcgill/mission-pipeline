@@ -32,17 +32,17 @@
 
 import { canonicalJson } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
-import { decisionLabels, decidingViews, ENV_LINE, labelBatch, labelStatus, recordedEnvironment } from '../evaluator/index.ts';
+import { decisionLabels, decidingViews, labelBatch, labelStatus, olderEnvironmentProof } from '../evaluator/index.ts';
 import { appendRecords, closeMission, currentDelivery, factById, flowEvents, LedgerError, listDispatches, missionCloses, releaseDispatch, setMission, taskQueue, wordsEntry, type Db, type DispatchInfo, type MissionClose, type WriteTx } from '../memory/index.ts';
 import { deliveryDocument } from '../delivery/delivery.ts';
 import { PLAN_LINE, PM_PLAN_EFFECTIVE, SECRETARY_LINE, explorationLine, taskLine } from '../flow/plandoc.ts';
 import { acceptedStartOf, lineAcceptance } from '../flow/execution.ts';
 import { flowCtx } from '../flow/context.ts';
 import { fold } from '../flow/exploration/machine.ts';
+import { repairsOf } from '../flow/repair.ts';
 import type { ProcessContext } from './context.ts';
 import { fullRunStatus, type FullRunStatus } from './fullRuns.ts';
 import { TASKS_LINE, type TaskSpecDoc } from './ports.ts';
-import { repairsOf, type RepairEntry } from './repairs.ts';
 
 export type CloseMode = 'with-risk' | 'full' | 'post-audit';
 export const CLOSE_MODES: readonly CloseMode[] = ['with-risk', 'full', 'post-audit'];
@@ -104,6 +104,28 @@ function body<T>(tx: WriteTx, h: string): T {
 
 type CheckedStarts = ReadonlyMap<string, Awaited<ReturnType<typeof acceptedStartOf>>>;
 
+/** One repair of the mission as the closing snapshot lists it (D-10; flow/repair.ts repairsOf, the one resolver). */
+export interface RepairEntry {
+  readonly repair: string;
+  /** The kind the PM chose. */
+  readonly kind: string;
+  /** The user's reason, verbatim from the words entry. */
+  readonly text: string;
+  readonly words: string | null;
+  /** What it is about ("task <id>", "exploration <id>"), or null: the plan in effect as a whole. */
+  readonly about: string | null;
+  /** Where it stands: decided (amended and/or reopened), architect (its Architect step is under way), exploration (one more round), waiting. */
+  readonly state?: string;
+  /** The tasks it added to the plan in effect, and the tasks it reopened. */
+  readonly added?: readonly string[];
+  readonly reopened?: readonly string[];
+}
+
+/** The mission's repairs for the closing snapshot, read through the flow's resolver (repairsOf). */
+async function closingRepairs(ctx: ProcessContext, mission: MissionId): Promise<RepairEntry[]> {
+  return (await repairsOf(flowCtx(ctx.ports(), mission))).map((r) => ({ repair: r.id, kind: r.kind, text: r.text, words: r.words, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state: r.state, added: [...r.added], reopened: [...r.reopened] }));
+}
+
 /** What the close reads before its write (git, and resolvers on the context): the delivered tree's full-run status, the repairs. */
 interface CloseInputs {
   readonly words: string | null;
@@ -149,6 +171,8 @@ export interface CloseSnapshot {
 function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunning: boolean, checked: CheckedStarts, inputs: CloseInputs): CloseSnapshot {
   const ev = (line: string, event: string) => flowEvents(tx, { mission, line, event, limit: 10_000 });
   // the outputs: the effective plans, the accepted products of the plan tasks, the settled explorations' artifacts
+  // (4.1.2: a repair's amendment is an "effective" event of the plan in effect listing the tasks it added,
+  // plandoc.ts amendedPlan: they are read here as the plan's own)
   const effective = ev(PLAN_LINE, 'effective').map((e) => body<{ dplan: string; tasks: readonly string[] }>(tx, e.body));
   const pmPlans = ev(PLAN_LINE, PM_PLAN_EFFECTIVE).map((e) => body<{ plan: string; explorations?: readonly string[] }>(tx, e.body));
   const tasks = [...new Set(effective.flatMap((e) => e.tasks))];
@@ -224,11 +248,10 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
       issueRisks.push(`issue ${state.issue} on ${output.object}: ${disposition}`);
     }
   }
-  // proven outputs whose deciding runs are from an older environment identity (shown, never re-checked here)
-  const env = recordedEnvironment(tx)?.identity ?? null;
-  const provenOutputs = proof.filter((p) => p.label === 'proven').map((p) => p.object);
-  const deciding = env === null || provenOutputs.length === 0 ? new Map() : decidingViews(tx, provenOutputs).views;
-  const olderEnvironment = provenOutputs.filter((o) => (deciding.get(o)?.deciding ?? []).some((j: { evidence: ReadonlyArray<{ record: { envLine: string; envSnapshot: string } | null }> }) => j.evidence.some((e) => e.record !== null && e.record.envLine === ENV_LINE && e.record.envSnapshot !== env)));
+  // proven outputs whose deciding runs are from an older environment identity (shown, never re-checked
+  // here): the one resolver every read labels them with (renew.ts olderEnvironmentProof)
+  const olderTargets = proof.some((p) => p.label === 'proven') ? olderEnvironmentProof(tx).targets : new Set<string>();
+  const olderEnvironment = proof.filter((p) => p.label === 'proven' && olderTargets.has(p.object)).map((p) => p.object);
   // the mission's current delivery, read in this write; its full-run status was read before it (git)
   const cur = currentDelivery(tx, mission);
   const dd = cur === null ? null : deliveryDocument(tx.data, cur);
@@ -303,7 +326,7 @@ export function snapshotLines(snap: CloseSnapshot): string[] {
     list('Open or deferred issues', d.issues),
     list('Start risks', d.startRisks),
     list('Proven in an older environment', d.olderEnvironment),
-    list('Repairs', d.repairs?.map((r) => `${r.repair} (${r.kind}${r.words !== null ? `, ${r.words}` : ''}): ${r.text}`)),
+    list('Repairs', d.repairs?.map((r) => `${r.repair} (${r.kind}${r.words !== null ? `, ${r.words}` : ''}${r.about !== null ? `, about ${r.about}` : ''}): ${r.text}${r.state !== undefined ? ` [${r.state}${(r.added ?? []).length > 0 ? `; added ${r.added!.join(', ')}` : ''}${(r.reopened ?? []).length > 0 ? `; reopened ${r.reopened!.join(', ')}` : ''}]` : ''}`)),
     `Full suite: ${d.fullRun === null ? (snap.fullRun === undefined ? 'not recorded (a close before 4.1.2)' : 'no delivered tree to compare') : d.fullRun.line}`,
     ...(d.labelsRecomputing ? ['Labels were recomputing at close: the proof states above are the last stored ones.'] : []),
   ];
@@ -365,7 +388,7 @@ export async function pmClose(ctx: ProcessContext, missionId: string, req: { rea
   const fc = flowCtx(ctx.ports(), mission);
   const checked = new Map<string, Awaited<ReturnType<typeof acceptedStartOf>>>();
   for (const task of tasks) checked.set(task, await acceptedStartOf(fc, task));
-  const inputs: CloseInputs = { words: req.words ?? null, delivered: deliveredInputs(ctx, mission), repairs: repairsOf(ctx, mission) };
+  const inputs: CloseInputs = { words: req.words ?? null, delivered: deliveredInputs(ctx, mission), repairs: await closingRepairs(ctx, mission) };
   const op = stateOp(ctx, 'close', mission, req);
   let repeated = true;
   const out = ctx.memory.write({ op, payload: { mission, mode: req.mode, waitRunning, words: req.words ?? null, request: req.request ?? null }, command: 'close', filler: ctx.filler }, (tx) => {

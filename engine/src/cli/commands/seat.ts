@@ -129,7 +129,7 @@ const fullRun: Command = {
       ...m.failing.flatMap((f) => [`--- last lines of ${f.id}:`, f.tail]),
       m.passed
         ? `Cite its runs in your judgments as evidence:<id> (${m.commands.map((x) => `evidence:${x.evidence}`).join(', ')}).`
-        : 'It failed: trace the failure to the task whose change caused it (the last lines above; the run summary), name that task in your findings and hand back "needs-decision": the fix belongs to that task, not to this integration task.',
+        : `It failed: trace the failure to the task whose change caused it (the last lines above, the run summary; mp seat ${d} owners <path>... lists which accepted products changed a path) and hand back "rework" with reopen: [{ "task", "issue", "evidence" }] naming that task: the fix belongs to that task, not to this integration task. "needs-decision" only for a failure no dependency explains.`,
     ];
     return ok(lines.join('\n'), r, 0);
   },

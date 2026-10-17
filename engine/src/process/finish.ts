@@ -20,23 +20,24 @@ import type { DeliveryTarget } from '../delivery/proofView.ts';
 import type { LandingResult } from '../git/land.ts';
 import { acceptedStartOf } from '../flow/execution.ts';
 import { flowCtx } from '../flow/context.ts';
-import { latestEffective } from '../flow/planning.ts';
+import { planInEffect } from '../flow/planning.ts';
 import { currentDelivery, deliveryInfo } from '../memory/index.ts';
 import { pmClose, type Closed } from './close.ts';
 import type { ProcessContext } from './context.ts';
 import { pmDeliver, pmLand, pmRebuild } from './pm.ts';
 
 /**
- * The accepted outputs of the mission's plan in effect: each task's accepted product, through the
- * flow's own resolvers (latestEffective, acceptedStartOf). A product with a start risk is included:
- * the delivery labels it honestly.
+ * The accepted outputs of the mission's plan in effect, with the tasks its repairs added: each
+ * task's accepted product, through the flow's own resolvers (planInEffect, acceptedStartOf). A
+ * product with a start risk is included: the delivery labels it honestly. `mp pm finish` delivers
+ * these by default, and `mp pm full-run` runs the suite on their candidate.
  */
 export async function acceptedOutputs(ctx: ProcessContext, mission: string): Promise<DeliveryTarget[]> {
   const fc = flowCtx(ctx.ports(), mission as MissionId);
-  const eff = await latestEffective(fc);
-  if (eff === null) return [];
+  const inEffect = await planInEffect(fc);
+  if (inEffect === null) return [];
   const out: DeliveryTarget[] = [];
-  for (const task of eff.tasks) {
+  for (const { id: task } of inEffect.plan.tasks) {
     const start = await acceptedStartOf(fc, task);
     if (start !== null) out.push({ kind: 'object', id: start.product as ObjectVersionId });
   }

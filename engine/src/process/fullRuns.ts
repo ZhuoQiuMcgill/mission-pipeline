@@ -16,34 +16,26 @@
 //                commit): a new marker cites it (`reusedFrom`), nothing runs.
 //   who          an integration task's Reviewer (`mp seat <id> full-run`, last, once nothing visible
 //                is wrong); the PM at the end of a mission (`mp pm full-run`, on the candidate
-//                `mp pm deliver` would build), citing the user's words or an authorization item in
+//                `mp pm deliver` would build: the delivery's own candidate-only mode), citing the user's words or an authorization item in
 //                force (D-7, D-8): the record shows who decided.
 //   the read     fullRunStatus(ctx, mission, tree): the newest marker, whether it ran on `tree`, and
 //                what changed since (accepted products recorded after it, paths that differ). P4
 //                shows it at delivery and close; every read calls this resolver.
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import { normalizeCommand, type SuiteCommand } from '../common/fullSuite.ts';
 import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
 import { reusableMethodRun } from '../evaluator/runs.ts';
-import { buildCandidate, landedVersions } from '../delivery/candidate.ts';
-import { buildManifest } from '../delivery/manifest.ts';
-import { memoryProofView } from '../delivery/memoryView.ts';
 import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/scope.ts';
 import type { DeliveryTarget } from '../delivery/proofView.ts';
-import { discoverRepo, gitOid } from '../git/objects.ts';
-import { AttributeEvaluator, readTransformDescription } from '../git/representation.ts';
-import { lineAcceptance } from '../flow/execution.ts';
 import { flowCtx } from '../flow/context.ts';
-import { PLAN_LINE, taskLine } from '../flow/plandoc.ts';
 import { currentItems, itemLine } from '../flow/requirements.ts';
-import { appendRecords, factById, flowEvents, type Db, type WriteTx } from '../memory/index.ts';
+import { appendRecords, factById, type Db, type WriteTx } from '../memory/index.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
-import { labelView } from './labelView.ts';
+import { acceptedOutputs } from './finish.ts';
+import { pmDeliver } from './pm.ts';
 import { DISPATCH_LINE } from './ports.ts';
 import { commandLine, FULL_RUN_TAIL, newRunId, normalizeCwd, runLeaf, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 
@@ -320,66 +312,31 @@ function readMarker(ctx: ProcessContext, mission: string, id: string): FullRunMa
 // ---------------------------------------------------------------- mp pm full-run (D-7)
 
 /**
- * The outputs a delivery of the mission carries when none are named: the accepted product of each
- * task of its effective plans, as the closing snapshot reads them (execution.ts lineAcceptance).
+ * The candidate `mp pm deliver` would build for these outputs: the delivery itself in its
+ * candidate-only mode (delivery.ts `candidateOnly`), so the manifest, the composition (a superseded
+ * prerequisite laid by its newer version) and the proof check are the delivery's own; nothing is
+ * recorded (no delivery, no intent, no ref) and nothing is written to disk but its attribute scratch.
  */
-export function missionOutputs(db: Db, data: { text(h: string): string }, mission: string): string[] {
-  const body = <T>(h: string): T => JSON.parse(data.text(h)) as T;
-  const tasks = [...new Set(flowEvents(db, { mission: mission as MissionId, line: PLAN_LINE, event: 'effective', limit: 10_000 }).flatMap((e) => body<{ tasks: readonly string[] }>(e.body).tasks))];
-  const out: string[] = [];
-  for (const t of tasks) {
-    const sel = lineAcceptance(flowEvents(db, { mission: mission as MissionId, line: taskLine(t), limit: 10_000 }).map((e) => ({ revision: Number(e.revision), event: e.event, key: e.key, body: body<unknown>(e.body) })));
-    if (!sel.abandoned && sel.product !== null) out.push(sel.product);
-  }
-  return out;
-}
-
-/**
- * The candidate `mp pm deliver` would build for these outputs (the delivery's manifest and its
- * candidate builder, buildCandidate), built on the target branch's head; nothing is recorded (no
- * delivery, no intent, no ref). P4's delivery may replace this with its own no-record mode.
- */
-export async function buildDeliveryCandidate(ctx: ProcessContext, req: { readonly mission: string; readonly selected: readonly DeliveryTarget[] }): Promise<{ readonly commit: string; readonly base: string }> {
-  const m = ctx.memory;
-  const labels = labelView(ctx);
-  if (labels.recomputing) throw new ProcessError('NOT_ALLOWED', 'the labels are recomputing: nothing was built; run the same command again shortly (if it lasts, WI-32: mp pm drain)');
-  const view = memoryProofView(m, labels);
-  const built = buildManifest(view, req.selected);
-  if (built.kind !== 'manifest') {
-    const why = built.kind === 'unknown' ? `the outputs name objects the memory does not know: ${built.missing.map((t) => t.id).join(', ')}` : built.kind === 'unplaced' ? `these versions have no commit: ${built.versions.join(', ')}` : `the manifest is incompatible (${built.conflicts.length} path(s) in different versions): an integration task is needed first`;
-    throw new ProcessError('NOT_ALLOWED', `no delivery candidate can be built: ${why}`);
-  }
-  const head = ctx.git.runSync(['rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${ctx.targetBranch}^{commit}`], { cwd: ctx.projectDir });
-  if (head.code !== 0) throw new ProcessError('NOT_ALLOWED', `the target branch ${ctx.targetBranch} does not exist`);
-  const base = gitOid(head.stdout.toString('utf8').trim());
-  mkdirSync(m.paths.tmp, { recursive: true });
-  const scratch = mkdtempSync(join(m.paths.tmp, `full-run-${req.mission}-`));
-  let attributes: AttributeEvaluator | null = null;
-  try {
-    const repo = await discoverRepo(ctx.git, ctx.projectDir);
-    const description = await readTransformDescription(ctx.git, repo, ctx.projectDir);
-    attributes = await AttributeEvaluator.create(ctx.git, repo, description, scratch);
-    const ident = ctx.ident();
-    const c = await buildCandidate({
-      git: ctx.git,
-      repo,
-      manifest: built.manifest,
-      base,
-      attributes,
-      snapshotDir: join(scratch, 'candidate'),
-      message: `mission-pipeline: full-run candidate of ${req.mission} (${req.selected.map((t) => t.id).join(', ')})`,
-      author: ident,
-      committer: ident,
-      versionOf: (id) => view.object(id),
-      alreadyLaid: await landedVersions(ctx.git, repo, m, base, (id) => view.object(id)),
-    });
-    if (c.kind === 'conflict') throw new ProcessError('NOT_ALLOWED', `the outputs conflict on the target branch's head (${c.conflicts.map((x) => x.path).join(', ')}): an integration task resolves them first`);
-    if (c.kind === 'description-mismatch') throw new ProcessError('NOT_ALLOWED', `these versions rest on another transform description: ${c.versions.join(', ')} (WI-19)`);
-    return { commit: c.candidate.commit, base };
-  } finally {
-    attributes?.dispose();
-    rmSync(scratch, { recursive: true, force: true });
-  }
+async function deliveryCandidate(ctx: ProcessContext, req: { readonly mission: string; readonly selected: readonly DeliveryTarget[] }): Promise<{ readonly commit: string; readonly base: string; readonly tree: string }> {
+  const r = await pmDeliver(ctx, { mission: req.mission, delivery: 'full-run-candidate', selected: req.selected, candidateOnly: true });
+  if (r.kind === 'candidate') return { commit: r.commit, base: r.base, tree: r.tree };
+  const why =
+    r.kind === 'recomputing'
+      ? 'the labels are recomputing: run the same command again shortly (if it lasts, WI-32: mp pm drain)'
+      : r.kind === 'unknown-targets'
+        ? `the outputs name objects the memory does not know: ${r.missing.map((t) => t.id).join(', ')}`
+        : r.kind === 'unplaced-products'
+          ? `these versions have no commit: ${r.versions.join(', ')}`
+          : r.kind === 'incompatible'
+            ? `the manifest is incompatible (${r.conflicts.length} path(s) in different versions): an integration task is needed first`
+            : r.kind === 'conflict'
+              ? `the outputs conflict on the target branch's head (${r.conflicts.map((x) => x.path).join(', ')}): an integration task resolves them first`
+              : r.kind === 'description-mismatch'
+                ? `these versions rest on another transform description: ${r.versions.join(', ')} (WI-19)`
+                : r.kind === 'objects-unavailable'
+                  ? `objects the candidate needs are not local (${r.code}${r.paths.length > 0 ? `: ${r.paths.slice(0, 5).join(', ')}` : ''}); nothing is fetched (WI-13)`
+                  : `the delivery build answered ${r.kind}`;
+  throw new ProcessError('NOT_ALLOWED', `no delivery candidate can be built: ${why}; nothing was run`);
 }
 
 /** The missions whose work the outputs carry (an unknown object adds none; the manifest refuses it later). */
@@ -399,7 +356,7 @@ export interface PmFullRunRequest {
   /** an authorization item in force that leaves this decision to the PM (D-8). */
   readonly authority?: string | null;
   readonly reason: string;
-  /** The outputs whose delivery candidate it runs on (default: the mission's accepted products). */
+  /** The outputs whose delivery candidate it runs on (default: the accepted products of the plan in effect, as `mp pm finish` delivers). */
   readonly outputs?: readonly DeliveryTarget[];
 }
 
@@ -431,12 +388,13 @@ export async function pmFullRun(ctx: ProcessContext, req: PmFullRunRequest): Pro
     }
     cited = line;
   }
-  const outputs = req.outputs !== undefined && req.outputs.length > 0 ? req.outputs : ctx.memory.read((db) => missionOutputs(db, ctx.memory.data, req.mission)).map((id): DeliveryTarget => ({ kind: 'object', id: id as never }));
+  // the outputs `mp pm finish` would deliver by default (finish.ts acceptedOutputs: the plan in effect, with its repairs)
+  const outputs = req.outputs !== undefined && req.outputs.length > 0 ? req.outputs : await acceptedOutputs(ctx, req.mission);
   // the scope a delivery of these outputs would have (the delivery's resolver), before anything is built or run
   const scope = ctx.memory.read((db) => deriveScope(db, req.mission as MissionId, outputMissions(db, outputs)));
   ctx.memory.read((db) => assertScopeNotStopped(db, scope, 'this full run'));
   if (outputs.length === 0) throw new ProcessError('NOT_ALLOWED', `mission ${req.mission} has no accepted product yet: there is no delivery candidate to run the full suite on`);
-  const cand = await buildDeliveryCandidate(ctx, { mission: req.mission, selected: outputs });
+  const cand = await deliveryCandidate(ctx, { mission: req.mission, selected: outputs });
   const r = await runFullSuite(ctx, { mission: req.mission, commit: cand.commit, suite: ctx.fullSuite, by: 'pm', cites: { words, authority: cited, reason: req.reason.trim().slice(0, 2000), dispatch: null }, scope });
   return { ...r, candidate: cand.commit, outputs: outputs.map((t) => t.id) };
 }

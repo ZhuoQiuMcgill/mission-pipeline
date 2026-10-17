@@ -87,7 +87,7 @@ import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
-import { closingRunner, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { fullRunLine, heldByClose } from './close.ts';
 import { fullRunStatus } from './fullRuns.ts';
 import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
@@ -868,7 +868,7 @@ function deliveryFullRun(ctx: ProcessContext, mission: string): (c: { readonly t
  */
 export async function pmDeliver(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly delivery: string; readonly selected: readonly DeliveryTarget[]; readonly words?: string | null; readonly targetBranch?: string; readonly rebuildOf?: string | null; readonly message?: string | null },
+  req: { readonly mission: string; readonly delivery: string; readonly selected: readonly DeliveryTarget[]; readonly words?: string | null; readonly targetBranch?: string; readonly rebuildOf?: string | null; readonly message?: string | null; readonly candidateOnly?: boolean },
 ): Promise<DeliveryResult> {
   ctx.environment();
   // §4.1: a call first does one bounded label batch (the labels must reflect the log before a decision that needs "proven")
@@ -885,6 +885,7 @@ export async function pmDeliver(
       ...(req.words !== undefined ? { words: req.words } : {}),
       ...(req.rebuildOf !== undefined ? { rebuildOf: req.rebuildOf } : {}),
       ...(req.message !== undefined && req.message !== null ? { message: req.message } : {}),
+      ...(req.candidateOnly === true ? { candidateOnly: true } : {}),
       filler: ctx.filler,
     },
     { labels: () => labelView(ctx), fullRun: deliveryFullRun(ctx, req.mission) },

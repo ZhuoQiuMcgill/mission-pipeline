@@ -60,7 +60,7 @@ export const ReviewerResultShape = {
   reopen: z
     .array(z.object({ task: z.string().min(1).describe('A dependency listed on your card.'), issue: z.string().min(1).describe('What is wrong in its work.'), evidence: z.string().optional().describe('The run or file that shows it.') }))
     .optional()
-    .describe('Integration tasks only, with verdict "rework": the dependencies whose work causes the failure. Each gets a new attempt with the issue on its card; this task then builds again on their fixed work.'),
+    .describe('Integration tasks only, with verdict "rework": the dependencies whose work causes the failure (a failing full suite included; `mp seat <id> owners <path>` traces a path to its task). Each gets a new attempt with the issue on its card; this task then builds again on their fixed work. A failure no dependency explains: verdict "needs-decision", without reopen.'),
 };
 
 const ConstructorResultSchema = z.object(ConstructorResultShape);
