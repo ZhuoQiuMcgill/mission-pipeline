@@ -5,7 +5,7 @@ import { decodeConstraintCheck, encodeConstraintCheck, type ObjectVersionRecord,
 import { requiredRange } from '../../evaluator/semantics.ts';
 import { constraintApplies } from '../../memory/domain/constraints.ts';
 import type { BasisIndex } from '../../flow/context.ts';
-import type { DetailedTask } from '../../flow/plandoc.ts';
+import { DetailedPlanDoc, amendedPlan, type AmendmentEntry, type DetailedTask } from '../../flow/plandoc.ts';
 import type { ConstraintBody, CurrentItem } from '../../flow/requirements.ts';
 import { canonicalJson } from '../../common/hash.ts';
 
@@ -109,7 +109,9 @@ export function auditBasisTexts(ix: BasisIndex, events: readonly import('../../f
     const obj = object((e.body as { dplan: string }).dplan);
     if (obj === undefined) continue;
     const d = JSON.parse(content.get(obj.content)) as import('../../flow/plandoc.ts').StoredDetailedPlan;
-    for (const t of d.plan.tasks) for (const st of t.standards) out.set(standardLine(e.mission, t.id, st.id), `acceptance standard ${st.id} of task ${t.id}: ${st.text}`);
+    // the plan's tasks and the tasks its repairs added, by the shared resolver (4.1.2, D-10)
+    const plan = amendedPlan(DetailedPlanDoc.parse(d.plan), (e.body as { amendments?: readonly AmendmentEntry[] }).amendments);
+    for (const t of plan.tasks) for (const st of t.standards) out.set(standardLine(e.mission, t.id, st.id), `acceptance standard ${st.id} of task ${t.id}: ${st.text}`);
   }
   for (const [line, v] of ix.current) {
     const rec = ix.records.get(v);

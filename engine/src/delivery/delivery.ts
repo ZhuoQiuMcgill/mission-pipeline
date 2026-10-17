@@ -270,7 +270,7 @@ function reportLeaf(doc: DeliveryDocument, ref: string, rebuilds: number): strin
     '',
     `- Proven: ${doc.proof.proven.length === 0 ? 'none' : doc.proof.proven.join(', ')}`,
     ...(doc.proof.deliveredBy ?? []).map((d) => `- ${d.version}: ${d.path} is delivered by ${d.by}`),
-    ...doc.proof.notFullyProven.map((n) => `- Not fully proven: ${n.id} (${n.reasons.map((r) => r.kind === 'start-lacks-prerequisite' ? `${r.kind}: ${r.missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')}` : r.kind).join(', ')})`),
+    ...doc.proof.notFullyProven.map((n) => `- Not fully proven: ${n.id} (${n.reasons.map((r) => r.kind === 'start-lacks-prerequisite' ? `${r.kind}: ${r.missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')}` : r.kind === 'built-on-superseded' ? `built on ${r.prerequisite}; delivered with ${r.deliveredWith}` : r.kind).join(', ')})`),
     '',
     '## Closing checks',
     '',

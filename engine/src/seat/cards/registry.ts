@@ -39,7 +39,7 @@ import { roleText } from './roles.ts';
 export type ToolProfile = 'materials' | 'read' | 'read-rerun' | 'read-evidence' | 'read-web' | 'write';
 
 /** One `mp seat <id>` command. */
-export type SeatCommand = 'card' | 'read' | 'checkout' | 'rerun' | 'request-evidence' | 'handback';
+export type SeatCommand = 'card' | 'read' | 'checkout' | 'rerun' | 'owners' | 'request-evidence' | 'handback';
 
 /** The commands of each profile (every seat also has `card`, `read` and `handback`). */
 export const SEAT_COMMANDS: Readonly<Record<ToolProfile, readonly SeatCommand[]>> = {

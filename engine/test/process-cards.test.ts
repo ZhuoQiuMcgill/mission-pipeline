@@ -87,6 +87,7 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
     revision: null,
     output: { object: 'dplan.m1.1.1', predecessor: null, path: 'plans/m1', calibrator2: { basisLines: [], reliesOn: [] }, feasibility: { basisLines: [], reliesOn: [] } },
   },
+  'architect-repair': { ...base('arch-repair.m1.R-1.1'), seat: 'architect-repair', workspace: { snapshot: COMMIT, writablePaths: [] }, repair: { id: 'R-1', kind: 'defect', text: 'the header row is dropped', words: 'W-2', about: 'task impl' }, dplan: 'dplan.m1.1.1', pmPlan: 'pmplan.m1.1', elements: [{ id: 'e1', kind: 'deliverable', text: 'a parser' }], plan: PLAN, accepted: [{ task: 'impl', product: 'prod.con.m1.impl.1', attempt: 1, changedPaths: ['src/a.ts'] }], owners: [{ path: 'src/a.ts', owners: [{ task: 'impl', product: 'prod.con.m1.impl.1', attempt: 1, current: true }] }], history: { gitLog: '', runs: [] }, revision: null, materials: [MAT] },
   'architect-feasibility': { ...base('feas.m1.1.1'), seat: 'architect-feasibility', workspace: { snapshot: COMMIT, writablePaths: [] }, target: 'dplan.m1.1.1', review: 'feasibility', plan: PLAN, history: { gitLog: '', runs: [] }, earlierFindings: [], binding: BINDING },
   secretary: {
     ...base('sec.x'),
@@ -243,6 +244,8 @@ describe('cards: every kind renders the 4.1 way (§5.2, §14)', () => {
     assert.deepEqual(cmds('crititor'), ['card', 'read', 'checkout', 'request-evidence', 'handback']);
     assert.deepEqual(cmds('constructor-experiment'), ['card', 'checkout', 'rerun', 'handback'], 'decision 11: the step commands run with rerun');
     assert.deepEqual(cmds('researcher-author'), ['card', 'checkout', 'request-evidence', 'handback']);
+    // 4.1.2: a repair's Architect step may ask which accepted products changed a path
+    assert.deepEqual(cmds('architect-repair'), ['card', 'read', 'checkout', 'owners', 'handback']);
   });
 
   it('a card never names a host path; a continuation names the previous task, not a session', () => {

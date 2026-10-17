@@ -1,9 +1,12 @@
-// The program's mechanical checks of a detailed plan (design 3.5, 3.10). No model, no tokens.
+// The program's mechanical checks of a detailed plan (design 3.5, 3.10; 4.1.2). No model, no tokens.
+// MECHANICAL_RULES below is the list the Architect's card shows ("Mechanical checks your plan must
+// pass"): the same list, never written twice.
 //
 //   1. Coverage within this round's executable scope: every PM plan element that is not an
-//      exploration and does not wait for an unsettled exploration has a task; every element of
-//      the detailed plan traces to a PM plan element or is marked "architect". Goals beyond an
-//      unsettled exploration need no coverage, and no task may be planned for them (3.10).
+//      exploration and does not wait for an unsettled exploration has a task (a task may cover
+//      several elements); every element of the detailed plan traces to PM plan elements or is
+//      marked "architect". Goals beyond an unsettled exploration need no coverage, and no task may
+//      be planned for them (3.10).
 //   2. Tasks that can run in parallel have non-overlapping write scopes; the integration task
 //      depends on every module task and is not in this check.
 //   3. Scheduling dependencies exist and have no cycle; every interface used is either found in
@@ -13,9 +16,31 @@
 //      depends on every implementation task (3.4).
 //   5. Order changes against a user-specified PM plan order are reported separately: they go
 //      straight to the Secretary (3.5), they do not send the plan back.
-// Any failure of 1–4 sends the plan back to the Architect (the mechanical-return loop, 6.5).
+//   6. Every task writes something, except an integration task (it then gets no Constructor) or an
+//      experiment (4.1.2: checks belong in the acceptance standards of the task they check).
+//   7. Only the integration task runs the full suite: no other task declares one of its commands
+//      as a verification command (D-5, D-6).
+// Any failure of 1–4, 6, 7 sends the plan back to the Architect (the mechanical-return loop, 6.5).
+// A repair's amendment (D-10) is checked as the plan in effect plus the added tasks: the per-task
+// rules apply to the added tasks (the plan in effect passed them when it took effect), and rule 4
+// leaves the added tasks out (the PM's full run at the end checks them, D-7).
 
-import { planIdProblems, type DetailedPlanDoc, type DetailedTask, type PmPlanDoc } from './plandoc.ts';
+import { elementsOf, planIdProblems, type DetailedPlanDoc, type DetailedTask, type PmPlanDoc } from './plandoc.ts';
+import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
+
+/** The mechanical checks in words (the Architect's card renders this list; mechanicalCheck applies it). */
+export const MECHANICAL_RULES: ReadonlyArray<{ readonly id: string; readonly text: string }> = [
+  { id: 'ids', text: 'Ids are unique: tasks, modules and interfaces in the plan, and each task\'s standard ids and verification command ids.' },
+  { id: 'coverage', text: 'Every PM plan element of this round (not an exploration, not waiting for an exploration that has not stood) is covered by at least one task. A task may cover several elements: one change that satisfies several elements is one task.' },
+  { id: 'provenance', text: 'Every task, module and interface traces to PM plan elements of this round, or is marked "architect"; nothing traces to an exploration element or to an element that waits for an exploration.' },
+  { id: 'write scopes', text: 'Tasks that can run in parallel (neither depends on the other) have write scopes that do not overlap; the integration task is exempt.' },
+  { id: 'dependencies', text: 'Every task a task depends on exists, and the dependencies have no cycle.' },
+  { id: 'interfaces', text: 'Every interface a task implements or calls is reused (found in the named file of the snapshot) or defined by an interface task, and the task comes after its definition task.' },
+  { id: 'integration', text: 'With more than one implementation task there is exactly one integration task, and it depends on every implementation task.' },
+  { id: 'writes', text: 'Every task writes something, except an integration task (with nothing to write it gets no Constructor: its Reviewer judges its dependencies\' work laid together) or an experiment. A read-only "check" task is refused: checks belong in the acceptance standards of the task whose change they check.' },
+  { id: 'full suite', text: 'Only the integration task runs the project\'s full suite (its Reviewer runs it last): no other task lists a full-suite command as a verification command. Give ordinary tasks the project\'s local commands.' },
+  { id: 'order', text: 'A change to an element order the user specified is not a failure: it goes to the Secretary.' },
+];
 
 export interface MechanicalResult {
   readonly ok: boolean;
@@ -76,6 +101,29 @@ export interface MechanicalInputs {
   readonly unsettled: ReadonlySet<string>;
   /** Whether the snapshot has `symbol` in `file` (3.5 "在快照中找得到对应文件和符号"). */
   readonly hasSymbol: (file: string, symbol: string) => Promise<boolean>;
+  /** The project's full suite (config `fullSuite`, COMMON's alias): only the integration task may run one of its commands. */
+  readonly fullSuite?: readonly SuiteCommand[];
+  /** A repair's amendment (D-10): the ids of the tasks it adds to the plan in effect (`plan` holds both). */
+  readonly amendment?: { readonly added: ReadonlySet<string> };
+  /**
+   * Tasks earlier repairs added (plandoc.ts amendedTaskIds): the integration rule (rule 4) is
+   * evaluated on the plan's own tasks only, so these, and the amendment's own added tasks, are
+   * outside it in every later check (a later repair, a revision that carries them).
+   */
+  readonly amended?: ReadonlySet<string>;
+}
+
+/** Rule 6: a task that writes nothing, other than an integration task or an experiment. */
+export function writesNothingProblem(t: Pick<DetailedTask, 'id' | 'kind' | 'writeScope'>): string | null {
+  if (t.writeScope.length > 0 || t.kind === 'integration' || t.kind === 'experiment') return null;
+  return `task ${t.id} writes nothing: checks belong in the acceptance standards of the task whose change they check; the full suite runs in the integration task's review.`;
+}
+
+/** Rule 7: a non-integration task that declares a full-suite command. */
+export function fullSuiteProblem(t: Pick<DetailedTask, 'id' | 'kind' | 'verificationCommands'>, suite: readonly SuiteCommand[]): string | null {
+  if (t.kind === 'integration' || suite.length === 0) return null;
+  if (!t.verificationCommands.some((c) => isFullSuiteCommand(suite, c.command))) return null;
+  return `task ${t.id} runs the full suite: only the integration task's Reviewer runs it (D-5, D-6).`;
 }
 
 export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalResult> {
@@ -86,8 +134,20 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
   const elements = new Map(pmPlan.elements.map((e) => [e.id, e]));
   const waiting = (id: string): boolean => (elements.get(id)?.after ?? []).some((x) => i.unsettled.has(x)) || (elements.get(id)?.kind === 'exploration' && i.unsettled.has(elements.get(id)?.exploration?.id ?? ''));
 
-  // 1. coverage and provenance
-  const covered = new Set(plan.tasks.flatMap((t) => (t.provenance === 'architect' ? [] : [t.provenance.planElement])));
+  // a repair's amendment: the per-task rules apply to the tasks it adds (the plan in effect passed them)
+  const checked = (t: DetailedTask): boolean => i.amendment === undefined || i.amendment.added.has(t.id);
+
+  // 6, 7. every task writes something (integration and experiments excepted); the full suite only in the integration task
+  for (const t of plan.tasks) {
+    if (!checked(t)) continue;
+    const ro = writesNothingProblem(t);
+    if (ro !== null) failures.push(`writes: ${ro}`);
+    const fs = fullSuiteProblem(t, i.fullSuite ?? []);
+    if (fs !== null) failures.push(`full suite: ${fs}`);
+  }
+
+  // 1. coverage and provenance (a task may cover several elements: each counts)
+  const covered = new Set(plan.tasks.flatMap((t) => elementsOf(t.provenance)));
   for (const e of pmPlan.elements) {
     if (e.kind === 'exploration' || waiting(e.id)) continue;
     if (!covered.has(e.id)) failures.push(`coverage: PM plan element "${e.id}" has no task`);
@@ -99,11 +159,12 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
     ...plan.modules.map((m) => [`module ${m.id}`, m.provenance] as [string, DetailedTask['provenance']]),
   ];
   for (const [what, p] of provenances) {
-    if (p === 'architect') continue;
-    const e = elements.get(p.planElement);
-    if (e === undefined) failures.push(`provenance: ${what} traces to "${p.planElement}", which is not a PM plan element`);
-    else if (e.kind === 'exploration') failures.push(`provenance: ${what} traces to exploration element "${e.id}"; explorations are not decomposed into tasks`);
-    else if (waiting(e.id)) failures.push(`round: ${what} plans element "${e.id}", which waits for an exploration that has not stood (3.10)`);
+    for (const id of elementsOf(p)) {
+      const e = elements.get(id);
+      if (e === undefined) failures.push(`provenance: ${what} traces to "${id}", which is not a PM plan element`);
+      else if (e.kind === 'exploration') failures.push(`provenance: ${what} traces to exploration element "${e.id}"; explorations are not decomposed into tasks`);
+      else if (waiting(e.id)) failures.push(`round: ${what} plans element "${e.id}", which waits for an exploration that has not stood (3.10)`);
+    }
   }
 
   // 3. dependencies: known, acyclic
@@ -120,13 +181,17 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
       const a = parallelCandidates[x] as DetailedTask;
       const b = parallelCandidates[y] as DetailedTask;
       if (dependsOn(a.id, b.id) || dependsOn(b.id, a.id)) continue;
+      if (!checked(a) && !checked(b)) continue;
       const overlap = scopesOverlap(a.writeScope, b.writeScope);
       if (overlap.length > 0) failures.push(`write scopes: tasks ${a.id} and ${b.id} can run in parallel and both write ${overlap.join(', ')}`);
     }
   }
 
   // 4. integration
-  const impl = plan.tasks.filter((t) => t.kind === 'implementation');
+  // rule 4 is evaluated on the plan's own tasks: implementation tasks any repair added (earlier ones, or this
+  // amendment's) are outside it in every check; the PM's full run at the end checks them (D-7)
+  const outside = (t: DetailedTask): boolean => (i.amendment?.added.has(t.id) ?? false) || (i.amended?.has(t.id) ?? false);
+  const impl = plan.tasks.filter((t) => t.kind === 'implementation' && !outside(t));
   const integ = plan.tasks.filter((t) => t.kind === 'integration');
   if (impl.length > 1) {
     if (integ.length !== 1) failures.push(`integration: ${impl.length} implementation tasks need exactly one integration task (found ${integ.length})`);
@@ -141,6 +206,7 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
   const reused = new Map(plan.reusedInterfaces.map((x) => [x.name, x]));
   for (const [name, r] of reused) if (!(await i.hasSymbol(r.file, name))) failures.push(`interfaces: reused interface ${name} is not found in ${r.file} of the snapshot`);
   for (const t of plan.tasks) {
+    if (!checked(t)) continue;
     for (const n of [...t.calls, ...(t.kind === 'interface' ? [] : t.implements)]) {
       if (reused.has(n)) continue;
       const defs = defined.get(n);
@@ -152,18 +218,22 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
     }
   }
 
-  // 5. order against a user-specified PM plan order
+  // 5. order against a user-specified PM plan order: every element a task covers counts (the
+  // task's work for an element waits for the dependency's work for an element the user put later)
   if (pmPlan.order === 'user') {
     const pos = new Map(pmPlan.elements.map((e, k) => [e.id, k]));
-    const elementOf = (t: DetailedTask): string | null => (t.provenance === 'architect' ? null : t.provenance.planElement);
     for (const t of plan.tasks) {
-      const et = elementOf(t);
-      if (et === null) continue;
+      if (!checked(t)) continue;
+      const ets = elementsOf(t.provenance);
       for (const d of deps.get(t.id) ?? []) {
         const dt = plan.tasks.find((x) => x.id === d);
-        const ed = dt === undefined ? null : elementOf(dt);
-        if (ed === null || ed === et) continue;
-        if ((pos.get(ed) ?? 0) > (pos.get(et) ?? 0)) orderChanges.push(`task ${t.id} (element ${et}) waits for task ${d} (element ${ed}), which the user put later`);
+        const eds = dt === undefined ? [] : elementsOf(dt.provenance);
+        for (const et of ets) {
+          for (const ed of eds) {
+            if (ets.includes(ed)) continue;
+            if ((pos.get(ed) ?? 0) > (pos.get(et) ?? 0)) orderChanges.push(`task ${t.id} (element ${et}) waits for task ${d} (element ${ed}), which the user put later`);
+          }
+        }
       }
     }
   }

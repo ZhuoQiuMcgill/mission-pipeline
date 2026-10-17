@@ -66,6 +66,8 @@ import {
 } from '../memory/index.ts';
 import { recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
 import { submitPmBatch } from '../flow/planning.ts';
+import { recordRepair } from '../flow/repair.ts';
+import type { RepairKind } from '../flow/plandoc.ts';
 import { answerEscalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
 import { RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, type ReviewNeededBody } from '../flow/plandoc.ts';
 import { scopesOverlap } from '../flow/mechanical.ts';
@@ -131,6 +133,8 @@ export function purposeOf(card: { readonly seat: string } & Readonly<Record<stri
       return `decompose PM plan ${c['pmPlan']?.object} (round ${c['pmPlan']?.round})`;
     case 'architect-feasibility':
       return `feasibility review of ${c['target']}`;
+    case 'architect-repair':
+      return clip(`repair ${c['repair']?.id} (${c['repair']?.kind}) of plan ${c['dplan']}: ${c['repair']?.text}`);
     case 'secretary':
       return clip(`decide ${c['request']?.id} (${c['request']?.source}): ${c['request']?.summary}`);
     case 'crititor':
@@ -699,6 +703,31 @@ export async function pmRequirement(
   });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm requirement add' });
   return { version };
+}
+
+/**
+ * `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<reason>" [--about <task|exploration>]`
+ * (4.1.2, D-9, D-10): the user tried the product and found a problem. The reason must occur verbatim in
+ * the words entry (the requirement items' check); the PM chooses the kind. About an exploration it
+ * reopens it for one more round; otherwise an Architect repair step amends the plan in effect.
+ */
+export async function pmRepair(ctx: ProcessContext, req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null }> {
+  ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
+  const mission = req.mission as MissionId;
+  let about: { kind: 'task' | 'exploration'; id: string } | null = null;
+  if (req.about !== undefined) {
+    const isExploration = ctx.memory.read((db) => flowEvents(db, { mission, line: `exploration:${req.about}`, event: 'defined', limit: 1 }).length > 0);
+    about = { kind: isExploration ? 'exploration' : 'task', id: req.about };
+  }
+  let r: { readonly id: string; readonly repeated: boolean };
+  try {
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about });
+  } catch (e) {
+    if (e instanceof LedgerError || e instanceof ProcessError) throw e;
+    throw new LedgerError('BAD_REQUEST', (e as Error).message);
+  }
+  await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm repair ${r.id}` });
+  return { repair: r.id, repeated: r.repeated, about };
 }
 
 /** `mp pm requirement withdraw <mission> <item> --reason ...`. */

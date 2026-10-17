@@ -7,7 +7,7 @@ import { writeScopeDocument, writeScopeIdentity } from '../src/delivery/writeSco
 import { FlowEngine } from '../src/flow/engine.ts';
 import { flowCtx, shortHash } from '../src/flow/context.ts';
 import { acceptedProduct } from '../src/flow/execution.ts';
-import { DetailedTask } from '../src/flow/plandoc.ts';
+import { DetailedTask, taskCardHash } from '../src/flow/plandoc.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import { constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT } from '../src/flow/scripted.ts';
 import { FakeProofView, fakeObject, obj, ov, pu } from './delivery-fixtures.test.ts';
@@ -158,7 +158,7 @@ test('v4.1.0 cross-spec continuation inherits the earlier origin and restarts', 
   await newer(w, true);
   await w.ports.scheduler.cancel('rev.m1.impl.1');
   const spec = (await w.ports.ledger.events<{ dplan: string }>({ mission: M, line: 'task:impl', event: 'spec' }))[0]!;
-  await w.ports.ledger.append('test:old-respec', { events: [event('impl', 'spec', 'old-spec-2', { dplan: spec.body.dplan, hash: shortHash(DetailedTask.parse(w.plan.tasks.find((t) => t.id === 'impl')!)) }), event('impl', 'rework', '2', { k: 2, reason: 'respec', issues: [], instructions: [] })] });
+  await w.ports.ledger.append('test:old-respec', { events: [event('impl', 'spec', 'old-spec-2', { dplan: spec.body.dplan, hash: taskCardHash(DetailedTask.parse(w.plan.tasks.find((t) => t.id === 'impl')!)) }), event('impl', 'rework', '2', { k: 2, reason: 'respec', issues: [], instructions: [] })] });
   const snapshot = w.ports.scheduler.actions.snapshot!;
   w.ports.scheduler.actions.snapshot = async (req) => req.purpose === 'constructor-impl' ? { path: previous.source!.commit, commit: previous.source!.commit, products: await w.ports.scheduler.composition(['prod.con.m1.iface.1.new']) } : snapshot(req);
   // v4.1.0 continued across the new spec and kept the predecessor despite the card change.

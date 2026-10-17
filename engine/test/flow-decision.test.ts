@@ -188,7 +188,7 @@ describe('flow: mechanical checks (3.5) and their loop (6.5)', () => {
     await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { order: 'user' }), userWords: ['W-1'] });
     const engine = new FlowEngine(ports);
     const swapped = detailedPlan(M);
-    const plan: DetailedPlanDoc = { ...swapped, tasks: swapped.tasks.map((t) => (t.id === 'iface' ? { ...t, provenance: { planElement: 'e2' } } : { ...t, provenance: { planElement: 'e1' } })) };
+    const plan: DetailedPlanDoc = { ...swapped, tasks: swapped.tasks.map((t) => (t.id === 'iface' ? { ...t, provenance: { planElements: ['e2'] } } : { ...t, provenance: { planElements: ['e1'] } })) };
     let card: SecretaryCard | null = null;
     const ran = await drive(
       engine,
@@ -289,7 +289,7 @@ describe('flow: a single-task plan (3.4, 3.6)', () => {
     await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!] }), userWords: ['W-1'], mode: 'stable' });
     const engine = new FlowEngine(ports);
     const full = detailedPlan(M);
-    const single: DetailedPlanDoc = { ...full, newInterfaces: [], tasks: [{ ...(full.tasks[1] as DetailedPlanDoc['tasks'][number]), implements: [], dependsOn: [], provenance: { planElement: 'e1' } }] };
+    const single: DetailedPlanDoc = { ...full, newInterfaces: [], tasks: [{ ...(full.tasks[1] as DetailedPlanDoc['tasks'][number]), implements: [], dependsOn: [], provenance: { planElements: ['e1'] } }] };
     const ran = await drive(engine, ports.scheduler, happyScript(M, () => single));
     assert.deepEqual(ran.map((t) => ports.scheduler.card<{ seat: string }>(t).seat), ['calibrator-1', 'architect-decompose', 'calibrator-2', 'constructor', 'reviewer']);
     const acc = await ports.ledger.events<{ product: string }>({ mission: M, event: 'accepted' });

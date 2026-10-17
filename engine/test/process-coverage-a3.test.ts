@@ -299,7 +299,7 @@ describe('stops, notices, the Secretary\'s re-dispatches', () => {
 });
 
 describe('a task that only reads and runs (the real two-harness run: an "integrate-tests" task)', () => {
-  it('has an empty write scope; its Constructor changes nothing; its product claims no path; delivering both outputs succeeds and lands', async () => {
+  it('4.1.2: an integration task with an empty write scope gets no Constructor; its start snapshot is its candidate, claims no path; delivering both outputs succeeds and lands', async () => {
     const { pmDeliver, pmLand } = await import('../src/process/index.ts');
     p = await planned(planOf([
       { id: 'impl', kind: 'implementation', dir: 'a', implementsAdd: true },
@@ -308,26 +308,24 @@ describe('a task that only reads and runs (the real two-harness run: an "integra
     const ctx = p.ctx;
     await construct(p, (await readyOf(ctx, 'constructor')).step, 'a');
     await step(ctx, 'reviewer', (c) => reviewerPass(c));
-    // the read-only task: the card says it writes nothing; a change is refused, no change is accepted
-    const s = await readyOf(ctx, 'constructor');
+    // nothing to write, so no Constructor: the program records the start snapshot (the dependencies'
+    // products laid over the base, on real git) as the product, and its Reviewer is ready at once
+    const next = await pmNext(ctx);
+    assert.ok(!next.ready.some((r) => r.kind === 'constructor'), `no Constructor step: ${next.ready.map((r) => r.step).join(', ')}`);
+    const s = await readyOf(ctx, 'reviewer');
     assert.match(s.step, /\.tests\./);
-    const d = pmDispatch(ctx, s.step);
-    const card = dispatchView(ctx, d.dispatch).card as unknown as { workspace: { writablePaths: string[] } };
-    assert.deepEqual(card.workspace.writablePaths, []);
-    assert.match(d.card, /None: this task only reads and runs/);
-    write(join(p.dir, d.worktree!), 'a/add.js', 'exports.add = (a, b) => a - b;\n');
-    const refused = await handBack(ctx, d.dispatch, { done: 'ran the tests', unmet_standards: [], unfixed_problems: [], decisions_needed: [] });
-    assert.ok(refused.kind === 'refused' && refused.problems.some((x) => /outside your write paths/.test(x)), JSON.stringify(refused));
-    p.git('-C', join(p.dir, d.worktree!), 'checkout', '--', 'a/add.js');
-    const ok = await handBack(ctx, d.dispatch, { done: 'ran the tests: they pass', unmet_standards: [], unfixed_problems: [], decisions_needed: [] });
-    assert.ok(ok.kind === 'recorded' && ok.outcome === 'accepted' && ok.verification?.[0]?.passed === true, JSON.stringify(ok));
-    assert.deepEqual(ok.kind === 'recorded' ? ok.candidate?.changedPaths : null, []);
-    await step(ctx, 'reviewer', (c) => reviewerPass(c));
+    await step(ctx, 'reviewer', (c) => {
+      assert.equal(c.integration?.hasConstructor, false, 'the Reviewer card says no Constructor ran');
+      assert.deepEqual(c.candidate.changedPaths, []);
+      assert.deepEqual(c.integration?.dependencies.map((x: { task: string }) => x.task), ['impl']);
+      return reviewerPass(c);
+    });
     const testsProduct = `prod.con.${M}.tests.1`;
     const implProduct = `prod.con.${M}.impl.1`;
-    const rec = ctx.memory.read((db) => JSON.parse((db.stmt("SELECT record FROM log WHERE kind = 'object.version' AND json_extract(record, '$.object') = ?").get(testsProduct) as { record: string }).record) as { scope: { paths: string[] }; source: { writeScope: string[] } });
+    const rec = ctx.memory.read((db) => JSON.parse((db.stmt("SELECT record FROM log WHERE kind = 'object.version' AND json_extract(record, '$.object') = ?").get(testsProduct) as { record: string }).record) as { scope: { paths: string[] }; source: { writeScope: string[] }; prerequisites: unknown });
     assert.deepEqual(rec.scope.paths, [], 'it claims no path');
     assert.deepEqual(rec.source.writeScope, []);
+    assert.deepEqual(ctx.memory.data.getList(rec.prerequisites as never), [implProduct], 'its start is pinned to its dependency\'s product');
     await pmNext(ctx);
     assert.equal(label(p, testsProduct), 'proven');
     // the reviewer's repro: delivering both outputs, or only the read-only one, is not "incompatible"
@@ -337,6 +335,8 @@ describe('a task that only reads and runs (the real two-harness run: an "integra
     const both = await pmDeliver(ctx, { mission: M, delivery: 'v1', selected: [{ kind: 'object', id: implProduct as never }, { kind: 'object', id: testsProduct as never }], words });
     assert.equal(both.kind, 'delivered', JSON.stringify(both).slice(0, 400));
     if (both.kind !== 'delivered') return;
+    // the start snapshot is the integration product's origin: its start holds its dependencies' unlanded work
+    assert.deepEqual(both.record.proof?.notFullyProven, []);
     const landed = await pmLand(ctx, { mission: M, delivery: 'v1', words });
     assert.equal(landed.kind, 'landed', JSON.stringify(landed).slice(0, 400));
     assert.equal(p.git('show', 'refs/heads/main:a/add.js'), 'exports.add = (a, b) => a + b;');

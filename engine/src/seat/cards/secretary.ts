@@ -67,6 +67,8 @@ export const SecretaryCardSchema = z.object({
   grantAvailable: z.boolean(),
   /** A negated review position this decision rules on (accepting it records a pass that revokes the negation). */
   position: z.object({ target: z.string().min(1), review: z.string().min(1), revokes: z.string().min(1), binding: Binding }).nullable(),
+  /** 4.1.2: the earlier decisions on the same subject: the decision, its reason, and whether it was carried out. */
+  earlierDecisions: z.array(z.object({ escalation: z.string(), source: z.string(), option: z.string(), by: z.string(), reason: z.string(), applied: z.enum(['carried out', 'not carried out yet', 'closed as superseded']) })).optional(),
 });
 export type SecretaryCard = z.infer<typeof SecretaryCardSchema>;
 
@@ -97,6 +99,7 @@ export function renderSecretary(c: SecretaryCard): string {
     list('Authorizations (verbatim)', c.authorizations.map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition !== null ? ` (tell the user when: ${a.notifyCondition})` : ''}`)) +
     list('Requirement items involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
     renderMaterials(c.materials) +
+    list(`Earlier decisions on ${r.subject} (decide this one knowing them)`, (c.earlierDecisions ?? []).map((d) => `${d.escalation} (${d.source}): ${d.option} by ${d.by}${d.reason !== '' ? `: ${d.reason}` : ''} (${d.applied})`)) +
     list('Options', c.options.map((o) => `${o.id}: ${o.label}. Outcome: ${o.outcome}`)) +
     `## Your extra grant on lineage ${r.lineage}\n${c.grantAvailable ? 'Available (once per lineage, at most 2 attempts).' : 'Already used: only the user can grant more (choose ask-user if more attempts are the only way).'}\n\n`
   );

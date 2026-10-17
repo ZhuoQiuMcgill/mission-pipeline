@@ -15,6 +15,7 @@
 // 8) and recorded as PM actions under an operation id: the same id again with the same arguments
 // replays the recorded result; with other arguments it is refused (OP_CONFLICT).
 
+import { fullSuiteOf, type SuiteCommand } from '../common/fullSuite.ts';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
@@ -135,7 +136,9 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   const config = o.readsConfig === false ? defaultConfig({ targetBranch: 'main', versionCommands: [] }) : readConfig(dir);
   const startedAt = Date.now();
   const git = io.process?.git ?? PlainGit.create();
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, filler: o.filler ?? null, ...(io.process ?? {}) });
+  // the flows read the project's local commands and its full suite (4.1.2; `closingChecks` is the alias)
+  const project = { localCommands: config.verificationCommands, fullSuite: fullSuiteOf(config as { fullSuite?: readonly SuiteCommand[]; closingChecks?: readonly SuiteCommand[] }) };
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, filler: o.filler ?? null, project, ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {

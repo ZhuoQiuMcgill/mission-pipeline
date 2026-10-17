@@ -50,6 +50,28 @@ export const ReviewerCardSchema = z.object({
   declaredCommands: z.array(Command),
   selfReportedGaps: z.array(Item),
   openIssues: z.array(z.object({ issue: z.string().min(1), text: z.string() })),
+  /** 4.1.2: the previous Reviewer of this task: its verdict, each standard it found unmet or unclear with the reason, and its findings. */
+  previousReview: z
+    .object({
+      review: z.string().min(1),
+      attempt: z.number().int().positive(),
+      verdict: z.enum(['pass', 'rework', 'needs-decision']),
+      unmet: z.array(z.object({ standard: z.string(), met: z.enum(['no', 'unclear']), reason: z.string() })),
+      findings: z.array(z.string()),
+    })
+    .optional(),
+  /**
+   * 4.1.2 (D-6): an integration task's review. `hasConstructor` false: the task writes nothing, so no
+   * Constructor ran and the candidate is its start snapshot (its dependencies' products laid over the
+   * base). `dependencies`: each dependency (direct or not) with its accepted product and the paths that
+   * product changed; a rework may reopen one of them (`reopen` in the hand-back).
+   */
+  integration: z
+    .object({
+      hasConstructor: z.boolean(),
+      dependencies: z.array(z.object({ task: z.string().min(1), product: z.string().min(1), attempt: z.number().int().positive(), direct: z.boolean(), changedPaths: z.array(z.string()) })),
+    })
+    .optional(),
   /** The judgment's binding inputs, fixed by the card's contract (5.2). */
   binding: z.object({
     judgment: z.string().min(1),
@@ -112,7 +134,30 @@ export function renderCard(c: SeatCard): string {
     list('Declared commands you may rerun (by id)', c.declaredCommands.map((d) => `[${d.id}] ${d.command}`)) +
     list('Scratch paths (a rerun may write here; nothing written is kept)', c.workspace.scratchPaths ?? []) +
     list("The Constructor's self-reported gaps (answer every one)", c.selfReportedGaps.map((g) => `[${g.id}] ${g.text}`)) +
-    list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`))
+    list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`)) +
+    renderPreviousReview(c) +
+    renderIntegration(c)
+  );
+}
+
+function renderPreviousReview(c: ReviewerCard): string {
+  const p = c.previousReview;
+  if (p === undefined) return '';
+  return (
+    `## The previous review of this task\n${p.review} (attempt ${p.attempt}) handed back "${p.verdict}".\n` +
+    (p.unmet.length > 0 ? `${p.unmet.map((u) => `- [${u.standard}] ${u.met === 'no' ? 'not met' : 'unclear'}: ${u.reason}`).join('\n')}\n` : '') +
+    (p.findings.length > 0 ? `${p.findings.map((f) => `- finding: ${f}`).join('\n')}\n` : '') +
+    '\n'
+  );
+}
+
+function renderIntegration(c: ReviewerCard): string {
+  const g = c.integration;
+  if (g === undefined) return '';
+  return (
+    `## This is an integration task\n${g.hasConstructor ? 'Its Constructor laid its own change over its dependencies\' work.' : 'It writes nothing, so no Constructor ran: the candidate is its start snapshot, its dependencies\' accepted products laid over the base. A rework cannot fix it here: name the dependency to reopen.'}\n` +
+    'When a failure traces to a dependency, hand back verdict "rework" with `reopen`: [{ "task": "<id>", "issue": "<what is wrong>", "evidence": "<run or file>" }]: that task gets a new attempt with the issue on its card, and this task builds again on its fixed work. The original task fixes it; this task does not absorb the fix. `mp seat <id> owners <path>...` lists which accepted products changed a path.\n\n' +
+    list('Dependencies and the paths their accepted products changed', g.dependencies.map((d) => `${d.task}${d.direct ? '' : ' (indirect)'}: ${d.product} (attempt ${d.attempt}): ${d.changedPaths.join(', ') || 'no path'}`))
   );
 }
 
@@ -165,7 +210,9 @@ export function seatCommandsOf(card: { readonly seat: string } & Readonly<Record
   if (card['allowAsyncEvidence'] === true) out.add('request-evidence');
   if (rerunCommands(card).length > 0) out.add('rerun');
   else out.delete('rerun');
-  const order: readonly SeatCommand[] = ['card', 'read', 'checkout', 'rerun', 'request-evidence', 'handback'];
+  // 4.1.2: which accepted products changed a path, for tracing a failure (an integration review, a repair)
+  if (card['integration'] !== undefined || card.seat === 'architect-repair') out.add('owners');
+  const order: readonly SeatCommand[] = ['card', 'read', 'checkout', 'rerun', 'owners', 'request-evidence', 'handback'];
   return order.filter((c) => out.has(c));
 }
 
@@ -192,6 +239,9 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         break;
       case 'rerun':
         lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunCommands(card).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite.`);
+        break;
+      case 'owners':
+        lines.push(`\`mp seat ${dispatch} owners <path>...\`: which accepted products of this mission changed each path (a path, or a directory ending in "/"), with their task and attempt.`);
         break;
       case 'request-evidence':
         lines.push(`\`mp seat ${dispatch} request-evidence --stdin\`: ask for an evidence execution: your notes (what you need to continue) on stdin, ending with the request as a fenced json block (the JSON schema below); or \`mp seat ${dispatch} request-evidence --request ${f.request} --notes ${f.notes}\` with two files. It ends this dispatch; a new card brings your notes back with the results.`);

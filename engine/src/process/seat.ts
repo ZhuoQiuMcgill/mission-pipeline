@@ -57,6 +57,8 @@ import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
 import { runOnCommit, type RecordedRun } from './runs.ts';
+import { pathOwners } from '../flow/execution.ts';
+import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
 
@@ -102,7 +104,7 @@ function inFlight(v: DispatchView, what: string): void {
   if (v.info.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${v.info.dispatch} is ${v.info.state === 'released' ? `released (${v.info.released})` : 'handed back'}: ${what} is for a dispatch in flight`);
 }
 
-function allows(v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'request-evidence'): void {
+function allows(v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'owners' | 'request-evidence'): void {
   if (!seatCommandsOf(v.card).includes(command)) throw new ProcessError('NOT_ALLOWED', `the ${v.card.seat} card of dispatch ${v.info.dispatch} has no \`${command}\` command (its commands: ${seatCommandsOf(v.card).join(', ')})`);
 }
 
@@ -128,6 +130,21 @@ export function seatRead(ctx: ProcessContext, dispatch: string, material: string
     });
   }
   return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read)' : ''}\n${materialPage(r.text, page)}` };
+}
+
+/**
+ * `mp seat <id> owners <path>...` (4.1.2, D-6 tracing aid): which accepted products of the mission
+ * changed each path, from their recorded changed paths (execution.ts pathOwners, the one resolver).
+ */
+export async function seatOwners(ctx: ProcessContext, dispatch: string, paths: readonly string[]): Promise<{ readonly dispatch: string; readonly owners: Awaited<ReturnType<typeof pathOwners>>; readonly text: string }> {
+  const v = dispatchView(ctx, dispatch);
+  allows(v, 'owners');
+  if (paths.length === 0) throw new ProcessError('NOT_ALLOWED', 'name at least one path (a directory ends in "/")');
+  const owners = await pathOwners(flowCtx(ctx.ports(), v.info.mission as MissionId), paths);
+  const text = owners
+    .map((o) => `${o.path}: ${o.owners.length === 0 ? 'no accepted product changed it' : o.owners.map((x) => `${x.task} attempt ${x.attempt} (${x.product}${x.current ? '' : ', an earlier accepted version'})${x.paths.length > 1 || x.paths[0] !== o.path ? `: ${x.paths.join(', ')}` : ''}`).join('; ')}`)
+    .join('\n');
+  return { dispatch, owners, text };
 }
 
 /** The commit (or project-relative path) a card names. */

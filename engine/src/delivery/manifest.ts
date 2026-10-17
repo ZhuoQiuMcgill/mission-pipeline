@@ -45,6 +45,29 @@ export interface DeliveryManifest {
   readonly units: readonly ManifestUnit[];
   /** Every repository path of the manifest and the one version that delivers it (of stacked versions, the one on top). */
   readonly paths: ReadonlyMap<string, ObjectVersionId>;
+  /**
+   * 4.1.2 (D-6, no cascade): versions reached only as a recorded prerequisite whose task's newer
+   * version (down the predecessor line) is in the manifest too: `by` is laid in their place (it is
+   * the task's current content and carries their change, Appendix H) and they are not laid
+   * themselves; `requiredBy` are the selected outputs that reach them. No member's recorded
+   * prerequisites change: a member built on a superseded version is judged by the proof check
+   * ("built on <version>; delivered with <by>") unless a delivered integration covers it.
+   */
+  readonly superseded?: ReadonlyMap<ObjectVersionId, { readonly by: ObjectVersionId; readonly requiredBy: readonly DeliveryTarget[] }>;
+}
+
+/**
+ * The prerequisite closure the overlay lays by (Appendix L), with each superseded prerequisite read
+ * as the version laid in its place (4.1.2): a member built on a task's earlier version is stacked
+ * over that task's newer version. The members' recorded prerequisites are not changed.
+ */
+export function layingClosure(manifest: Pick<DeliveryManifest, 'entries' | 'units' | 'superseded'>): Map<ObjectVersionId, Set<ObjectVersionId>> {
+  const sup = manifest.superseded;
+  const objects = manifest.entries.map((e) => ({
+    id: e.object.id,
+    prerequisites: sup === undefined ? e.object.prerequisites : e.object.prerequisites.map((t) => (t.kind === 'object' && sup.has(t.id) ? { kind: 'object' as const, id: sup.get(t.id)!.by } : t)),
+  }));
+  return prerequisiteClosure(objects, (u) => manifest.units.find((x) => x.unit === u)?.members ?? null);
 }
 
 export interface ConflictSide {
@@ -192,6 +215,32 @@ export function buildManifest(view: DeliveryProofView, selected: readonly Delive
   const unplaced = [...entries.values()].filter((e) => e.object.kind === 'product' && e.object.tree === null).map((e) => e.object.id);
   if (unplaced.length > 0) return { kind: 'unplaced', versions: unplaced.sort(byId) };
 
+  // 4.1.2: a version reached only as a recorded prerequisite whose task's newer version is in the
+  // manifest too is not laid: the newer version takes its place (a selected version and a proof unit's
+  // member always stay). Recorded prerequisites are never rewritten; the proof check judges the rest
+  const roots = new Set(selected.filter((t) => t.kind === 'object').map((t) => t.id));
+  const direct = new Map<ObjectVersionId, ObjectVersionId>();
+  for (const [id, e] of entries) {
+    if (e.object.tree === null) continue;
+    const seen = new Set<string>([id]);
+    for (let p = (e.object.predecessor ?? null) as ObjectVersionId | null; p !== null && !seen.has(p); p = (view.object(p)?.predecessor ?? null) as ObjectVersionId | null) {
+      seen.add(p);
+      const pe = entries.get(p);
+      if (pe !== undefined && pe.unit === null && pe.object.tree !== null && !roots.has(p) && !direct.has(p)) direct.set(p, id);
+    }
+  }
+  const superseded = new Map<ObjectVersionId, { by: ObjectVersionId; requiredBy: DeliveryTarget[] }>();
+  for (const p of direct.keys()) {
+    let top = direct.get(p)!;
+    const seen = new Set<ObjectVersionId>([p]);
+    while (direct.has(top) && !seen.has(top)) {
+      seen.add(top);
+      top = direct.get(top)!;
+    }
+    superseded.set(p, { by: top, requiredBy: [...entries.get(p)!.requiredBy.values()] });
+  }
+  for (const p of superseded.keys()) entries.delete(p);
+
   const unitLabels = new Map<ProofUnitId, Label>();
   for (const u of units.keys()) unitLabels.set(u, view.label({ kind: 'unit', id: u }));
   const list: ManifestEntry[] = [...entries.entries()]
@@ -221,11 +270,9 @@ export function buildManifest(view: DeliveryProofView, selected: readonly Delive
       else l.push(e);
     }
   }
-  // Versions stacked on each other share paths and modules as one line of work (Appendix L).
-  const closure = prerequisiteClosure(
-    list.map((e) => e.object),
-    (u) => units.get(u) ?? null,
-  );
+  // Versions stacked on each other share paths and modules as one line of work (Appendix L); a member
+  // built on a superseded version is stacked over the version laid in its place (4.1.2)
+  const closure = layingClosure({ entries: list, units: [...units.entries()].map(([unit, members]) => ({ unit, members, label: 'unaccepted' as Label })), ...(superseded.size > 0 ? { superseded } : {}) });
   const apart = (es: readonly ManifestEntry[]): boolean => es.length > 1 && !stacked(es.map((e) => e.object.id), closure);
   const conflicts: ManifestConflict[] = [];
   for (const [path, es] of [...byPath.entries()].sort(([a], [b]) => byId(a, b))) {
@@ -252,6 +299,7 @@ export function buildManifest(view: DeliveryProofView, selected: readonly Delive
         .sort(([a], [b]) => byId(a, b))
         .map(([unit, members]) => ({ unit, members, label: unitLabels.get(unit) as Label })),
       paths,
+      ...(superseded.size > 0 ? { superseded } : {}),
     },
   };
 }

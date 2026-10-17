@@ -60,7 +60,7 @@
 // attacked on its reasoning until it converges.
 
 import type { ExplorationDefinition } from './definition.ts';
-import type { ExplorationSettledBody } from '../plandoc.ts';
+import type { ExplorationSettledBody, RepairRef } from '../plandoc.ts';
 import { isBlocking, type Severity } from '../../seat/cards/crititor.ts';
 import type { RegisteredAttemptT } from '../../seat/cards/researcher.ts';
 
@@ -97,6 +97,11 @@ export interface EvidenceTaskInfo {
 export interface RerunBody {
   readonly evidence: readonly string[];
   readonly environment: string;
+  /**
+   * 4.1.2 (D-10): a repair about this exploration: it is reopened for one more round with the repair
+   * as an added question (on every card of the round); its settled conclusion stays as history.
+   */
+  readonly repair?: RepairRef;
 }
 
 export interface QueuedBody {
@@ -419,6 +424,8 @@ export interface XState {
   readonly settles: SettleRecord[];
   /** The current settle: the one recorded since the exploration last reopened, or null (not settled, or reopened since). */
   settled: SettleRecord | null;
+  /** 4.1.2: the repairs that reopened it, each an added question its later rounds answer. */
+  readonly repairs: RepairRef[];
 }
 
 export function emptyState(): XState {
@@ -465,6 +472,7 @@ export function emptyState(): XState {
     definitions: new Map(),
     settles: [],
     settled: null,
+    repairs: [],
   };
 }
 
@@ -540,8 +548,27 @@ export function fold(events: readonly XEvent[]): XState {
         break;
       }
       case 'rerun': {
-        // only a converged exploration is reopened for it (an active one judges the new records in its rounds)
         const b = e.body as RerunBody;
+        if (b.repair !== undefined) {
+          // a repair (D-10): one more round with the repair as an added question; a stop of any kind
+          // reopens (its settle becomes history), and the author answers it first
+          if (s.repairs.some((r) => r.id === b.repair!.id)) break;
+          s.repairs.push(b.repair);
+          // one more round, and its closing attacker (a round that passes converges only after one)
+          s.rerunRounds += 2;
+          if (s.stopped !== null) {
+            s.stopped = null;
+            s.settled = null;
+            s.afterAttack = null;
+            s.signatures.length = 0;
+            s.fatalFailed.length = 0;
+            s.needClosing = false;
+            s.attackerClosing = false;
+            if (s.turn === 'none' || s.turn === 'await-ruling' || s.turn === 'attacker') s.turn = 'author';
+          }
+          break;
+        }
+        // only a converged exploration is reopened for it (an active one judges the new records in its rounds)
         let added = false;
         for (const id of b.evidence) {
           if (s.reruns.has(id)) continue;

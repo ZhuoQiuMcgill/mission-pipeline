@@ -34,6 +34,7 @@ import { SEAT_CAPABILITIES, basisIndex, flowCtx, idPart, type FlowCtx } from '..
 import type { AnyCard, FlowPorts, FlowTaskStatus } from '../ports.ts';
 import { handleFailure } from '../failures.ts';
 import { detailedPlanOf, type EffectiveBody } from '../planning.ts';
+import { amendedPlan } from '../plandoc.ts';
 import { PLAN_LINE, REQUIREMENTS_LINE } from '../plandoc.ts';
 import { currentConstraints, currentItems, requirementSetLine } from '../requirements.ts';
 import { cancelSecretarySteps, carryGuard, closing, markApplied, openEscalations } from '../secretary.ts';
@@ -609,7 +610,8 @@ async function taskOfProduct(ctx: FlowCtx, object: string): Promise<{ readonly t
     let commands: Array<{ id: string; command: string; cwd?: string }> = [];
     for (const f of await ctx.ports.ledger.events<EffectiveBody>({ mission: ctx.mission, line: PLAN_LINE, event: 'effective' })) {
       const d = await detailedPlanOf(ctx, f.body.dplan);
-      const t = d?.plan.tasks.find((x) => x.id === task);
+      // the plan with the tasks its repairs added (4.1.2, D-10): the effective event lists them
+      const t = d === null ? undefined : amendedPlan(d.plan, f.body.amendments).tasks.find((x) => x.id === task);
       if (t !== undefined) commands = t.verificationCommands.map((c) => ({ id: c.id, command: c.command, ...(c.cwd !== undefined ? { cwd: c.cwd } : {}) }));
     }
     return { task, commands };

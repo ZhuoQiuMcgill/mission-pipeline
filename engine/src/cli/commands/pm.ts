@@ -49,6 +49,7 @@ import {
   pmPlan,
   pmRelease,
   pmRenew,
+  pmRepair,
   pmRequirement,
   pmSay,
   pmStartLegalization,
@@ -59,6 +60,7 @@ import {
   type ProcessContext,
 } from '../../process/index.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
+import { REPAIR_KINDS, type RepairKind } from '../../flow/plandoc.ts';
 import { flagBool, flagList, flagStr, missionArg, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
 import { CliError, EXIT, refused, usage } from '../errors.ts';
@@ -466,6 +468,27 @@ const requirement: Command = {
       ...(flagStr(args, 'notify') !== null ? { notifyCondition: flagStr(args, 'notify')! } : {}),
     });
     return ok(`Requirement item ${item} (${type}) of ${m} recorded as ${r.version}.`, { mission: m, item, version: r.version });
+  },
+};
+
+const repair: Command = {
+  group: 'pm',
+  name: ['repair'],
+  summary: 'a problem the user found trying the product, as a repair (D-10): the user\'s reason verbatim from their words, the kind you choose; the Architect amends the plan in effect under the mechanical checks only (about an exploration: one more round)',
+  usage: 'mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user\'s reason, verbatim from W-n>" [--about <task-id|exploration-id>]',
+  flags: { words: 'string', kind: 'string', text: 'string', about: 'string' },
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const words = wordsArg(p.ctx, args, true)!;
+    const kind = flagStr(args, 'kind');
+    if (kind === null || !(REPAIR_KINDS as readonly string[]).includes(kind)) throw usage(`--kind is one of ${REPAIR_KINDS.join(', ')} (you choose it; the user's words are the reason)`);
+    const text = flagStr(args, 'text');
+    if (text === null || text.trim() === '') throw usage(`--text: the user's reason, verbatim from ${words}`);
+    const about = flagStr(args, 'about');
+    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}) });
+    const what = r.about?.kind === 'exploration' ? `exploration ${r.about.id} is reopened for one more round with it as an added question` : 'an Architect repair step amends the plan in effect (mechanical checks only); mp pm next lists it';
+    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${what}.`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about });
   },
 };
 
@@ -909,6 +932,7 @@ export const PM_COMMANDS: readonly Command[] = [
   stopRelease,
   mission,
   requirement,
+  repair,
   constraint,
   plan,
   answer,
