@@ -7,7 +7,7 @@ import { recompute } from '../../evaluator/index.ts';
 import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { CliError, EXIT, usage } from '../errors.ts';
-import { configPath, parseConfig, readConfig } from '../config.ts';
+import { configPath, DEFAULT_COMMIT_IDENT, parseConfig, readConfig } from '../config.ts';
 import { copyDocs, mpInit, mpVersion, type PointerTarget } from '../init.ts';
 import type { Project } from '../project.ts';
 import { section } from '../render.ts';
@@ -62,6 +62,7 @@ const config: Command = {
       `Target branch: ${cfg.targetBranch}`,
       ...section('Verification commands (for plans)', cfg.verificationCommands.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
       ...section('Closing checks (mp pm deliver)', cfg.closingChecks.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
+      `Commit identity: author ${cfg.commit?.author ?? `${DEFAULT_COMMIT_IDENT} (default)`}; committer ${cfg.commit?.committer ?? (cfg.commit?.author !== undefined ? 'the author' : `${DEFAULT_COMMIT_IDENT} (default)`)}`,
       ...section('Environment identity: version commands', cfg.environment.versionCommands, 'none (operating system and architecture only)'),
       ...section('Exclusive resources', cfg.exclusiveResources, 'none'),
       ...section('Filler hints', Object.entries(cfg.fillers).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`), 'none'),

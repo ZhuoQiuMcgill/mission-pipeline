@@ -8,7 +8,7 @@ import { sha256 } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
 import { ITEM_ID, missionIdProblem } from '../../common/ids.ts';
 import { LOOP_KINDS, type LoopKind } from '../../common/records.ts';
-import { rebuildDelivery, type DeliveryResult } from '../../delivery/delivery.ts';
+import type { DeliveryResult } from '../../delivery/delivery.ts';
 import type { DeliveryTarget } from '../../delivery/proofView.ts';
 import { closeNotLanded, type LandingResult } from '../../git/land.ts';
 import { detachDuplicateCheckout } from '../../git/pmActions.ts';
@@ -28,8 +28,8 @@ import {
   type StopScope,
 } from '../../memory/index.ts';
 import {
-  closingRunner,
-  labelView,
+  deliveryIdFor,
+  targetKey,
   listNotices,
   parseFiller,
   pmAck,
@@ -40,8 +40,10 @@ import {
   pmDeliver,
   pmDispatch,
   pmDrain,
+  pmFinish,
   pmGrant,
   pmLand,
+  pmRebuild,
   pmLegalizationState,
   pmLegalize,
   pmMission,
@@ -473,7 +475,7 @@ const constraint: Command = {
   group: 'pm',
   name: ['constraint'],
   summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope',
-  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>]\n       mp pm constraint withdraw <constraint> --words W-<n>',
+  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>]\n       mp pm constraint withdraw <constraint> --words W-<n>',
   flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string' },
   async run(c, args) {
     const p = P(c);
@@ -494,8 +496,10 @@ const constraint: Command = {
     const text = flagStr(args, 'text');
     if (text === null || text.trim() === '') throw usage('--text: the constraint');
     const paths = flagList(args, 'paths');
-    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(missionScope !== null ? { missionScope } : {}), scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
-    return ok(`Constraint ${id} (${kind}) recorded as ${r.version}.`, { mission: m, constraint: id, version: r.version });
+    // the words the constraint came from (optional, as `withdraw` needs them): recorded with it
+    const w = wordsArg(p.ctx, args, false);
+    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(missionScope !== null ? { missionScope } : {}), ...(w !== null ? { words: w } : {}), scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
+    return ok(`Constraint ${id} (${kind}) recorded as ${r.version}${w !== null ? ` on ${w}` : ''}.`, { mission: m, constraint: id, version: r.version, words: w });
   },
 };
 
@@ -654,8 +658,20 @@ export function renderDelivery(p: Project, r: DeliveryResult): { text: string; e
   const R = EXIT.REFUSED;
   const withWi = (head: string, wi: string | null): { text: string; exitCode: number; wi: string | null } => ({ text: [head, ...wiLine(p, wi)].join('\n'), exitCode: R, wi });
   switch (r.kind) {
-    case 'delivered':
-      return { text: `Delivery ${r.record.delivery} made: ref ${r.record.ref} at ${short(r.record.commit)} on base ${short(r.record.base)}${r.record.checks.length > 0 ? `; closing checks ${r.record.checks.filter((x) => x.passed).length}/${r.record.checks.length} passed` : ''}${r.recovered ? ' (finished an earlier attempt)' : ''}.`, exitCode: 0, wi: null };
+    case 'delivered': {
+      const notProven = r.record.proof?.notFullyProven ?? [];
+      return {
+        text: [
+          `Delivery ${r.record.delivery} made: ref ${r.record.ref} at ${short(r.record.commit)} on base ${short(r.record.base)}${r.recovered ? ' (finished an earlier attempt)' : ''}.`,
+          ...(notProven.length > 0 ? [`Delivered with their labels, not fully proven: ${notProven.map((n) => n.id).join(', ')}.`] : []),
+          `No command ran: ${r.record.fullRun?.line ?? 'full-run status not recorded (a delivery made before 4.1.2)'}. A full run at the end is your call (D-7).`,
+        ].join('\n'),
+        exitCode: 0,
+        wi: null,
+      };
+    }
+    case 'candidate':
+      return { text: `Candidate ${short(r.commit)} (tree ${short(r.tree)}) on base ${short(r.base)} built and proof-checked; nothing was delivered.`, exitCode: 0, wi: null };
     case 'recomputing':
       return { text: 'The labels are recomputing: nothing was built. Run the same command again shortly (if it lasts, WI-32: mp pm drain).', exitCode: R, wi: null };
     case 'unknown-targets':
@@ -670,8 +686,6 @@ export function renderDelivery(p: Project, r: DeliveryResult): { text: string; e
       return withWi(`These versions were accepted under another transform description: ${r.versions.join(', ')}.`, 'WI-19');
     case 'objects-unavailable':
       return withWi(`Git objects the candidate needs are not here (${r.code}): ${[...r.objects, ...r.paths].slice(0, 10).join(', ')}; nothing was fetched.`, 'WI-13');
-    case 'checks-failed':
-      return withWi(`The closing checks failed on candidate ${short(r.commit)}: ${r.outcomes.filter((x) => !x.passed).map((x) => `${x.id} (exit ${x.exitCode ?? '?'})`).join(', ')}. No delivery ref; the candidate is kept.`, 'WI-21');
     case 'rebuild-limit-exhausted':
       return withWi(`This delivery's rebuilds are used up (${r.rebuilds}/${r.limit}): ${r.detail}${r.leftRef !== null ? `; the delivery ref ${r.leftRef} stays` : ''}.`, 'WI-08');
     case 'ref-mismatch':
@@ -690,12 +704,21 @@ function deliveryMission(ctx: ProcessContext, delivery: string, flag: string | n
   return ms[0]!;
 }
 
+/** `--message "<subject>"`: one line, the delivery commit's subject. */
+function messageArg(args: ParsedArgs): string | null {
+  const m = flagStr(args, 'message');
+  if (m === null) return null;
+  const t = m.trim();
+  if (t === '' || /[\r\n]/.test(t) || t.length > 500) throw usage('--message is the delivery commit\'s subject: one line, 1 to 500 characters');
+  return t;
+}
+
 const deliver: Command = {
   group: 'pm',
   name: ['deliver'],
-  summary: 'deliver: the manifest, the candidate on the target branch, the proof and closing checks, the delivery ref (§6.7)',
-  usage: 'mp pm deliver <mission> --outputs <object|unit:<id>,...> --words W-<n> [--rebuild-of <delivery>] [--op <delivery id>]',
-  flags: { outputs: 'list', words: 'string', 'rebuild-of': 'string' },
+  summary: 'deliver: the manifest, the candidate on the target branch, its proof check and full-run status, the delivery ref (§6.7); no command runs',
+  usage: 'mp pm deliver <mission> --outputs <object|unit:<id>,...> --words W-<n> [--message "<commit subject>"] [--rebuild-of <delivery>] [--op <delivery id>]',
+  flags: { outputs: 'list', words: 'string', 'rebuild-of': 'string', message: 'string' },
   decides: true,
   async run(c, args) {
     const p = P(c);
@@ -703,11 +726,12 @@ const deliver: Command = {
     const outputs = flagList(args, 'outputs');
     if (outputs.length === 0) throw usage('--outputs: what the user wants delivered (object versions, or unit:<proof unit>)');
     const w = wordsArg(p.ctx, args, true)!;
+    const message = messageArg(args);
     // the delivery's id: --op when given (deliver again under a new id), else one derived from the request, so a retry finishes the same delivery
-    const delivery = flagStr(args, 'op') ?? `d-${sha256(`${m}\n${[...outputs].sort().join(',')}\n${w}`).slice(0, 12)}`;
+    const delivery = flagStr(args, 'op') ?? deliveryIdFor(m, outputs.map(target), w, message);
     if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(delivery)) throw usage(`a delivery id (--op) is letters, digits and "-", at most 64: ${delivery}`);
     const rebuildOf = flagStr(args, 'rebuild-of');
-    const r = await pmDeliver(p.ctx, { mission: m, delivery, selected: outputs.map(target), closingChecks: p.config.closingChecks, words: w, ...(rebuildOf !== null ? { rebuildOf } : {}) });
+    const r = await pmDeliver(p.ctx, { mission: m, delivery, selected: outputs.map(target), words: w, ...(rebuildOf !== null ? { rebuildOf } : {}), ...(message !== null ? { message } : {}) });
     const d = renderDelivery(p, r);
     const nextLine = r.kind === 'delivered' ? `\nThe user's "deliver" is consent to land: mp pm land ${delivery} --words ${w}` : '';
     return ok(`${d.text}${nextLine}`, { mission: m, delivery, result: r, wi: d.wi }, d.exitCode);
@@ -735,6 +759,15 @@ function renderLanding(p: Project, r: LandingResult): { text: string; exitCode: 
     case 'refused':
       return { text: [`Refused (${r.reason}): ${r.detail}.`, ...wiLine(p, 'WI-06')].join('\n'), exitCode: EXIT.REFUSED, wi: 'WI-06' };
   }
+}
+
+/** A landing that found the base moved, with its WI-05 default rebuild (one place for `land` and `finish`). */
+function renderRebuilt(p: Project, landing: string, rb: DeliveryResult, w: string, then: readonly string[] = []): { lines: string[]; exitCode: number } {
+  const rd = renderDelivery(p, rb);
+  return {
+    lines: [landing, `Rebuilt on the new base (WI-05 default): ${rd.text}`, ...(rb.kind === 'delivered' ? [`Next: mp pm land ${rb.record.delivery} --words ${w}`, ...then] : []), ...wiLine(p, 'WI-05')],
+    exitCode: rb.kind === 'delivered' ? EXIT.REFUSED : rd.exitCode,
+  };
 }
 
 const land: Command = {
@@ -772,11 +805,9 @@ const land: Command = {
     const d = renderLanding(p, r);
     if (r.kind !== 'base-moved') return ok(d.text, { mission: m, delivery, result: r, intent: r.kind === 'landed' || r.kind === 'open' ? r.intent : null, wi: d.wi }, d.exitCode);
     // WI-05 default: rebuild the candidate on the new base (counted), then the PM lands the new delivery
-    const ident = p.ctx.ident();
-    const rb = await rebuildDelivery(p.ctx.gitCtx, { mission: m as MissionId, delivery, closingChecks: p.config.closingChecks, author: ident, committer: ident, filler: p.ctx.filler }, { labels: () => labelView(p.ctx), closing: closingRunner(p.ctx) });
-    const rd = renderDelivery(p, rb);
-    const lines = [d.text, `Rebuilt on the new base (WI-05 default): ${rd.text}`, ...(rb.kind === 'delivered' ? [`Next: mp pm land ${rb.record.delivery} --words ${w}`] : []), ...wiLine(p, 'WI-05')];
-    return ok(lines.join('\n'), { mission: m, delivery, result: r, rebuild: rb, wi: 'WI-05' }, rb.kind === 'delivered' ? EXIT.REFUSED : rd.exitCode);
+    const rb = await pmRebuild(p.ctx, { mission: m, delivery });
+    const x = renderRebuilt(p, d.text, rb, w);
+    return ok(x.lines.join('\n'), { mission: m, delivery, result: r, rebuild: rb, wi: 'WI-05' }, x.exitCode);
   },
 };
 
@@ -815,18 +846,71 @@ const detachDuplicate: Command = {
 const close: Command = {
   group: 'pm',
   name: ['close'],
-  summary: 'close a mission (with-risk, full or post-audit): a closing snapshot; its production steps are held, audits and deliveries go on',
-  usage: 'mp pm close <mission> --mode with-risk|full|post-audit',
-  flags: { mode: 'string' },
+  summary: 'close a mission: the honest closing snapshot (what is delivered, unproven, unfinished, at risk); never refused on the state of the work (D-11). Production steps are held; audits and deliveries go on',
+  usage: 'mp pm close <mission> [--words W-<n>] [--mode with-risk|full|post-audit]   (the mode is only recorded; default with-risk)',
+  flags: { mode: 'string', words: 'string' },
   decides: true,
   async run(c, args) {
     const p = P(c);
     const m = missionArg(args, 0);
-    const mode = flagStr(args, 'mode');
+    const mode = flagStr(args, 'mode') ?? 'with-risk';
     if (mode !== 'with-risk' && mode !== 'full' && mode !== 'post-audit') throw usage('--mode is with-risk, full or post-audit');
-    // the process layer decides inside the close's own write (a full close: labels settled, every output proven, nothing unfinished)
-    const r = await pmClose(p.ctx, m, { mode, request: c.op });
+    const w = wordsArg(p.ctx, args, false);
+    // the process layer writes the snapshot inside the close's own write; it refuses nothing about the work
+    const r = await pmClose(p.ctx, m, { mode, request: c.op, words: w });
     return ok(r.message, r);
+  },
+};
+
+const finish: Command = {
+  group: 'pm',
+  name: ['finish'],
+  summary: 'the user\'s "close and merge" in one step (D-9): deliver the accepted outputs, land, close, all on the same words; stops after the delivery, mission open, when landing cannot complete',
+  usage: 'mp pm finish <mission> --words W-<n> [--outputs <object|unit:<id>,...>] [--message "<commit subject>"] [--allow-external <worktree>]',
+  flags: { words: 'string', outputs: 'list', message: 'string', 'allow-external': 'string' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const w = wordsArg(p.ctx, args, true)!;
+    const message = messageArg(args);
+    const given = flagList(args, 'outputs');
+    const ext = flagStr(args, 'allow-external');
+    const r = await pmFinish(p.ctx, { mission: m, words: w, outputs: given.length > 0 ? given.map(target) : null, message, request: c.op, ...(ext !== null ? { allowExternal: ext } : {}) });
+    const lines: string[] = [];
+    let exitCode = 0;
+    let wi: string | null = null;
+    if (r.delivery === null) lines.push(`Nothing to deliver: the plan in effect of ${m} has no accepted output. Nothing was landed.`);
+    else {
+      const d = renderDelivery(p, r.delivery.result);
+      lines.push(`1. Deliver (${r.outputs.map(targetKey).join(', ')}): ${d.text}`);
+      if (r.stoppedAt === 'deliver') {
+        exitCode = d.exitCode;
+        wi = d.wi;
+        lines.push(`Stopped after the delivery step: nothing was landed; mission ${m} stays open. When it is resolved: mp pm finish ${m} --words ${w} again (the same words).`);
+      }
+    }
+    if (r.landing !== null) {
+      const l = renderLanding(p, r.landing);
+      if (r.landing.kind === 'base-moved' && r.rebuild !== null) {
+        const x = renderRebuilt(p, l.text, r.rebuild, w, [`then: mp pm close ${m} --words ${w}`]);
+        lines.push(`2. Land${r.landed !== r.delivery?.id ? ` (${r.landed})` : ''}: ${x.lines.join('\n')}`);
+        exitCode = x.exitCode;
+        wi = 'WI-05';
+      } else {
+        lines.push(`2. Land${r.landed !== r.delivery?.id ? ` (${r.landed})` : ''}: ${l.text}`);
+        if (r.stoppedAt === 'land') {
+          exitCode = l.exitCode;
+          wi = l.wi;
+        } else if (l.wi !== null) wi = l.wi;
+      }
+      if (r.stoppedAt === 'land') {
+        const id = r.landed ?? '<delivery>';
+        lines.push(`Stopped after the delivery: ${id} is delivered, not landed; mission ${m} stays open. Once the WI is resolved, the same words serve: mp pm land ${r.rebuild?.kind === 'delivered' ? r.rebuild.record.delivery : id} --words ${w}, then mp pm close ${m} --words ${w}.`);
+      }
+    }
+    if (r.close !== null) lines.push(`${r.delivery === null ? '' : '3. Close: '}${r.close.message}`);
+    return ok(lines.join('\n'), { mission: m, words: w, outputs: r.outputs, delivery: r.delivery, landed: r.landed, landing: r.landing, rebuild: r.rebuild, close: r.close, stoppedAt: r.stoppedAt, wi }, exitCode);
   },
 };
 
@@ -919,6 +1003,7 @@ export const PM_COMMANDS: readonly Command[] = [
   withdrawDeliveryCmd,
   detachDuplicate,
   close,
+  finish,
   alerts,
   ack,
   confirmCopy,

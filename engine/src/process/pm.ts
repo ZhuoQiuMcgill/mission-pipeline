@@ -19,7 +19,8 @@ import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 //   pmStop      a stop, written before anything queued; "stop recorded; N dispatches in flight"
 // and the PM's flow commands (requirements with their verbatim quote, constraints, PM plan
 // batches, answers, grants, legalization), each followed by advancing the process, plus the
-// delivery (A4 deliver with this package's LabelView and ClosingRunner) and the landing.
+// delivery (A4 deliver with this package's LabelView and the full-run status of the candidate's
+// tree; no command runs, 4.1.2 D-7), the WI-05 rebuild and the landing.
 // Every write of an `mp pm` command carries the command and the PM's filler (§3.2 item 13).
 
 import { mkdirSync } from 'node:fs';
@@ -32,7 +33,7 @@ import { replacementFollowsOriginal } from '../evaluator/renew.ts';
 import { reusableMethodRun } from '../evaluator/runs.ts';
 import { effectiveEvidence } from '../evaluator/semantics.ts';
 import { StoredIndex } from '../evaluator/store.ts';
-import { deliver, type ClosingCheck, type DeliveryResult } from '../delivery/delivery.ts';
+import { deliver, rebuildDelivery, type DeliveryFullRun, type DeliveryResult } from '../delivery/delivery.ts';
 import type { DeliveryTarget } from '../delivery/proofView.ts';
 import { land, recoverLandings, type LandingResult, type RecoveryReport } from '../git/land.ts';
 import {
@@ -82,8 +83,9 @@ import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
-import { closingRunner, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
-import { heldByClose } from './close.ts';
+import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { fullRunLine, heldByClose } from './close.ts';
+import { fullRunStatus } from './fullRuns.ts';
 import { materialLeaf } from './seat.ts';
 
 // ---------------------------------------------------------------- shared
@@ -707,10 +709,11 @@ export async function pmWithdrawRequirement(ctx: ProcessContext, req: { readonly
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm requirement withdraw' });
 }
 
-/** `mp pm constraint add <mission> <constraint> --kind object|instruction --text ... [--paths] [--task-types]`. */
-export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string }): Promise<{ readonly version: string }> {
+/** `mp pm constraint add <mission> <constraint> --kind object|instruction --text ... [--paths] [--task-types] [--words W-<n>]`. */
+export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string; readonly words?: string }): Promise<{ readonly version: string }> {
   const scope: ConstraintScope = { ...req.scope, ...(req.missionScope !== undefined ? { mission: req.missionScope } : {}) };
-  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope });
+  if (req.words !== undefined) wordsText(ctx, req.words);
+  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope, ...(req.words !== undefined ? { words: req.words } : {}) });
   await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint' });
   return { version };
 }
@@ -779,15 +782,26 @@ export async function pmLegalizationState(ctx: ProcessContext, req: { readonly m
 
 // ---------------------------------------------------------------- delivery and landing (A4, with this package's labels and runs)
 
-/** `mp pm deliver <mission> --outputs ... --words W-<n>` (§6.7): A4's deliver with the stored labels and the closing checks as runs. */
+/** The full-run status of a delivery candidate's tree (P1's resolver), with its line for people (D-7). */
+function deliveryFullRun(ctx: ProcessContext, mission: string): (c: { readonly tree: string }) => DeliveryFullRun {
+  return (c) => {
+    const status = fullRunStatus(ctx, mission, c.tree);
+    return { line: fullRunLine(status), status };
+  };
+}
+
+/**
+ * `mp pm deliver <mission> --outputs ... --words W-<n> [--message <subject>]` (§6.7; 4.1.2, D-7): A4's
+ * deliver with the stored labels. No command runs: the delivery records the full-run status of its
+ * tree, and a full run at the end is the PM's call.
+ */
 export async function pmDeliver(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly delivery: string; readonly selected: readonly DeliveryTarget[]; readonly closingChecks?: readonly ClosingCheck[]; readonly words?: string | null; readonly targetBranch?: string; readonly rebuildOf?: string | null },
+  req: { readonly mission: string; readonly delivery: string; readonly selected: readonly DeliveryTarget[]; readonly words?: string | null; readonly targetBranch?: string; readonly rebuildOf?: string | null; readonly message?: string | null },
 ): Promise<DeliveryResult> {
   ctx.environment();
   // §4.1: a call first does one bounded label batch (the labels must reflect the log before a decision that needs "proven")
   settleLabels(ctx);
-  const ident = ctx.ident();
   return deliver(
     ctx.gitCtx,
     {
@@ -795,15 +809,22 @@ export async function pmDeliver(
       delivery: req.delivery,
       targetBranch: req.targetBranch ?? ctx.targetBranch,
       selected: req.selected,
-      closingChecks: req.closingChecks ?? [],
-      author: ident,
-      committer: ident,
+      author: ctx.ident(),
+      committer: ctx.committer(),
       ...(req.words !== undefined ? { words: req.words } : {}),
       ...(req.rebuildOf !== undefined ? { rebuildOf: req.rebuildOf } : {}),
+      ...(req.message !== undefined && req.message !== null ? { message: req.message } : {}),
       filler: ctx.filler,
     },
-    { labels: () => labelView(ctx), closing: closingRunner(ctx) },
+    { labels: () => labelView(ctx), fullRun: deliveryFullRun(ctx, req.mission) },
   );
+}
+
+/** WI-05 default after a landing found the target branch moved: the delivery rebuilt on the new base (counted, decision 16). */
+export async function pmRebuild(ctx: ProcessContext, req: { readonly mission: string; readonly delivery: string }): Promise<DeliveryResult> {
+  ctx.environment();
+  settleLabels(ctx);
+  return rebuildDelivery(ctx.gitCtx, { mission: req.mission as MissionId, delivery: req.delivery, author: ctx.ident(), committer: ctx.committer(), filler: ctx.filler }, { labels: () => labelView(ctx), fullRun: deliveryFullRun(ctx, req.mission) });
 }
 
 /** `mp pm land <delivery> --words W-<n>` (§6.7): A4's fast-forward landing from the recorded base. */

@@ -28,6 +28,7 @@ export {
   pmDrain,
   pmGrant,
   pmLand,
+  pmRebuild,
   pmLegalizationState,
   pmLegalize,
   pmNext,
@@ -69,5 +70,7 @@ export {
   type HandBackInput,
 } from './seat.ts';
 export { DISPATCH_LINE, MemoryFlowEvaluator, MemoryFlowLedger, MemoryFlowScheduler, REDISPATCH_LOOP, handbackDoc, memoryFlowPorts, noticeAlertId, raiseNotice, taskStatus, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
-export { CLOSE_MODES, allowedAfterClose, heldByClose, missionState, pmClose, pmMission, type CloseMode, type Closed } from './close.ts';
+export { CLOSE_MODES, allowedAfterClose, fullRunLine, heldByClose, missionState, pmClose, pmMission, snapshotLines, type CloseMode, type Closed, type CloseSnapshot } from './close.ts';
+export { acceptedOutputs, deliveryIdFor, pmFinish, targetKey, type Finished } from './finish.ts';
+export { fullRunStatus, type FullRunMarker, type FullRunStatus } from './fullRuns.ts';
 export { CWD_FIELD, normalizeCwd, runCwd, closingRunner, newRunId, runLeaf, runOnCommit, RunInProgress, shellRunner, tapResults, type CommandOutcome, type CommandRunner, type DeclaredCommand, type RecordedRun } from './runs.ts';
