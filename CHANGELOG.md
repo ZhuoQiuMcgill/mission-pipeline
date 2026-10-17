@@ -39,7 +39,8 @@ it was not. Read the upgrade notes before you upgrade a project with work in fli
   full-suite command still runs it at hand-back, and a task that writes nothing still gets a
   Constructor. An integration task with nothing to write that was not dispatched yet runs without a
   Constructor. A revision of such a plan is checked against the new mechanical rules 6 and 7 (every
-  task writes something; only the integration task runs the full suite): the Architect fixes those
+  task writes something; no task, the integration task included, lists the full suite among its
+  commands): the Architect fixes those
   tasks, and their changed cards restart them (notice `plan-revision-restarts-work`).
 - **Leftovers.** Run `mp pm clean` once to free the checkouts 4.1.1 left under
   `.mission-pipeline/tmp/`. It reports the space it freed.
@@ -73,8 +74,9 @@ it was not. Read the upgrade notes before you upgrade a project with work in fli
 - A task may cover several plan elements, and the plan has no read-only tasks. A task traces to `{
   planElements: [...] }` (the 4.1.1 shape `{ planElement }` is still read, and a one-element task
   keeps its identity, so nothing restarts on upgrade). Two new mechanical rules: every task writes
-  something, except an integration task or an experiment (rule 6), and only the integration task
-  runs the full suite (rule 7). A one-paragraph change planned as one implementation task and four
+  something, except an integration task or an experiment (rule 6), and no task, the integration task
+  included, lists the full suite among its verification commands (rule 7): the integration task's
+  Reviewer runs it with `mp seat <id> full-run`. A one-paragraph change planned as one implementation task and four
   read-only check tasks took 5 Constructors, 5 Reviewers and 5 run sets; now it is one task, one
   Constructor and one Reviewer.
 - An integration task with nothing to write runs without a Constructor. Its start snapshot (its
@@ -158,6 +160,14 @@ it was not. Read the upgrade notes before you upgrade a project with work in fli
   `reopen-skipped`, `reopened-task-abandoned` (WI-08) and `integration-start-conflict`.
 
 ### Fixed
+- A full-suite command is never run at a hand-back or in the flow's verification, also on plans made
+  before 4.1.2 and on cards already in flight. It was run before the Reviewer looked, left no full-run
+  marker, and the close then said the suite had never run. The integration task's Reviewer runs it
+  with `mp seat <id> full-run`; the hand-back notes the command it skipped.
+- A stop now holds what it should: reruns, full runs, `mp pm renew` and the flow's verification. The
+  verification waits and runs after the stop is released.
+- The close lists the tasks of the plan in effect (repair amendments included), not tasks an earlier
+  plan version dropped.
 - The Architect's card shows the project constraints in force, the mechanical checks its plan must
   pass, the project's local commands and full suite, and what a Reviewer can see. It used to plan
   blind to them, and plans came back.

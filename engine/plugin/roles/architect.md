@@ -44,7 +44,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 Rules for the plan:
 - A task may cover several plan elements: one change that satisfies several elements is one task.
 - Every task writes something, except the integration task or an experiment. With nothing to write, the integration task gets no Constructor: its Reviewer judges its dependencies' work laid together. Never add a read-only task that only runs or checks: put the check in the acceptance standards of the task whose change it checks.
-- A task's verification commands are the project's local commands. Only the integration task runs the full suite (its Reviewer runs it last): never list a full-suite command as a task's verification command.
+- A task's verification commands are the project's local commands. Never list a full-suite command as a task's verification command, not even on the integration task: its Reviewer runs the suite last, with `mp seat <id> full-run`.
 - Write acceptance standards a Reviewer can judge from what it sees: the change, the local runs' exit codes, durations and failing output, and for the integration task the full run. The output of passing runs is not kept.
 - Tasks that can run in parallel never have overlapping write scopes.
 - Nothing waits for an exploration that has not stood, and nothing is planned for the goals beyond it.

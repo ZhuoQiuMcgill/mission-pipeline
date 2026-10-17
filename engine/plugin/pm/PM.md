@@ -63,7 +63,7 @@ Let running seats hand back first.
 - An environment change no longer takes proof off anything. Runs recorded by 4.1.0 (run method v1) still do not count: if you never renewed them, run `mp pm renew` once.
 - Run `mp pm clean` once: it frees the checkouts and scratch directories 4.1.1 left under `.mission-pipeline/tmp/` and reports the space.
 - Plans already in effect keep their tasks and commands. A task that lists a full-suite command still runs it at hand-back, and a task that writes nothing still gets a Constructor. An integration task with nothing to write that was not dispatched yet runs without a Constructor.
-- A revision of such a plan is checked against the new mechanical rules: every task writes something (except an integration task or an experiment), and only the integration task runs the full suite. The Architect fixes those tasks, which changes their cards: they restart (notice `plan-revision-restarts-work`).
+- A revision of such a plan is checked against the new mechanical rules: every task writes something (except an integration task or an experiment), and no task lists the full suite among its commands. Until then, `mp` skips full-suite commands at hand-back on that plan's cards: the integration task's Reviewer runs the suite with `full-run`. The Architect fixes those tasks, which changes their cards: they restart (notice `plan-revision-restarts-work`).
 - The Claude Code adapter no longer runs `mp pm next` at session start.
 
 ## Upgrading from 4.1.0
@@ -77,7 +77,7 @@ Let running Constructors hand back first; use git 2.53 or later.
 - If you ran the field's PR stack: carried re-binds stay as history and their program judgments no longer count. The next `mp` writes remove them in bounded batches (`mp pm drain` at once); until then labels read as recomputing and proof decisions wait. Stable mode re-binds for a Reviewer, fast mode notifies, and dependents follow the seat's accepted successor. Stack deliveries land as recorded, so re-prepare any that rested on a layered or projected proof. No other stack record is re-checked.
 
 ## Stops
-- `mp pm stop` records the stop at a conservative scope; from then on `mp` refuses new dispatches, hand-backs and landings in scope. It cannot stop a running seat: stop those in your harness, then report what `mp` and your harness confirmed.
+- `mp pm stop` records the stop at a conservative scope; from then on `mp` refuses new dispatches, hand-backs, landings, reruns, full runs and renewals in scope, and the flow's verification waits until the stop is released. It cannot stop a running seat: stop those in your harness, then report what `mp` and your harness confirmed.
 - A stop in error or too wide: confirm with the user, then `mp pm stop-narrow` or `mp pm stop-release`. Work a stop cancelled does not come back by itself.
 
 ## The end of a mission
