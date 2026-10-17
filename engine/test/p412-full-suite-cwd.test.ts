@@ -20,3 +20,12 @@ test('the hand-back keeps a package-local command whose text equals the suite', 
   const kept = verificationCommands(suite, [{ id: 'fe', command: 'npm test', cwd: 'frontend' }, { id: 'all', command: 'npm test' }]);
   assert.deepEqual(kept.map((c) => c.id), ['fe']);
 });
+
+test('equivalent working directories match the way a run resolves them (final review r3)', () => {
+  const fe = [{ id: 'fe', command: 'npm test', cwd: 'frontend' }];
+  assert.equal(isFullSuiteCommand(fe, 'npm test', 'frontend/.'), true, 'frontend/. is frontend');
+  assert.equal(isFullSuiteCommand(fe, 'npm test', 'frontend/'), true);
+  assert.equal(isFullSuiteCommand(fe, 'npm test', 'frontend\\'), true, 'a backslash is a slash');
+  assert.equal(isFullSuiteCommand(suite, 'npm test', 'frontend/..'), true, 'frontend/.. is the root');
+  assert.equal(isFullSuiteCommand(suite, 'npm test', '../elsewhere'), false, 'a directory outside the checkout never matches');
+});

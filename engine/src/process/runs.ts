@@ -37,6 +37,7 @@ import { mkdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { normalRelDir } from '../common/fullSuite.ts';
 import type { EnvSnapshotId, EvidenceId, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord, RunClass } from '../common/records.ts';
@@ -90,13 +91,10 @@ export const CWD_FIELD = RUN_FIELD.cwd;
 
 /** A command's working directory, normalized and relative to the checkout root ("." for the root); a path that leaves the checkout is refused. */
 export function normalizeCwd(cwd: string | undefined | null): string {
-  if (cwd === undefined || cwd === null) return '.';
-  const s = cwd.replace(/\\/g, '/').trim();
-  if (s === '' || s === '.' || s === './') return '.';
-  if (s.startsWith('/') || /^[A-Za-z]:/.test(s)) throw new ProcessError('NOT_ALLOWED', `the working directory "${cwd}" is not relative to the repository root`);
-  const n = posix.normalize(s).replace(/\/+$/, '');
-  if (n === '' || n === '.') return '.';
-  if (n === '..' || n.startsWith('../') || n.split('/').includes('.git')) throw new ProcessError('NOT_ALLOWED', `the working directory "${cwd}" leaves the checkout`);
+  const n = normalRelDir(cwd);
+  const s = (cwd ?? '').replace(/\\/g, '/').trim();
+  if (n === null && (s.startsWith('/') || /^[A-Za-z]:/.test(s))) throw new ProcessError('NOT_ALLOWED', `the working directory "${cwd}" is not relative to the repository root`);
+  if (n === null || n.split('/').includes('.git')) throw new ProcessError('NOT_ALLOWED', `the working directory "${cwd}" leaves the checkout`);
   return n;
 }
 
