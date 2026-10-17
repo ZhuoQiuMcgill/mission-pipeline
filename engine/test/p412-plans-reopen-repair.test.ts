@@ -133,7 +133,7 @@ describe('P3 item 1: a task may trace several plan elements', () => {
 
 // ---------------------------------------------------------------- 2, 3. mechanical refusals
 
-describe('P3 items 2 and 3: no read-only tasks; the full suite only in the integration task', () => {
+describe('P3 items 2 and 3: no read-only tasks; no task declares the full suite', () => {
   it('an implementation task with an empty write scope is refused with the card\'s text', async () => {
     const plan = detailedPlan(M);
     const ro: PlanDoc = { ...plan, tasks: plan.tasks.map((t) => (t.id === 'impl' ? { ...t, writeScope: [] } : t)) };
@@ -144,13 +144,16 @@ describe('P3 items 2 and 3: no read-only tasks; the full suite only in the integ
     assert.deepEqual(ok.failures, []);
   });
 
-  it('a non-integration task that runs the full suite is refused; the integration task may', async () => {
+  it('a task that runs the full suite is refused, the integration task included (its Reviewer runs it with full-run, INT F1)', async () => {
     const fullSuite = [{ id: 'all', command: ['npm', 'test'] }];
     const r = await mechanicalCheck({ pmPlan: pmPlan(M), plan: detailedPlan(M), unsettled: new Set(), hasSymbol: async () => true, fullSuite });
     assert.ok(r.failures.includes('full suite: task impl runs the full suite: only the integration task\'s Reviewer runs it (D-5, D-6).'), r.failures.join('; '));
     const p = integrationPlan();
     const integ: PlanDoc = { ...p, tasks: p.tasks.map((t) => (t.id === 'impl' ? { ...t, verificationCommands: [{ id: 'unit', command: 'npm run unit' }] } : t.id === 'integ' ? { ...t, verificationCommands: [{ id: 'all', command: 'npm   test' }] } : t)) };
-    const ok = await mechanicalCheck({ pmPlan: pmPlan(M), plan: integ, unsettled: new Set(), hasSymbol: async () => true, fullSuite });
+    const bad = await mechanicalCheck({ pmPlan: pmPlan(M), plan: integ, unsettled: new Set(), hasSymbol: async () => true, fullSuite });
+    assert.deepEqual(bad.failures, ['full suite: task integ (integration) lists the full suite as a verification command: its Reviewer runs the suite with `mp seat <id> full-run`, last; give the task the project\'s local commands (D-5).']);
+    const local: PlanDoc = { ...integ, tasks: integ.tasks.map((t) => (t.id === 'integ' ? { ...t, verificationCommands: [{ id: 'unit', command: 'npm run unit' }] } : t)) };
+    const ok = await mechanicalCheck({ pmPlan: pmPlan(M), plan: local, unsettled: new Set(), hasSymbol: async () => true, fullSuite });
     assert.deepEqual(ok.failures, []);
   });
 

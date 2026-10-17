@@ -12,7 +12,7 @@ import type { MissionId, ModuleId } from '../common/ids.ts';
 import { Command, Continuation, Interface, Item, ListRefSchema, Workspace, commonCardFields, list, renderCommon } from './cards/common.ts';
 import { SEAT_COMMANDS, seatCardEntry, type SeatCommand } from './cards/registry.ts';
 import { roleText } from './cards/roles.ts';
-import type { SuiteCommand } from '../common/fullSuite.ts';
+import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
 
 export { Continuation };
 
@@ -227,13 +227,30 @@ export function seatCommandsOf(card: { readonly seat: string } & Readonly<Record
   if (materials.length === 0) out.delete('read');
   if (e.toolProfile === 'read-evidence' && card['allowAsyncEvidence'] === false) out.delete('request-evidence');
   if (card['allowAsyncEvidence'] === true) out.add('request-evidence');
-  if (rerunCommands(card).length > 0) out.add('rerun');
+  if (rerunnableCommands(card, o).length > 0) out.add('rerun');
   else out.delete('rerun');
   if (offersFullRun(card, o)) out.add('full-run');
   // 4.1.2: which accepted products changed a path, for tracing a failure (an integration review, a repair)
   if (isIntegrationCard(card) || card.seat === 'architect-repair') out.add('owners');
   const order: readonly SeatCommand[] = ['card', 'read', 'checkout', 'rerun', 'owners', 'request-evidence', 'full-run', 'handback'];
   return order.filter((c) => out.has(c));
+}
+
+/**
+ * The declared commands a seat may rerun: its card's, without the project's full suite (4.1.2: the
+ * suite is left to the integration review, whose Reviewer runs it with `mp seat <id> full-run`).
+ */
+export function rerunnableCommands(card: Readonly<Record<string, unknown>>, o: CardProject = {}): Array<{ readonly id: string; readonly command: string; readonly cwd?: string }> {
+  return rerunCommands(card).filter((c) => !isFullSuiteCommand(o.fullSuite ?? [], c.command));
+}
+
+/** The commands on a card (a Constructor's verification commands, a Reviewer's declared commands) that are the project's full suite (4.1.2). */
+export function fullSuiteOnCard(card: Readonly<Record<string, unknown>>, o: CardProject = {}): Array<{ readonly id: string; readonly command: string }> {
+  const suite = o.fullSuite ?? [];
+  if (suite.length === 0) return [];
+  const listed = [...((card['verificationCommands'] as Array<{ id: string; command: string }> | undefined) ?? []), ...rerunCommands(card)];
+  const seen = new Set<string>();
+  return listed.filter((c) => isFullSuiteCommand(suite, c.command) && !seen.has(c.id) && (seen.add(c.id), true));
 }
 
 /** The commands a seat may have `mp` run with `mp seat <id> rerun <command-id>` (declared on its card). */
@@ -258,7 +275,7 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
         break;
       case 'rerun':
-        lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunCommands(card).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite.`);
+        lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunnableCommands(card, o).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite.`);
         break;
       case 'owners':
         lines.push(`\`mp seat ${dispatch} owners <path>...\`: which accepted products of this mission changed each path (a path, or a directory ending in "/"), with their task and attempt.`);
@@ -297,6 +314,12 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
   const fullRun = offersFullRun(card, o)
     ? `\n\n## The full suite (an integration task)\nYou judge the whole change. Check the cheapest things first:\n- look at the change and the local results above first;\n- if something is visibly wrong, hand back "rework" (or "needs-decision") without a full run;\n- only when nothing visible is wrong, run \`mp seat ${o.dispatch} full-run\` (the full suite: ${(o.fullSuite ?? []).map((x) => `[${x.id}] ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`).join('; ')}), and cite its runs as evidence:<id>.\nA "pass" must cite a passing full run of this candidate; without one the hand-back is refused. When the full suite fails, trace the failure to the task whose change caused it (the run summary keeps the last 400 lines of each failing command; \`mp seat ${o.dispatch} owners <path>...\` lists which accepted products changed a path) and hand back "rework" with \`reopen\`: [{ "task", "issue", "evidence" }] naming that task: it fixes its own work, and this integration task does not absorb the fix.${(card['integration'] as { hasConstructor?: boolean } | undefined)?.hasConstructor === true ? ' A failure in this task\'s own change is a "rework" without `reopen`.' : ''} Hand back "needs-decision" only for a failure no dependency explains.`
     : '';
+  // 4.1.2 (D-4, D-5, D-7): the project's full suite listed on this card is never run at hand-back
+  const suite = fullSuiteOnCard(card, o);
+  const suiteNote =
+    suite.length > 0
+      ? `\n\n## The project's full suite\n${suite.map((c) => `[${c.id}] ${c.command}`).join('; ')} on this card ${suite.length === 1 ? 'is' : 'are'} the project's full suite. \`mp\` does not run ${suite.length === 1 ? 'it' : 'them'} at hand-back, and ${suite.length === 1 ? 'it is' : 'they are'} not rerun from this card: ${offersFullRun(card, o) ? `you run the suite with \`mp seat ${o.dispatch} full-run\`, last (below), and that run is recorded with a full-run marker.` : 'the suite is left to the integration review (its Reviewer runs `mp seat <id> full-run`, last, recorded with a full-run marker).'}${e.exportsProduct === true ? ' Do not run it yourself: you answer for your own part, with its local commands (D-4).' : ''}`
+      : '';
   const evidence = seatCommandsOf(card, o).includes('request-evidence') ? `\nAn evidence request (the last fenced json block of your notes on \`mp seat ${o.dispatch} request-evidence --stdin\`, or the file \`${f.request}\`) matches this JSON schema:\n\n\`\`\`json\n${JSON.stringify(z.toJSONSchema(EvidenceRequestSchema), null, 2)}\n\`\`\`\n` : '';
   return [
     `# ${SEAT_TITLE[e.seat] ?? e.seat} card: dispatch ${o.dispatch}`,
@@ -311,7 +334,7 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
     '',
     '# This task',
     '',
-    `${where}${e.render(parsed)}`.trimEnd() + fullRun,
+    `${where}${e.render(parsed)}`.trimEnd() + suiteNote + fullRun,
     '',
     '## Your commands',
     '',

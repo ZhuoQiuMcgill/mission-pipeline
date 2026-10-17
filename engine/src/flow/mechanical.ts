@@ -18,8 +18,9 @@
 //      straight to the Secretary (3.5), they do not send the plan back.
 //   6. Every task writes something, except an integration task (it then gets no Constructor) or an
 //      experiment (4.1.2: checks belong in the acceptance standards of the task they check).
-//   7. Only the integration task runs the full suite: no other task declares one of its commands
-//      as a verification command (D-5, D-6).
+//   7. No task declares a full-suite command as a verification command, the integration task
+//      included: the suite is run only by the integration task's Reviewer (`mp seat <id> full-run`,
+//      last, with a marker), never at hand-back (D-4, D-5, D-7).
 // Any failure of 1–4, 6, 7 sends the plan back to the Architect (the mechanical-return loop, 6.5).
 // A repair's amendment (D-10) is checked as the plan in effect plus the added tasks: the per-task
 // rules apply to the added tasks (the plan in effect passed them when it took effect), and rule 4
@@ -38,7 +39,7 @@ export const MECHANICAL_RULES: ReadonlyArray<{ readonly id: string; readonly tex
   { id: 'interfaces', text: 'Every interface a task implements or calls is reused (found in the named file of the snapshot) or defined by an interface task, and the task comes after its definition task.' },
   { id: 'integration', text: 'With more than one implementation task there is exactly one integration task, and it depends on every implementation task.' },
   { id: 'writes', text: 'Every task writes something, except an integration task (with nothing to write it gets no Constructor: its Reviewer judges its dependencies\' work laid together) or an experiment. A read-only "check" task is refused: checks belong in the acceptance standards of the task whose change they check.' },
-  { id: 'full suite', text: 'Only the integration task runs the project\'s full suite (its Reviewer runs it last): no other task lists a full-suite command as a verification command. Give ordinary tasks the project\'s local commands.' },
+  { id: 'full suite', text: 'No task lists a full-suite command as a verification command, the integration task included: the project\'s full suite is run only by the integration task\'s Reviewer (`mp seat <id> full-run`, last), never at hand-back. Give tasks the project\'s local commands.' },
   { id: 'order', text: 'A change to an element order the user specified is not a failure: it goes to the Secretary.' },
 ];
 
@@ -101,7 +102,7 @@ export interface MechanicalInputs {
   readonly unsettled: ReadonlySet<string>;
   /** Whether the snapshot has `symbol` in `file` (3.5 "在快照中找得到对应文件和符号"). */
   readonly hasSymbol: (file: string, symbol: string) => Promise<boolean>;
-  /** The project's full suite (config `fullSuite`, COMMON's alias): only the integration task may run one of its commands. */
+  /** The project's full suite (config `fullSuite`, COMMON's alias): no task declares one of its commands (the integration Reviewer's full-run runs it). */
   readonly fullSuite?: readonly SuiteCommand[];
   /** A repair's amendment (D-10): the ids of the tasks it adds to the plan in effect (`plan` holds both). */
   readonly amendment?: { readonly added: ReadonlySet<string> };
@@ -119,11 +120,13 @@ export function writesNothingProblem(t: Pick<DetailedTask, 'id' | 'kind' | 'writ
   return `task ${t.id} writes nothing: checks belong in the acceptance standards of the task whose change they check; the full suite runs in the integration task's review.`;
 }
 
-/** Rule 7: a non-integration task that declares a full-suite command. */
+/** Rule 7: a task, of any kind, that declares a full-suite command (the integration Reviewer's `full-run` runs the suite, never a hand-back). */
 export function fullSuiteProblem(t: Pick<DetailedTask, 'id' | 'kind' | 'verificationCommands'>, suite: readonly SuiteCommand[]): string | null {
-  if (t.kind === 'integration' || suite.length === 0) return null;
+  if (suite.length === 0) return null;
   if (!t.verificationCommands.some((c) => isFullSuiteCommand(suite, c.command))) return null;
-  return `task ${t.id} runs the full suite: only the integration task's Reviewer runs it (D-5, D-6).`;
+  return t.kind === 'integration'
+    ? `task ${t.id} (integration) lists the full suite as a verification command: its Reviewer runs the suite with \`mp seat <id> full-run\`, last; give the task the project's local commands (D-5).`
+    : `task ${t.id} runs the full suite: only the integration task's Reviewer runs it (D-5, D-6).`;
 }
 
 export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalResult> {
@@ -137,7 +140,7 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
   // a repair's amendment: the per-task rules apply to the tasks it adds (the plan in effect passed them)
   const checked = (t: DetailedTask): boolean => i.amendment === undefined || i.amendment.added.has(t.id);
 
-  // 6, 7. every task writes something (integration and experiments excepted); the full suite only in the integration task
+  // 6, 7. every task writes something (integration and experiments excepted); no task declares the full suite
   for (const t of plan.tasks) {
     if (!checked(t)) continue;
     const ro = writesNothingProblem(t);

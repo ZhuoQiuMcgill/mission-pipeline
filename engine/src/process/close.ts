@@ -39,6 +39,7 @@ import { PLAN_LINE, PM_PLAN_EFFECTIVE, SECRETARY_LINE, explorationLine, taskLine
 import { acceptedStartOf, lineAcceptance } from '../flow/execution.ts';
 import { flowCtx } from '../flow/context.ts';
 import { fold } from '../flow/exploration/machine.ts';
+import { latestEffective, planInEffect } from '../flow/planning.ts';
 import { repairsOf } from '../flow/repair.ts';
 import type { ProcessContext } from './context.ts';
 import { fullRunStatus, type FullRunStatus } from './fullRuns.ts';
@@ -129,6 +130,12 @@ async function closingRepairs(ctx: ProcessContext, mission: MissionId): Promise<
 /** What the close reads before its write (git, and resolvers on the context): the delivered tree's full-run status, the repairs. */
 interface CloseInputs {
   readonly words: string | null;
+  /**
+   * The plan in effect read before the write (planInEffect: its tasks with those its repairs added;
+   * tasks a re-plan dropped are history, not unfinished work), and how many "effective" events the
+   * mission had then (one more in the write: the plan changed while closing).
+   */
+  readonly plan: { readonly tasks: readonly string[]; readonly effective: number };
   /** The mission's current delivery as read before the write, with its tree and the full-run status of that tree. */
   readonly delivered: { readonly delivery: string; readonly tree: string | null; readonly fullRun: FullRunStatus | null } | null;
   readonly repairs: readonly RepairEntry[];
@@ -170,12 +177,12 @@ export interface CloseSnapshot {
 /** The closing snapshot document (proof state, unfinished work, risks), read inside the close's write. */
 function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunning: boolean, checked: CheckedStarts, inputs: CloseInputs): CloseSnapshot {
   const ev = (line: string, event: string) => flowEvents(tx, { mission, line, event, limit: 10_000 });
-  // the outputs: the effective plans, the accepted products of the plan tasks, the settled explorations' artifacts
-  // (4.1.2: a repair's amendment is an "effective" event of the plan in effect listing the tasks it added,
-  // plandoc.ts amendedPlan: they are read here as the plan's own)
+  // the outputs: the plan in effect, the accepted products of its tasks (with the tasks its repairs
+  // added; a task a re-plan dropped is history, 4.1.2), the settled explorations' artifacts
   const effective = ev(PLAN_LINE, 'effective').map((e) => body<{ dplan: string; tasks: readonly string[] }>(tx, e.body));
   const pmPlans = ev(PLAN_LINE, PM_PLAN_EFFECTIVE).map((e) => body<{ plan: string; explorations?: readonly string[] }>(tx, e.body));
-  const tasks = [...new Set(effective.flatMap((e) => e.tasks))];
+  const tasks = [...inputs.plan.tasks];
+  const planMoved = effective.length !== inputs.plan.effective;
   const outputs: Array<{ object: string; kind: string; of: string }> = [];
   const unfinishedTasks: string[] = [];
   const abandoned: string[] = [];
@@ -263,6 +270,7 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
   const same = cur !== null && inputs.delivered !== null && inputs.delivered.delivery === cur.delivery;
   const fullRun: CloseSnapshot['fullRun'] = cur === null ? null : same ? { tree: inputs.delivered!.tree, line: inputs.delivered!.fullRun !== null ? fullRunLine(inputs.delivered!.fullRun) : 'full-run status unknown: the delivered tree could not be read', status: inputs.delivered!.fullRun } : { tree: null, line: `full-run status not read: delivery ${cur.delivery} was recorded while closing`, status: null };
   const risks = [
+    ...(planMoved ? ['the plan in effect changed while closing: its tasks are those read before; close again for the current plan'] : []),
     ...startRisks,
     ...notProven.map((x) => `not proven: ${x}`),
     ...deliveredNotProven.map((x) => `not proven: ${x}`),
@@ -384,11 +392,20 @@ export async function pmClose(ctx: ProcessContext, missionId: string, req: { rea
   if (req.words !== undefined && req.words !== null && ctx.memory.read((db) => wordsEntry(db, req.words!)) === null) throw new LedgerError('RECORD_INVALID', `no words entry ${req.words}`);
   const known = ctx.memory.read((db) => db.stmt('SELECT 1 FROM missions WHERE mission = ?').get(mission) !== undefined || flowEvents(db, { mission, limit: 1 }).length > 0);
   if (!known) throw new LedgerError('BAD_REQUEST', `there is no mission ${mission}`);
-  const tasks = ctx.memory.read((db) => [...new Set(flowEvents(db, { mission, line: PLAN_LINE, event: 'effective', limit: 10_000 }).flatMap((e) => (JSON.parse(ctx.memory.data.text(e.body)) as { tasks: string[] }).tasks))]);
   const fc = flowCtx(ctx.ports(), mission);
+  // the plan in effect, its repairs' tasks included (the flow's resolver); its stored plan missing or
+  // unreadable: the tasks its "effective" event lists (the same list), never a refusal (D-11)
+  const effectiveCount = ctx.memory.read((db) => flowEvents(db, { mission, line: PLAN_LINE, event: 'effective', limit: 10_000 }).length);
+  let inEffect: Awaited<ReturnType<typeof planInEffect>> = null;
+  try {
+    inEffect = await planInEffect(fc);
+  } catch {
+    /* read below from its event */
+  }
+  const tasks = inEffect !== null ? inEffect.plan.tasks.map((t) => t.id) : [...((await latestEffective(fc))?.tasks ?? [])];
   const checked = new Map<string, Awaited<ReturnType<typeof acceptedStartOf>>>();
   for (const task of tasks) checked.set(task, await acceptedStartOf(fc, task));
-  const inputs: CloseInputs = { words: req.words ?? null, delivered: deliveredInputs(ctx, mission), repairs: await closingRepairs(ctx, mission) };
+  const inputs: CloseInputs = { words: req.words ?? null, plan: { tasks, effective: effectiveCount }, delivered: deliveredInputs(ctx, mission), repairs: await closingRepairs(ctx, mission) };
   const op = stateOp(ctx, 'close', mission, req);
   let repeated = true;
   const out = ctx.memory.write({ op, payload: { mission, mode: req.mode, waitRunning, words: req.words ?? null, request: req.request ?? null }, command: 'close', filler: ctx.filler }, (tx) => {
