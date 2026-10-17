@@ -6,7 +6,7 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
-## [4.1.2] - unreleased
+## [4.1.2] - 2026-10-17
 
 4.1.2 cuts the engine's execution redundancy. Two field runs showed the engine paying for a perfect
 process in time and disk:
