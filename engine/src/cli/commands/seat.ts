@@ -73,14 +73,14 @@ const read: Command = {
 const checkout: Command = {
   group: 'seat',
   name: ['checkout'],
-  summary: 'put the commit your card names in a directory and print its path (read there; nothing changed there is kept)',
+  summary: 'print the path of a read-only directory holding the commit your card names (shared with the other seats reading that commit; read there, never write)',
   usage: 'mp seat <dispatch> checkout',
   flags: {},
   async run(c, args) {
     const r = await seatCheckout(P(c).ctx, dispatchOf(args));
     const note =
       r.commit !== null
-        ? `\n(commit ${r.commit}: a file snapshot without git metadata; git commands there reach the project's repository, so use the commit: git -C ${P(c).dir} show ${r.commit}, or git -C ${P(c).dir} diff ${r.commit}^ ${r.commit} for a candidate's change)`
+        ? `\n(commit ${r.commit}: a read-only file snapshot without git metadata, shared with the other seats reading this commit; do not write there. git commands there reach the project's repository, so use the commit: git -C ${P(c).dir} show ${r.commit}, or git -C ${P(c).dir} diff ${r.commit}^ ${r.commit} for a candidate's change)`
         : '';
     return ok(`${r.path}${note}`, r);
   },

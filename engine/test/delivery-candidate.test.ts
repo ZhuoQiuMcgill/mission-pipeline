@@ -112,7 +112,7 @@ test('each version brings its own changes onto the current main; what main did m
     assert.equal(blob(w, k.commit, 'docs/readme.md'), 'readme 2', "main's own change survives");
     assert.equal(blob(w, k.commit, 'top.txt'), 'added on main');
     assert.deepEqual(k.changedPaths, ['a/x.ts', 'b/gone.ts', 'b/new.ts', 'b/y.ts', 'p/main.ts']);
-    assert.equal(readFileSync(join(k.snapshotDir, 'p/main.ts'), 'utf8'), 'main 2\n', 'the canonical candidate is materialized');
+    assert.equal(readFileSync(join(k.snapshotDir!, 'p/main.ts'), 'utf8'), 'main 2\n', 'the canonical candidate is materialized');
     const proof = await checkCandidateProofs({ git: fx.git, repo: w.layout, view: w.view, manifest: manifestOf(w, obj('p1'), obj('b1')), candidate: k });
     assert.deepEqual(proof.notFullyProven, []);
     assert.deepEqual([...proof.proven].sort(), ['a1', 'b1', 'p1']);

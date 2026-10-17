@@ -33,6 +33,7 @@ import {
   listNotices,
   parseFiller,
   pmAck,
+  pmClean,
   pmClose,
   pmAnswer,
   pmConstraint,
@@ -235,8 +236,44 @@ const release: Command = {
       `Worktree: ${r.worktree === 'none' ? 'none' : r.worktree === 'removed' ? 'removed' : 'kept (released as abandoned: it stays until --ended)'}.`,
       ...(r.requeued ? [`The step is ready again (re-dispatches ${r.attempts}/${r.allowed}).`] : []),
       ...(r.exhausted ? [`The lineage's re-dispatches are used up (${r.attempts}/${r.allowed}): the Secretary decides. ${wiLine(p, 'WI-08').join('')}`] : []),
+      ...(r.notes ?? []),
     ];
     return ok(lines.join('\n'), r, r.exhausted ? EXIT.REFUSED : 0);
+  },
+};
+
+/** Bytes for people: B, KB, MB, GB (powers of 1024, one decimal). */
+function bytesText(n: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  return u === 0 ? `${n} B` : `${v.toFixed(1)} ${units[u]}`;
+}
+
+const clean: Command = {
+  group: 'pm',
+  name: ['clean'],
+  summary: 'remove now what no running mp process owns under .mission-pipeline/tmp/ and the worktrees of dispatches that are over; reports the bytes freed (safe while other mp commands run)',
+  usage: 'mp pm clean [--mission <m>]   (--mission: only that mission\'s dispatch directories and worktrees; ownerless scratch always goes)',
+  flags: { mission: 'string' },
+  async run(c, args) {
+    const p = P(c);
+    const m = flagStr(args, 'mission');
+    if (m !== null && missionIdProblem(m) !== null) throw usage(`--mission: ${missionIdProblem(m)}`);
+    const r = pmClean(p.ctx, { mission: m as MissionId | null });
+    const lines = [
+      `Freed ${bytesText(r.totalBytes)}.`,
+      ...section('Removed under .mission-pipeline/tmp/', r.removed.map((x) => `${x.path}: ${x.why}${x.done ? '' : ' (not finished: it waits in the trash)'}; ${bytesText(x.bytes)}`), 'nothing'),
+      ...section('Worktrees removed', r.worktrees.map((w) => `${w.path} (${w.dispatch}): ${bytesText(w.bytes)}`)),
+      ...section('Worktrees kept', r.worktreesKept.map((w) => `${w.dispatch}: ${w.why}`)),
+      ...(r.pending > 0 ? [`${r.pending} director${r.pending === 1 ? 'y' : 'ies'} in the trash could not be deleted now; mp pm next and mp pm clean try again.`] : []),
+      ...section('Left in place', r.kept.map((k) => `${k.path}: ${k.why}`)),
+    ];
+    return ok(lines.join('\n'), r);
   },
 };
 
@@ -919,6 +956,7 @@ export const PM_COMMANDS: readonly Command[] = [
   withdrawDeliveryCmd,
   detachDuplicate,
   close,
+  clean,
   alerts,
   ack,
   confirmCopy,

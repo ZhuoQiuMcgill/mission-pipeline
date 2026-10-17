@@ -127,7 +127,9 @@ describe('a mission through the shell-invoked mp, copied to another folder mid-w
     const leaf = readFileSync(join(p.dir, '.mission-pipeline', 'missions', M, 'dispatches', cal2.dispatch, 'report.md'), 'utf8');
     assert.match(leaf, /^# Report of D-\d+\n\nDone as the card says\./);
     assert.doesNotMatch(leaf, /```json/, 'the report leaf is the report; the fields went to result.json');
-    assert.ok(existsSync(join(p.dir, '.mission-pipeline', 'tmp', cal2.dispatch, 'result.json')), 'mp wrote the hand-back files itself');
+    // 4.1.2: mp wrote the hand-back files itself, read them, and removed tmp/<dispatch>/ once the hand-back was recorded
+    assert.equal(cal2.answer.outcome, 'accepted');
+    assert.ok(!existsSync(join(p.dir, '.mission-pipeline', 'tmp', cal2.dispatch)), 'tmp/<dispatch>/ is removed once the hand-back is recorded');
 
     const n2 = await ok(p.dir, 'pm', 'next');
     const s4 = n2.result.ready.find((r: { kind: string }) => r.kind === 'constructor');

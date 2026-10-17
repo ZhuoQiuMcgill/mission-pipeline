@@ -20,9 +20,11 @@
 //      otherwise (the base or an earlier version changed  -> conflict, typed, for
 //      it differently from what the version started from)    an integration task
 //    The result is a commit whose only parent is the base (landing is a
-//    fast-forward, 6.6 step 7), written with plumbing that never runs a filter,
-//    and the canonical candidate snapshot materialized from it (7.1: checks and
-//    verification run on the canonical candidate).
+//    fast-forward, 6.6 step 7), written with plumbing that never runs a filter.
+//    What is written to disk is the caller's request (4.1.2): the canonical
+//    candidate snapshot materialized from it (7.1: checks run on the canonical
+//    candidate), only some of its paths, or nothing (a start snapshot only
+//    needs the commit).
 // 4. Proof check on the final candidate tree:
 //    - the object itself: its write-scope identity, recomputed on the candidate,
 //      must equal the accepted version's (a user commit on main that touched
@@ -32,7 +34,10 @@
 //    - each shared path is delivered by the strictly stacked top version; the
 //      lower version is checked only on its other paths, on the final tree;
 //    - its evidence: the input hashes of the runs its deciding judgments used
-//      must match the candidate's content.
+//      must match the candidate's content: the bytes a checkout of the
+//      candidate holds at those paths, read from the materialized candidate or,
+//      when it was not materialized, computed from its objects with the same
+//      conversion (nothing written).
 //    A version failing any of these, or not proven at the view's revision, can
 //    only be delivered as "not fully proven" (listed with the reasons). Then,
 //    to a fixed point (code review r1 #5; 5.2, 5.3): a proof unit is proven only
@@ -66,8 +71,9 @@ import {
   sha256File,
   sha256Hex,
   transformDescriptionHash,
-  type AttributeEvaluator,
+  AttributeEvaluator,
   type SnapshotManifest,
+  type TransformDescription,
 } from '../git/representation.ts';
 import type { GitExec } from '../git/plainGit.ts';
 import { buildManifest, prerequisiteClosure, stackOrder, type DeliveryManifest, type ManifestEntry } from './manifest.ts';
@@ -100,13 +106,22 @@ export interface OverlayLayer {
   readonly found: ReadonlyMap<string, EntryState | null>;
 }
 
+/**
+ * What buildCandidate writes to disk (4.1.2): the whole canonical candidate ('all', the default),
+ * only the listed paths, or nothing ('none': only the commit is wanted, e.g. a start snapshot).
+ */
+export type CandidateMaterialization = 'all' | 'none' | { readonly paths: readonly string[] };
+
 export interface Candidate {
   readonly base: GitOid;
   readonly commit: GitOid;
   readonly tree: GitOid;
-  /** The canonical candidate, materialized under the bound transform description (7.1). */
-  readonly snapshotDir: string;
-  readonly snapshot: SnapshotManifest;
+  /** Where the candidate was materialized under the bound transform description (7.1); null: nothing was written. */
+  readonly snapshotDir: string | null;
+  /** The manifest of what was materialized (null: nothing). */
+  readonly snapshot: SnapshotManifest | null;
+  /** What snapshotDir holds (absent: the whole candidate, as before 4.1.2). */
+  readonly materialized?: CandidateMaterialization;
   /** Paths the overlay changed relative to the base. */
   readonly changedPaths: readonly string[];
   /** The versions in the order they were laid, each with what it found on the paths it changed (Appendix L). */
@@ -126,10 +141,15 @@ export interface CandidateOptions {
   readonly manifest: DeliveryManifest;
   /** The target branch's current commit. */
   readonly base: GitOid;
-  /** Carries the bound transform description. */
-  readonly attributes: AttributeEvaluator;
-  /** Created; must be empty. */
-  readonly snapshotDir: string;
+  /**
+   * Carries the bound transform description. Materializing needs the evaluator itself; with
+   * `materialize: 'none'` the description alone does (no scratch repository is made for it).
+   */
+  readonly attributes: AttributeEvaluator | { readonly description: TransformDescription };
+  /** Created; must be empty. Unused (and not created) with `materialize: 'none'`. */
+  readonly snapshotDir?: string;
+  /** What to write to disk (4.1.2); default 'all'. */
+  readonly materialize?: CandidateMaterialization;
   readonly message: string;
   readonly author: Ident;
   readonly committer: Ident;
@@ -394,15 +414,23 @@ export async function buildCandidate(o: CandidateOptions): Promise<CandidateResu
   }
   const root = (trees[trees.length - 1] as (typeof trees)[number]).oid;
   const commit = await commitTree(git, repo, root, [o.base], o.message, o.author, o.committer);
-  const snapshot = await materializeSnapshot({ git, repo, commit, attributes: o.attributes, dest: o.snapshotDir });
+  const want = o.materialize ?? 'all';
+  let snapshot: SnapshotManifest | null = null;
+  if (want !== 'none') {
+    if (!(o.attributes instanceof AttributeEvaluator)) throw new Error('materializing a candidate needs an attribute evaluator, not only the transform description');
+    if (o.snapshotDir === undefined) throw new Error('materializing a candidate needs its snapshot directory');
+    const only = want === 'all' ? null : new Set(want.paths);
+    snapshot = await materializeSnapshot({ git, repo, commit, attributes: o.attributes, dest: o.snapshotDir, ...(only !== null ? { exclude: (p: string) => !only.has(p) } : {}) });
+  }
   return {
     kind: 'candidate',
     candidate: {
       base: o.base,
       commit,
       tree: root,
-      snapshotDir: o.snapshotDir,
+      snapshotDir: want === 'none' ? null : (o.snapshotDir as string),
       snapshot,
+      materialized: want,
       // a path a later version put back as the base had it is not changed
       changedPaths: [...overlay.entries()].filter(([path, entry]) => !sameEntry(entry, baseEntries.get(path))).map(([path]) => path).sort(),
       layers,
@@ -464,6 +492,40 @@ function candidateFileHash(snapshotDir: string, path: string): ContentHash | nul
   }
 }
 
+/** True when the candidate's snapshot directory holds `path` as a checkout would (it was materialized whole, or with this path). */
+function materializedAt(candidate: Candidate, path: string): boolean {
+  if (candidate.snapshotDir === null) return false;
+  const m = candidate.materialized ?? 'all';
+  if (m === 'all') return true;
+  return m !== 'none' && m.paths.includes(path);
+}
+
+/**
+ * The sha256 of the bytes a clean checkout of the candidate holds at each of `paths` (4.1.2): read
+ * from the snapshot directory where the candidate was materialized there (as before), otherwise
+ * computed from the candidate's objects by materializeSnapshot itself, for these paths only and
+ * without a destination: the same conversion (eol, ident, LFS) on the same bytes, nothing written.
+ * A symlink is hashed by its target, an absent path (or a directory, a submodule) is null.
+ */
+export async function candidateFileHashes(o: { readonly git: GitExec; readonly repo: RepoLayout; readonly candidate: Candidate; readonly attributes?: AttributeEvaluator }, paths: readonly string[]): Promise<Map<string, ContentHash | null>> {
+  const out = new Map<string, ContentHash | null>();
+  const rest = new Set<string>();
+  for (const p of paths) {
+    if (out.has(p)) continue;
+    if (materializedAt(o.candidate, p)) out.set(p, candidateFileHash(o.candidate.snapshotDir as string, p));
+    else rest.add(p);
+  }
+  if (rest.size === 0) return out;
+  if (o.attributes === undefined) throw new Error('the candidate was not materialized at the evidence inputs: hashing them needs its attribute evaluator (checkCandidateProofs attributes)');
+  const manifest = await materializeSnapshot({ git: o.git, repo: o.repo, commit: o.candidate.commit, attributes: o.attributes, exclude: (p) => !rest.has(p) });
+  const found = new Map(manifest.entries.map((e) => [e.path, e.sha256]));
+  for (const p of rest) {
+    const h = found.get(p) ?? null;
+    out.set(p, h === null ? null : contentHash(h));
+  }
+  return out;
+}
+
 /** One identity rule for a composed tree, including strictly stacked path ownership. */
 async function treeIdentities(git: GitExec, repo: RepoLayout, manifest: DeliveryManifest, entries: readonly TreeEntry[]) {
   const closure = prerequisiteClosure(manifest.entries.map((e) => e.object), membersIn(manifest));
@@ -520,11 +582,21 @@ export async function checkCandidateProofs(o: {
   readonly view: DeliveryProofView;
   readonly manifest: DeliveryManifest;
   readonly candidate: Candidate;
+  /** Needed when the candidate was not materialized at its evidence inputs (4.1.2: candidateFileHashes). */
+  readonly attributes?: AttributeEvaluator;
 }): Promise<ProofCheck> {
   const entries = await lsTree(o.git, o.repo, o.candidate.commit, { recursive: true });
   // Per maintainer ruling 2, 2026-10-13: read only the final delivered tree.
   // Shared paths belong to the strictly stacked top version; no tree is reconstructed.
   const { handedOver, identities } = await treeIdentities(o.git, o.repo, o.manifest, entries);
+  // The evidence inputs, hashed on the candidate in one pass (4.1.2: nothing is materialized for them).
+  const inputPaths: string[] = [];
+  for (const e of o.manifest.entries) {
+    const targets: DeliveryTarget[] = [{ kind: 'object', id: e.object.id }];
+    if (e.unit !== null) targets.push({ kind: 'unit', id: e.unit });
+    for (const t of targets) for (const ev of o.view.decidingEvidence(t)) for (const input of ev.inputs) if (!handedOver.get(e.object.id)!.has(input.path)) inputPaths.push(input.path);
+  }
+  const hashes = await candidateFileHashes(o, inputPaths);
   const objectsOf = (t: DeliveryTarget): DeliveryObject[] => {
     if (t.kind === 'object') {
       const x = o.view.object(t.id);
@@ -573,7 +645,7 @@ export async function checkCandidateProofs(o: {
       for (const ev of o.view.decidingEvidence(t)) {
         for (const input of ev.inputs) {
           if (handedOver.get(obj.id)!.has(input.path)) continue;
-          const actual = candidateFileHash(o.candidate.snapshotDir, input.path);
+          const actual = hashes.get(input.path) ?? null;
           if (actual !== input.sha256) reasons.push({ kind: 'evidence-input-mismatch', evidence: ev.evidence, path: input.path, expected: input.sha256, actual });
         }
       }

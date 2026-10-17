@@ -3,7 +3,8 @@
 //   snapshot    the commit a seat reads: the mission's base (the target branch's head) or a given
 //               commit, with accepted product versions laid over it (a dependent task sees its
 //               prerequisites, 5.3) by the delivery's overlay (delivery/candidate.ts); the card
-//               names the commit, `mp seat <id> checkout` materializes it. A later attempt's start
+//               names the commit, `mp seat <id> checkout` materializes it (the snapshot itself writes
+//               nothing to disk: only its commit is used, 4.1.2). A later attempt's start
 //               (carry): the previous candidate, or, when its dependencies' products changed, the
 //               previous version's whole change laid over their current snapshot (Appendix M)
 //   product     the product version of a Constructor's candidate commit (5.1): its content is the
@@ -21,8 +22,6 @@
 // Every action is idempotent: a product version is recorded once per object id, a snapshot of the
 // same inputs is the same commit, a verification is reused.
 
-import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { canonicalJson } from '../common/hash.ts';
 import type { GitOid, MissionId, ModuleId, ObjectVersionId, ProofUnitId } from '../common/ids.ts';
 import type { ObjectVersionRecord } from '../common/records.ts';
@@ -33,7 +32,7 @@ import { memoryProofView } from '../delivery/memoryView.ts';
 import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
-import { AttributeEvaluator, MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
+import { MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
 import { appendRecords, factById, LedgerError } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
 import type { ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../flow/ports.ts';
@@ -151,18 +150,17 @@ export function gitActions(ctx: ProcessContext): GitActions {
       manifest = compose(view, given);
     }
     const products = manifest.entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
-    const scratch = mkdtempSync(join(ctx.memory.paths.tmp, 'snapshot-'));
-    let attributes: AttributeEvaluator | null = null;
     try {
       const layout = await repo();
-      attributes = await AttributeEvaluator.create(ctx.git, layout, await description(), scratch);
+      // 4.1.2: only the commit is used; nothing is materialized, so no scratch directory or
+      // attribute repository is made (the description alone checks the versions rest on it)
       const r = await buildCandidate({
         git: ctx.git,
         repo: layout,
         manifest,
         base: gitOid(base),
-        attributes,
-        snapshotDir: join(scratch, 'overlay'),
+        attributes: { description: await description() },
+        materialize: 'none',
         message: message ?? `mission-pipeline: snapshot of ${mission} with ${products.join(', ')}`,
         author: ctx.ident(0),
         committer: ctx.ident(0),
@@ -178,9 +176,6 @@ export function gitActions(ctx: ProcessContext): GitActions {
     } catch (e) {
       if (e instanceof MissingObjectsError) throw new ActionError('missing-objects', e.message, e);
       throw e;
-    } finally {
-      attributes?.dispose();
-      rmSync(scratch, { recursive: true, force: true });
     }
   }
 

@@ -188,7 +188,7 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         lines.push(`\`mp seat ${dispatch} read <material> [--page <n>]\`: one page of a material (page 1 by default); it reports a missing or edited material instead of serving it.`);
         break;
       case 'checkout':
-        lines.push(`\`mp seat ${dispatch} checkout\`: puts ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'} in \`${f.dir}/checkout/\` and prints the path; read the project there (nothing you change there is kept).`);
+        lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
         break;
       case 'rerun':
         lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunCommands(card).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite.`);
@@ -219,7 +219,7 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
     e.exportsProduct === true && ws !== undefined
       ? `## Your worktree\n\`.mission-pipeline/worktrees/${o.dispatch}/\`, created at commit ${ws.snapshot}. Work there with your harness's own tools and leave your changes as files: at hand-back \`mp\` collects every change git does not ignore (modified, deleted and new files, without \`git add\`); inside the write paths they become your candidate commit, a change outside them refuses the hand-back with the paths listed. Ignored files are never collected. Do not commit, stage, reset, stash or switch branches there.\n\n`
       : ws !== undefined && ws.snapshot !== ''
-        ? `## What you read\nThe project at commit ${ws.snapshot} (\`mp seat ${o.dispatch} checkout\`).\n\n`
+        ? `## What you read\nThe project at commit ${ws.snapshot}: run \`mp seat ${o.dispatch} checkout\`, which prints the directory that holds it.\n\n`
         : '';
   const evidence = seatCommandsOf(card).includes('request-evidence') ? `\nAn evidence request (the last fenced json block of your notes on \`mp seat ${o.dispatch} request-evidence --stdin\`, or the file \`${f.request}\`) matches this JSON schema:\n\n\`\`\`json\n${JSON.stringify(z.toJSONSchema(EvidenceRequestSchema), null, 2)}\n\`\`\`\n` : '';
   return [

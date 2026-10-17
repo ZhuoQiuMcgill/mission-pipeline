@@ -84,6 +84,7 @@ import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
 import { closingRunner, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { heldByClose } from './close.ts';
+import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
 import { materialLeaf } from './seat.ts';
 
 // ---------------------------------------------------------------- shared
@@ -314,6 +315,12 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
     landings = null;
   }
   tidyWorktrees(ctx);
+  // 4.1.2: scratch nobody alive owns, the tmp/ of dispatches that are over, unheld checkouts (bounded)
+  try {
+    sweepTmp(ctx, { budgetMs: SWEEP_BUDGET_MS });
+  } catch {
+    /* housekeeping: tried again on the next call */
+  }
   const errors: string[] = [];
   for (const r of await advance(ctx)) for (const e of r.errors) errors.push(`${r.mission} ${e.step}: ${e.message}`);
   const steps = readSteps(ctx);
@@ -425,6 +432,8 @@ export interface Released {
   readonly attempts: number;
   readonly allowed: number;
   readonly worktree: 'removed' | 'kept' | 'none';
+  /** What could not be removed now (the dispatch's tmp/ directory, a checkout it held); mp pm next tries again. */
+  readonly notes?: readonly string[];
 }
 
 /** `mp pm release <id> --ended | --abandoned` (§5.4, WI-28). */
@@ -469,8 +478,10 @@ export async function pmRelease(ctx: ProcessContext, dispatch: string, how: 'end
       worktree = 'kept';
     }
   }
+  // 4.1.2: a released dispatch's tmp/<dispatch>/ goes, and the checkouts only it held
+  const notes = dispatchOver(ctx, dispatch);
   await advance(ctx, d.mission, { dispatch: null, task: null, step: `mp pm release ${dispatch} --${how}` });
-  return { dispatch, how, ...r, worktree };
+  return { dispatch, how, ...r, worktree, ...(notes.length > 0 ? { notes } : {}) };
 }
 
 // ---------------------------------------------------------------- mp pm renew, drain, stop

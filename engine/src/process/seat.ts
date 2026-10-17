@@ -6,7 +6,9 @@
 //   card              the card leaf as the seat received it (hash-checked)
 //   read              one page of a material: its leaf, hash-checked (a missing or edited leaf is
 //                     reported, never served); the page read is recorded (must-read tracking)
-//   checkout          the commit the card names, materialized into tmp/<dispatch>/checkout/
+//   checkout          the commit the card names, in the read-only checkout that the seats reading
+//                     that commit share, tmp/checkouts/<commit>/ (4.1.2: held by this dispatch while
+//                     it is in flight; removed when its last holder is over, housekeeping.ts)
 //   rerun             a declared command of the card on a clean checkout: a sampling run with a
 //                     new run id every time (§6.5, scenario 13)
 //   request-evidence  a hand-back that asks for evidence (decision 13): it ends the dispatch with
@@ -15,7 +17,8 @@
 //                     tmp/<dispatch>/: checked against the role's rules (a refused hand-back does
 //                     not count and keeps the worktree; the seat fixes it and runs it again,
 //                     decision 14), the report filed as the leaf dispatches/<d>/report.md, the
-//                     records appended in the same write, then the process advanced.
+//                     records appended in the same write, then the process advanced. Once it is
+//                     recorded, tmp/<dispatch>/ is removed and the dispatch's checkout holds end.
 // A Constructor's hand-back first collects its candidate from its worktree (A4, decision 17),
 // then `mp` runs the card's verification commands on a clean checkout of the candidate (§5.3)
 // and removes the worktree once the hand-back is accepted.
@@ -25,7 +28,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
-import { checkoutCommit, seatCheckoutDir, type Collection } from '../git/workspace.ts';
+import type { Collection } from '../git/workspace.ts';
 import { continuationCheck, type ContinuationRequest } from '../evaluator/index.ts';
 import {
   appendRecords,
@@ -59,6 +62,7 @@ import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, ty
 import { runOnCommit, type RecordedRun } from './runs.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
+import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
 
 // ---------------------------------------------------------------- the dispatch's card and materials
 
@@ -138,16 +142,21 @@ function cardSnapshot(v: DispatchView): string | null {
 
 const COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
-/** `mp seat <id> checkout` (decision 10): the commit the card names, materialized into tmp/<dispatch>/checkout/. */
+/**
+ * `mp seat <id> checkout` (decision 10; 4.1.2): the commit the card names, in the read-only
+ * checkout the seats reading that commit share, `tmp/checkouts/<commit>/` (built once, atomically);
+ * the path is printed. This dispatch holds it while in flight.
+ */
 export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promise<{ readonly path: string; readonly commit: string | null }> {
   const v = dispatchView(ctx, dispatch);
   allows(v, 'checkout');
   const snap = cardSnapshot(v);
   if (snap === null) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to read`);
   if (!COMMIT.test(snap)) return { path: join(ctx.projectDir, ...snap.split('/')), commit: null };
-  const dir = seatCheckoutDir(ctx.memory.paths, dispatch);
-  const c = await checkoutCommit(ctx.gitCtx, { commit: snap, dir });
-  return { path: c.dir, commit: c.commit };
+  // a dispatch that is over holds nothing: its checkout would have no holder
+  inFlight(v, 'a checkout');
+  const c = await holdSharedCheckout(ctx, v.info, snap);
+  return { path: c.path, commit: c.commit };
 }
 
 /**
@@ -188,7 +197,11 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
 function readHandBackFile(ctx: ProcessContext, dispatch: string, file: string, what: string): string {
   const dir = join(ctx.memory.paths.tmp, dispatch);
   const abs = isAbsolute(file) ? file : resolve(ctx.projectDir, file);
-  if (!existsSync(abs)) throw new ProcessError('BAD_FILE', `the ${what} file ${file} does not exist (write it to .mission-pipeline/tmp/${dispatch}/)`);
+  if (!existsSync(abs)) {
+    // 4.1.2: tmp/<dispatch>/ is removed once a hand-back is recorded
+    if (ctx.memory.read((db) => dispatchInfo(db, dispatch))?.handbackHash != null) throw new ProcessError('NOT_ALLOWED', `dispatch ${dispatch} was already handed back (its files in .mission-pipeline/tmp/${dispatch}/ were removed once it was recorded): you are done`);
+    throw new ProcessError('BAD_FILE', `the ${what} file ${file} does not exist (write it to .mission-pipeline/tmp/${dispatch}/)`);
+  }
   let real: string;
   let realDir: string;
   try {
@@ -349,7 +362,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(data, v.info);
     if (prior !== null && prior.seat === seatHash) {
-      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: [] };
+      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch) };
     }
     throw new LedgerError('FACT_CONFLICT', `dispatch ${dispatch} already handed back other content: one hand-back per dispatch`);
   }
@@ -414,6 +427,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   });
   const notes: string[] = out.closed ? [`mission ${v.info.mission} closed before this hand-back: it is recorded, not accepted; the step waits until the mission is opened again`] : [];
   if (out.moot !== null) notes.push(`${out.moot} before this hand-back: it is recorded, not accepted, and nothing it decides is carried out`);
+  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
+  notes.push(...dispatchOver(ctx, dispatch));
   let verification: VerificationRun[] | null = null;
   if (out.accepted && entry.exportsProduct === true && candidate !== null) {
     // §5.3: the program's runs on a clean checkout of the candidate are the evidence
@@ -520,7 +535,7 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
   const seatHash = sha256(canonicalJson({ report: input.notes, request: parsed.data }));
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(ctx.memory.data, v.info);
-    if (prior !== null && prior.seat === seatHash) return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: null, verification: null, notes: [] };
+    if (prior !== null && prior.seat === seatHash) return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: null, verification: null, notes: dispatchOver(ctx, dispatch) };
     throw new LedgerError('FACT_CONFLICT', `dispatch ${dispatch} already handed back other content: one hand-back per dispatch`);
   }
   const runs = ctx.memory.read((db) => dispatchRuns(db, ctx.memory.data, v.info));
@@ -542,7 +557,8 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
     const r = recordHandback(tx, { dispatch, report: input.notes, result: doc, filler: input.filler ?? null });
     return { outcome: r.outcome, report: r.report };
   });
-  const notes: string[] = [];
+  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
+  const notes: string[] = dispatchOver(ctx, dispatch);
   if (input.advance !== false) await advanceQuietly(ctx, v, notes);
   return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate: null, verification: null, notes };
 }
