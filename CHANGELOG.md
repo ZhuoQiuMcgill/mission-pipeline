@@ -6,6 +6,197 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.1.2] - unreleased
+
+4.1.2 cuts the engine's execution redundancy. Two field runs showed the engine paying for a perfect
+process in time and disk:
+- one mission of 31 tasks took 329 seat dispatches;
+- a 9-line change took 3 hours, 17 seat dispatches, 7 runs of a 16-minute suite and 10 GB of
+  leftover checkouts.
+
+The process keeps its checks: the Calibrators, the Architect with its mechanical checks and
+feasibility, the Constructor, the Reviewer and the Auditor. What changes is how much work the engine
+does to carry them out: the same work done twice, more work than a step needs, leftovers, invalidation
+spreading too wide, rework caused by missing information, and units split too finely. The
+maintainer's rulings are D-1 to D-12 in `docs/design/DesignDoc_ExecutionRedundancy_2026-10-17_v01.md`
+(design contract U-25 to U-36 and Appendix O). One proof rule changes: a run recorded in an older
+environment still counts, and every read labels it. The record never says something was checked when
+it was not. Read the upgrade notes before you upgrade a project with work in flight.
+
+### Upgrade notes
+- **Let running seats hand back first.**
+- **The full suite.**
+  - Rename `closingChecks` in `config.json` to `fullSuite`. The old key is still read when
+    `fullSuite` is absent; `mp config` says which key it read and warns when both are present.
+  - `mp pm deliver` no longer runs it. The integration task's Reviewer runs it, and the PM decides
+    whether to run it again before closing.
+  - Put only local tests in tasks (`verificationCommands`).
+- **Environment changes.** A tool update or a move no longer takes proof off anything. Reads mark
+  runs from an older environment, and `mp pm renew` is a tool the PM uses when it judges the change
+  matters; `mp pm next` no longer offers it. Runs recorded by 4.1.0 (run method v1) still do not
+  count: renew them once if you never did.
+- **Plans in effect keep their commands.** A task of a plan already in effect that lists a
+  full-suite command still runs it at hand-back, and a task that writes nothing still gets a
+  Constructor. An integration task with nothing to write that was not dispatched yet runs without a
+  Constructor. A revision of such a plan is checked against the new mechanical rules 6 and 7 (every
+  task writes something; only the integration task runs the full suite): the Architect fixes those
+  tasks, and their changed cards restart them (notice `plan-revision-restarts-work`).
+- **Leftovers.** Run `mp pm clean` once to free the checkouts 4.1.1 left under
+  `.mission-pipeline/tmp/`. It reports the space it freed.
+- **Closing.** Closing no longer refuses on the state of the work. `--mode` is kept and only
+  recorded; every mode records the same honest snapshot.
+- **Hook.** The Claude Code adapter no longer runs `mp pm next` at session start.
+
+### Changed
+- One hand-back runs each command once. The hand-back ran the task's verification commands, and the
+  flow's next pass ran them again, because the hand-back's runs were not the flow's verification and
+  a command marked `network` or sampled was never reusable. In a field run, two of the seven suite
+  runs were this. Now the hand-back's runs are the attempt's `verified` result, written right after
+  they run; the flow reads them and runs nothing. A failing setup command keeps its last lines in
+  the run summary.
+- The full suite runs where it matters (D-4 to D-7). Constructors run their task's local tests only.
+  In a project with a full suite, the integration task's Reviewer checks the cheapest things first,
+  and runs the full suite last, with `mp seat <id> full-run`, only when nothing visible is wrong;
+  its `pass` is refused without a passing full run of the candidate. Every full run leaves a marker.
+  `mp pm deliver` runs no command: before, the closing checks ran on every delivery and every
+  rebuild; now a delivery shows whether the full suite ran on its tree, or what changed since it
+  last did. Whether to run it again at the end is the PM's call with the user (`mp pm full-run`). A
+  passing full run on the same tree, environment and suite is reused, never run again.
+- An environment change labels runs and invalidates nothing (D-1, the honest record). Before, a tool
+  version change dropped every proof resting on declared runs, stable mode stalled, the PM was
+  offered `mp pm renew`, which reran every affected group, and settled explorations reran their
+  experiments. Now: no runs, no dispatches, one notice per environment (`environment-older-runs`);
+  the reads and the verification runs on a card mark such runs "older environment". Only a cause
+  that makes a run meaningless takes it out: runs of the older run method (4.1.0) still do not
+  count. A settled exploration is reopened only on the PM's word (`mp pm reopen-exploration`; notice
+  `exploration-older-environment`).
+- A task may cover several plan elements, and the plan has no read-only tasks. A task traces to `{
+  planElements: [...] }` (the 4.1.1 shape `{ planElement }` is still read, and a one-element task
+  keeps its identity, so nothing restarts on upgrade). Two new mechanical rules: every task writes
+  something, except an integration task or an experiment (rule 6), and only the integration task
+  runs the full suite (rule 7). A one-paragraph change planned as one implementation task and four
+  read-only check tasks took 5 Constructors, 5 Reviewers and 5 run sets; now it is one task, one
+  Constructor and one Reviewer.
+- An integration task with nothing to write runs without a Constructor. Its start snapshot (its
+  dependencies' accepted work laid together) is recorded as its product, the local runs run once,
+  and its Reviewer judges it. This saves one Constructor dispatch and one worktree per such task.
+- A failure traced to a task reopens that task (D-6). The integration Reviewer hands back `rework`
+  with `reopen`, naming a dependency with accepted work; `mp seat <id> owners <path>...` traces a
+  path to the products that changed it. The named task gets a new attempt with the issue on its
+  card, counted on its own rework loop; the integration waits for it and builds again on its new
+  work. Its other dependents keep their work and proof; reads show them as built on the older
+  version. Before, the way back was a full re-plan: a PM batch, Calibrator ①, the Architect,
+  feasibility, Calibrator ② and re-bind Reviewers. Now it is that task's Constructor and Reviewer,
+  and the integration Reviewer.
+- A delivery lays a reopened task's newer version in place of the older version that a dependent
+  recorded as a prerequisite. The dependent is stacked over it, and its proof reads
+  `built-on-superseded` unless a delivered, proven version (the integration) records both. Recorded
+  prerequisites are never rewritten.
+- Repairs amend the plan in effect (D-10). `mp pm repair` records the user's reason verbatim and the
+  kind the PM chose. An Architect repair step reopens tasks or adds tasks, and only the mechanical
+  checks apply: no Calibrator, no feasibility review, no new detailed plan, no re-bind, and existing
+  tasks keep their cards and proof. Before, the same problem took Calibrator ①, a new detailed-plan
+  cycle and re-binds. A repair about an exploration gives it one more round with the question added.
+  The reason is shown on every card the repair causes, in `mp read why` and in the closing snapshot.
+- Closing never refuses on the state of the work (D-11). `NOT_READY` and `RECOMPUTING` are gone: a
+  refused full close used to mean a retry loop; now it is one write. The snapshot also records the
+  words it cites, the delivered entries with their labels at delivery and now, the open and deferred
+  issues, the start risks, the outputs proven on runs from an older environment, the repairs, the
+  full-run status of the delivered tree, and whether labels were still recomputing. `--mode` is only
+  recorded. Refused still: a bad mode, an unknown mission, a words entry that does not exist.
+- The end of a mission is one sentence (D-9). `mp pm finish <mission> --words W-<n>` delivers the
+  accepted outputs of the plan in effect, lands and closes on one words entry. It used to take three
+  words entries and three commands, so the PM came back to the user three times; now it is one and
+  one. When landing cannot complete, it stops after the delivery with the mission open, and the same
+  words serve again.
+- Reading seats share one read-only checkout per commit (`tmp/checkouts/<commit>/`), built in a
+  sibling directory and renamed into place, and removed when no dispatch in flight holds it. Before,
+  every reading dispatch got its own full copy, kept for good, and killed reruns left partial
+  checkouts: a field run left 10 GB under `.mission-pipeline/tmp/`. Now there is at most one copy
+  per commit while it is held. Each build also makes its files read-only, and each hold is one small
+  flow event.
+- Start snapshots and deliveries write no tree. A start snapshot used to write the whole tree into a
+  scratch directory, run `git init` and two `git config` calls, hash it and delete it unread. A
+  delivery's proof check wrote every file of the candidate. Now both hash from git objects and write
+  nothing; a full run's candidate writes no tree either.
+- Scratch under `.mission-pipeline/tmp/` has owners. Each scratch directory has an owner lock under
+  `locks/owners/`, released by the operating system when its process exits. A dispatch's `tmp/<id>/`
+  is removed at its hand-back or release. `mp pm next` sweeps what no live process owns, for at most
+  1.5 seconds per call; removals go through `tmp/.trash-*`.
+- The SessionStart hook prints a three-line pointer and runs nothing. It used to print the PM
+  handbook core and run `mp pm next` in every session, a dispatched seat's included: up to 100
+  seconds and a PM write per session start, and a seat could read the PM's steps and act as the PM.
+  The hook's timeout went from 120 to 10 seconds.
+- A seat whose sandbox cannot write (for example a read-only `.git`) no longer raises WI-20 at its
+  hand-back. The hand-back is recorded; what the seat's process could not write is a note ("left to
+  the PM: …"), and the PM's next `mp pm next` does it. Any other error still raises WI-20.
+- The design contract (v06) records D-1 to D-12 as U-25 to U-36 and adds Appendix O, execution
+  redundancy as built. Mechanics the rulings do not fix are marked "Author's decision under D-12"
+  (D-12: details are not the maintainer's) instead of "Proposal, pending ruling".
+
+### Added
+- `mp pm finish <mission> --words W-<n> [--outputs ...] [--message ...] [--allow-external ...]`:
+  deliver, land and close on the user's one sentence.
+- `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "..."
+  [--about <task|exploration>]`: a problem the user found, as a plan amendment.
+- `mp pm full-run <mission> --words W-<n> | --authority <item> --reason "..." [--outputs ...]`: the
+  full suite on the candidate `mp pm finish` would deliver; refused without the user's words or an
+  authorization item in force. `mp read full-runs <mission>` lists the markers.
+- `mp seat <id> full-run` (an integration task's Reviewer) and `mp seat <id> owners <path>...` (an
+  integration Reviewer or a repair's Architect).
+- `mp pm clean [--mission <m>]`: removes now what no running `mp` process owns under
+  `.mission-pipeline/tmp/`, and the worktrees of dispatches that are over; reports the bytes freed
+  and what it kept.
+- `mp pm reopen-exploration <mission> <exploration> [--words W-<n>]`: the PM's word to reopen a
+  settled exploration after an environment change.
+- Config `fullSuite` (`[{ id, command, cwd? }]`; `closingChecks` is its deprecated alias) and
+  `commit` (`{ author?, committer? }` as `"Name <email>"`, the identity of the commits `mp` writes;
+  default `Mission Pipeline <mp@localhost>`). `mp init` writes `fullSuite: []`.
+- `mp pm deliver --message "<subject>"` sets the delivery commit's subject; `mp pm close --words
+  W-<n>` cites the user's words.
+- Notices `environment-older-runs`, `exploration-older-environment`, `repair-decided`,
+  `reopen-skipped`, `reopened-task-abandoned` (WI-08) and `integration-start-conflict`.
+
+### Fixed
+- The Architect's card shows the project constraints in force, the mechanical checks its plan must
+  pass, the project's local commands and full suite, and what a Reviewer can see. It used to plan
+  blind to them, and plans came back.
+- A Reviewer's card shows the previous review of the task: its verdict, the standards it found not
+  met or unclear with their reasons, and its findings.
+- A Secretary's card shows the earlier decisions on the same subject.
+- `mp read show plan` prints the mechanical check failures and the order changes.
+- `mp init` detects version commands from the project's first-level folders, not only its root
+  (skipping dot folders, `node_modules`, `vendor`, `target`, `dist`, `build` and `venv`).
+- `mp pm constraint add --words W-<n>` checks the words entry and records it with the constraint.
+- Missing LFS objects on paths no evidence reads no longer stop a delivery or a start snapshot.
+  Missing objects of an evidence input are reported as `objects-unavailable` (WI-13), like any other
+  missing object.
+- A Constructor's hand-back says that its worktree has been removed, so a shell left inside it knows
+  why its next command fails.
+
+### Known issues
+- WI-34 (since 4.1.1) is unchanged: a plan's proof can fall short of an object constraint recorded
+  later, and stable production waits for one of WI-34's two exits. Whether the program may start a
+  plan re-review by itself was on the 4.1.2 agenda (U-23); D-1 to D-12 do not rule on it.
+- A repair decided while a re-plan is in flight can be dropped by that re-plan. The notice
+  `plan-revision-restarts-work` names the tasks a repair added that it drops; record the repair
+  again.
+- An output proven only through a proof unit's judgment gets no "older environment" mark in the
+  closing snapshot, and Auditor and exploration cards do not mark older-environment runs. This is
+  information only: such runs count either way.
+- Seats can create new files inside a shared checkout, because its directories stay writable. The
+  card says never to write there.
+- A hand-back's or release's removal that does not finish within its 2-second budget waits in the
+  trash without a note; the next `mp pm next` or `mp pm clean` finishes it.
+- `mp pm finish` derives the delivery id from the mission, the outputs, the words and `--message`. A
+  delivery ref that exists and points elsewhere makes every retry hit the same id: deliver again
+  with `mp pm deliver --op <new id>`, then `mp pm land` and `mp pm close` (WI-20).
+- A constraint added again with the same text, a changed scope and new words records no words on the
+  event. Withdraw it and add it under a new id.
+- `mp pm next` runs `git worktree list` once per ended Constructor dispatch whose worktree it
+  tidies.
+- The other known issues of 4.1.1 still apply.
+
 ## [4.1.1] - 2026-10-16
 
 4.1.1 takes in the field's stacked PRs #8–#15, revised per the maintainer's seven rulings of
