@@ -49,14 +49,32 @@ export const ReviewerCardSchema = z.object({
   verificationRuns: z.array(z.object({ evidence: z.string().min(1), command: z.string(), summary: z.string() })),
   /** Commands the Reviewer may have `mp` rerun on the candidate (`mp seat <id> rerun`). */
   declaredCommands: z.array(Command),
-  /**
-   * An integration task (4.1.2, D-5, D-6): the Reviewer judges the whole. When the project declares a
-   * full suite, its card offers `mp seat <id> full-run` (last, once nothing visible is wrong), and a
-   * pass cites a passing full run of the candidate.
-   */
-  integration: z.boolean().optional(),
   selfReportedGaps: z.array(Item),
   openIssues: z.array(z.object({ issue: z.string().min(1), text: z.string() })),
+  /** 4.1.2: the previous Reviewer of this task: its verdict, each standard it found unmet or unclear with the reason, and its findings. */
+  previousReview: z
+    .object({
+      review: z.string().min(1),
+      attempt: z.number().int().positive(),
+      verdict: z.enum(['pass', 'rework', 'needs-decision']),
+      unmet: z.array(z.object({ standard: z.string(), met: z.enum(['no', 'unclear']), reason: z.string() })),
+      findings: z.array(z.string()),
+    })
+    .optional(),
+  /**
+   * 4.1.2 (D-5, D-6): an integration task's review; the Reviewer judges the whole. When the project
+   * declares a full suite, its card offers `mp seat <id> full-run` (last, once nothing visible is
+   * wrong), and a pass cites a passing full run of the candidate. `hasConstructor` false: the task writes nothing, so no
+   * Constructor ran and the candidate is its start snapshot (its dependencies' products laid over the
+   * base). `dependencies`: each dependency (direct or not) with its accepted product and the paths that
+   * product changed; a rework may reopen one of them (`reopen` in the hand-back).
+   */
+  integration: z
+    .object({
+      hasConstructor: z.boolean(),
+      dependencies: z.array(z.object({ task: z.string().min(1), product: z.string().min(1), attempt: z.number().int().positive(), direct: z.boolean(), changedPaths: z.array(z.string()) })),
+    })
+    .optional(),
   /** The judgment's binding inputs, fixed by the card's contract (5.2). */
   binding: z.object({
     judgment: z.string().min(1),
@@ -119,7 +137,30 @@ export function renderCard(c: SeatCard): string {
     list('Declared commands you may rerun (by id)', c.declaredCommands.map((d) => `[${d.id}] ${d.command}`)) +
     list('Scratch paths (a rerun may write here; nothing written is kept)', c.workspace.scratchPaths ?? []) +
     list("The Constructor's self-reported gaps (answer every one)", c.selfReportedGaps.map((g) => `[${g.id}] ${g.text}`)) +
-    list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`))
+    list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`)) +
+    renderPreviousReview(c) +
+    renderIntegration(c)
+  );
+}
+
+function renderPreviousReview(c: ReviewerCard): string {
+  const p = c.previousReview;
+  if (p === undefined) return '';
+  return (
+    `## The previous review of this task\n${p.review} (attempt ${p.attempt}) handed back "${p.verdict}".\n` +
+    (p.unmet.length > 0 ? `${p.unmet.map((u) => `- [${u.standard}] ${u.met === 'no' ? 'not met' : 'unclear'}: ${u.reason}`).join('\n')}\n` : '') +
+    (p.findings.length > 0 ? `${p.findings.map((f) => `- finding: ${f}`).join('\n')}\n` : '') +
+    '\n'
+  );
+}
+
+function renderIntegration(c: ReviewerCard): string {
+  const g = c.integration;
+  if (g === undefined) return '';
+  return (
+    `## This is an integration task\n${g.hasConstructor ? 'Its Constructor laid its own change over its dependencies\' work.' : 'It writes nothing, so no Constructor ran: the candidate is its start snapshot, its dependencies\' accepted products laid over the base. A rework cannot fix it here: name the dependency to reopen.'}\n` +
+    'When a failure traces to a dependency, hand back verdict "rework" with `reopen`: [{ "task": "<id>", "issue": "<what is wrong>", "evidence": "<run or file>" }]: that task gets a new attempt with the issue on its card, and this task builds again on its fixed work. The original task fixes it; this task does not absorb the fix. `mp seat <id> owners <path>...` lists which accepted products changed a path.\n\n' +
+    list('Dependencies and the paths their accepted products changed', g.dependencies.map((d) => `${d.task}${d.direct ? '' : ' (indirect)'}: ${d.product} (attempt ${d.attempt}): ${d.changedPaths.join(', ') || 'no path'}`))
   );
 }
 
@@ -167,7 +208,13 @@ export interface CardProject {
 
 /** An integration task's Reviewer card in a project that declares a full suite: it gets `mp seat <id> full-run` (4.1.2). */
 export function offersFullRun(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: CardProject = {}): boolean {
-  return card.seat === 'reviewer' && card['integration'] === true && (o.fullSuite?.length ?? 0) > 0;
+  return isIntegrationCard(card) && (o.fullSuite?.length ?? 0) > 0;
+}
+
+/** An integration task's Reviewer card: the flow gives it the field `integration` (its dependencies, D-6). */
+export function isIntegrationCard(card: { readonly seat: string } & Readonly<Record<string, unknown>>): boolean {
+  const x = card['integration'];
+  return card.seat === 'reviewer' && x !== undefined && x !== null && x !== false;
 }
 
 /** The `mp seat <id>` commands a card's seat gets (§4.1: the command list is part of its card). */
@@ -183,7 +230,9 @@ export function seatCommandsOf(card: { readonly seat: string } & Readonly<Record
   if (rerunCommands(card).length > 0) out.add('rerun');
   else out.delete('rerun');
   if (offersFullRun(card, o)) out.add('full-run');
-  const order: readonly SeatCommand[] = ['card', 'read', 'checkout', 'rerun', 'request-evidence', 'full-run', 'handback'];
+  // 4.1.2: which accepted products changed a path, for tracing a failure (an integration review, a repair)
+  if (isIntegrationCard(card) || card.seat === 'architect-repair') out.add('owners');
+  const order: readonly SeatCommand[] = ['card', 'read', 'checkout', 'rerun', 'owners', 'request-evidence', 'full-run', 'handback'];
   return order.filter((c) => out.has(c));
 }
 
@@ -210,6 +259,9 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         break;
       case 'rerun':
         lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunCommands(card).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite.`);
+        break;
+      case 'owners':
+        lines.push(`\`mp seat ${dispatch} owners <path>...\`: which accepted products of this mission changed each path (a path, or a directory ending in "/"), with their task and attempt.`);
         break;
       case 'full-run':
         lines.push(`\`mp seat ${dispatch} full-run\`: \`mp\` runs the project's full suite (${(o.fullSuite ?? []).map((x) => x.id).join(', ')}) in order on a clean checkout of this candidate and records it with a full-run marker; a passing full run already recorded on the same tree and environment is reused (nothing runs). Cite its runs as evidence:<id>. Run it last, only when nothing visible is wrong.`);

@@ -55,7 +55,7 @@ import {
 } from '../memory/index.ts';
 import { supersededRecheck, type PmBatchBody, type RecheckBody } from '../flow/planning.ts';
 import { SECRETARY_LINE } from '../flow/plandoc.ts';
-import { EvidenceRequestSchema, rerunCommands, seatCommandsOf } from '../seat/card.ts';
+import { EvidenceRequestSchema, isIntegrationCard, rerunCommands, seatCommandsOf } from '../seat/card.ts';
 import type { ReviewerCard } from '../seat/card.ts';
 import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/common.ts';
 import { handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
@@ -68,6 +68,8 @@ import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, ty
 import { runOnCommit, type RecordedRun } from './runs.ts';
 import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
 import { tagScope } from '../delivery/scope.ts';
+import { pathOwners } from '../flow/execution.ts';
+import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
 import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
@@ -114,7 +116,7 @@ function inFlight(v: DispatchView, what: string): void {
   if (v.info.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${v.info.dispatch} is ${v.info.state === 'released' ? `released (${v.info.released})` : 'handed back'}: ${what} is for a dispatch in flight`);
 }
 
-function allows(ctx: ProcessContext, v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'request-evidence' | 'full-run'): void {
+function allows(ctx: ProcessContext, v: DispatchView, command: 'read' | 'checkout' | 'rerun' | 'owners' | 'request-evidence' | 'full-run'): void {
   const commands = seatCommandsOf(v.card, { fullSuite: ctx.fullSuite });
   if (!commands.includes(command)) throw new ProcessError('NOT_ALLOWED', `the ${v.card.seat} card of dispatch ${v.info.dispatch} has no \`${command}\` command (its commands: ${commands.join(', ')})`);
 }
@@ -141,6 +143,21 @@ export function seatRead(ctx: ProcessContext, dispatch: string, material: string
     });
   }
   return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read)' : ''}\n${materialPage(r.text, page)}` };
+}
+
+/**
+ * `mp seat <id> owners <path>...` (4.1.2, D-6 tracing aid): which accepted products of the mission
+ * changed each path, from their recorded changed paths (execution.ts pathOwners, the one resolver).
+ */
+export async function seatOwners(ctx: ProcessContext, dispatch: string, paths: readonly string[]): Promise<{ readonly dispatch: string; readonly owners: Awaited<ReturnType<typeof pathOwners>>; readonly text: string }> {
+  const v = dispatchView(ctx, dispatch);
+  allows(ctx, v, 'owners');
+  if (paths.length === 0) throw new ProcessError('NOT_ALLOWED', 'name at least one path (a directory ends in "/")');
+  const owners = await pathOwners(flowCtx(ctx.ports(), v.info.mission as MissionId), paths);
+  const text = owners
+    .map((o) => `${o.path}: ${o.owners.length === 0 ? 'no accepted product changed it' : o.owners.map((x) => `${x.task} attempt ${x.attempt} (${x.product}${x.current ? '' : ', an earlier accepted version'})${x.paths.length > 1 || x.paths[0] !== o.path ? `: ${x.paths.join(', ')}` : ''}`).join('; ')}`)
+    .join('\n');
+  return { dispatch, owners, text };
 }
 
 /** The commit (or project-relative path) a card names. */
@@ -204,7 +221,7 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
 
 /** An integration task's Reviewer card (the flow marks it; `full-run` is offered when the project declares a full suite). */
 function integrationReview(ctx: ProcessContext, card: DispatchView['card']): boolean {
-  return card.seat === 'reviewer' && card['integration'] === true && ctx.fullSuite.length > 0;
+  return isIntegrationCard(card) && ctx.fullSuite.length > 0;
 }
 
 /**

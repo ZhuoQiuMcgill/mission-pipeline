@@ -8,6 +8,7 @@
 
 import { z } from 'zod';
 import { ITEM_ID, wellFormed, type MissionId } from '../common/ids.ts';
+import { canonicalJson, sha256 } from '../common/hash.ts';
 
 /** An exploration's round budget when its definition sets none (4.1 §6.3, U-6). */
 export const EXPLORATION_ROUNDS_DEFAULT = 3;
@@ -83,7 +84,27 @@ export type PmPlanDoc = z.infer<typeof PmPlanDoc>;
 
 // ---------------------------------------------------------------- the detailed plan (3.4)
 
-export const TaskProvenance = z.union([z.object({ planElement: z.string().min(1) }), z.literal('architect')]);
+/**
+ * Where a detailed-plan element comes from (4.1.2, D-10 analysis item 7): the PM plan elements it
+ * covers (a task may cover several: one change that satisfies several elements is one task), or
+ * "architect" (the Architect's own supplement). The 4.1.1 shape `{ planElement }` is read as
+ * `{ planElements: [planElement] }`, in hand-backs and in stored plans alike.
+ */
+export const TaskProvenance = z.preprocess(
+  (v) => (v !== null && typeof v === 'object' && !Array.isArray(v) && 'planElement' in v && !('planElements' in v) ? { planElements: [(v as { planElement: unknown }).planElement] } : v),
+  z.union([z.object({ planElements: z.array(z.string().min(1)).min(1).describe('The PM plan element ids this element covers (at least one).') }), z.literal('architect')]),
+);
+export type TaskProvenanceT = z.infer<typeof TaskProvenance>;
+
+/** The PM plan elements a provenance names (none for "architect"). */
+export function elementsOf(p: TaskProvenanceT): readonly string[] {
+  return p === 'architect' ? [] : p.planElements;
+}
+
+/** A provenance in words: "architect", or "from e1" / "from e1, e2". */
+export function provenanceText(p: TaskProvenanceT, prefix = 'from'): string {
+  return p === 'architect' ? 'architect' : `${prefix} ${p.planElements.join(', ')}`;
+}
 
 export const DetailedTask = z.object({
   id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
@@ -95,11 +116,13 @@ export const DetailedTask = z.object({
   /** Requirement item lines the task rests on. */
   requirementItems: z.array(z.string()),
   /**
-   * The paths the task may change. Empty: a task that only reads and runs (it runs the tests, it
-   * checks a behaviour): its Constructor changes nothing (any change refuses the hand-back), and
-   * its product version claims no path, so a delivery that selects it adds no path of its own.
+   * The paths the task may change. Empty only for an integration task with nothing to write (it
+   * gets no Constructor: its candidate is its start snapshot, which its Reviewer judges) or an
+   * experiment; the mechanical check refuses any other task that writes nothing (4.1.2: checks
+   * belong in the acceptance standards of the task whose change they check). A product with an
+   * empty write scope claims no path, so a delivery that selects it adds no path of its own.
    */
-  writeScope: z.array(z.string()).describe('The paths the task may change (exact paths, "dir/**", or "**"). Empty for a task that only reads and runs (for example, runs the tests): it changes no file.'),
+  writeScope: z.array(z.string()).describe('The paths the task may change (exact paths, "dir/**", or "**"). Empty only for an integration task with nothing to write (it gets no Constructor; its Reviewer judges its dependencies\' work laid together) or an experiment: any other task must change something.'),
   readableFiles: z.array(z.string()),
   interpreter: z.string(),
   /**
@@ -119,6 +142,18 @@ export const DetailedTask = z.object({
 });
 export type DetailedTask = z.infer<typeof DetailedTask>;
 
+/**
+ * A task's card identity (a spec records it; a different one is a re-plan of the task). A task
+ * that covers one element hashes in the 4.1.1 shape `{ planElement }`, so the specs recorded by
+ * 4.1.1 keep their identity and no task restarts because of the new provenance shape.
+ */
+export function taskCardHash(t: DetailedTask): string {
+  const parsed = DetailedTask.parse(t);
+  const p = parsed.provenance;
+  const canonical = p !== 'architect' && p.planElements.length === 1 ? { ...parsed, provenance: { planElement: p.planElements[0] } } : parsed;
+  return sha256(canonicalJson(canonical)).slice(0, 16);
+}
+
 export const DetailedPlanDoc = z.object({
   reusedInterfaces: z.array(z.object({ name: z.string().min(1), file: z.string().min(1), location: z.string().min(1), provenance: TaskProvenance })),
   newInterfaces: z.array(
@@ -136,6 +171,55 @@ export const DetailedPlanDoc = z.object({
   risks: z.array(z.string()),
 });
 export type DetailedPlanDoc = z.infer<typeof DetailedPlanDoc>;
+
+/**
+ * A repair's amendment of the plan in effect (D-10): the tasks it adds and the tasks it reopens. It is
+ * recorded as a new "effective" event of the same detailed plan (key "<dplan>#a<n>"), whose body lists
+ * every amendment of that plan so far: the plan's tasks plus the amendments' tasks are the plan in
+ * effect (amendedPlan), and a later real re-plan carries them over like any other task (the
+ * Architect's revision card shows the amended plan). No new detailed plan version, no re-bind.
+ */
+export interface AmendmentEntry {
+  readonly repair: string;
+  readonly tasks: readonly DetailedTask[];
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string }>;
+  /** The Architect repair task whose hand-back it is. */
+  readonly arch: string;
+}
+
+/** The detailed plan with the amendments recorded on it, in order (an id the plan already has is never replaced). */
+export function amendedPlan(plan: DetailedPlanDoc, amendments: readonly AmendmentEntry[] | undefined): DetailedPlanDoc {
+  if (amendments === undefined || amendments.length === 0) return plan;
+  const ids = new Set(plan.tasks.map((t) => t.id));
+  const added: DetailedTask[] = [];
+  for (const a of amendments) {
+    for (const t of a.tasks) {
+      if (ids.has(t.id)) continue;
+      ids.add(t.id);
+      added.push(DetailedTask.parse(t));
+    }
+  }
+  return { ...plan, tasks: [...plan.tasks, ...added] };
+}
+
+/**
+ * The tasks repairs added to any plan of the mission (every amendment of every "effective" event):
+ * outside the integration rule in every later mechanical check (repairs and revisions that carry
+ * them alike); whether their changes need another full run is the PM's close-time decision (D-7).
+ */
+export function amendedTaskIds(effective: ReadonlyArray<{ readonly amendments?: readonly AmendmentEntry[] }>): Set<string> {
+  return new Set(effective.flatMap((e) => (e.amendments ?? []).flatMap((a) => a.tasks.map((t) => t.id))));
+}
+
+/** The latest "effective" event body of one detailed plan (its last amendment, if any), from the mission's events. */
+export function latestEffectiveOf<B extends { readonly dplan: string }>(events: ReadonlyArray<{ readonly line: string; readonly event: string; readonly body: unknown }>, dplan: string): B | undefined {
+  return events.filter((e) => e.line === PLAN_LINE && e.event === 'effective' && (e.body as { dplan?: string }).dplan === dplan).at(-1)?.body as B | undefined;
+}
+
+/** The repair an amended task was added by, from the effective body that lists it (null: a task of the plan itself). */
+export function repairOfTask(amendments: readonly AmendmentEntry[] | undefined, task: string): string | null {
+  return amendments?.find((a) => a.tasks.some((t) => t.id === task))?.repair ?? null;
+}
 
 /** The stored content of a detailed plan version (the plan object's content document). */
 export interface StoredDetailedPlan {
@@ -203,6 +287,44 @@ export const SECRETARY_LINE = 'secretary';
 export const taskLine = (task: string): string => `task:${task}`;
 /** One exploration's line (4.3; owned by the exploration flow). */
 export const explorationLine = (exploration: string): string => `exploration:${exploration}`;
+
+/**
+ * Repairs (4.1.2, D-9, D-10): a problem the user found when trying the product, recorded by the PM
+ * (`mp pm repair`) with the user's reason verbatim from a words entry and the kind the PM chose. Line
+ * "repairs", event "repair", key the repair id (R-<n>). About an exploration, the exploration is
+ * reopened for one more round with the repair as an added question; otherwise an Architect repair
+ * step amends the plan in effect (added tasks) and/or reopens tasks, under the mechanical checks only.
+ */
+export const REPAIRS_LINE = 'repairs';
+export const REPAIR_KINDS = ['defect', 'usability', 'missing', 'new-question'] as const;
+export type RepairKind = (typeof REPAIR_KINDS)[number];
+export interface RepairBody {
+  readonly id: string;
+  /** The words entry the reason is quoted from. */
+  readonly words: string;
+  readonly kind: RepairKind;
+  /** The user's reason, verbatim from the words entry. */
+  readonly text: string;
+  /** What it is about: a task, an exploration, or the plan in effect as a whole. */
+  readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
+}
+/** The Architect repair step's outcome, once its amendment passed the mechanical checks (event "decided", key the repair id). */
+export interface RepairDecidedBody {
+  readonly repair: string;
+  readonly dplan: string;
+  readonly arch: string;
+  readonly add: readonly string[];
+  /** The tasks it reopens, each at the attempt it was accepted at when the repair was decided. */
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string }>;
+}
+/** A repair as a card shows it (every card of the work it caused). */
+export interface RepairRef {
+  readonly id: string;
+  readonly kind: RepairKind;
+  readonly text: string;
+  readonly words: string;
+}
+export const repairRef = (r: RepairBody): RepairRef => ({ id: r.id, kind: r.kind, text: r.text, words: r.words });
 
 /**
  * The event the decision layer writes when a PM plan version passes Calibrator ① (line "plan",

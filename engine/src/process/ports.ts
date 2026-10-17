@@ -588,5 +588,5 @@ export class MemoryFlowEvaluator implements FlowEvaluatorPort {
 
 /** The three ports over one process context. */
 export function memoryFlowPorts(ctx: ProcessContext): FlowPorts {
-  return { ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now };
+  return { ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: ctx.project };
 }

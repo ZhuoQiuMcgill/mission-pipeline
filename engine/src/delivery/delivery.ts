@@ -259,7 +259,7 @@ interface DeliveryDocument {
 
 /** One reason the delivery's proof check gave for "not fully proven", as the report leaf and the closing snapshot show it. */
 export function proofReasonText(r: ProofMismatch): string {
-  return r.kind === 'start-lacks-prerequisite' ? `${r.kind}: ${r.missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')}` : r.kind;
+  return r.kind === 'start-lacks-prerequisite' ? `${r.kind}: ${r.missing.map((m) => `${m.prerequisite} at ${m.path}`).join(', ')}` : r.kind === 'built-on-superseded' ? `built on ${r.prerequisite}; delivered with ${r.deliveredWith}` : r.kind;
 }
 
 /**

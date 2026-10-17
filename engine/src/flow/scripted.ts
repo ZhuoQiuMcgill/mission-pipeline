@@ -186,8 +186,8 @@ export function detailedPlan(mission: string, o: { implProvenance?: string; extr
   const item = (i: string): string => itemLine(mission, i);
   return {
     reusedInterfaces: [],
-    newInterfaces: [{ name: 'Parser', definition: 'parse(text: string): string[][]', searched: 'searched src/ for existing parsers: none', provenance: { planElement: 'e1' } }],
-    modules: [{ id: 'parser', writeScope: ['src/parser/**'], provenance: { planElement: 'e1' } }],
+    newInterfaces: [{ name: 'Parser', definition: 'parse(text: string): string[][]', searched: 'searched src/ for existing parsers: none', provenance: { planElements: ['e1'] } }],
+    modules: [{ id: 'parser', writeScope: ['src/parser/**'], provenance: { planElements: ['e1'] } }],
     tasks: [
       {
         id: 'iface',
@@ -205,7 +205,7 @@ export function detailedPlan(mission: string, o: { implProvenance?: string; extr
         dependsOn: [],
         exclusive: [],
         estimate: { durationMs: 60_000, costMicros: 300_000, basis: 'a similar interface took a minute' },
-        provenance: { planElement: 'e1' },
+        provenance: { planElements: ['e1'] },
       },
       {
         id: 'impl',
@@ -226,7 +226,7 @@ export function detailedPlan(mission: string, o: { implProvenance?: string; extr
         dependsOn: ['iface'],
         exclusive: [],
         estimate: { durationMs: 300_000, costMicros: 1_000_000, basis: 'past parser work' },
-        provenance: { planElement: o.implProvenance ?? 'e2' },
+        provenance: { planElements: [o.implProvenance ?? 'e2'] },
       },
       ...(o.extraTask
         ? [
@@ -246,7 +246,7 @@ export function detailedPlan(mission: string, o: { implProvenance?: string; extr
               dependsOn: ['impl'],
               exclusive: [],
               estimate: { durationMs: 60_000, costMicros: 100_000, basis: 'small' },
-              provenance: { planElement: 'e2' },
+              provenance: { planElements: ['e2'] },
             },
           ]
         : []),

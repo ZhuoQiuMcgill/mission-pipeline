@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatRead, seatRequestEvidence, seatRerun, type FullRunMarker, type HandBackAnswer } from '../../process/index.ts';
+import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, type FullRunMarker, type HandBackAnswer } from '../../process/index.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
 import { CliError, EXIT, refused, usage } from '../errors.ts';
@@ -135,6 +135,19 @@ const fullRun: Command = {
   },
 };
 
+const owners: Command = {
+  group: 'seat',
+  name: ['owners'],
+  summary: 'which accepted products of this mission changed each path (an integration review or a repair traces a failure with it)',
+  usage: 'mp seat <dispatch> owners <path>...   (a directory ends in "/")',
+  flags: {},
+  async run(c, args) {
+    const d = dispatchOf(args);
+    const r = await seatOwners(P(c).ctx, d, args.positionals.slice(1));
+    return ok(r.text, r);
+  },
+};
+
 /**
  * The no-file form (a harness whose sub-agents may not write files): one document on stdin, the
  * Markdown report with the structured fields as its LAST fenced ```json block (or given with
@@ -213,4 +226,4 @@ const requestEvidence: Command = {
   },
 };
 
-export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, fullRun, handback, requestEvidence];
+export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, fullRun, owners, handback, requestEvidence];

@@ -19,12 +19,18 @@ import type { ContentHash, JudgmentId, MissionId, ObjectVersionId } from '../../
 import type { BaseRecord, JudgmentRecord, ListRef, ObjectVersionRecord, ReviewContract } from '../../common/records.ts';
 import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
-import { DetailedPlanDoc, DetailedTask, feasibilityRequired, planIdProblems, type StoredDetailedPlan } from '../../flow/plandoc.ts';
-import { Binding, Item, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
+import { DetailedPlanDoc, DetailedTask, TaskProvenance, elementsOf, feasibilityRequired, planIdProblems, type StoredDetailedPlan } from '../../flow/plandoc.ts';
+import { MECHANICAL_RULES } from '../../flow/mechanical.ts';
+import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
 const Contract = z.object({ basisLines: z.array(z.string()), reliesOn: z.array(z.string()) });
+
+/** The project's commands (config): local tests and the full suite. */
+const SuiteCmd = z.object({ id: z.string().min(1), command: z.union([z.string().min(1), z.array(z.string().min(1))]), cwd: z.string().optional() });
+export const ProjectCommands = z.object({ local: z.array(Command), fullSuite: z.array(SuiteCmd) });
+export type ProjectCommandsT = z.infer<typeof ProjectCommands>;
 
 const RunHistory = z.array(z.object({ task: z.string(), seat: z.string(), durationMs: z.number().int().nonnegative(), costMicros: z.number().int().nonnegative() }));
 
@@ -76,23 +82,25 @@ export const ArchitectDecomposeCardSchema = z.object({
     calibrator2: Contract,
     feasibility: Contract,
   }),
+  /** 4.1.2: the project's commands (local tests a task may run; the full suite only the integration task's Reviewer runs). Absent on cards queued before it existed. */
+  projectCommands: ProjectCommands.optional(),
 });
 export type ArchitectDecomposeCard = z.infer<typeof ArchitectDecomposeCardSchema>;
 
 export const ArchitectDecomposeResultShape = {
-  reusedInterfaces: z.array(z.object({ name: z.string(), file: z.string(), location: z.string(), provenance: z.union([z.object({ planElement: z.string() }), z.literal('architect')]) })).describe('Existing interfaces the plan reuses, with file and location.'),
+  reusedInterfaces: z.array(z.object({ name: z.string(), file: z.string(), location: z.string(), provenance: TaskProvenance })).describe('Existing interfaces the plan reuses, with file and location.'),
   newInterfaces: z
     .array(
       z.object({
         name: z.string(),
         definition: z.string(),
         searched: z.string().describe('Required: which existing interfaces you searched, and why none was reused.'),
-        provenance: z.union([z.object({ planElement: z.string() }), z.literal('architect')]),
+        provenance: TaskProvenance,
       }),
     )
     .describe('Interfaces to create.'),
-  modules: z.array(z.object({ id: z.string(), writeScope: z.array(z.string()), provenance: z.union([z.object({ planElement: z.string() }), z.literal('architect')]) })).describe('Modules and their write scopes (exact paths, "dir/**", or "**").'),
-  tasks: z.array(DetailedTask).describe('Interface definition tasks, one implementation task per module, one integration task (a single-task plan keeps a full task card).'),
+  modules: z.array(z.object({ id: z.string(), writeScope: z.array(z.string()), provenance: TaskProvenance })).describe('Modules and their write scopes (exact paths, "dir/**", or "**").'),
+  tasks: z.array(DetailedTask).describe('Interface definition tasks, one implementation task per module, one integration task (a single-task plan keeps a full task card). A task may cover several plan elements: one change that satisfies several elements is one task (provenance.planElements lists them all).'),
   risks: z.array(z.string()).describe('Risks a read-only look cannot settle.'),
 };
 const ArchitectDecomposeResultSchema = z.object(ArchitectDecomposeResultShape);
@@ -189,7 +197,25 @@ export function previousPlanText(id: string | null, plan: DetailedPlanDoc): stri
 
 // ---------------------------------------------------------------- render
 
-const prov = (p: z.infer<typeof DetailedTask>['provenance']): string => (p === 'architect' ? 'architect' : `plan element ${p.planElement}`);
+const prov = (p: z.infer<typeof DetailedTask>['provenance']): string => (p === 'architect' ? 'architect' : `plan element${p.planElements.length === 1 ? '' : 's'} ${p.planElements.join(', ')}`);
+
+/** What a Reviewer can see, so standards are written to be judged from it (4.1.2, item 7). */
+export const REVIEWER_EVIDENCE_TEXT =
+  'What a Reviewer can see: the change, the local runs\' exit codes, durations and failing output; for the integration task, the full run. The output of passing runs is not kept: write standards a Reviewer can judge from these.';
+
+/** The planning rules every Architect card shows (decomposition, revision, repair): one change that covers several elements is one task; the mechanical checks; the commands; what a Reviewer sees. */
+export function renderPlanningRules(commands: ProjectCommandsT | undefined): string {
+  const cmd = (c: { id: string; command: string | readonly string[]; cwd?: string | undefined }): string => `[${c.id}] ${typeof c.command === 'string' ? c.command : c.command.join(' ')}${c.cwd !== undefined ? ` (in ${c.cwd})` : ''}`;
+  return (
+    '## How to cut tasks\nA task may cover several plan elements: one change that satisfies several elements is one task. Never add a read-only task that only runs or checks: put the check in the acceptance standards of the task whose change it checks.\n\n' +
+    list('Mechanical checks your plan must pass', MECHANICAL_RULES.map((r) => `${r.id}: ${r.text}`)) +
+    (commands === undefined
+      ? ''
+      : list("The project's local commands (a task's verificationCommands may name these)", commands.local.map(cmd)) +
+        (commands.fullSuite.length > 0 ? list("The project's full suite (only the integration task's Reviewer runs it; never a task's verification command)", commands.fullSuite.map(cmd)) : "## The project's full suite\nNone is configured.\n\n")) +
+    `## What a Reviewer can see\n${REVIEWER_EVIDENCE_TEXT}\n\n`
+  );
+}
 
 function renderRevision(c: ArchitectDecomposeCard): string {
   const r = c.revision;
@@ -226,6 +252,7 @@ export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
     list('Settled exploration conclusions to plan from', c.explorationConclusions.map((x) => `[${x.exploration}] ${x.summary}`)) +
     `## Git history (exported)\n${c.history.gitLog || '(none)'}\n\n` +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms, ${h.costMicros} micro-dollars`)) +
+    renderPlanningRules(c.projectCommands) +
     renderRevision(c) +
     renderMaterials(c.materials ?? []) +
     inline
@@ -266,7 +293,7 @@ export function decomposeProblems(c: ArchitectDecomposeCard, r: ArchitectDecompo
   for (const t of r.tasks) for (const d of t.dependsOn) if (!known.has(d)) out.push(`tasks[${t.id}].dependsOn: "${d}" is not a task of this plan`);
   const elements = new Set(c.pmPlan.elements.map((e) => e.id));
   const provs = [...r.tasks.map((t) => [`tasks[${t.id}]`, t.provenance] as const), ...r.newInterfaces.map((i) => [`newInterfaces[${i.name}]`, i.provenance] as const), ...r.modules.map((m) => [`modules[${m.id}]`, m.provenance] as const)];
-  for (const [where, p] of provs) if (p !== 'architect' && !elements.has(p.planElement)) out.push(`${where}.provenance: "${p.planElement}" is not an element of the PM plan`);
+  for (const [where, p] of provs) for (const e of elementsOf(p)) if (!elements.has(e)) out.push(`${where}.provenance: "${e}" is not an element of the PM plan`);
   for (const i of r.newInterfaces) if (i.searched.trim() === '') out.push(`newInterfaces[${i.name}].searched: say which existing interfaces you searched and why none was reused`);
   const modules = new Set(r.modules.map((m) => m.id));
   for (const t of r.tasks) {
@@ -364,5 +391,102 @@ const feasibilityEntry: SeatCardEntry<ArchitectFeasibilityCard, ArchitectFeasibi
   records: (c, r) => [feasibilityJudgment(c, r)],
 };
 
+// ---------------------------------------------------------------- the repair step (4.1.2, D-10)
+
+/**
+ * A repair's Architect step: a read-only seat with the plan in effect (amended by earlier repairs),
+ * the repair item (the user's reason verbatim, its kind), the accepted products it may reopen and
+ * the owners of the paths the repair names. It hands back the tasks to reopen (existing tasks with
+ * accepted products, each with the issue) and/or the tasks to add to the plan in effect. Only the
+ * program's mechanical checks apply to its amendment: no Calibrator, no feasibility review. Nothing
+ * else in the plan changes: existing tasks keep their cards and their products keep their proof.
+ */
+export const ArchitectRepairCardSchema = z.object({
+  ...commonCardFields,
+  seat: z.literal('architect-repair'),
+  workspace: ReadOnlyWorkspace,
+  repair: z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string().min(1), words: z.string().min(1), about: z.string().nullable() }),
+  /** The plan in effect: its detailed plan version and its PM plan. */
+  dplan: z.string().min(1),
+  pmPlan: z.string().min(1),
+  /** The PM plan elements an added task may trace to. */
+  elements: z.array(z.object({ id: z.string(), kind: z.string(), text: z.string() })),
+  /** The plan in effect's tasks (with earlier repairs' additions), in full. */
+  plan: DetailedPlanDoc,
+  /** The tasks with an accepted product: what a repair may reopen. */
+  accepted: z.array(z.object({ task: z.string().min(1), product: z.string().min(1), attempt: z.number().int().positive(), changedPaths: z.array(z.string()) })),
+  /** Which accepted products changed the paths the repair is about. */
+  owners: z.array(z.object({ path: z.string(), owners: z.array(z.object({ task: z.string(), product: z.string(), attempt: z.number().int().positive(), current: z.boolean() })) })),
+  history: z.object({ gitLog: z.string(), runs: RunHistory }),
+  /** A revision of an earlier attempt of this step: its mechanical failures. */
+  revision: z.object({ mechanicalFailures: z.array(z.string()) }).nullable(),
+  projectCommands: ProjectCommands.optional(),
+  materials: z.array(Material).optional(),
+});
+export type ArchitectRepairCard = z.infer<typeof ArchitectRepairCardSchema>;
+
+export const ArchitectRepairResultShape = {
+  reopen: z.array(z.object({ task: z.string().min(1).describe('A task with an accepted product, listed on the card.'), issue: z.string().min(1).describe('What its work must fix for this repair.') })).describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
+  add: z.array(DetailedTask).describe('New tasks the repair needs, added to the plan in effect (fresh ids; dependsOn the existing tasks whose work they build on or whose paths they touch).'),
+  note: z.string().describe('Why this repair is these reopenings and additions, in a few sentences.'),
+};
+const ArchitectRepairResultSchema = z.object(ArchitectRepairResultShape);
+export type ArchitectRepairResult = z.infer<typeof ArchitectRepairResultSchema>;
+
+export function renderArchitectRepair(c: ArchitectRepairCard): string {
+  const p = c.plan;
+  return (
+    renderCommon(c) +
+    `## The repair\n${c.repair.id} (${c.repair.kind}${c.repair.about !== null ? `, about ${c.repair.about}` : ''}): the user's reason, verbatim from ${c.repair.words}: "${c.repair.text}"\n\n` +
+    `## The plan in effect\nDetailed plan ${c.dplan} (PM plan ${c.pmPlan}), ${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'}${(c.materials ?? []).length > 0 ? `, in full in material ${(c.materials ?? [])[0]!.id}` : ''}.\n\n` +
+    list('Tasks', p.tasks.map((t) => `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing'}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t.provenance)})`)) +
+    list('PM plan elements an added task may trace to', c.elements.map((e) => `[${e.id}] (${e.kind}) ${e.text}`)) +
+    list('Accepted work a repair may reopen (task: product, attempt, paths it changed)', c.accepted.map((a) => `${a.task}: ${a.product} (attempt ${a.attempt}): ${a.changedPaths.join(', ') || 'no path'}`)) +
+    list('Who changed the paths the repair is about', c.owners.map((o) => `${o.path}: ${o.owners.map((x) => `${x.task} (${x.product}, attempt ${x.attempt}${x.current ? '' : ', an earlier version'})`).join('; ') || 'no accepted product'}`)) +
+    '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. Existing tasks keep their cards: change none of them. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect").\n\n' +
+    renderPlanningRules(c.projectCommands) +
+    (c.revision !== null ? list('Mechanical check failures of your previous hand-back to fix', c.revision.mechanicalFailures) : '') +
+    renderMaterials(c.materials ?? [])
+  );
+}
+
+export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult): string[] {
+  const out: string[] = [];
+  if (r.reopen.length === 0 && r.add.length === 0) out.push('reopen, add: a repair reopens at least one task or adds at least one');
+  const accepted = new Set(c.accepted.map((a) => a.task));
+  const named = r.reopen.map((x) => x.task);
+  for (const t of new Set(named)) {
+    if (!accepted.has(t)) out.push(`reopen: task "${t}" is not a task with an accepted product (on the card: ${[...accepted].join(', ') || 'none'})`);
+    if (named.filter((x) => x === t).length > 1) out.push(`reopen: task "${t}" is named more than once`);
+  }
+  const existing = new Set(c.plan.tasks.map((t) => t.id));
+  const ids = r.add.map((t) => t.id);
+  for (const id of new Set(ids)) {
+    if (existing.has(id)) out.push(`add: task id "${id}" is a task of the plan in effect: an added task gets a fresh id (existing tasks keep their cards)`);
+    if (ids.filter((x) => x === id).length > 1) out.push(`add: task id "${id}" is used more than once`);
+  }
+  const elements = new Set(c.elements.map((e) => e.id));
+  for (const t of r.add) {
+    for (const e of elementsOf(t.provenance)) if (!elements.has(e)) out.push(`add[${t.id}].provenance: "${e}" is not an element of the PM plan`);
+    for (const d of t.dependsOn) if (!existing.has(d) && !ids.includes(d)) out.push(`add[${t.id}].dependsOn: "${d}" is not a task of the plan in effect or of this repair`);
+    if (t.estimate.basis.trim() === '') out.push(`add[${t.id}].estimate.basis: give the basis of the estimate`);
+  }
+  return out;
+}
+
+const repairEntry: SeatCardEntry<ArchitectRepairCard, ArchitectRepairResult> = {
+  kind: 'architect-repair',
+  seat: 'architect',
+  schema: ArchitectRepairCardSchema,
+  resultShape: ArchitectRepairResultShape,
+  resultSchema: ArchitectRepairResultSchema,
+  toolProfile: 'read',
+  render: renderArchitectRepair,
+  problems: (c, r) => repairProblems(c, r),
+  // the flow records the amendment (after the mechanical checks), not the hand-back
+  records: () => [],
+};
+
 registerSeatCard(decomposeEntry);
 registerSeatCard(feasibilityEntry);
+registerSeatCard(repairEntry);

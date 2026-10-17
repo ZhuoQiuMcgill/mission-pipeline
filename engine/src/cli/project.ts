@@ -16,6 +16,7 @@
 // 8) and recorded as PM actions under an operation id: the same id again with the same arguments
 // replays the recorded result; with other arguments it is refused (OP_CONFLICT).
 
+import { fullSuiteOf, type SuiteCommand } from '../common/fullSuite.ts';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
@@ -24,7 +25,6 @@ import { PlainGit } from '../git/plainGit.ts';
 import { pmAction, recordPmAction, type Filler, type Memory } from '../memory/index.ts';
 import { openProcess, type ProcessContext, type ProcessOptions } from '../process/index.ts';
 import { commitIdentities, defaultConfig, readConfig, type ProjectConfig } from './config.ts';
-import { fullSuiteOf } from '../common/fullSuite.ts';
 import { CliError, EXIT, errorMessage, wi41 } from './errors.ts';
 
 export interface CliIo {
@@ -139,7 +139,9 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   const git = io.process?.git ?? PlainGit.create();
   // the identity of the commits mp writes: config `commit` (4.1.2); a test's process options still win
   const ids = commitIdentities(config);
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
+  // the flows read the project's local commands and its full suite (4.1.2; `closingChecks` is the alias)
+  const project = { localCommands: config.verificationCommands, fullSuite: fullSuiteOf(config as { fullSuite?: readonly SuiteCommand[]; closingChecks?: readonly SuiteCommand[] }) };
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), filler: o.filler ?? null, project, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {

@@ -81,7 +81,8 @@ describe('a mission through the shell-invoked mp, copied to another folder mid-w
     await ok(p.dir, 'init', '--pointer', 'agents');
     const cfgFile = join(p.dir, '.mission-pipeline', 'config.json');
     const cfg = JSON.parse(readFileSync(cfgFile, 'utf8'));
-    writeFileSync(cfgFile, JSON.stringify({ ...cfg, closingChecks: [{ id: 'smoke', command: 'node src/check.js' }] }, null, 2));
+    // 4.1.2: closingChecks is read as the full suite; a task's own check differs from it (only the integration task's Reviewer runs the full suite)
+    writeFileSync(cfgFile, JSON.stringify({ ...cfg, closingChecks: [{ id: 'smoke', command: 'node src/check.js --smoke' }] }, null, 2));
     await ok(p.dir, 'config');
     await ok(p.dir, 'pm', 'session', '--filled-by', 'claude-code/opus');
     await ok(p.dir, 'pm', 'mission', 'open', M);

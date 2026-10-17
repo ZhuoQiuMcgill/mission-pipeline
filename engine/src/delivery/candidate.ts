@@ -76,7 +76,7 @@ import {
   type TransformDescription,
 } from '../git/representation.ts';
 import type { GitExec } from '../git/plainGit.ts';
-import { buildManifest, prerequisiteClosure, stackOrder, type DeliveryManifest, type ManifestEntry } from './manifest.ts';
+import { buildManifest, layingClosure, prerequisiteClosure, stackOrder, type DeliveryManifest, type ManifestEntry } from './manifest.ts';
 import type { DeliveryObject, DeliveryProofView, DeliveryTarget } from './proofView.ts';
 import type { Memory } from '../memory/index.ts';
 import { inWriteScope, writeScopeIdentity } from './writeScope.ts';
@@ -328,11 +328,8 @@ function membersIn(manifest: DeliveryManifest): (unit: ProofUnitId) => readonly 
 
 export async function buildCandidate(o: CandidateOptions): Promise<CandidateResult> {
   const { git, repo } = o;
-  // each version after the versions it rests on (Appendix L)
-  const closure = prerequisiteClosure(
-    o.manifest.entries.map((e) => e.object),
-    membersIn(o.manifest),
-  );
+  // each version after the versions it rests on (Appendix L; a superseded prerequisite read as the version laid in its place, 4.1.2)
+  const closure = layingClosure(o.manifest);
   const byVersion = new Map(o.manifest.entries.filter((e) => e.object.tree !== null).map((e) => [e.object.id, e]));
   const placed = stackOrder([...byVersion.keys()], closure).map((id) => byVersion.get(id) as ManifestEntry);
   const expected = transformDescriptionHash(o.attributes.description);
@@ -451,7 +448,13 @@ export type ProofMismatch =
   | { readonly kind: 'unit-member-not-proven'; readonly unit: ProofUnitId; readonly member: ObjectVersionId }
   /** 5.2: a prerequisite (an object, or a member of a prerequisite unit) is not proven on the candidate. */
   | { readonly kind: 'prerequisite-not-proven'; readonly prerequisite: ObjectVersionId }
-  | { readonly kind: 'delivering-version-not-proven'; readonly path: string; readonly by: ObjectVersionId };
+  | { readonly kind: 'delivering-version-not-proven'; readonly path: string; readonly by: ObjectVersionId }
+  /**
+   * 4.1.2 (D-6, no cascade): the version was proven built on `prerequisite`, a task's earlier version,
+   * and is delivered with that task's newer version `deliveredWith`, and no delivered, proven version
+   * (an integration reviewed on that very combination) records both as its prerequisites.
+   */
+  | { readonly kind: 'built-on-superseded'; readonly prerequisite: ObjectVersionId; readonly deliveredWith: ObjectVersionId };
 
 /**
  * 6.6 step 4: the candidate holds a NEW version of this object. To deliver it as
@@ -528,7 +531,7 @@ export async function candidateFileHashes(o: { readonly git: GitExec; readonly r
 
 /** One identity rule for a composed tree, including strictly stacked path ownership. */
 async function treeIdentities(git: GitExec, repo: RepoLayout, manifest: DeliveryManifest, entries: readonly TreeEntry[]) {
-  const closure = prerequisiteClosure(manifest.entries.map((e) => e.object), membersIn(manifest));
+  const closure = layingClosure(manifest);
   const handedOver = new Map<ObjectVersionId, Map<string, ObjectVersionId>>();
   const identities = new Map<ObjectVersionId, { expected: ContentHash; actual: ContentHash; missing: readonly string[] }>();
   for (const { object } of manifest.entries) {
@@ -599,13 +602,26 @@ export async function checkCandidateProofs(o: {
   const hashes = await candidateFileHashes(o, inputPaths);
   const objectsOf = (t: DeliveryTarget): DeliveryObject[] => {
     if (t.kind === 'object') {
-      const x = o.view.object(t.id);
+      // a prerequisite superseded in this manifest: the content in the candidate is the version laid in its place (4.1.2)
+      const x = o.view.object(o.manifest.superseded?.get(t.id)?.by ?? t.id);
       return x === null ? [] : [x];
     }
     return (o.view.unitMembers(t.id) ?? []).map((m) => o.view.object(m)).filter((x): x is DeliveryObject => x !== null);
   };
   const reasonsOf = new Map<ObjectVersionId, ProofMismatch[]>();
   const needsReverification: Reverification[] = [];
+  // 4.1.2: members built on a superseded prerequisite, and the delivered versions whose recorded
+  // prerequisites hold both the newer version and the member (an integration of that combination)
+  const recordedIds = (obj: DeliveryObject): Set<string> => new Set(obj.prerequisites.flatMap((p) => (p.kind === 'object' ? [p.id] : [...(o.view.unitMembers(p.id) ?? [])])));
+  const builtOnSuperseded: Array<{ member: ObjectVersionId; prerequisite: ObjectVersionId; deliveredWith: ObjectVersionId; covers: ObjectVersionId[] }> = [];
+  for (const e of o.manifest.entries) {
+    for (const p of recordedIds(e.object)) {
+      const sup = o.manifest.superseded?.get(p as ObjectVersionId);
+      if (sup === undefined) continue;
+      const covers = o.manifest.entries.filter((v) => v.object.id !== e.object.id && v.label === 'proven' && ((ids) => ids.has(sup.by) && ids.has(e.object.id))(recordedIds(v.object))).map((v) => v.object.id);
+      builtOnSuperseded.push({ member: e.object.id, prerequisite: p as ObjectVersionId, deliveredWith: sup.by, covers });
+    }
+  }
   // 1. Each version's own checks.
   for (const e of o.manifest.entries) {
     const reasons: ProofMismatch[] = [];
@@ -656,6 +672,13 @@ export async function checkCandidateProofs(o: {
   const failing = (oid: ObjectVersionId): boolean => (reasonsOf.get(oid)?.length ?? 0) > 0;
   for (let changed = true; changed; ) {
     changed = false;
+    // a member built on a superseded prerequisite stands only while a delivered integration of that combination does (4.1.2)
+    for (const b of builtOnSuperseded) {
+      const rs = reasonsOf.get(b.member)!;
+      if (b.covers.some((v) => !failing(v)) || rs.some((r) => r.kind === 'built-on-superseded' && r.prerequisite === b.prerequisite)) continue;
+      rs.push({ kind: 'built-on-superseded', prerequisite: b.prerequisite, deliveredWith: b.deliveredWith });
+      changed = true;
+    }
     for (const d of deliveredBy) {
       const rs = reasonsOf.get(d.version)!;
       if (failing(d.by) && !rs.some((r) => r.kind === 'delivering-version-not-proven' && r.path === d.path)) {

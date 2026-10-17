@@ -12,7 +12,7 @@ import { PlainGit } from '../git/plainGit.ts';
 import type { SnapshotFiles } from '../seat/results.ts';
 import type { SuiteCommand } from '../common/fullSuite.ts';
 import { collectCandidate, ensureWorkspace, releaseWorkspace, removeWorkspace, type Collection, type CollectRequest, type GitContext } from '../git/workspace.ts';
-import type { FlowPorts, FlowSchedulerPort } from '../flow/ports.ts';
+import type { FlowPorts, FlowProject, FlowSchedulerPort } from '../flow/ports.ts';
 import { gitActions } from './actions.ts';
 import { memoryFlowPorts } from './ports.ts';
 import { shellRunner, type CommandRunner } from './runs.ts';
@@ -55,6 +55,8 @@ export interface ProcessOptions {
   readonly fullSuite?: readonly SuiteCommand[];
   /** Tests without a repository: the files of a snapshot commit that hand-back pointers are checked against (null: not checked). Default: git's (seat.ts commitFiles). */
   readonly snapshotFiles?: (commit: string) => SnapshotFiles | null;
+  /** The project's declared commands the flows read (config.json `verificationCommands` and `fullSuite`, 4.1.2). Default: none. */
+  readonly project?: FlowProject;
 }
 
 export interface ProcessContext {
@@ -78,6 +80,8 @@ export interface ProcessContext {
   readonly snapshotFiles: ((commit: string) => SnapshotFiles | null) | null;
   /** The git package's context (A4). */
   readonly gitCtx: GitContext;
+  /** The project's declared commands the flows read (4.1.2). */
+  readonly project: FlowProject;
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -119,6 +123,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     snapshotFiles: o.snapshotFiles ?? null,
     handover: null,
     gitCtx: { memory, git },
+    project: o.project ?? { localCommands: [], fullSuite: [] },
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);
     },

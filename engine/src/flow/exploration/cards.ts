@@ -59,6 +59,8 @@ function common(s: XState, task: string, duties: string, resume: Resume | null, 
     constraints: def.constraints,
     ...(asyncEvidence ? { allowAsyncEvidence: true } : {}),
     ...(continuation !== null ? { continuation } : {}),
+    // 4.1.2 (D-10): the repairs that reopened the exploration, an added question on every round's card
+    ...(s.repairs.length > 0 ? { repairs: s.repairs.map((r) => ({ ...r })) } : {}),
   };
 }
 
@@ -335,7 +337,8 @@ export function executorCard(
   };
   const duties = 'Carry out the evidence run exactly as the steps say and record what happened.';
   // execution instructions only: object constraints and decision quotes carry intent, not steps
-  const blindCommon = (extra: readonly string[]) => ({ ...common(s, task, duties, null, false, extra), decisionQuotes: [], constraints: def.constraints.filter((k) => k.kind === 'instruction') });
+  // blind: no intent (§4.3), so no repair either
+  const blindCommon = (extra: readonly string[]) => { const { repairs: _repairs, ...c } = common(s, task, duties, null, false, extra) as ReturnType<typeof common> & { repairs?: unknown }; void _repairs; return { ...c, decisionQuotes: [], constraints: def.constraints.filter((k) => k.kind === 'instruction') }; };
   if (executor === 'reading') {
     const net = def.readingNetwork.length > 0 ? ['net'] : [];
     return { ...blindCommon(net), seat: 'researcher-reader', workspace: readOnlyWorkspace(s), network: { allowed: [...def.readingNetwork] }, ...blind };
