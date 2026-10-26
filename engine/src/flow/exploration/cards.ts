@@ -1,5 +1,6 @@
 // The exploration's cards (design 4.1 §6.3, §5.4; 4.0 4.3, 8.2, 6.2): built from the state alone
-// (machine.ts) and an explicit selection of current object constraints for review cards. Every card carries what the memory
+// (machine.ts) and an explicit selection of the project constraints in force (9.5: every seat's, by
+// dynamic.ts constraintsForExploration; the object constraints review cards bind). Every card carries what the memory
 // knows (the product's current version, every finding with its disposition and the Stabilizer's
 // verdict, the evidence executions, the discussion, the rulings), so a seat that continues after
 // evidence loses only its conversation, never the facts: its new card carries its notes and the
@@ -11,6 +12,8 @@ import type { ExperimentCard } from '../../seat/cards/experiment.ts';
 import type { AuthorCard, InterpreterCard, ReaderCard, RegisteredAttemptT } from '../../seat/cards/researcher.ts';
 import type { StabilizerCard } from '../../seat/cards/stabilizer.ts';
 import type { objectConstraints } from '../../seat/cards/inputs.ts';
+import { constraintsForExploration } from '../../seat/cards/dynamic.ts';
+import type { ConstraintBody } from '../requirements.ts';
 import { SEAT_CAPABILITIES } from '../context.ts';
 import type { FlowContent } from '../ports.ts';
 import { xid } from './definition.ts';
@@ -62,6 +65,12 @@ function common(s: XState, task: string, duties: string, resume: Resume | null, 
     // 4.1.2 (D-10): the repairs that reopened the exploration, an added question on every round's card
     ...(s.repairs.length > 0 ? { repairs: s.repairs.map((r) => ({ ...r })) } : {}),
   };
+}
+
+/** The project constraints in force that a card of this seat shows (9.5; the claim selects them again, refresh.ts). */
+function projectConstraints(s: XState, seat: string, inForce: readonly ConstraintBody[]) {
+  const { def } = defined(s);
+  return constraintsForExploration(inForce, seat, def.mission, def.exploration);
 }
 
 function readOnlyWorkspace(s: XState) {
@@ -156,7 +165,7 @@ function newVersion(s: XState, n: number): NewVersionT {
 const AUTHOR_DUTIES =
   'You own this exploration\'s product. Each turn pick one step: discuss the framing, ask for evidence (request-evidence), or submit a new version with a disposition for every open finding.';
 
-export function authorCard(s: XState, n: number, task: string, content: FlowContent, resume: Resume | null): AuthorCard {
+export function authorCard(s: XState, n: number, task: string, content: FlowContent, resume: Resume | null, inForce: readonly ConstraintBody[]): AuthorCard {
   const { def } = defined(s);
   const m = new Materials(content);
   if (s.version !== null) m.add('version', `Current version ${s.version.id}`, s.version.content, true);
@@ -168,6 +177,7 @@ export function authorCard(s: XState, n: number, task: string, content: FlowCont
   return {
     ...common(s, task, def.duties.trim() !== '' ? def.duties : AUTHOR_DUTIES, resume, true, [], m),
     seat: 'researcher-author',
+    constraints: [...def.constraints, ...projectConstraints(s, 'researcher-author', inForce)],
     workspace: readOnlyWorkspace(s),
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
@@ -187,7 +197,7 @@ export function authorCard(s: XState, n: number, task: string, content: FlowCont
   };
 }
 
-export function interpreterCard(s: XState, n: number, task: string, content: FlowContent): InterpreterCard {
+export function interpreterCard(s: XState, n: number, task: string, content: FlowContent, inForce: readonly ConstraintBody[]): InterpreterCard {
   const { def } = defined(s);
   if (s.method === null) throw new Error('interpretation before the method passed');
   const m = new Materials(content);
@@ -204,6 +214,7 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
   return {
     ...common(s, task, 'Interpret the records of the registered attempts; you took part in none of the executions.', null, false),
     seat: 'researcher-interpreter',
+    constraints: [...def.constraints, ...projectConstraints(s, 'researcher-interpreter', inForce)],
     workspace: readOnlyWorkspace(s),
     exploration: explorationRef(s, 'reasoning'),
     goal: def.goal,
@@ -234,7 +245,7 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
   };
 }
 
-export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null, constraints: ObjectConstraints): CrititorCard {
+export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null, constraints: ObjectConstraints, inForce: readonly ConstraintBody[]): CrititorCard {
   const { d, def } = defined(s);
   const m = new Materials(content);
   const target = s.version;
@@ -251,7 +262,8 @@ export function attackerCard(s: XState, n: number, task: string, content: FlowCo
   return {
     ...common(s, task, 'Attack the version adversarially and re-check every finding marked awaiting-recheck.', resume, true, [], m),
     seat: 'crititor',
-    constraints: mode === 'attack' ? [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list] : [...def.constraints],
+    // the object constraints it reviews against are those the judgment binds; the instructions are context
+    constraints: [...(mode === 'attack' ? [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list] : def.constraints), ...projectConstraints(s, 'crititor', inForce).filter((c) => c.kind === 'instruction')],
     workspace: readOnlyWorkspace(s),
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
@@ -322,6 +334,7 @@ export function executorCard(
   req: EvidenceRequestDoc,
   executor: 'experiment' | 'reading',
   evidence: { readonly id: string; readonly attempt: string | null },
+  inForce: readonly ConstraintBody[],
 ): ExperimentCard | ReaderCard {
   const { d, def } = defined(s);
   // blind (4.3, review r1 #19): no material of the exploration (not the PM plan, not the document
@@ -336,15 +349,16 @@ export function executorCard(
     materials: m.list,
   };
   const duties = 'Carry out the evidence run exactly as the steps say and record what happened.';
-  // execution instructions only: object constraints and decision quotes carry intent, not steps
+  // execution instructions only: object constraints and decision quotes carry intent, not steps;
+  // of the project's, only the instructions written for this blind seat (dynamic.ts constraintsForExploration)
   // blind: no intent (§4.3), so no repair either
-  const blindCommon = (extra: readonly string[]) => { const { repairs: _repairs, ...c } = common(s, task, duties, null, false, extra) as ReturnType<typeof common> & { repairs?: unknown }; void _repairs; return { ...c, decisionQuotes: [], constraints: def.constraints.filter((k) => k.kind === 'instruction') }; };
+  const blindCommon = (seat: string, extra: readonly string[]) => { const { repairs: _repairs, ...c } = common(s, task, duties, null, false, extra) as ReturnType<typeof common> & { repairs?: unknown }; void _repairs; return { ...c, decisionQuotes: [], constraints: [...def.constraints.filter((k) => k.kind === 'instruction'), ...projectConstraints(s, seat, inForce)] }; };
   if (executor === 'reading') {
     const net = def.readingNetwork.length > 0 ? ['net'] : [];
-    return { ...blindCommon(net), seat: 'researcher-reader', workspace: readOnlyWorkspace(s), network: { allowed: [...def.readingNetwork] }, ...blind };
+    return { ...blindCommon('researcher-reader', net), seat: 'researcher-reader', workspace: readOnlyWorkspace(s), network: { allowed: [...def.readingNetwork] }, ...blind };
   }
   return {
-    ...blindCommon([]),
+    ...blindCommon('constructor-experiment', []),
     seat: 'constructor-experiment',
     workspace: { snapshot: d.snapshot.path, writablePaths: [...def.experimentPaths] },
     interpreter: '',
@@ -360,7 +374,7 @@ export function executorCard(
  * dispositions, earlier in-scope findings still open, the first and the current version, the
  * earlier rounds' judgments and the rulings. Its judgment binds the attack judgment's contract.
  */
-export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent, constraints: ObjectConstraints): StabilizerCard {
+export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent, constraints: ObjectConstraints, inForce: readonly ConstraintBody[]): StabilizerCard {
   const { d, def: current0 } = defined(s);
   const st = s.stabilizing;
   if (st === null) throw new Error('no round to stabilize');
@@ -383,7 +397,7 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
   return {
     ...common(s, task, 'Judge this round of the attack against the definition and the user\'s words: which findings bind the author, which shift the direction, and whether the work drifts.', null, false, [], m),
     seat: 'stabilizer',
-    constraints: [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list],
+    constraints: [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list, ...projectConstraints(s, 'stabilizer', inForce).filter((c) => c.kind === 'instruction')],
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
     attackScope: def.attackScope,

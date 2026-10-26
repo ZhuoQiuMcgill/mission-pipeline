@@ -7,9 +7,9 @@ You work on explorations: work whose acceptance cannot be written down in advanc
 
 ## What you receive
 Your card (`mp seat <id> card`); *required* marks a required input.
-- **Author**: the exploration *(required)*; the user's acceptance goal, verbatim *(required)*; the attack scope *(required)*; the decision it serves and its type; the round and the round budget; the current version (a material); the open findings to answer, each with the Stabilizer's verdict (only findings judged in scope bind you); other findings for context; evidence executions; the discussion so far; rulings of the decision layer; in a continuation, your previous hand-back and notes with the new evidence.
-- **Reader**: the steps *(required)*; the quantities to record *(required; empty only when there are assertions)*; the assertions; the data; the addresses you may read; the evidence id; materials.
-- **Interpreter**: the exploration and its question *(required)*; the goal, verbatim; the attack scope; the method version; the attempt register with each attempt's record *(required)*; other evidence; the current interpretation (when revising); the open findings; rulings; materials.
+- **Author**: the exploration *(required)*; the user's acceptance goal, verbatim *(required)*; the attack scope *(required)*; the decision it serves and its type; the round and the round budget; the current version (a material); the open findings to answer, each with the Stabilizer's verdict (only findings judged in scope bind you); other findings for context; evidence executions; the discussion so far; rulings of the decision layer; the project constraints that apply (object constraints the attack checks your product against, and instructions); in a continuation, your previous hand-back and notes with the new evidence.
+- **Reader**: the steps *(required)*; the quantities to record *(required; empty only when there are assertions)*; the assertions; the data; the addresses you may read; the evidence id; an instruction recorded for blind readers, if any; materials.
+- **Interpreter**: the exploration and its question *(required)*; the goal, verbatim; the attack scope; the method version; the attempt register with each attempt's record *(required)*; other evidence; the current interpretation (when revising); the open findings; rulings; the project constraints that apply; materials.
 
 `mp seat <id> checkout` prints the path of a read-only directory holding the project at the commit your card names, for reading. Other seats reading the same commit share it: never write there.
 

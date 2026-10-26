@@ -8,6 +8,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Changed
+- **Exploration cards show the project constraints that apply to them, as task cards do.** Only the
+  Crititor's and the Stabilizer's cards listed constraints, the object constraints their judgment
+  binds, so an instruction the PM recorded for an exploration (say "when you read result X, also
+  report recount Y") reached none of its seats. Now the author's, the interpreter's, the Crititor's
+  and the Stabilizer's cards list the constraints in force by the task cards' rule, with the
+  exploration's product path as the write scope, and `mp pm dispatch` selects them again: one
+  recorded later is on the next card and on a card already queued, and a withdrawn one leaves.
+  `--task-types exploration` reaches all four seats; a seat name (`researcher-author`,
+  `researcher-interpreter`, `crititor`, `stabilizer`) narrows an instruction to that seat. A blind
+  executor (`researcher-reader`, `constructor-experiment`) gets only an instruction whose task types
+  name its seat, never an object constraint. Instructions bind no judgment, so no judgment changes,
+  and a card already in flight stays as it was claimed.
+
 ### Fixed
 - **The Claude Code adapter no longer records another session's message as the user's words.** A
   message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and

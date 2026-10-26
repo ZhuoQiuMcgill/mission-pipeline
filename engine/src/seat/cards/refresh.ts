@@ -1,5 +1,6 @@
 // Claim-time selection is owned by the queue-time builders; refresh adds no seat context.
 import type { BaseRecord, ObjectVersionRecord, ProofUnitRecord, ListRef } from '../../common/records.ts';
+import type { BasisIndex } from '../../flow/context.ts';
 import { decidingViews, labelStatus } from '../../evaluator/index.ts';
 import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type PlanningInputs, auditBasisTexts, auditPositionInputs, auditNodeConstraints, auditChainInputs, contractLines, objectConstraints, withdrawnPlanReason } from './inputs.ts';
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
@@ -12,7 +13,7 @@ import type { FlowEvent } from '../../flow/ports.ts';
 import type { EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
-import { constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints } from './dynamic.ts';
+import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints } from './dynamic.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
 import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectRepairCard } from './architect.ts';
@@ -25,6 +26,12 @@ import type { StabilizerCard } from './stabilizer.ts';
 
 type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
 
+/** A card's constraint that is a project constraint (a basis line of `mp pm constraint`), not an exploration definition's own. */
+function projectConstraint(ix: BasisIndex, id: string): boolean {
+  const kind = ix.records.get(ix.current.get(id) ?? '')?.basisKind;
+  return kind === 'constraint' || kind === 'instruction';
+}
+
 function pages<T extends { revision: number }>(read: (after: number) => readonly T[]): T[] {
   const out: T[] = [];
   let after = 0;
@@ -33,16 +40,16 @@ function pages<T extends { revision: number }>(read: (after: number) => readonly
 
 export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc): TaskSpecDoc {
   const card = structuredClone(spec.card) as DispatchCard;
-  // Exploration definition inputs stay fixed. Its review constraints are selected below (§9.5).
+  // Exploration definition inputs stay fixed. Its project constraints are selected below (§9.5).
   // Blind cards exclude intent (§4.3).
   switch (card.seat) {
+    // a repair's Architect step: its plan inputs are fixed at queue time; the flow discards a hand-back on a plan no longer in effect
+    case 'architect-repair':
+      return spec;
     case 'researcher-author':
     case 'researcher-reader':
     case 'researcher-interpreter':
     case 'constructor-experiment':
-    // a repair's Architect step: its plan inputs are fixed at queue time; the flow discards a hand-back on a plan no longer in effect
-    case 'architect-repair':
-      return spec;
     case 'crititor':
     case 'stabilizer':
     case 'constructor':
@@ -84,14 +91,26 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
     break;
   }
   switch (card.seat) {
+    case 'researcher-author':
+    case 'researcher-interpreter':
+    case 'researcher-reader':
+    case 'constructor-experiment': {
+      // as the queue-time builder (flow/exploration/cards.ts): the definition's own, then the project's in force (a blind card names no exploration)
+      const exploration = card.seat === 'researcher-author' || card.seat === 'researcher-interpreter' ? card.exploration.id : null;
+      card.constraints = [...card.constraints.filter((c) => !projectConstraint(ix, c.id)), ...constraintsForExploration(constraints, card.seat, mission, exploration)];
+      break;
+    }
     case 'crititor':
     case 'stabilizer': {
-      if (card.binding === null || card.target === null) break;
-      const obj = object(card.target);
-      if (obj === undefined) break;
-      const input = objectConstraints(constraints, obj);
-      card.binding.constraints = data.putList(input.checks);
-      card.constraints = [...card.constraints.filter((c) => c.kind !== 'object'), ...input.list];
+      const own = card.constraints.filter((c) => !projectConstraint(ix, c.id));
+      let objects = card.constraints.filter((c) => c.kind === 'object' && projectConstraint(ix, c.id));
+      const obj = card.binding === null || card.target === null ? undefined : object(card.target);
+      if (obj !== undefined && card.binding !== null) {
+        const input = objectConstraints(constraints, obj);
+        card.binding.constraints = data.putList(input.checks);
+        objects = input.list;
+      }
+      card.constraints = [...own, ...objects, ...constraintsForExploration(constraints, card.seat, mission, card.exploration.id).filter((c) => c.kind === 'instruction')];
       break;
     }
     case 'constructor': {

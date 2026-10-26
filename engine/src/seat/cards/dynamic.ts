@@ -3,6 +3,7 @@ import type { FlowEvent } from '../../flow/ports.ts';
 import { elementsOf, type DetailedTask } from '../../flow/plandoc.ts';
 import type { DecisionBody, EscalationBody } from '../../flow/secretary.ts';
 import { scopesOverlap } from '../../flow/mechanical.ts';
+import { xid } from '../../flow/exploration/definition.ts';
 import { canonicalJson } from '../../common/hash.ts';
 import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
@@ -20,7 +21,7 @@ export function taskReferencePlan(events: readonly FlowEvent[], contract?: Revie
 }
 
 /** Instructions are seat context; object constraints retain their proof scope semantics. */
-export function constraintsForTask(constraints: readonly ConstraintBody[], task: Pick<DetailedTask, 'kind' | 'writeScope'>, mission: string): ConstraintBody[] {
+export function constraintsForTask(constraints: readonly ConstraintBody[], task: { readonly kind: string; readonly writeScope: readonly string[] }, mission: string): ConstraintBody[] {
   return constraints.filter((c) => {
     const paths = scopesOverlap(c.scope.paths, task.writeScope).length > 0;
     if (c.scope.mission !== undefined && c.scope.mission !== mission) return false;
@@ -28,6 +29,29 @@ export function constraintsForTask(constraints: readonly ConstraintBody[], task:
     return c.kind === 'object' ? (c.scope.taskTypes.length === 0 || c.scope.taskTypes.includes(task.kind)) && paths
       : c.scope.taskTypes.length > 0 ? c.scope.taskTypes.includes(task.kind) || (c.scope.paths.some((p) => p !== '**') && paths) : paths;
   });
+}
+
+/** An exploration's blind executors (4.3): they see one evidence run's steps, never what the exploration expects. */
+const BLIND_SEATS: ReadonlySet<string> = new Set(['researcher-reader', 'constructor-experiment']);
+
+/**
+ * The project constraints an exploration seat's card shows (9.5), selected as a task card's
+ * (constraintsForTask), at queue time (flow/exploration/cards.ts) and again at the claim (refresh.ts).
+ * A seat that knows the exploration writes to its product's path and answers to the task type
+ * "exploration" (its product's, so an object constraint means for the author what it means for the
+ * Crititor and the Stabilizer who review it) and, for an instruction, to its own seat name too. A
+ * blind executor writes no product and knows no exploration (`exploration` may be null): like a task
+ * card without write paths, only an instruction whose task types name its seat reaches it, so no
+ * reading of the exploration's results arrives by default (4.3).
+ */
+export function constraintsForExploration(constraints: readonly ConstraintBody[], seat: string, mission: string, exploration: string | null): Array<{ id: string; text: string; kind: 'object' | 'instruction' }> {
+  const blind = BLIND_SEATS.has(seat);
+  const writeScope = blind || exploration === null ? [] : [xid.path(mission, exploration)];
+  const lines = new Set([
+    ...(blind ? [] : constraintsForTask(constraints, { kind: 'exploration', writeScope }, mission)),
+    ...constraintsForTask(constraints, { kind: seat, writeScope }, mission).filter((c) => c.kind === 'instruction'),
+  ].map((c) => c.line));
+  return constraints.filter((c) => lines.has(c.line)).map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
 }
 
 /** The constraints an Architect's card shows (4.1.2, item 7): every object constraint and instruction in the mission's scope (a plan covers every path). */
