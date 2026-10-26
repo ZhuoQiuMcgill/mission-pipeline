@@ -11,10 +11,11 @@ import type { ExperimentCard } from '../../seat/cards/experiment.ts';
 import type { AuthorCard, InterpreterCard, ReaderCard, RegisteredAttemptT } from '../../seat/cards/researcher.ts';
 import type { StabilizerCard } from '../../seat/cards/stabilizer.ts';
 import type { objectConstraints } from '../../seat/cards/inputs.ts';
+import { OLDER_ENVIRONMENT } from '../../evaluator/renew.ts';
 import { SEAT_CAPABILITIES } from '../context.ts';
 import type { FlowContent } from '../ports.ts';
 import { xid } from './definition.ts';
-import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, type FindingState, type XState } from './machine.ts';
+import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, olderSnapshotEvidence, phaseFindings, type EvidenceState, type FindingState, type XState } from './machine.ts';
 
 type ObjectConstraints = ReturnType<typeof objectConstraints>;
 
@@ -68,6 +69,44 @@ function readOnlyWorkspace(s: XState) {
   return { snapshot: defined(s).d.snapshot.path, writablePaths: [] as string[] };
 }
 
+/**
+ * A queued card as its dispatch hands it over (process/explorationSnapshot.ts): the commit it names
+ * and a blind card's evidence binding are the exploration's as they stand at the claim, so a card
+ * queued before a resnapshot reads the new snapshot, and the evidence it lists from an older snapshot
+ * is labelled as on a card built now. Everything else is the card as it was queued; a card that
+ * needs none of it (every card of an exploration whose snapshot was not taken again) is returned as
+ * it is.
+ */
+export function cardAtClaim<C extends { readonly seat: string } & Readonly<Record<string, unknown>>>(s: XState, card: C): C {
+  const d = s.defined;
+  if (d === null) return card;
+  let out: Record<string, unknown> = card;
+  const ws = card['workspace'] as { readonly snapshot: string } | undefined;
+  if (ws !== undefined && ws.snapshot !== d.snapshot.path) out = { ...out, workspace: { ...ws, snapshot: d.snapshot.path } };
+  // a blind card's evidence is a binding (the others' evidence is a list of records)
+  if (card.seat === 'researcher-reader' || card.seat === 'constructor-experiment') {
+    const ev = card['evidence'] as { readonly envLine: string; readonly envSnapshot: string };
+    if (ev.envLine !== d.envLine || ev.envSnapshot !== d.envSnapshot) out = { ...out, evidence: { ...ev, envLine: d.envLine, envSnapshot: d.envSnapshot } };
+    return out as C;
+  }
+  const due = (id: string | null, summary: string): boolean => id !== null && olderSnapshotEvidence(s, id) && !summary.endsWith(OLDER_MARK);
+  const relabel = <T extends { readonly summary: string }>(items: readonly T[], id: (x: T) => string | null): T[] | null =>
+    items.some((x) => due(id(x), x.summary)) ? items.map((x) => (due(id(x), x.summary) ? { ...x, summary: `${x.summary}${OLDER_MARK}` } : x)) : null;
+  const evidence = Array.isArray(card['evidence']) ? relabel(card['evidence'] as ReadonlyArray<{ readonly id: string; readonly summary: string }>, (x) => x.id) : null;
+  if (evidence !== null) out = { ...out, evidence };
+  // an interpreter's attempts, each with its latest record
+  const attempts = Array.isArray(card['attempts']) ? relabel(card['attempts'] as ReadonlyArray<{ readonly evidence: string | null; readonly summary: string }>, (x) => x.evidence) : null;
+  if (attempts !== null) out = { ...out, attempts };
+  return out as C;
+}
+
+const OLDER_MARK = ` (${OLDER_ENVIRONMENT})`;
+
+/** An evidence summary as the cards show it: one recorded under an older snapshot (before a resnapshot) still counts, and says so. */
+export function evidenceSummary(s: XState, e: EvidenceState): string {
+  return olderSnapshotEvidence(s, e.id) ? `${e.summary}${OLDER_MARK}` : e.summary;
+}
+
 function explorationRef(s: XState, focus: 'product' | 'method' | 'reasoning') {
   const { def } = defined(s);
   return { id: def.exploration, product: def.product, research: def.research, focus, question: def.question };
@@ -103,7 +142,7 @@ function evidenceItems(s: XState, m: Materials, onlyExtra = false, mustRead: Rea
   return [...s.evidence.values()]
     .filter((e) => !onlyExtra || e.attempt === null)
     .sort((a, b) => a.k - b.k)
-    .map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt, material: e.report !== null ? m.add(`evidence-${e.id}`, `Evidence ${e.id} report`, e.report, mustRead.has(e.id)) : null }));
+    .map((e) => ({ id: e.id, status: e.status, summary: evidenceSummary(s, e), attempt: e.attempt, material: e.report !== null ? m.add(`evidence-${e.id}`, `Evidence ${e.id} report`, e.report, mustRead.has(e.id)) : null }));
 }
 
 function rulings(s: XState): string[] {
@@ -218,7 +257,7 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
         purpose: a.purpose,
         evidence: e?.id ?? null,
         status: e?.status ?? 'not-run',
-        summary: e?.summary ?? 'no record',
+        summary: e !== null ? evidenceSummary(s, e) : 'no record',
         material: e !== null && e.report !== null ? m.add(`evidence-${e.id}`, `Attempt ${a.id} record`, e.report, true) : null,
       };
     }),

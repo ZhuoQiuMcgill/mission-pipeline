@@ -40,6 +40,10 @@
 //                          rests on (code review r1 #3): they run again (the same request, blind),
 //                          then the same position judges the version again with the new records
 //   settled (<x>, <x>#<n>) the step handed a stop to the decision layer (plandoc.ts): one per opening
+//   resnapshotted (<n>)    the snapshot the seats read was taken again from the target branch: before
+//                          the first step was dispatched (nothing had run on the old one), or on the
+//                          PM's word; every card from then on names it, and evidence recorded before
+//                          still counts, labelled "older environment"
 //
 // Settling (code review r1 #3 carried through): an exploration settles at most once per opening, and
 // a rerun that reopens a converged exploration (or a redefinition that clears a stop) opens it again.
@@ -80,6 +84,25 @@ export interface DefinedBody {
   readonly envSnapshot: string;
   /** The commit the seats read (`path` is what the cards name: the commit, or a project-relative path). */
   readonly snapshot: { readonly path: string; readonly commit: string };
+}
+
+/** The event of a snapshot taken again (line "exploration:<id>", key: its number, 1 for the first). */
+export const RESNAPSHOTTED = 'resnapshotted';
+
+/** A snapshot taken again from the target branch (the branch moved since the exploration was defined, or since its last one). */
+export interface ResnapshotBody {
+  readonly n: number;
+  /** The commit the seats read from now on, and its evidence environment (a new env.snapshot on the exploration's env line). */
+  readonly snapshot: { readonly path: string; readonly commit: string };
+  readonly envSnapshot: string;
+  /** The snapshot it replaces. */
+  readonly previous: { readonly commit: string; readonly envSnapshot: string };
+  /** dispatch: taken when its first step was dispatched (nothing had run yet); pm: `mp pm resnapshot-exploration`. */
+  readonly by: 'dispatch' | 'pm';
+  /** The step whose dispatch took it (by dispatch). */
+  readonly step: string | null;
+  /** The words entry it rests on (by pm). */
+  readonly words: string | null;
 }
 
 export interface EvidenceTaskInfo {
@@ -426,6 +449,10 @@ export interface XState {
   settled: SettleRecord | null;
   /** 4.1.2: the repairs that reopened it, each an added question its later rounds answer. */
   readonly repairs: RepairRef[];
+  /** The snapshots taken again, oldest first (`defined` holds the one in force). */
+  readonly resnapshots: ResnapshotBody[];
+  /** The evidence environment (env snapshot id) each evidence was recorded under: the snapshot in force when it was taken into account. */
+  readonly evidenceEnv: Map<string, string>;
 }
 
 export function emptyState(): XState {
@@ -473,6 +500,8 @@ export function emptyState(): XState {
     settles: [],
     settled: null,
     repairs: [],
+    resnapshots: [],
+    evidenceEnv: new Map(),
   };
 }
 
@@ -593,6 +622,15 @@ export function fold(events: readonly XEvent[]): XState {
         if (s.settled === null) s.settled = rec;
         break;
       }
+      case RESNAPSHOTTED: {
+        // the snapshot the seats read, taken again: every card from now on names it; nothing is
+        // queued or invalidated by it (evidence recorded before still counts: olderSnapshotEvidence)
+        const b = e.body as ResnapshotBody;
+        if (s.defined === null) break;
+        s.defined = { ...s.defined, snapshot: { path: b.snapshot.path, commit: b.snapshot.commit }, envSnapshot: b.envSnapshot };
+        s.resnapshots.push(b);
+        break;
+      }
       default:
         break; // unknown events of a newer flow are ignored
     }
@@ -612,6 +650,7 @@ function consume(s: Mutable, c: ConsumedBody): void {
     case 'evidence': {
       const k = q?.evidence?.k ?? s.evidenceSeq;
       s.evidence.set(c.evidence, { id: c.evidence, k, status: c.status, summary: c.summary, report: c.report, attempt: c.attempt });
+      if (s.defined !== null) s.evidenceEnv.set(c.evidence, s.defined.envSnapshot);
       if (s.awaitingEvidence !== null && s.awaitingEvidence.executor === c.task) s.awaitingEvidence.evidence = c.evidence;
       const old = q?.evidence?.rerunOf;
       if (old !== undefined && s.reruns.has(old)) {
@@ -972,6 +1011,16 @@ export function currentEvidence(s: XState, id: string): string {
     if (rep === undefined || rep === null || seen.has(rep)) return cur;
     cur = rep;
   }
+}
+
+/**
+ * Whether an evidence was recorded under an older snapshot than the one the seats read now (a
+ * resnapshot came after it): it still counts, and every read labels it "older environment". Never
+ * true for an exploration whose snapshot was not taken again.
+ */
+export function olderSnapshotEvidence(s: XState, id: string): boolean {
+  const env = s.evidenceEnv.get(id);
+  return env !== undefined && s.defined !== null && env !== s.defined.envSnapshot;
 }
 
 /** A registered attempt's latest record (code review r2 #5), through the reruns; null before it ran. */

@@ -8,6 +8,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Added
+- `mp pm resnapshot-exploration <mission> <exploration> --words W-<n>`: the PM's word that a started
+  exploration reads the target branch as it is now. Its next cards name the new commit, a card
+  already queued too; nothing runs again. Evidence recorded before still counts, and the
+  exploration's cards, hand-off and `mp read show exploration` mark it "older environment". It is
+  refused while the exploration is settled (`EXPLORATION_SETTLED`: reopen it, or plan a new
+  exploration id), while one of its dispatches is in flight or its hand-back is not taken into
+  account yet (`DISPATCH_IN_FLIGHT`), and when the branch is still at its snapshot
+  (`SNAPSHOT_CURRENT`).
+
+### Changed
+- **An exploration that has not started reads code landed after its plan took effect.** Its
+  snapshot used to be fixed when it was defined, so a tool the same mission built and landed for
+  its explorations stayed out of their reach. Now the dispatch of its first step takes the snapshot
+  again when the target branch moved since (event `resnapshotted` on the exploration's line, a new
+  `env.snapshot` on its env line). Nothing has run on the old snapshot then, so nothing is
+  invalidated. An exploration whose snapshot is never taken again behaves as before.
+- On an exploration's env line, a record bound to a snapshot the line had before still counts. On
+  every other line, a record bound to an older snapshot still does not.
+
 ### Fixed
 - **The Claude Code adapter no longer records another session's message as the user's words.** A
   message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and

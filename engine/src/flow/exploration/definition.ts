@@ -4,7 +4,7 @@
 // flow fills cards with. The decision layer defines it; the exploration flow runs it.
 
 import { z } from 'zod';
-import { idPart } from '../../common/ids.ts';
+import { EXPLORATION_ENV_PREFIX, idPart } from '../../common/ids.ts';
 import { DEFAULT_ATTACK_SCOPE } from '../../seat/cards/crititor.ts';
 import { EXPLORATION_ROUNDS_DEFAULT } from '../plandoc.ts';
 
@@ -108,8 +108,8 @@ export const xid = {
   versionPrefix: (m: string, x: string, n: number) => `xpv.${tok(m, x)}.${n}`,
   basisLine: (m: string, x: string) => `xpdef.${tok(m, x)}`,
   basisVersion: (m: string, x: string, v: number) => `xpdef.${tok(m, x)}.v${v}`,
-  envLine: (m: string, x: string) => `xpenv.${tok(m, x)}`,
-  envSnapshot: (m: string, x: string, h: string) => `xpenv.${tok(m, x)}.${h.slice(0, 16)}`,
+  envLine: (m: string, x: string) => `${EXPLORATION_ENV_PREFIX}${tok(m, x)}`,
+  envSnapshot: (m: string, x: string, h: string) => `${EXPLORATION_ENV_PREFIX}${tok(m, x)}.${h.slice(0, 16)}`,
   /** The object path of the exploration's product (5.2 v33: a concrete document path). */
   path: (m: string, x: string) => `exploration/${tok(m, x)}`,
 };
