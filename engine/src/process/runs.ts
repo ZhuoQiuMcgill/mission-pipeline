@@ -23,6 +23,12 @@
 // which removing the folder does not. Best effort: a failing one is a note in the summary leaf,
 // never evidence, and changes no result and no reuse.
 //
+// Time limits (config.json): each command gets `commandTimeoutMs`, except the reruns of an
+// exploration's experiment executor (`mp seat <id> rerun` on a constructor-experiment card: the
+// declaration marks them `experiment` and `rerun`), which get `experimentCommandTimeoutMs` (default
+// `commandTimeoutMs`): an experiment may need a day where a hung test should end in minutes. Such a
+// rerun is a sampling run: it takes no run lock and holds no write lock of the memory while it executes.
+//
 // Reuse (§6.5): a declared run is reused for the same candidate, command, working directory and
 // environment identity (reusableMethodRun's key); a sampling run never is: each one executes and gets
 // a new run id.
@@ -107,6 +113,15 @@ export function normalizeCwd(cwd: string | undefined | null): string {
 /** The working directory a recorded run ran in ("." when it recorded none). */
 export function runCwd(fields: Readonly<Record<string, string>>): string {
   return Object.hasOwn(fields, CWD_FIELD) ? fields[CWD_FIELD]! : '.';
+}
+
+/**
+ * The time limit of each command of a run (see the top of this file): an experiment executor's
+ * rerun (`experiment` and `rerun` declared: `mp seat <id> rerun` on a constructor-experiment card)
+ * gets `experimentCommandTimeoutMs`; every other run, `commandTimeoutMs`.
+ */
+export function commandTimeoutFor(ctx: Pick<ProcessContext, 'commandTimeoutMs' | 'experimentCommandTimeoutMs'>, declaration: Pick<RunDeclaration, 'experiment' | 'rerun'>): number {
+  return declaration.experiment === true && declaration.rerun === true ? ctx.experimentCommandTimeoutMs : ctx.commandTimeoutMs;
 }
 
 /** One command as a card declares it. `sampled` / `network`: the card's marks (§6.5). */
@@ -405,6 +420,7 @@ async function executeRuns(
   const staged = new Map<string, RecordedRun>();
   const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
   let cleanup: readonly CleanupFailure[] = [];
+  const timeoutMs = commandTimeoutFor(ctx, req.declaration);
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
   await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
   try {
@@ -412,7 +428,7 @@ async function executeRuns(
       const rel = normalizeCwd(c.cwd);
       const cwd = rel === '.' ? dir : join(dir, ...rel.split('/'));
       mkdirSync(cwd, { recursive: true });
-      const out = ctx.runner({ command: c.command, cwd, timeoutMs: ctx.commandTimeoutMs });
+      const out = ctx.runner({ command: c.command, cwd, timeoutMs });
       const runClass = classOf(c);
       const key = canonicalJson({ command: c.command, cwd: rel });
       const prior = reusable[i] ?? (runClass === 'declared' ? staged.get(key) : undefined);
