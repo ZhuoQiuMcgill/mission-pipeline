@@ -23,6 +23,7 @@ import { randomBytes } from 'node:crypto';
 import type { Db } from '../memory/db.ts';
 import { ENV_LINE, RUN_METHOD } from './environment.ts';
 import type { RunClass } from '../common/records.ts';
+import { EXPLORATION_ENV_PREFIX } from '../common/ids.ts';
 
 /** What a run's card declares about it, at the moment it is recorded. */
 export interface RunDeclaration {
@@ -107,11 +108,19 @@ export function olderRunMethod(fields: Readonly<Record<string, string>>): boolea
  * 4.1.2: whether a recorded run still counts as evidence, one rule for every reader
  * (semantics.ts evidenceApplicable, the Auditor's card): a run on the 4.1 environment line counts
  * under any environment identity unless it was recorded under an older run method; a run on any
- * other line counts while it is bound to its line's current snapshot.
+ * other line counts while it is bound to its line's current snapshot. An exploration's line is the
+ * code its seats read (7.2): after a resnapshot, a record bound to a snapshot the line had before
+ * still counts (`hadSnapshot`, as the records stood), and the exploration's reads label it "older
+ * environment", as 4.1.2 does for a run from an older environment identity.
  */
-export function runCounts(rec: { readonly envLine: string; readonly envSnapshot: string; readonly fields: Readonly<Record<string, string>> }, currentSnapshot: string | undefined): boolean {
+export function runCounts(
+  rec: { readonly envLine: string; readonly envSnapshot: string; readonly fields: Readonly<Record<string, string>> },
+  currentSnapshot: string | undefined,
+  hadSnapshot: (snapshot: string) => boolean = () => false,
+): boolean {
   if (rec.envLine === ENV_LINE) return !olderRunMethod(rec.fields);
-  return currentSnapshot === rec.envSnapshot;
+  if (currentSnapshot === rec.envSnapshot) return true;
+  return currentSnapshot !== undefined && rec.envLine.startsWith(EXPLORATION_ENV_PREFIX) && hadSnapshot(rec.envSnapshot);
 }
 
 /** Current-method reuse key. Old evidence remains readable and usable by its seat's judgment,

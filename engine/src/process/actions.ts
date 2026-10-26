@@ -4,7 +4,8 @@
 //               commit, with accepted product versions laid over it (a dependent task sees its
 //               prerequisites, 5.3) by the delivery's overlay (delivery/candidate.ts); the card
 //               names the commit, `mp seat <id> checkout` materializes it (the snapshot itself writes
-//               nothing to disk: only its commit is used, 4.1.2). A later attempt's start
+//               nothing to disk: only its commit is used, 4.1.2); `targetHead` reads the base alone
+//               at once (an exploration's snapshot taken again at a dispatch). A later attempt's start
 //               (carry): the previous candidate, or, when its dependencies' products changed, the
 //               previous version's whole change laid over their current snapshot (Appendix M)
 //   product     the product version of a Constructor's candidate commit (5.1): its content is the
@@ -220,6 +221,14 @@ export function gitActions(ctx: ProcessContext): GitActions {
       if (req.carry !== undefined) return carried(req, req.carry);
       const r = await laid(req.mission, req.commit ?? missionBase(), req.products ?? []);
       return { path: r.commit, commit: r.commit, products: r.products, ...(req.writable !== undefined ? { writable: [...req.writable] } : {}) };
+    },
+
+    targetHead() {
+      try {
+        return commitOf(missionBase());
+      } catch {
+        return null;
+      }
     },
 
     async product(req: ProductRequest): Promise<ProductVersion> {

@@ -43,6 +43,7 @@ import {
   pmDrain,
   pmFullRun,
   pmReopenExploration,
+  pmResnapshotExploration,
   pmFinish,
   pmGrant,
   pmLand,
@@ -844,6 +845,26 @@ const reopenExploration: Command = {
   },
 };
 
+const resnapshotExploration: Command = {
+  group: 'pm',
+  name: ['resnapshot-exploration'],
+  summary: 'a started exploration reads the target branch as it is now (code that landed after it began): its next cards name the new snapshot; nothing runs again by itself, and evidence recorded before still counts, marked "older environment"',
+  usage: 'mp pm resnapshot-exploration <mission> <exploration> --words W-<n>',
+  flags: { words: 'string' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const x = positional(args, 1, 'exploration');
+    const w = wordsArg(p.ctx, args, true);
+    const r = await pmResnapshotExploration(p.ctx, { mission: m, exploration: x, words: w });
+    return ok(
+      `Exploration ${x} of ${m} now reads ${short(r.snapshot)} (it read ${short(r.previous)}): every card dispatched from now on names it. Nothing runs again by itself; ${r.olderEvidence.length} evidence execution(s) recorded before still count, marked "older environment".`,
+      { mission: m, exploration: x, ...r },
+    );
+  },
+};
+
 function renderLanding(p: Project, r: LandingResult): { text: string; exitCode: number; wi: string | null } {
   switch (r.kind) {
     case 'landed': {
@@ -1108,6 +1129,7 @@ export const PM_COMMANDS: readonly Command[] = [
   deliver,
   fullRun,
   reopenExploration,
+  resnapshotExploration,
   land,
   withdrawDeliveryCmd,
   detachDuplicate,

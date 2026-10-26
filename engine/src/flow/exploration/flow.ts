@@ -28,7 +28,7 @@ import {
   type ReaderCard,
 } from '../../seat/cards/researcher.ts';
 import type { AnyCard, AppendGuard, FlowEventInput, FlowLedgerPort, FlowNotice, FlowSchedulerPort, FlowTask, FlowTaskStatus } from '../ports.ts';
-import { attackerCard, authorCard, executorCard, interpreterCard, parseEvidenceRequest, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
+import { attackerCard, authorCard, cardAtClaim, evidenceSummary, executorCard, interpreterCard, parseEvidenceRequest, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
 import { ExplorationDefinitionSchema, xid, type ExplorationDefinition } from './definition.ts';
 import {
   allowedRounds,
@@ -37,12 +37,14 @@ import {
   effectiveSeverity,
   fold,
   pendingTasks,
+  RESNAPSHOTTED,
   type Action,
   type ConsumedBody,
   type DefinedBody,
   type Disposition,
   type QueuedBody,
   type RerunBody,
+  type ResnapshotBody,
   type Role,
   type RulingBody,
   type StopReason,
@@ -79,8 +81,9 @@ async function load(p: ExplorationPorts, mission: MissionId, x: string): Promise
  * Define an exploration (the decision layer's call, 4.3): the definition becomes a basis line
  * (its version is what every attack judgment binds, 10.1 "Crititor 攻击与裁决"), the evidence
  * environment line is registered (7.2: the exploration's evidence stays applicable while it is
- * current), and the snapshot the seats read is fixed. Idempotent; a different definition under
- * the same id is refused (FACT_CONFLICT).
+ * current), and the snapshot the seats read is taken: the target branch's head (taken again only
+ * by resnapshotEntries' two routes). Idempotent; a different definition under the same id is
+ * refused (FACT_CONFLICT).
  */
 export async function defineExploration(p: ExplorationPorts, input: ExplorationDefinition): Promise<void> {
   const def = ExplorationDefinitionSchema.parse(input);
@@ -98,12 +101,53 @@ export async function defineExploration(p: ExplorationPorts, input: ExplorationD
     basisLine: xid.basisLine(def.mission, def.exploration),
     basisVersion: xid.basisVersion(def.mission, def.exploration, 1),
     envLine: xid.envLine(def.mission, def.exploration),
-    envSnapshot: xid.envSnapshot(def.mission, def.exploration, p.ledger.content.put(canonicalJson({ snapshot: snapshot.commit, mission: def.mission, exploration: def.exploration }))),
+    envSnapshot: envSnapshotOf(def.mission, def.exploration, snapshot.commit, (d) => p.ledger.content.put(d)),
     snapshot: { path: snapshot.path, commit: snapshot.commit },
   };
   const basis: PlainBasisVersionRecord = { kind: 'basis.version', basisKind: 'standard', line: body.basisLine as never, version: body.basisVersion as never, mission, scope: null };
   const env: EnvSnapshotRecord = { kind: 'env.snapshot', line: body.envLine as never, snapshot: body.envSnapshot as never };
   await p.ledger.append(xid.op(def.mission, def.exploration, 'define'), { events: [{ mission, line: line(def.exploration), event: DEFINED, key: 'definition', body }], records: [basis, env] });
+}
+
+/** The evidence environment of a snapshot: the same commit gives the same id (definition and resnapshot alike). */
+function envSnapshotOf(mission: string, x: string, commit: string, put: (doc: string) => string): string {
+  return xid.envSnapshot(mission, x, put(canonicalJson({ snapshot: commit, mission, exploration: x })));
+}
+
+/**
+ * The snapshot the seats read, taken again from the target branch (it moved since the exploration
+ * was defined, or since its last resnapshot): the event that makes every later card name it, and its
+ * evidence environment, a new env.snapshot on the exploration's env line (7.2). Nothing is queued
+ * or rerun by it. Evidence recorded before still counts (the evaluator's runCounts: a snapshot the
+ * line had), and every read of the exploration labels it "older environment". Two routes write these
+ * in one write with their checks (process/explorationSnapshot.ts): the dispatch of an exploration's
+ * first step, and `mp pm resnapshot-exploration`. Null when the snapshot is that commit already.
+ */
+export function resnapshotEntries(
+  s: XState,
+  snapshot: { readonly path: string; readonly commit: string },
+  put: (doc: string) => string,
+  by: { readonly by: ResnapshotBody['by']; readonly step?: string | null; readonly words?: string | null },
+): { readonly event: FlowEventInput; readonly record: EnvSnapshotRecord; readonly body: ResnapshotBody } | null {
+  const d = s.defined;
+  const def = s.def;
+  if (d === null || def === null) throw new Error('exploration not defined');
+  if (snapshot.commit === d.snapshot.commit) return null;
+  const n = s.resnapshots.length + 1;
+  const body: ResnapshotBody = {
+    n,
+    snapshot: { path: snapshot.path, commit: snapshot.commit },
+    envSnapshot: envSnapshotOf(def.mission, def.exploration, snapshot.commit, put),
+    previous: { commit: d.snapshot.commit, envSnapshot: d.envSnapshot },
+    by: by.by,
+    step: by.step ?? null,
+    words: by.words ?? null,
+  };
+  return {
+    event: { mission: def.mission as MissionId, line: line(def.exploration), event: RESNAPSHOTTED, key: String(n), body },
+    record: { kind: 'env.snapshot', line: d.envLine as never, snapshot: body.envSnapshot as never },
+    body,
+  };
 }
 
 /**
@@ -242,7 +286,7 @@ async function consumeFinished(p: ExplorationPorts, mission: MissionId, x: strin
     if (body === null) continue;
     const records: BaseRecord[] = [];
     if (body.kind === 'evidence' && !body.auto && q.role === 'executor' && st.handBack !== null) {
-      const card = cardOf<ExperimentCard | ReaderCard>(p, q);
+      const card = cardAtClaim(s, cardOf<ExperimentCard | ReaderCard>(p, q));
       // the experiment's evidence record is the program's (the hand-back made none): its claims checked against the dispatch's runs
       if (!st.handBack.records.some((x) => x.kind === 'evidence' && x.evidence === card.evidence.id)) records.push(blindRecordOf(p, card, st.handBack.result as BlindResult, st.handBack));
     }
@@ -346,7 +390,8 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
       };
     }
     case 'executor': {
-      const card = cardOf<ExperimentCard | ReaderCard>(p, q);
+      // bound as its dispatch was (cardAtClaim: a resnapshot waits while a dispatch is in flight)
+      const card = cardAtClaim(s, cardOf<ExperimentCard | ReaderCard>(p, q));
       const r = hb.result as BlindResult;
       const rec = blindRecordOf(p, card, r, hb);
       const status = rec.fields['status'] === 'completed' ? 'completed' : 'unverified';
@@ -582,7 +627,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const rq = s.tasks.get(a.requester);
       if (aw === null || rq === undefined) return;
       const ev = aw.evidence !== null ? s.evidence.get(aw.evidence) : undefined;
-      const text = ev === undefined ? 'The evidence run left no record.' : `Evidence ${ev.id} (${ev.status}): ${ev.summary}${ev.report !== null ? `\nFull report: material evidence-${ev.id}.` : ''}`;
+      const text = ev === undefined ? 'The evidence run left no record.' : `Evidence ${ev.id} (${ev.status}): ${evidenceSummary(s, ev)}${ev.report !== null ? `\nFull report: material evidence-${ev.id}.` : ''}`;
       // §5.4: continuation is a new card with the notes the seat saved and the evidence, never a harness session
       const resume: Resume = { previous: a.requester, notes: aw.notes, evidence: text };
       const task = xid.task(mission, x, n, rq.role);
@@ -689,7 +734,7 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
     stabilizer: s.stabilizations.map((j) => ({ round: j.round, verdict: j.verdict, drift: j.drift.verdict, reason: j.drift.reason, findings: j.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason })) })),
     unresolvedBlocking: findings.filter((f) => blocks(f) && f.status !== 'resolved').map((f) => f.id),
     residualRisks: findings.filter((f) => f.residualRisk).map((f) => f.id),
-    evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt })),
+    evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: evidenceSummary(s, e), attempt: e.attempt })),
     questions: [...s.questions],
     research: def.research ? { noConclusion: s.noConclusion, method: s.method?.version ?? null } : null,
   };
