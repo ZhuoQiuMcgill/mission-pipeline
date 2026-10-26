@@ -70,6 +70,7 @@ const config: Command = {
         suite.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}${x.cwd !== undefined ? ` (in ${x.cwd})` : ''}`),
         'none',
       ),
+      ...section("Run cleanup: cleanupCommands (in each run's checkout, after its commands, before mp removes it)", cfg.cleanupCommands.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
       `Commit identity: author ${cfg.commit?.author ?? `${DEFAULT_COMMIT_IDENT} (default)`}; committer ${cfg.commit?.committer ?? (cfg.commit?.author !== undefined ? 'the author' : `${DEFAULT_COMMIT_IDENT} (default)`)}`,
       ...section('Environment identity: version commands', cfg.environment.versionCommands, 'none (operating system and architecture only)'),
       ...section('Exclusive resources', cfg.exclusiveResources, 'none'),

@@ -8,6 +8,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Added
+- **A project can release what its commands leave outside a run's checkout.** Config
+  `cleanupCommands` (`[{ id, command }]`, default none) lists commands `mp` runs in the root of a
+  run's checkout after the run's commands, also when one fails or times out, and before it removes
+  the checkout: verification runs, `mp seat <id> rerun`, `mp pm renew` and full runs. Docker Compose
+  names a project after the folder it runs in, so a Compose command run from the checkout leaves a
+  network and the images it built for every run, and after about 30 runs the daemon has no address
+  pool left. `docker compose -f docker-compose.yml --project-directory . down --rmi local --remove-orphans`
+  removes them; `--rmi local` removes only images without a custom tag. Cleanup is best effort: each
+  command gets at most 5 minutes (less when `commandTimeoutMs` is shorter), and a failure is a note in
+  the run's summary leaf that changes no result, evidence or reuse. `mp config` shows the key, and
+  `mp init` writes `cleanupCommands: []`.
+
 ### Fixed
 - **The Claude Code adapter no longer records another session's message as the user's words.** A
   message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and

@@ -140,8 +140,9 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   // the identity of the commits mp writes: config `commit` (4.1.2); a test's process options still win
   const ids = commitIdentities(config);
   // the project's commands, read once from the config into the context (4.1.2): its full suite
-  // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
+  // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there.
+  // Its cleanup commands run after each run's commands, before the run's checkout is removed (runs.ts)
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {

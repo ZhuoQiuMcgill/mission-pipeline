@@ -10,6 +10,10 @@
 //                           (`mp pm full-run`); never by a delivery or a hand-back; optional, with no default
 //   closingChecks           the 4.1.1 key, read as a deprecated alias of `fullSuite` when that is
 //                           absent (fullSuiteOf, src/common/fullSuite.ts); `mp config` says which
+//   cleanupCommands         run in each run's checkout root after the run's commands, before `mp`
+//                           removes the checkout: they release what the project's commands made
+//                           outside it (containers' networks, images); best effort, never evidence;
+//                           default none
 //   commandTimeoutMs        per declared command
 //   environment             { versionCommands }: what the environment identity covers (§6.5)
 //   exclusiveResources      resources tasks may lease (a database, a device); informational here
@@ -48,6 +52,7 @@ export const ConfigSchema = z
     // optional with no default, so that the alias works: fullSuiteOf(config) reads fullSuite, else closingChecks
     fullSuite: z.array(SuiteCommandSchema).max(100).optional(),
     closingChecks: z.array(Command).max(100).optional(),
+    cleanupCommands: z.array(Command).max(100).default([]),
     commandTimeoutMs: z.number().int().min(1_000).max(24 * 3_600_000).default(30 * 60_000),
     environment: z.object({ versionCommands: z.array(z.string().min(1).max(1000)).max(50).default([]) }).strict().default({ versionCommands: [] }),
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
@@ -111,6 +116,7 @@ export function defaultConfig(o: { readonly targetBranch: string; readonly versi
     targetBranch: o.targetBranch,
     verificationCommands: [],
     fullSuite: [],
+    cleanupCommands: [],
     commandTimeoutMs: 30 * 60_000,
     environment: { versionCommands: [...o.versionCommands] },
     exclusiveResources: [],
