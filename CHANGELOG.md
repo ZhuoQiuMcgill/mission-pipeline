@@ -6,6 +6,15 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The Claude Code adapter no longer records another session's message as the user's words.** A
+  message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and
+  the adapter recorded it with `mp pm say`. It now skips that envelope, and the
+  `<ci-monitor-event>` a pull-request monitor sends, as it already skipped `<agent-message …>` and
+  `<task-notification>`.
+
 ## [4.1.2] - 2026-10-17
 
 4.1.2 cuts the engine's execution redundancy. Two field runs showed the engine paying for a perfect
