@@ -437,7 +437,7 @@ async function routeStop(ctx: FlowCtx, x: string): Promise<boolean> {
     subject: explorationLine(x),
     summary: `Exploration ${x} stopped without converging (${s.stopped.reason}, ${s.rounds} of ${h.allowedRounds} rounds): ${h.unresolvedBlocking.length} fatal or serious in-scope finding(s) unresolved.`,
     // 4.1 §6.3: the findings, the dispositions and the Stabilizer's judgments go to the Secretary
-    reasons: [...unresolvedOf(h), ...h.stabilizer.map((j) => `Stabilizer, round ${j.round}: ${j.drift}; ${j.findings.map((f) => `${f.finding.slice(0, 24)} ${f.verdict} (${f.severity}): ${f.reason}`).join('; ')}`)],
+    reasons: [...unresolvedOf(h), ...h.stabilizer.map((j) => `Stabilizer, round ${j.round}: ${j.drift}; ${j.findings.map((f) => `${f.finding.slice(0, 24)} ${f.verdict} (${f.severity}${f.answered === true ? ', answered' : ''}): ${f.reason}`).join('; ')}`)],
     // sending back adds no rounds (review r1 #7): it is offered only while some are left
     // sending back adds no rounds (review r1 #7); accepting waits for any direction question's ruling (code review r1 #2)
     options: STOP_OPTIONS.filter((o) => (o !== 'send-back' || allowedRounds(s) - s.rounds > 0) && (o !== 'accept-risk' || !directionPending(s))),

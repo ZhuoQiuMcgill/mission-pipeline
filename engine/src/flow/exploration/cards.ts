@@ -96,6 +96,7 @@ function priorFinding(f: FindingState, m: Materials, i: number, mustRead: boolea
     disposition: f.disposition === null ? null : { action: f.disposition.action, note: f.disposition.note, evidence: f.disposition.evidence, question: f.disposition.question },
     ruling: f.ruling,
     scope: f.scope,
+    ...(f.answered !== null ? { answered: f.answered } : {}),
   };
 }
 
