@@ -431,7 +431,9 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
         ? `open the mission again if the user wants its production to go on (mp pm mission open ${h.mission})`
         : h.why.startsWith('git writes')
           ? 'confirm this copy is the one in use (mp pm confirm-copy, WI-31)'
-          : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
+          : h.why.startsWith('exploration')
+            ? 'it starts by itself once the explorations it waits for settle (their own blocks are listed here)'
+            : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
     block(ofStep(h.step, String(h.mission)), `${h.step} (${h.seat}) is held: ${h.why}`, next, h.wi);
   }
   // dispatches: in flight under a stop, in flight too long, a hand-back after a stop

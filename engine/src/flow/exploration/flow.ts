@@ -30,6 +30,7 @@ import {
 import type { AnyCard, AppendGuard, FlowEventInput, FlowLedgerPort, FlowNotice, FlowSchedulerPort, FlowTask, FlowTaskStatus } from '../ports.ts';
 import { attackerCard, authorCard, executorCard, interpreterCard, parseEvidenceRequest, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
 import { ExplorationDefinitionSchema, xid, type ExplorationDefinition } from './definition.ts';
+import { predecessorsOf } from './predecessors.ts';
 import {
   allowedRounds,
   blocks,
@@ -467,30 +468,32 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
   const lineage = xid.lineage(mission, x);
   const n = s.seq + 1;
   const base = { n, round: s.rounds, phase: s.phase, fresh: false, target: null, judgment: null, evidence: null, resumeOf: null, versionPrefix: null, lineage, ...(s.defined !== null ? { basis: s.defined.basisVersion } : {}) };
+  // the explorations planned before this one (predecessors.ts): what they handed on, on the cards of the seats that know it
+  const predecessors = () => predecessorsOf(p.ledger, mission, x);
   switch (a.kind) {
     case 'stop':
       await stop(p, mission, x, s, a.reason, a.wi);
       return;
     case 'author': {
       const task = xid.task(mission, x, n, 'author');
-      await submitQueued(p, mission, x, s, { ...base, task, role: 'author', purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, null)), null);
+      await submitQueued(p, mission, x, s, { ...base, task, role: 'author', purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, null, await predecessors())), null);
       return;
     }
     case 'interpreter': {
       const task = xid.task(mission, x, n, 'interpreter');
-      await submitQueued(p, mission, x, s, { ...base, task, role: 'interpreter', purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content)), null);
+      await submitQueued(p, mission, x, s, { ...base, task, role: 'interpreter', purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content, await predecessors())), null);
       return;
     }
     case 'attacker': {
       const task = xid.task(mission, x, n, 'attacker');
-      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null, await constraintsForVersion(p, mission, s.version?.id ?? null));
+      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null, await constraintsForVersion(p, mission, s.version?.id ?? null), await predecessors());
       await submitQueued(p, mission, x, s, { ...base, task, role: 'attacker', purpose: a.mode, fresh: a.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), null);
       return;
     }
     case 'stabilizer': {
       // a new instance each round (4.1 §6.3)
       const task = xid.task(mission, x, n, 'stabilizer');
-      const card = stabilizerCard(s, n, task, p.ledger.content, await constraintsForVersion(p, mission, s.stabilizing?.target ?? null));
+      const card = stabilizerCard(s, n, task, p.ledger.content, await constraintsForVersion(p, mission, s.stabilizing?.target ?? null), await predecessors());
       await submitQueued(p, mission, x, s, { ...base, task, role: 'stabilizer', purpose: 'stabilize', target: card.target, judgment: card.binding.judgment }, asCard(card), null);
       return;
     }
@@ -588,14 +591,14 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const task = xid.task(mission, x, n, rq.role);
       const common = { ...base, task, role: rq.role, resumeOf: a.requester, lineage: rq.lineage };
       if (rq.role === 'author') {
-        await submitQueued(p, mission, x, s, { ...common, purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, resume)), a.requester);
+        await submitQueued(p, mission, x, s, { ...common, purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, resume, await predecessors())), a.requester);
       } else if (rq.role === 'attacker') {
         const mode = rq.purpose === 'discuss' ? 'discuss' : 'attack';
-        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume, await constraintsForVersion(p, mission, s.version?.id ?? null));
+        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume, await constraintsForVersion(p, mission, s.version?.id ?? null), await predecessors());
         await submitQueued(p, mission, x, s, { ...common, purpose: mode, fresh: rq.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), a.requester);
       } else {
         // interpreters and executors cannot ask for evidence; nothing to continue
-        await submitQueued(p, mission, x, s, { ...common, purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content)), a.requester);
+        await submitQueued(p, mission, x, s, { ...common, purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content, await predecessors())), a.requester);
       }
       return;
     }
