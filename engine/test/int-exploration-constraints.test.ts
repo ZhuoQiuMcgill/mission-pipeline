@@ -14,7 +14,7 @@ test('exploration: object constraints before the first turn bind both required p
   const author = only(w, 'researcher-author');
   const claimed = dispatchView(w.ports.ctx, pmDispatch(w.ports.ctx, author.task).dispatch).card;
   assert.deepEqual(claimed, author.card, 'the author is unchanged at dispatch');
-  assert.deepEqual(claimed['constraints'], []);
+  assert.deepEqual(claimed['constraints'], [{ id: 'constraint.all', text: 'Keep private details out of the result', kind: 'object' }], 'the author sees the object constraint its product is reviewed against');
   assert.deepEqual(await w.scheduler.run(author.task, { handBack: submit('design v1') }), []); await w.advance();
   for (let round = 0; round < 2; round++) {
     const c = cardOf<CrititorCard>(w, 'crititor');

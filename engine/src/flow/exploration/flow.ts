@@ -10,7 +10,7 @@
 // unnecessary to send again (a crash in between sends the same notice again: a no-op).
 
 import { canonicalJson, sha256 } from '../../common/hash.ts';
-import { currentConstraints } from '../requirements.ts';
+import { currentConstraints, type ConstraintBody } from '../requirements.ts';
 import { objectConstraints } from '../../seat/cards/inputs.ts';
 import type { MissionId } from '../../common/ids.ts';
 import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord } from '../../common/records.ts';
@@ -458,39 +458,43 @@ async function submitQueued(p: ExplorationPorts, mission: MissionId, x: string, 
 
 const asCard = (c: object): AnyCard => c as unknown as AnyCard;
 
-async function constraintsForVersion(p: ExplorationPorts, mission: MissionId, target: string | null) {
+async function constraintsForVersion(p: ExplorationPorts, target: string | null, inForce: readonly ConstraintBody[]) {
   const obj = target === null ? null : await p.ledger.objectVersion(target);
-  return obj === null ? { applicable: [], checks: [], list: [] } : objectConstraints(await currentConstraints({ ports: p, mission }), obj);
+  return obj === null ? { applicable: [], checks: [], list: [] } : objectConstraints(inForce, obj);
 }
 
 async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XState, a: Exclude<Action, { kind: 'none' }>): Promise<void> {
   const lineage = xid.lineage(mission, x);
   const n = s.seq + 1;
   const base = { n, round: s.rounds, phase: s.phase, fresh: false, target: null, judgment: null, evidence: null, resumeOf: null, versionPrefix: null, lineage, ...(s.defined !== null ? { basis: s.defined.basisVersion } : {}) };
+  // the project constraints in force (9.5): every card built now selects its own from them
+  const constraintsInForce = () => currentConstraints({ ports: p, mission });
   switch (a.kind) {
     case 'stop':
       await stop(p, mission, x, s, a.reason, a.wi);
       return;
     case 'author': {
       const task = xid.task(mission, x, n, 'author');
-      await submitQueued(p, mission, x, s, { ...base, task, role: 'author', purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, null)), null);
+      await submitQueued(p, mission, x, s, { ...base, task, role: 'author', purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, null, await constraintsInForce())), null);
       return;
     }
     case 'interpreter': {
       const task = xid.task(mission, x, n, 'interpreter');
-      await submitQueued(p, mission, x, s, { ...base, task, role: 'interpreter', purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content)), null);
+      await submitQueued(p, mission, x, s, { ...base, task, role: 'interpreter', purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content, await constraintsInForce())), null);
       return;
     }
     case 'attacker': {
       const task = xid.task(mission, x, n, 'attacker');
-      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null, await constraintsForVersion(p, mission, s.version?.id ?? null));
+      const all = await constraintsInForce();
+      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null, await constraintsForVersion(p, s.version?.id ?? null, all), all);
       await submitQueued(p, mission, x, s, { ...base, task, role: 'attacker', purpose: a.mode, fresh: a.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), null);
       return;
     }
     case 'stabilizer': {
       // a new instance each round (4.1 §6.3)
       const task = xid.task(mission, x, n, 'stabilizer');
-      const card = stabilizerCard(s, n, task, p.ledger.content, await constraintsForVersion(p, mission, s.stabilizing?.target ?? null));
+      const all = await constraintsInForce();
+      const card = stabilizerCard(s, n, task, p.ledger.content, await constraintsForVersion(p, s.stabilizing?.target ?? null, all), all);
       await submitQueued(p, mission, x, s, { ...base, task, role: 'stabilizer', purpose: 'stabilize', target: card.target, judgment: card.binding.judgment }, asCard(card), null);
       return;
     }
@@ -533,7 +537,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
         });
         return;
       }
-      const card = executorCard(s, task, p.ledger.content, req, executor, { id: evidence, attempt: null });
+      const card = executorCard(s, task, p.ledger.content, req, executor, { id: evidence, attempt: null }, await constraintsInForce());
       await submitQueued(p, mission, x, s, { ...base, task, lineage: evLineage, role: 'executor', purpose: 'evidence', evidence: { id: evidence, k, attempt: null, executor, requester: aw.requester } }, asCard(card), null);
       return;
     }
@@ -554,7 +558,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const k = s.evidenceSeq + 1;
       const evidence = xid.evidence(mission, x, k);
       const task = xid.task(mission, x, n, 'executor');
-      const card = executorCard(s, task, p.ledger.content, req, orig.evidence.executor, { id: evidence, attempt: orig.evidence.attempt });
+      const card = executorCard(s, task, p.ledger.content, req, orig.evidence.executor, { id: evidence, attempt: orig.evidence.attempt }, await constraintsInForce());
       await submitQueued(
         p,
         mission,
@@ -573,7 +577,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const k = s.evidenceSeq + 1;
       const evidence = xid.evidence(mission, x, k);
       const task = xid.task(mission, x, n, 'executor');
-      const card = executorCard(s, task, p.ledger.content, at, at.kind, { id: evidence, attempt: at.id });
+      const card = executorCard(s, task, p.ledger.content, at, at.kind, { id: evidence, attempt: at.id }, await constraintsInForce());
       await submitQueued(p, mission, x, s, { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: 'attempt', evidence: { id: evidence, k, attempt: at.id, executor: at.kind, requester: null } }, asCard(card), null);
       return;
     }
@@ -588,14 +592,15 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const task = xid.task(mission, x, n, rq.role);
       const common = { ...base, task, role: rq.role, resumeOf: a.requester, lineage: rq.lineage };
       if (rq.role === 'author') {
-        await submitQueued(p, mission, x, s, { ...common, purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, resume)), a.requester);
+        await submitQueued(p, mission, x, s, { ...common, purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, resume, await constraintsInForce())), a.requester);
       } else if (rq.role === 'attacker') {
         const mode = rq.purpose === 'discuss' ? 'discuss' : 'attack';
-        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume, await constraintsForVersion(p, mission, s.version?.id ?? null));
+        const all = await constraintsInForce();
+        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume, await constraintsForVersion(p, s.version?.id ?? null, all), all);
         await submitQueued(p, mission, x, s, { ...common, purpose: mode, fresh: rq.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), a.requester);
       } else {
         // interpreters and executors cannot ask for evidence; nothing to continue
-        await submitQueued(p, mission, x, s, { ...common, purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content)), a.requester);
+        await submitQueued(p, mission, x, s, { ...common, purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content, await constraintsInForce())), a.requester);
       }
       return;
     }
