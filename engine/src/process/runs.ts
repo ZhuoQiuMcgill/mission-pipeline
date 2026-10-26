@@ -17,6 +17,12 @@
 // the exit codes, the per-test results, the output's hash and the last lines of a failing
 // command; the full output is not kept (U-13).
 //
+// Cleanup (config.json `cleanupCommands`): after a run's commands, also when one fails, times out
+// or throws, `mp` runs the project's cleanup commands in the checkout root, then removes the
+// checkout. They release what the commands made outside it (a container network, a built image),
+// which removing the folder does not. Best effort: a failing one is a note in the summary leaf,
+// never evidence, and changes no result and no reuse.
+//
 // Reuse (§6.5): a declared run is reused for the same candidate, command, working directory and
 // environment identity (reusableMethodRun's key); a sampling run never is: each one executes and gets
 // a new run id.
@@ -162,6 +168,48 @@ export function commandLine(command: string | readonly string[]): string {
   return typeof command === 'string' ? command : command.map((a) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(a) ? a : JSON.stringify(a))).join(' ');
 }
 
+// ---------------------------------------------------------------- cleanup
+
+/** A cleanup command as config.json declares it (`cleanupCommands`): it runs in the checkout root. */
+export interface CleanupCommand {
+  readonly id: string;
+  readonly command: string | readonly string[];
+}
+
+/**
+ * The longest a cleanup command may take (or `commandTimeoutMs`, when that is shorter). It runs
+ * before the run is recorded and under its run locks, so a hung cleanup must not hold them for a
+ * whole command timeout; releasing resources takes seconds, and this leaves room for a slow one.
+ */
+export const CLEANUP_TIMEOUT_MS = 5 * 60_000;
+
+/** A cleanup command that failed, as the run summary leaf notes it. */
+interface CleanupFailure {
+  readonly id: string;
+  readonly command: string;
+  readonly why: string;
+  readonly tail: string;
+}
+
+/**
+ * Run the project's cleanup commands in a run's checkout root, in order (executeRuns, before it
+ * removes the checkout). Never throws: a failing or throwing command is returned as a failure and
+ * the later ones still run.
+ */
+function runCleanup(ctx: ProcessContext, dir: string): CleanupFailure[] {
+  const failures: CleanupFailure[] = [];
+  for (const c of ctx.cleanupCommands) {
+    const command = commandLine(c.command);
+    try {
+      const out = ctx.runner({ command, cwd: dir, timeoutMs: Math.min(ctx.commandTimeoutMs, CLEANUP_TIMEOUT_MS) });
+      if (out.timedOut || out.error !== null || out.exitCode !== 0) failures.push({ id: c.id, command, why: out.timedOut ? 'timeout' : out.error ?? out.signal ?? `exit ${out.exitCode}`, tail: tail(out.output) });
+    } catch (e) {
+      failures.push({ id: c.id, command, why: e instanceof Error ? e.message : String(e), tail: '' });
+    }
+  }
+  return failures;
+}
+
 // ---------------------------------------------------------------- run locks
 
 /**
@@ -248,8 +296,8 @@ function fieldsOf(o: CommandOutcome, extra: Record<string, string>): Record<stri
   return fields;
 }
 
-/** The run summary leaf (§5.3): commands, environment identity, exit codes, per-test results, output hash, last lines of a failing command. */
-function summaryLeaf(o: { readonly run: string; readonly mission: string; readonly commit: string; readonly purpose: string; readonly runClass: RunClass; readonly environment: { readonly identity: string; readonly parts: unknown }; readonly runs: readonly RecordedRun[] }): string {
+/** The run summary leaf (§5.3): commands, environment identity, exit codes, per-test results, output hash, last lines of a failing command; a failed cleanup command, as a note. */
+function summaryLeaf(o: { readonly run: string; readonly mission: string; readonly commit: string; readonly purpose: string; readonly runClass: RunClass; readonly environment: { readonly identity: string; readonly parts: unknown }; readonly runs: readonly RecordedRun[]; readonly cleanup: readonly CleanupFailure[] }): string {
   const lines = [
     `# Run ${o.run}`,
     '',
@@ -268,6 +316,12 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
     if ((!r.passed || r.setupFailure !== undefined) && r.tail !== '') lines.push('', 'Last lines of the output:', '', '```', r.tail, '```');
+    lines.push('');
+  }
+  if (o.cleanup.length > 0) lines.push('## Cleanup', '');
+  for (const f of o.cleanup) {
+    lines.push(`- Note: cleanup command ${f.id} (\`${f.command}\`) failed (${f.why}); the results above are unchanged.`);
+    if (f.tail !== '') lines.push('', 'Last lines of the output:', '', '```', f.tail, '```');
     lines.push('');
   }
   return lines.join('\n');
@@ -350,6 +404,7 @@ async function executeRuns(
   const records: EvidenceRecord[] = [];
   const staged = new Map<string, RecordedRun>();
   const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
+  let cleanup: readonly CleanupFailure[] = [];
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
   await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
   try {
@@ -379,9 +434,12 @@ async function executeRuns(
       if (runClass === 'declared') staged.set(key, recorded);
     }
   } finally {
+    // the project's cleanup, also after a failing or throwing command: what its commands made
+    // outside the checkout outlives the folder (runCleanup never throws)
+    cleanup = runCleanup(ctx, dir);
     removeCheckout(ctx.gitCtx, dir);
   }
-  const text = summaryLeaf({ run, mission: req.mission, commit: req.commit, purpose: req.purpose, runClass: records[0]?.runClass ?? 'other', environment: env, runs: executed });
+  const text = summaryLeaf({ run, mission: req.mission, commit: req.commit, purpose: req.purpose, runClass: records[0]?.runClass ?? 'other', environment: env, runs: executed, cleanup });
   const leaf = runLeaf(req.mission, run);
   const result = ctx.memory.write({ op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
     if (records.length > 0) appendRecords(tx, records as BaseRecord[]);

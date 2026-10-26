@@ -15,7 +15,7 @@ import { collectCandidate, ensureWorkspace, releaseWorkspace, removeWorkspace, t
 import type { FlowPorts, FlowSchedulerPort } from '../flow/ports.ts';
 import { gitActions } from './actions.ts';
 import { memoryFlowPorts } from './ports.ts';
-import { shellRunner, type CommandRunner } from './runs.ts';
+import { shellRunner, type CleanupCommand, type CommandRunner } from './runs.ts';
 
 /** A Constructor dispatch's worktree (§3.1, §5.4): A4's workspace functions, or a test's. */
 export interface WorkspaceOps {
@@ -57,6 +57,8 @@ export interface ProcessOptions {
   readonly snapshotFiles?: (commit: string) => SnapshotFiles | null;
   /** The project's local test commands (config.json `verificationCommands`), which the flows read with the full suite (4.1.2). Default: none. */
   readonly localCommands?: readonly SuiteCommand[];
+  /** Run in each run's checkout after its commands, before it is removed (config.json `cleanupCommands`). Default: none. */
+  readonly cleanupCommands?: readonly CleanupCommand[];
 }
 
 export interface ProcessContext {
@@ -82,6 +84,8 @@ export interface ProcessContext {
   readonly gitCtx: GitContext;
   /** The project's local test commands (config.json `verificationCommands`); the flows read them with `fullSuite` (ports(): FlowPorts.project). */
   readonly localCommands: readonly SuiteCommand[];
+  /** The project's cleanup of a run's checkout (config.json `cleanupCommands`; runs.ts executeRuns); empty when none is configured. */
+  readonly cleanupCommands: readonly CleanupCommand[];
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -124,6 +128,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     handover: null,
     gitCtx: { memory, git },
     localCommands: o.localCommands ?? [],
+    cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);
     },
