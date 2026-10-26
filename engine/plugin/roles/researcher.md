@@ -28,7 +28,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 
 ## Upstream and downstream
-- Author: upstream, the decision layer (the exploration's definition), the Crititor (findings), the Stabilizer (which findings bind you), the evidence executions. Downstream: the Crititor, who attacks each version you submit, and the Stabilizer, who judges your dispositions.
+- Author: upstream, the decision layer (the exploration's definition), the Crititor (findings), the Stabilizer (which findings bind you), the evidence executions. Downstream: the Crititor, who attacks each version you submit, and the Stabilizer, who judges your dispositions: when it judges that your revision or rebuttal answers a finding, the finding is resolved without the attacker's re-check.
 - Reader: upstream, `mp`, on behalf of the exploration that asked. Downstream: the exploration's author, attacker and interpreter, who read your record.
 - Interpreter: upstream, the records of the registered attempts and the Crititor's findings on your reasoning. Downstream: the Crititor.
 
