@@ -51,7 +51,9 @@ describe('the optional Claude Code adapter', () => {
     // harness envelopes are not the user's words either
     for (const prompt of [
       '<agent-message from="general-purpose">[Subagent hand-back] The Calibrator passed the plan.</agent-message>',
+      '<cross-session-message from="uds:/run/user/1000/sock" from-name="Secretary">Plan passed; D-4 is running.</cross-session-message>',
       '<task-notification><task-id>b1</task-id></task-notification>',
+      '<ci-monitor-event>Checks failed on the pull request.</ci-monitor-event>',
       '<system-reminder>context</system-reminder>',
       '<command-name>/clear</command-name>',
       'Note: [Subagent hand-back] from D-2',

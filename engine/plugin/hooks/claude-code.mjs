@@ -10,7 +10,8 @@
 // outside a project with .mission-pipeline/, or when `mp` fails, it prints nothing and exits 0.
 // Text the harness injects is never recorded as the user's words: the fixed prompt the PM gives a
 // dispatched seat ("You are the <seat> of Mission Pipeline. …") and the harness's envelopes
-// (<agent-message …>, <task-notification>, <system-reminder>, <command-…>, "[Subagent hand-back]").
+// (<agent-message …>, <cross-session-message …>, <task-notification>, <ci-monitor-event>,
+// <system-reminder>, <command-…>, "[Subagent hand-back]").
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -36,13 +37,13 @@ function mp(args, stdin) {
 
 /**
  * Text the harness injected, not the user's words: the fixed prompt of a dispatched seat, and the
- * harness's envelopes (a sub-agent's hand-back, a task notification, a system reminder, a slash
- * command's expansion).
+ * harness's envelopes (a sub-agent's hand-back, a message from another session, a task
+ * notification, a pull-request monitor's event, a system reminder, a slash command's expansion).
  */
 function harnessText(prompt) {
   const t = prompt.trim();
   if (/^You are the [A-Za-z ]+ of Mission Pipeline\./.test(t)) return true;
-  if (/^<(agent-message|task-notification|system-reminder|command-)/.test(t)) return true;
+  if (/^<(agent-message|cross-session-message|task-notification|ci-monitor-event|system-reminder|command-)/.test(t)) return true;
   return t.includes('[Subagent hand-back]');
 }
 
