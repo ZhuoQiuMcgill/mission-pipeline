@@ -10,7 +10,12 @@
 //                           (`mp pm full-run`); never by a delivery or a hand-back; optional, with no default
 //   closingChecks           the 4.1.1 key, read as a deprecated alias of `fullSuite` when that is
 //                           absent (fullSuiteOf, src/common/fullSuite.ts); `mp config` says which
-//   commandTimeoutMs        per declared command
+//   commandTimeoutMs        per declared command (at most 24 hours)
+//   experimentCommandTimeoutMs
+//                           per declared command an exploration's experiment executor reruns
+//                           (`mp seat <id> rerun` on a constructor-experiment card), so that a long
+//                           experiment can run to its end while every other command keeps the
+//                           shorter limit; at most 7 days; absent: commandTimeoutMs
 //   environment             { versionCommands }: what the environment identity covers (§6.5)
 //   exclusiveResources      resources tasks may lease (a database, a device); informational here
 //   fillers                 per seat, a filler hint "<harness>/<model>" shown by `mp pm next`
@@ -37,6 +42,9 @@ const SuiteCommandSchema = z.object({ id: CommandId, command: CommandLine, cwd: 
 const IDENT_TEXT = /^([^<>\r\n]*[^<>\s][^<>\r\n]*?)\s*<([^<>\s]+)>$/;
 const IdentText = z.string().max(400).regex(IDENT_TEXT, 'a commit identity "Name <email>"');
 
+/** The longest `experimentCommandTimeoutMs` a project may declare: 7 days. */
+export const MAX_EXPERIMENT_COMMAND_TIMEOUT_MS = 7 * 24 * 3_600_000;
+
 /** The seats a filler hint can name (role pages under roles/). */
 export const SEATS: readonly string[] = ['pm', 'calibrator', 'architect', 'secretary', 'constructor', 'reviewer', 'researcher', 'crititor', 'stabilizer', 'auditor'];
 
@@ -49,12 +57,23 @@ export const ConfigSchema = z
     fullSuite: z.array(SuiteCommandSchema).max(100).optional(),
     closingChecks: z.array(Command).max(100).optional(),
     commandTimeoutMs: z.number().int().min(1_000).max(24 * 3_600_000).default(30 * 60_000),
+    // optional with no default: absent, it is commandTimeoutMs (experimentCommandTimeoutOf)
+    experimentCommandTimeoutMs: z.number().int().min(1_000).max(MAX_EXPERIMENT_COMMAND_TIMEOUT_MS).optional(),
     environment: z.object({ versionCommands: z.array(z.string().min(1).max(1000)).max(50).default([]) }).strict().default({ versionCommands: [] }),
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
     fillers: z.record(z.string(), z.string().min(1).max(400).nullable()).default({}),
     commit: z.object({ author: IdentText.optional(), committer: IdentText.optional() }).strict().optional(),
   })
   .strict();
+
+/**
+ * The time limit of each declared command an exploration's experiment executor reruns
+ * (`mp seat <id> rerun` on a constructor-experiment card): `experimentCommandTimeoutMs`, else
+ * `commandTimeoutMs`.
+ */
+export function experimentCommandTimeoutOf(c: Pick<ProjectConfig, 'commandTimeoutMs' | 'experimentCommandTimeoutMs'>): number {
+  return c.experimentCommandTimeoutMs ?? c.commandTimeoutMs;
+}
 
 /** The default identity of the commits `mp` writes (process/context.ts DEFAULT_IDENT). */
 export const DEFAULT_COMMIT_IDENT = 'Mission Pipeline <mp@localhost>';

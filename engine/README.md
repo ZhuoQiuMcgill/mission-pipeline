@@ -45,7 +45,8 @@ mp init --pointer claude      # or agents, both, none (the default)
 | `verificationCommands` | the project's local tests, for the PM and the Architect to name in plans (each task's card carries the commands `mp` runs) |
 | `fullSuite` | `[{ "id", "command", "cwd"? }]`, the project's full test suite. `mp` runs it on a clean checkout for an integration task's Reviewer (`mp seat <id> full-run`) and on the PM's decision (`mp pm full-run`); it is never a task's verification command. The 4.1.1 key `closingChecks` is read as its alias when `fullSuite` is absent; `mp config` says which key it read and warns when both are present |
 | `environment.versionCommands` | what the environment identity covers, e.g. `node --version`; init declares the ones it recognises |
-| `commandTimeoutMs` | per declared command (default 30 minutes) |
+| `commandTimeoutMs` | per declared command (default 30 minutes, at most 24 hours) |
+| `experimentCommandTimeoutMs` | per declared command that an exploration's experiment executor runs with `mp seat <id> rerun` (a `constructor-experiment` card), at most 7 days; absent, it is `commandTimeoutMs`. An experiment that needs a day can run to its end while every other command (verification, other reruns, renewals, full runs) keeps `commandTimeoutMs`, so a hung test still ends early. Such a rerun takes no run lock and holds no write lock of the memory while it runs, so other `mp` commands go on |
 | `exclusiveResources` | resources tasks may lease |
 | `fillers` | per seat, a hint `"<harness>/<model>"` that `mp pm next` shows; information only |
 | `commit` | `{ "author"?, "committer"? }` as `"Name <email>"`: the identity of the commits `mp` writes (candidates, deliveries, rebuilds); default `Mission Pipeline <mp@localhost>`, and the committer defaults to the author |
