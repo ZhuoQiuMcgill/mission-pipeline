@@ -300,7 +300,11 @@ for (const kind of KINDS) it(`E: ${kind} dispatched content is independent of ch
   assert.equal(normalize(seatCardEntry(kind).render(cb), task), normalize(seatCardEntry(kind).render(ca), first.task));
   assert.ok(da.card.includes(seatCardEntry(kind).render(ca)));
   assert.ok(db.card.includes(seatCardEntry(kind).render(cb)));
-  if (EXPLORATION.has(kind) && kind !== 'crititor' && kind !== 'stabilizer') assert.deepEqual(cb, old.card, 'versioned definition content is immutable at claim');
+  if (EXPLORATION.has(kind) && kind !== 'crititor' && kind !== 'stabilizer') {
+    // the project constraints in force are selected again at the claim (as on every card); the definition's own stay
+    assert.deepEqual({ ...cb, constraints: [] }, { ...old.card, constraints: [] }, 'versioned definition content is immutable at claim');
+    assert.ok((cb['constraints'] as Array<{ id: string }>).some((c) => c.id === 'definition-instruction'));
+  }
   if (kind === 'researcher-reader' || kind === 'constructor-experiment') {
     assert.deepEqual(cb['decisionQuotes'], []);
     assert.equal((cb['constraints'] as Array<{ kind: string }>).some((c) => c.kind === 'object'), false);
