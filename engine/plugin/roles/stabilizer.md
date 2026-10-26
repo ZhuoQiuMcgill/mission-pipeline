@@ -10,6 +10,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The first and the current version of the product *(required)*, as materials.
 - The earlier rounds' judgments, if any, and the rulings of the decision layer.
 - The project constraints that apply: the object constraints your judgment binds, and instructions.
+- When the plan placed this exploration after others: each one's hand-off and latest version, as materials you may read (what the author was given to build on).
 
 ## What you hand back
 Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`): your reasoning per finding, and how the product moved from the first version to the current one. The fields:

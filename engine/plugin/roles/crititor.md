@@ -9,6 +9,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The mode: `attack` or `discuss`; the round; the version you attack and the version before it (their full texts are materials).
 - The earlier findings with the author's dispositions; the evidence executions; the discussion so far; rulings of the decision layer.
 - The project constraints that apply: in an attack, the object constraints you judge the version against (with their paths); and instructions.
+- When the plan placed this exploration after others: each one's hand-off and latest version, as materials you may read (what the author was given to build on).
 - `fresh`: you are the closing attacker, a new instance that has not seen the earlier rounds' conversation. Attack with a fresh view.
 
 `mp seat <id> checkout` prints the path of a read-only directory holding the project at the commit your card names, for reading. Other seats reading the same commit share it: never write there. That commit can be newer than the one earlier rounds read, when the PM took the exploration's snapshot again; evidence marked "older environment" was recorded on an older commit and still counts.
