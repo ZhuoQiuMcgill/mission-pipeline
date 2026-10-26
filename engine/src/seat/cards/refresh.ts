@@ -1,5 +1,6 @@
 // Claim-time selection is owned by the queue-time builders; refresh adds no seat context.
 import type { BaseRecord, ObjectVersionRecord, ProofUnitRecord, ListRef } from '../../common/records.ts';
+import { predecessorMaterials, predecessorsFrom, withPredecessorMaterials } from '../../flow/exploration/predecessors.ts';
 import { decidingViews, labelStatus } from '../../evaluator/index.ts';
 import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type PlanningInputs, auditBasisTexts, auditPositionInputs, auditNodeConstraints, auditChainInputs, contractLines, objectConstraints, withdrawnPlanReason } from './inputs.ts';
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
@@ -33,16 +34,16 @@ function pages<T extends { revision: number }>(read: (after: number) => readonly
 
 export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc): TaskSpecDoc {
   const card = structuredClone(spec.card) as DispatchCard;
-  // Exploration definition inputs stay fixed. Its review constraints are selected below (§9.5).
-  // Blind cards exclude intent (§4.3).
+  // Exploration definition inputs stay fixed. Its review constraints (§9.5) and the materials of the
+  // explorations planned before it are selected below. Blind cards exclude intent (§4.3).
   switch (card.seat) {
-    case 'researcher-author':
     case 'researcher-reader':
-    case 'researcher-interpreter':
     case 'constructor-experiment':
     // a repair's Architect step: its plan inputs are fixed at queue time; the flow discards a hand-back on a plan no longer in effect
     case 'architect-repair':
       return spec;
+    case 'researcher-author':
+    case 'researcher-interpreter':
     case 'crititor':
     case 'stabilizer':
     case 'constructor':
@@ -68,6 +69,8 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
   const items = resolveItems(ix, events);
   const constraints = resolveConstraints(ix, constraintEvents);
   const object = (id: string) => factById(db, 'object.version', id)?.record as ObjectVersionRecord | undefined;
+  // what the explorations planned before an exploration handed on, as they stand now (flow/exploration/predecessors.ts: the author must read them; never on a blind card)
+  const predecessors = (x: string, mustRead: boolean) => predecessorMaterials(predecessorsFrom(events, (h) => data.text(h), x), { get: (h) => data.text(h), put: (d) => data.put(d) }, mustRead);
   // The task's card in force: its latest spec. A plan that keeps the card writes no newer spec, so the
   // spec's plan can be older than the plan in effect; only the card is read from it, never plan-level inputs.
   let task: DetailedTask | undefined;
@@ -84,8 +87,13 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
     break;
   }
   switch (card.seat) {
+    case 'researcher-author':
+    case 'researcher-interpreter':
+      card.materials = withPredecessorMaterials(card.materials, predecessors(card.exploration.id, card.seat === 'researcher-author'));
+      break;
     case 'crititor':
     case 'stabilizer': {
+      card.materials = withPredecessorMaterials(card.materials, predecessors(card.exploration.id, false));
       if (card.binding === null || card.target === null) break;
       const obj = object(card.target);
       if (obj === undefined) break;

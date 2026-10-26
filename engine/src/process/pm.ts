@@ -5,9 +5,10 @@ import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 //   pmNext      one bounded label batch (A2), the landing recovery (A4), worktrees of finished
 //               dispatches removed, the process advanced; then, notices first (marked delivered):
 //               the ready steps (seat, task, mission, purpose, parallel), the steps held (a stop,
-//               a lease, the git-writes hold), what waits on the user, the dispatches in flight
-//               with their age. 4.1.2: after an environment change, no renew step; one notice per
-//               change names how many runs current proof rests on are from older environments
+//               a lease, the git-writes hold, an exploration planned after others not settled
+//               yet), what waits on the user, the dispatches in flight with their age. 4.1.2:
+//               after an environment change, no renew step; one notice per change names how
+//               many runs current proof rests on are from older environments
 //   pmDispatch  claims a ready step once (A1 claimDispatch): the dispatch id, the card leaf
 //               `missions/<m>/dispatches/<d>/card.md`, its material leaves, its leases; a
 //               Constructor's worktree is created at the card's commit (A4)
@@ -93,6 +94,7 @@ import { fullRunStatus } from './fullRuns.ts';
 import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
 import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/scope.ts';
 import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
+import { heldByPredecessors } from './explorationAfter.ts';
 import { materialLeaf } from './seat.ts';
 
 // ---------------------------------------------------------------- shared
@@ -263,6 +265,12 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
         held.push({ ...base, why: `git writes are held since this folder was moved or copied: ${gitHeld.reason}`, wi: 'WI-31' });
         continue;
       }
+      // an exploration planned after others starts once they settled (explorationAfter.ts)
+      const after = heldByPredecessors(db, ctx.memory.data, spec);
+      if (after !== null) {
+        held.push({ ...base, why: after, wi: null });
+        continue;
+      }
       const busy = (spec.exclusive ?? []).filter((r) => leased.has(r));
       if (busy.length > 0) {
         held.push({ ...base, why: `waits for ${busy.map((r) => `${r} (leased to ${leased.get(r)})`).join(', ')}`, wi: 'WI-28' });
@@ -391,6 +399,9 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     (tx) => {
       // a closed mission's production steps are held (§6.7): checked in the claim's own write
       if (heldByClose(tx, spec)) throw new ProcessError('NOT_READY', `mission ${task.mission} is closed: step ${step} is production work and waits until the mission is opened again`);
+      // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
+      const after = heldByPredecessors(tx, tx.data, spec);
+      if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
       spec = refreshDispatchCard(tx, tx.data, spec);
       const refreshed = tx.data.put(canonicalJson(spec));
       const n = Number((tx.stmt('SELECT COUNT(*) AS n FROM dispatches').get() as { n: number }).n) + 1;

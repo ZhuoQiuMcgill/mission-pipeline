@@ -8,6 +8,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Changed
+- **An exploration planned after others starts once they have settled, and its seats read what
+  they handed on.** A PM plan element's `after` names the explorations it waits for, but between
+  two explorations it did nothing: the later one's first step was ready at once, and nothing of the
+  earlier one reached its cards. A plan that restarted a settled exploration under a new id could
+  not give the new author the old one's last version, and in a chain A → B → C, B's author could not
+  read A's results. Now, when an exploration's element lists explorations in `after` (their element
+  ids, or the exploration ids), the author's, the interpreter's, the Crititor's and the Stabilizer's
+  cards carry, for each of them, its hand-off once it has settled (material `after-<x>-handoff`: the
+  settle and the hand-off of the stop it settled on) and its latest version (`after-<x>-latest`,
+  which says which version it settled on; that version too, as `after-<x>-settled`, when it is an
+  earlier one). The author must read the hand-off and the latest version; the others may. A blind
+  executor gets none of them. The list comes from the plan in effect, and `mp pm dispatch` selects
+  it again, so a card queued before a predecessor settled gets its hand-off when it is claimed. The
+  exploration's first step waits until every one of them has settled: `mp pm next` lists it as held
+  with the explorations it waits for, `mp pm dispatch` refuses it, and `mp read blocked` shows it.
+  The exploration's definition does not change, so no basis version or judgment changes, and an
+  exploration planned after none has the same cards as before. An exploration already started is
+  never held: when a later plan places it after others, its next cards and the ones already queued
+  carry their materials (must-read for the author), and a card in flight stays as it was claimed.
+
 ### Fixed
 - **The Claude Code adapter no longer records another session's message as the user's words.** A
   message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and

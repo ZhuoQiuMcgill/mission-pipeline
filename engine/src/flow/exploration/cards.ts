@@ -3,7 +3,8 @@
 // knows (the product's current version, every finding with its disposition and the Stabilizer's
 // verdict, the evidence executions, the discussion, the rulings), so a seat that continues after
 // evidence loses only its conversation, never the facts: its new card carries its notes and the
-// evidence (§5.4).
+// evidence (§5.4). The seats that know the exploration also read what the explorations planned
+// before it handed on (predecessors.ts): the author must, the others may; a blind executor never.
 
 import { CARD_FORMAT, materialPageCount, type ContinuationT, type MaterialRef } from '../../seat/cards/common.ts';
 import type { CrititorCard, EvidenceItemT, NewVersionT, PriorFindingT } from '../../seat/cards/crititor.ts';
@@ -15,6 +16,7 @@ import { SEAT_CAPABILITIES } from '../context.ts';
 import type { FlowContent } from '../ports.ts';
 import { xid } from './definition.ts';
 import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, type FindingState, type XState } from './machine.ts';
+import { predecessorMaterials, withPredecessorMaterials, type Predecessor } from './predecessors.ts';
 
 type ObjectConstraints = ReturnType<typeof objectConstraints>;
 
@@ -156,7 +158,7 @@ function newVersion(s: XState, n: number): NewVersionT {
 const AUTHOR_DUTIES =
   'You own this exploration\'s product. Each turn pick one step: discuss the framing, ask for evidence (request-evidence), or submit a new version with a disposition for every open finding.';
 
-export function authorCard(s: XState, n: number, task: string, content: FlowContent, resume: Resume | null): AuthorCard {
+export function authorCard(s: XState, n: number, task: string, content: FlowContent, resume: Resume | null, preds: readonly Predecessor[] = []): AuthorCard {
   const { def } = defined(s);
   const m = new Materials(content);
   if (s.version !== null) m.add('version', `Current version ${s.version.id}`, s.version.content, true);
@@ -181,13 +183,13 @@ export function authorCard(s: XState, n: number, task: string, content: FlowCont
     evidence: evidenceItems(s, m),
     discussion: [...s.discussion],
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, true)),
     newVersion: newVersion(s, n),
     registerAttempts: s.phase === 'method',
   };
 }
 
-export function interpreterCard(s: XState, n: number, task: string, content: FlowContent): InterpreterCard {
+export function interpreterCard(s: XState, n: number, task: string, content: FlowContent, preds: readonly Predecessor[] = []): InterpreterCard {
   const { def } = defined(s);
   if (s.method === null) throw new Error('interpretation before the method passed');
   const m = new Materials(content);
@@ -229,12 +231,12 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
     openFindings: open.map((f) => priorFinding(f, m, all.indexOf(f), true)),
     otherFindings: other.map((f) => priorFinding(f, m, all.indexOf(f), false)),
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, false)),
     newVersion: newVersion(s, n),
   };
 }
 
-export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null, constraints: ObjectConstraints): CrititorCard {
+export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null, constraints: ObjectConstraints, preds: readonly Predecessor[] = []): CrititorCard {
   const { d, def } = defined(s);
   const m = new Materials(content);
   const target = s.version;
@@ -267,7 +269,7 @@ export function attackerCard(s: XState, n: number, task: string, content: FlowCo
     evidence: evidenceItems(s, m, false, new Set(shown.flatMap((f) => (f.status === 'awaiting-recheck' && f.disposition?.evidence != null ? [f.disposition.evidence] : [])))),
     discussion: fresh ? [] : [...s.discussion],
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, false)),
     binding:
       mode === 'attack' && target !== null
         ? {
@@ -360,7 +362,7 @@ export function executorCard(
  * dispositions, earlier in-scope findings still open, the first and the current version, the
  * earlier rounds' judgments and the rulings. Its judgment binds the attack judgment's contract.
  */
-export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent, constraints: ObjectConstraints): StabilizerCard {
+export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent, constraints: ObjectConstraints, preds: readonly Predecessor[] = []): StabilizerCard {
   const { d, def: current0 } = defined(s);
   const st = s.stabilizing;
   if (st === null) throw new Error('no round to stabilize');
@@ -398,7 +400,7 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
       (j) => `round ${j.round} (${j.verdict}): ${j.drift.verdict}${j.drift.reason !== '' ? ` — ${j.drift.reason}` : ''}; ${j.findings.map((f) => `${f.finding.slice(0, 24)} ${f.verdict} (${f.severity})`).join(', ')}`,
     ),
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, false)),
     binding: {
       judgment: xid.judgment(def.mission, def.exploration, n),
       bases: content.putList([basis]),
