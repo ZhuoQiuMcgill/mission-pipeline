@@ -16,7 +16,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`), and these fields:
 - **attack**:
   - findings, each with a severity (fatal, serious, general, minor), a class (an entry of the attack scope, or a short name of another kind of hole), a one-line title, the basis (the passage, the counterexample, `evidence:<id>` or `file:<path>:<line>`), the consequence, the direction a fix should take, and the evidence ids supporting it;
-  - one re-check per earlier finding marked awaiting re-check: for a revision, is it really fixed in this version; for a rebuttal, does the cited evidence execution really cover the original counterexample (yes or no, with the reason);
+  - one re-check per earlier finding marked awaiting re-check: for a revision, is it really fixed in this version; for a rebuttal, does the cited evidence execution really cover the original counterexample (yes or no, with the reason). A finding the Stabilizer judged answered is resolved without your re-check; when you doubt the answer, re-check it too: "no" reopens it;
   - the directions that need no further change (settled);
   - a short overall assessment.
 - **discuss**: your reply to the author's framing and attack scope; no findings.

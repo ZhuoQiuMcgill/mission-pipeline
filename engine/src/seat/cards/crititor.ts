@@ -2,7 +2,8 @@
 // and adversarial: it attacks one version of the exploration's product, re-checks every earlier
 // finding the author disposed of (revised, or rebutted with an evidence execution), and may ask
 // for an evidence execution itself (`mp seat <id> request-evidence`). It hands back findings
-// (severity, basis, consequence, direction), one re-check per finding awaiting it, and the
+// (severity, basis, consequence, direction), one re-check per finding awaiting it (and, when it
+// doubts the answer, one per finding the Stabilizer judged answered: "no" reopens it), and the
 // directions that need no further change. In a discussion turn (4.3 step 1) it answers the
 // author's framing instead.
 //
@@ -81,6 +82,11 @@ export const PriorFinding = z.object({
   ruling: z.string().nullable(),
   /** The Stabilizer's verdict on it (4.1 §6.3), null before its round was stabilized. Only in-scope findings bind the author. */
   scope: z.enum(['in-scope', 'shifts-direction', 'out-of-scope']).nullable().optional(),
+  /**
+   * The round whose Stabilizer judged the author's revision or rebuttal answers it: resolved by that
+   * judgment, without the attacker's re-check. A later attacker may still re-check it ("no" reopens it).
+   */
+  answered: z.number().int().positive().optional(),
 });
 export type PriorFindingT = z.infer<typeof PriorFinding>;
 
@@ -142,7 +148,7 @@ export function renderPriorFindings(title: string, findings: readonly PriorFindi
     findings.map((f) => {
       const d = f.disposition;
       const disp = d === null ? '' : ` — author: ${d.action}${d.evidence !== null ? ` (evidence:${d.evidence})` : ''}${d.note !== '' ? `: ${d.note}` : ''}${d.question !== null ? ` [question: ${d.question}]` : ''}`;
-      return `[${f.id}] (${f.severity}, ${f.class}, round ${f.round}, ${f.status}${f.scope != null ? `, Stabilizer: ${f.scope}` : ''}) ${f.title}${f.material !== null ? ` (full text: material ${f.material})` : ''}${disp}${f.ruling !== null ? ` — ruling: ${f.ruling}` : ''}`;
+      return `[${f.id}] (${f.severity}, ${f.class}, round ${f.round}, ${f.status}${f.answered !== undefined ? ` (answered: the Stabilizer of round ${f.answered} judged the author's answer resolves it)` : ''}${f.scope != null ? `, Stabilizer: ${f.scope}` : ''}) ${f.title}${f.material !== null ? ` (full text: material ${f.material})` : ''}${disp}${f.ruling !== null ? ` — ruling: ${f.ruling}` : ''}`;
     }),
   );
 }
@@ -214,13 +220,13 @@ export const CrititorResultShape = {
   rechecks: z
     .array(
       z.object({
-        finding: z.string().describe('The id of an earlier finding marked awaiting-recheck.'),
+        finding: z.string().describe('The id of an earlier finding marked awaiting-recheck, or of one the Stabilizer judged answered (optional: "no" reopens it).'),
         resolved: z.enum(['yes', 'no']).describe('revise: is it really fixed in this version? rebut: does the evidence execution really cover the original counterexample?'),
         reason: z.string().min(1),
         evidence: z.array(z.string()).describe('Evidence ids you relied on (may be empty).'),
       }),
     )
-    .describe('Exactly one re-check per earlier finding marked awaiting-recheck (attack mode).'),
+    .describe('Exactly one re-check per earlier finding marked awaiting-recheck (attack mode); at most one per finding the Stabilizer judged answered, when you doubt the answer.'),
   settled: z.array(z.string()).describe('Directions that need no further change.'),
   reply: z.string().describe('discuss mode: your answer to the framing; attack mode: a short overall assessment.'),
 };
@@ -256,7 +262,8 @@ export function attackOutcome(priorFindings: readonly PriorFindingT[], r: Pick<C
   const awaiting: string[] = [];
   for (const f of priorFindings) {
     if (f.scope === 'out-of-scope' || f.scope === 'shifts-direction') continue;
-    if (!isBlocking(f.severity) || f.status === 'resolved' || yes.has(f.id)) continue;
+    // a finding the Stabilizer judged answered is resolved unless this re-check reopens it
+    if (!isBlocking(f.severity) || (f.status === 'resolved' && !no.has(f.id)) || yes.has(f.id)) continue;
     unresolved.push(f.id);
     if (f.status === 'awaiting-ruling') awaiting.push(f.id);
   }
@@ -281,13 +288,15 @@ function crititorProblems(card: CrititorCard, r: CrititorResult): string[] {
     return out;
   }
   const due = card.priorFindings.filter((f) => f.status === 'awaiting-recheck').map((f) => f.id);
-  for (const id of due) {
+  // resolved by the Stabilizer's judgment (answered): a re-check is allowed, not required
+  const answered = card.priorFindings.filter((f) => f.status === 'resolved' && f.answered !== undefined).map((f) => f.id);
+  for (const id of [...due, ...answered]) {
     const n = r.rechecks.filter((x) => x.finding === id).length;
-    if (n === 0) out.push(`rechecks: finding "${id}" awaits your re-check`);
+    if (n === 0 && due.includes(id)) out.push(`rechecks: finding "${id}" awaits your re-check`);
     if (n > 1) out.push(`rechecks: finding "${id}" is re-checked ${n} times`);
   }
   for (const x of r.rechecks) {
-    if (!due.includes(x.finding)) out.push(`rechecks: "${x.finding}" is not a finding awaiting re-check on the card`);
+    if (!due.includes(x.finding) && !answered.includes(x.finding)) out.push(`rechecks: "${x.finding}" is not a finding awaiting re-check on the card`);
     for (const e of x.evidence) if (!evidenceIds.has(e)) out.push(`rechecks[${x.finding}]: evidence "${e}" is not an evidence execution on the card`);
   }
   r.findings.forEach((f, i) => {
@@ -383,7 +392,10 @@ export function renderCrititorCard(c: CrititorCard): string {
     (c.mode === 'attack'
       ? `## Round ${c.round}: attack version ${c.target ?? '(none)'}\n${c.previousTarget !== null ? `It revises ${c.previousTarget}; both full texts are materials.\n` : ''}\n`
       : `## Round ${c.round}: discussion\nThe author asks to align the framing and the attack scope before (or while) the product takes shape. Answer in the reply.\n\n`) +
-    renderPriorFindings('Earlier findings (re-check every one marked awaiting-recheck)', c.priorFindings) +
+    renderPriorFindings(
+      `Earlier findings (re-check every one marked awaiting-recheck${c.priorFindings.some((f) => f.answered !== undefined) ? '; one the Stabilizer judged answered is resolved, and you may re-check it when you doubt the answer: "no" reopens it' : ''})`,
+      c.priorFindings,
+    ) +
     renderEvidence(c.evidence) +
     list('Discussion so far', c.discussion.map((d) => `(${d.from}, round ${d.round}) ${d.text}`)) +
     list('Rulings of the decision layer (verbatim)', c.rulings) +

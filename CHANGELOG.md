@@ -8,6 +8,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Changed
+- **The Stabilizer can close a finding the author answered, so an exploration can converge in its
+  last round.** A revised finding counted as resolved only after an attacker re-checked it in a later
+  round. When the last round of the budget raised one serious finding, the author revised it and the
+  Stabilizer agreed with the revision, nothing was left to re-check it, and the exploration ran out of
+  budget however good the revision was. Now the Stabilizer's hand-back can mark an in-scope finding
+  the author revised, or rebutted with an evidence execution, `answered: true`. The finding is then
+  resolved at once, without a re-check, and `mp read show exploration`, the hand-off and later cards
+  say it was resolved by the Stabilizer's judgment. A round converges (a research method passes to its
+  attempts) when the Stabilizer judges it on track, no direction question waits for a ruling, and every
+  in-scope fatal or serious finding is resolved, by a re-check or by `answered`; that holds in any
+  round, the budget's last included, and needs no closing attacker. When the author's revision made a
+  new version, the Stabilizer's hand-back also records a pass on it (judgment `<judgment>.revision`),
+  so the version the exploration settles on is proven. A later attacker may still re-check an answered
+  finding, and "no" reopens it like any failed re-check. Escalated, out-of-scope and direction findings
+  cannot be answered (the hand-back is refused). The budget, the Secretary's handling of explorations
+  that do not converge, and direction questions are unchanged. The Stabilizer's role page now says how
+  to end the fault-finding: refinements and edge cases that do not change the answer are `general` or
+  `minor` (or `out-of-scope`), and `serious` and `fatal` are for problems that would make the answer
+  wrong. Hand-backs and ledgers without the field read as before, and explorations already running
+  use the rule from their next Stabilizer judgment. A project's own copy of the role pages changes
+  with `mp docs update`; until then the Stabilizer's card still shows the field in its hand-back schema.
+
 ### Fixed
 - **The Claude Code adapter no longer records another session's message as the user's words.** A
   message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and

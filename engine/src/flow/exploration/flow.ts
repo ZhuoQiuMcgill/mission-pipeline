@@ -15,7 +15,7 @@ import { objectConstraints } from '../../seat/cards/inputs.ts';
 import type { MissionId } from '../../common/ids.ts';
 import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord } from '../../common/records.ts';
 import { attackOutcome, crititorEvidence, crititorFindingDocument, crititorFindingIds, versionId, type CrititorCard, type CrititorResult } from '../../seat/cards/crititor.ts';
-import { stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
+import { stabilizedRevision, stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
 import { blindEvidenceRecord, blindReportDocument, failedEvidenceRecord, type BlindResult, type ExperimentCard } from '../../seat/cards/experiment.ts';
 import {
   authorSubmittedVersion,
@@ -333,6 +333,8 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
     case 'stabilizer': {
       const card = cardOf<StabilizerCard>(p, q);
       const r = hb.result as StabilizerResult;
+      // the pass its answered findings made on the author's revision (the same rule as its records)
+      const revision = stabilizedRevision(card, r);
       return {
         kind: 'stabilized',
         task: q.task,
@@ -340,9 +342,10 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
         target: card.target,
         judgment: card.binding.judgment,
         verdict: stabilizedVerdict(card, r),
-        findings: r.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, question: f.question.trim() !== '' ? f.question : null })),
+        findings: r.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, question: f.question.trim() !== '' ? f.question : null, ...(f.answered === true ? { answered: true as const } : {}) })),
         drift: { verdict: r.round.verdict, reason: r.round.reason, question: r.round.question.trim() !== '' ? r.round.question : null },
         result: hb.resultHash,
+        ...(revision !== null ? { revision } : {}),
       };
     }
     case 'executor': {
@@ -643,9 +646,11 @@ export interface ExplorationHandoff {
     /** The Stabilizer's verdict and severity (4.1 §6.3), null before its round was stabilized. */
     readonly scope: string | null;
     readonly judgedSeverity: string | null;
+    /** The round whose Stabilizer judged the author's answer resolves it (no re-check), when it did. */
+    readonly answered?: number;
   }>;
   /** The Stabilizer's judgments, round by round (4.1 §6.3): what goes to the Secretary with the findings. */
-  readonly stabilizer: ReadonlyArray<{ readonly round: number; readonly verdict: string; readonly drift: string; readonly reason: string; readonly findings: ReadonlyArray<{ readonly finding: string; readonly verdict: string; readonly severity: string; readonly reason: string }> }>;
+  readonly stabilizer: ReadonlyArray<{ readonly round: number; readonly verdict: string; readonly drift: string; readonly reason: string; readonly findings: ReadonlyArray<{ readonly finding: string; readonly verdict: string; readonly severity: string; readonly reason: string; readonly answered?: true }> }>;
   readonly unresolvedBlocking: readonly string[];
   readonly residualRisks: readonly string[];
   readonly evidence: ReadonlyArray<{ readonly id: string; readonly status: string; readonly summary: string; readonly attempt: string | null }>;
@@ -685,8 +690,15 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
       ruling: f.ruling,
       scope: f.scope,
       judgedSeverity: f.judgedSeverity,
+      ...(f.answered !== null ? { answered: f.answered } : {}),
     })),
-    stabilizer: s.stabilizations.map((j) => ({ round: j.round, verdict: j.verdict, drift: j.drift.verdict, reason: j.drift.reason, findings: j.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason })) })),
+    stabilizer: s.stabilizations.map((j) => ({
+      round: j.round,
+      verdict: j.verdict,
+      drift: j.drift.verdict,
+      reason: j.drift.reason,
+      findings: j.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, ...(f.answered === true ? { answered: true as const } : {}) })),
+    })),
     unresolvedBlocking: findings.filter((f) => blocks(f) && f.status !== 'resolved').map((f) => f.id),
     residualRisks: findings.filter((f) => f.residualRisk).map((f) => f.id),
     evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt })),
@@ -696,6 +708,8 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
 }
 
 const DECIDE = 'the Secretary decides (an escalation on this exploration; WI-08 for the PM): grant more rounds (the Secretary once, then only the user), accept the current version with its open findings as residual risks, send it back with a new direction, re-plan, or give it up';
+
+const CONVERGED_ANSWERED = "the last round left no unresolved fatal or serious finding: its Stabilizer judged that the author's revisions or rebuttals answer the findings (answered), so they were resolved without a re-check round (8.2 stop 1, 4.1 §6.3)";
 
 const STOP_TEXT: Readonly<Record<StopReason, { readonly category: string; readonly trigger: string; readonly action: string }>> = {
   converged: {
@@ -735,12 +749,14 @@ async function stop(p: ExplorationPorts, mission: MissionId, x: string, s: XStat
   const h = buildHandoff(s, reason, wi);
   const handoff = p.ledger.content.put(canonicalJson(h));
   const t = STOP_TEXT[reason];
+  // converged on the Stabilizer's answered findings (4.1 §6.3): said so, not as a closing attacker's pass
+  const answered = reason === 'converged' && (s.stabilizations.at(-1)?.findings.some((f) => f.answered === true) ?? false);
   await p.ledger.notify({
     category: t.category,
     wi,
     key: `${x}:${n}`,
     mission,
-    trigger: `exploration ${x}: ${t.trigger}; ${s.rounds} of ${allowedRounds(s)} rounds used`,
+    trigger: `exploration ${x}: ${answered ? CONVERGED_ANSWERED : t.trigger}; ${s.rounds} of ${allowedRounds(s)} rounds used`,
     defaultAction: t.action,
     detail: { exploration: x, handoff, version: h.version?.id ?? null, unresolvedBlocking: h.unresolvedBlocking, residualRisks: h.residualRisks, acceptance: h.acceptance },
   });

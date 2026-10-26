@@ -317,10 +317,10 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
     for (const f of s.findings.values()) rounds.set(f.round, [...(rounds.get(f.round) ?? []), f]);
     for (const [r, fs] of [...rounds.entries()].sort((a, b) => a[0] - b[0])) {
       const st = s.stabilizations.find((z) => z.round === r);
-      out.push(`  round ${r}${st !== undefined ? ` — Stabilizer (${st.task}): ${st.drift.verdict}, version ${st.verdict}${st.drift.reason ? ` (${clip(st.drift.reason, 120)})` : ''}` : ' — not stabilized yet'}:`);
+      out.push(`  round ${r}${st !== undefined ? ` — Stabilizer (${st.task}): ${st.drift.verdict}, version ${st.verdict}${st.revision !== undefined ? `, the author's revision ${st.revision.version} passed on its answers` : ''}${st.drift.reason ? ` (${clip(st.drift.reason, 120)})` : ''}` : ' — not stabilized yet'}:`);
       for (const f of fs) {
         out.push(
-          `    ${f.id} [${f.severity}${f.judgedSeverity !== null && f.judgedSeverity !== f.severity ? ` → ${f.judgedSeverity}` : ''}] ${clip(f.title, 100)} — ${f.status}; disposition: ${f.disposition?.action ?? 'none yet'}; Stabilizer: ${f.scope ?? 'not judged yet'}${f.question !== null ? `; question: ${clip(f.question, 100)}` : ''}`,
+          `    ${f.id} [${f.severity}${f.judgedSeverity !== null && f.judgedSeverity !== f.severity ? ` → ${f.judgedSeverity}` : ''}] ${clip(f.title, 100)} — ${f.status}${f.answered !== null ? ` (answered: the Stabilizer of round ${f.answered} judged the author's ${f.disposition?.action === 'rebut' ? 'rebuttal' : 'revision'} resolves it, no re-check)` : ''}; disposition: ${f.disposition?.action ?? 'none yet'}; Stabilizer: ${f.scope ?? 'not judged yet'}${f.question !== null ? `; question: ${clip(f.question, 100)}` : ''}`,
         );
       }
     }
