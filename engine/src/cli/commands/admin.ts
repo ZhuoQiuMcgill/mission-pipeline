@@ -7,7 +7,7 @@ import { recompute } from '../../evaluator/index.ts';
 import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { CliError, EXIT, usage } from '../errors.ts';
-import { configPath, DEFAULT_COMMIT_IDENT, fullSuiteSource, parseConfig, readConfig } from '../config.ts';
+import { configPath, DEFAULT_COMMIT_IDENT, experimentCommandTimeoutOf, fullSuiteSource, parseConfig, readConfig } from '../config.ts';
 import { fullSuiteOf } from '../../common/fullSuite.ts';
 import { copyDocs, mpInit, mpVersion, type PointerTarget } from '../init.ts';
 import type { Project } from '../project.ts';
@@ -75,8 +75,9 @@ const config: Command = {
       ...section('Exclusive resources', cfg.exclusiveResources, 'none'),
       ...section('Filler hints', Object.entries(cfg.fillers).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`), 'none'),
       `Command timeout: ${Math.round(cfg.commandTimeoutMs / 1000)} s`,
+      `Experiment command timeout (an exploration's experiment reruns): ${Math.round(experimentCommandTimeoutOf(cfg) / 1000)} s${cfg.experimentCommandTimeoutMs === undefined ? ' (experimentCommandTimeoutMs not set: the command timeout)' : ''}`,
     ];
-    return ok(lines.join('\n'), { ...cfg, fullSuiteReadFrom: src.key, fullSuiteKeysBoth: src.both });
+    return ok(lines.join('\n'), { ...cfg, fullSuiteReadFrom: src.key, fullSuiteKeysBoth: src.both, experimentCommandTimeoutMsInEffect: experimentCommandTimeoutOf(cfg) });
   },
 };
 

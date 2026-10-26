@@ -24,7 +24,7 @@ import { recoverLandings, type LandingResult } from '../git/land.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import { pmAction, recordPmAction, type Filler, type Memory } from '../memory/index.ts';
 import { openProcess, type ProcessContext, type ProcessOptions } from '../process/index.ts';
-import { commitIdentities, defaultConfig, readConfig, type ProjectConfig } from './config.ts';
+import { commitIdentities, defaultConfig, experimentCommandTimeoutOf, readConfig, type ProjectConfig } from './config.ts';
 import { CliError, EXIT, errorMessage, wi41 } from './errors.ts';
 
 export interface CliIo {
@@ -141,7 +141,7 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   const ids = commitIdentities(config);
   // the project's commands, read once from the config into the context (4.1.2): its full suite
   // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {

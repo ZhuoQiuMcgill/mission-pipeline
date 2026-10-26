@@ -8,6 +8,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Added
+- **An experiment can run longer than a test.** Config `experimentCommandTimeoutMs` (milliseconds,
+  at most 7 days; absent, it is `commandTimeoutMs`) is the time limit of each declared command an
+  exploration's experiment executor runs with `mp seat <id> rerun` (a `constructor-experiment` card).
+  Every other command keeps `commandTimeoutMs` (at most 24 hours): task verification, other seats'
+  reruns, `mp pm renew` and full runs. A project can then let an experiment that needs a day or two
+  finish without giving every hung test the same time. Such a rerun is a sampling run: it takes no
+  run lock and holds no write lock of the memory while it executes, so other `mp` commands go on.
+  `mp config` shows the limit in effect.
+
 ### Fixed
 - **The Claude Code adapter no longer records another session's message as the user's words.** A
   message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and
