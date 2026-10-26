@@ -523,12 +523,19 @@ const isConstraintKind = (ix: IndexView, v: string): boolean => {
  * 5.2: applicable iff bound to the current snapshot of its environment line and not revoked. 4.1.2
  * (D-1, the honest record): a run on the 4.1 environment line (ENV_LINE) recorded under another
  * environment identity still counts; every read labels it "older environment" instead. Only a run
- * recorded under an older run method does not count (olderRunMethod: invalidation by cause).
+ * recorded under an older run method does not count (olderRunMethod: invalidation by cause). A
+ * record on an exploration's line bound to a snapshot the line had before a resnapshot still counts
+ * (runCounts).
  */
 export function evidenceApplicable(ix: IndexView, e: EvidenceId): boolean {
   const ev = ix.evidence.get(e);
   if (!ev || ix.revoked.has(e)) return false;
-  return runCounts(ev, ix.envCurrent.get(ev.envLine));
+  return runCounts(ev, ix.envCurrent.get(ev.envLine), envHad(ix, ev.envLine, Infinity));
+}
+
+/** Whether an environment line had a snapshot before `beforeRev` (read only when runCounts asks: an exploration's line after a resnapshot). */
+function envHad(ix: IndexView, line: EnvLineId, beforeRev: number): (snapshot: string) => boolean {
+  return (snapshot) => (ix.envHistory.get(line) ?? []).some((h) => h.rev < beforeRev && h.snapshot === snapshot);
 }
 
 /**
@@ -576,7 +583,7 @@ function evidenceApplicableBefore(ix: IndexView, e: EvidenceId, beforeRev: numbe
   const ev = ix.evidence.get(e);
   if (!ev || (ix.evidenceRev.get(e) ?? Infinity) >= beforeRev) return false;
   if ((ix.revokedRev.get(e) ?? Infinity) < beforeRev) return false;
-  return runCounts(ev, envSnapshotBefore(ix, ev.envLine, beforeRev));
+  return runCounts(ev, envSnapshotBefore(ix, ev.envLine, beforeRev), envHad(ix, ev.envLine, beforeRev));
 }
 
 export type PositionState = { readonly state: 'none' } | { readonly state: 'pass' | 'fail' | 'undecided'; readonly by: JudgmentInfo };

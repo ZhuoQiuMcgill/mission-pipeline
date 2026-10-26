@@ -27,7 +27,14 @@ export interface WorkspaceOps {
 }
 
 /** The program actions the flows need beyond the memory (snapshot, product, rebind, verify, findSymbol, history): actions.ts gitActions. */
-export type GitActions = Pick<FlowSchedulerPort, 'startHolds' | 'composition' | 'snapshot' | 'product' | 'rebind' | 'verify' | 'findSymbol' | 'history'>;
+export type GitActions = Pick<FlowSchedulerPort, 'startHolds' | 'composition' | 'snapshot' | 'product' | 'rebind' | 'verify' | 'findSymbol' | 'history'> & {
+  /**
+   * The target branch's head, read at once (null: it cannot be read): an exploration's snapshot
+   * as it would be taken now (it lays no products over the base), read before a dispatch's write
+   * (explorationSnapshot.ts). Actions without it (a test's) never take one again at a dispatch.
+   */
+  readonly targetHead?: () => string | null;
+};
 
 export interface ProcessOptions {
   /** How git runs (default: plain `git` from PATH). */

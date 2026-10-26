@@ -7,6 +7,7 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
+import { olderSnapshotEvidence } from '../flow/exploration/machine.ts';
 import { PLAN_LINE } from '../flow/plandoc.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
@@ -313,6 +314,10 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
     const lastSettle = s.settles.at(-1);
     if (s.settled !== null) out.push(`  settled: ${s.settled.body.outcome} (${s.settled.body.stop})${s.settled.body.artifact !== null ? ` on ${s.settled.body.artifact}` : ''}${s.settles.length > 1 ? ` (settle ${s.settled.n} of ${s.settles.length})` : ''}`);
     else if (lastSettle !== undefined) out.push(`  not settled now: reopened after an environment change; settled earlier: ${lastSettle.body.outcome} (${lastSettle.body.stop})${lastSettle.body.artifact !== null ? ` on ${lastSettle.body.artifact}` : ''}`);
+    // a snapshot taken again: what the seats read now, and the evidence recorded under an older one (it still counts)
+    const older = [...s.evidence.keys()].filter((id) => olderSnapshotEvidence(s, id));
+    const last = s.resnapshots.at(-1);
+    if (last !== undefined) out.push(`  snapshot: ${short(s.defined.snapshot.commit)}, taken again ${s.resnapshots.length} time(s), last ${last.by === 'pm' ? "on the PM's word" : 'before its first step'}${older.length > 0 ? `; evidence from an older snapshot, still counting (${OLDER_ENVIRONMENT}): ${older.join(', ')}` : ''}`);
     const rounds = new Map<number, typeof s.findings extends Map<string, infer F> ? F[] : never>();
     for (const f of s.findings.values()) rounds.set(f.round, [...(rounds.get(f.round) ?? []), f]);
     for (const [r, fs] of [...rounds.entries()].sort((a, b) => a[0] - b[0])) {
@@ -324,7 +329,21 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
         );
       }
     }
-    json.push({ mission, exploration: x, turn: s.turn, rounds: s.rounds, version: s.version, stopped: s.stopped, settled: s.settled, settles: s.settles, drift: s.drift, findings: [...s.findings.values()], stabilizations: s.stabilizations, evidence: [...s.evidence.values()] });
+    json.push({
+      mission,
+      exploration: x,
+      turn: s.turn,
+      rounds: s.rounds,
+      version: s.version,
+      stopped: s.stopped,
+      settled: s.settled,
+      settles: s.settles,
+      drift: s.drift,
+      findings: [...s.findings.values()],
+      stabilizations: s.stabilizations,
+      evidence: [...s.evidence.values()].map((e) => (older.includes(e.id) ? { ...e, environment: OLDER_ENVIRONMENT } : e)),
+      ...(last !== undefined ? { snapshot: s.defined.snapshot, resnapshots: s.resnapshots } : {}),
+    });
   }
   if (json.length === 0) return null;
   return { text: out.join('\n'), json };

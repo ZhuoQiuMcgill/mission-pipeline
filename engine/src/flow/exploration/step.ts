@@ -2,7 +2,9 @@
 // the decision layer (src/flow/plandoc.ts) and the Secretary (src/flow/secretary.ts).
 //
 //   - start: every exploration element of a PM plan that passed Calibrator ① (event
-//     "pm-plan-effective" on line "plan") is defined here (4.3: defined by the PM with the user).
+//     "pm-plan-effective" on line "plan") is defined here (4.3: defined by the PM with the user),
+//     its snapshot the target branch's head then; the dispatch of its first step takes it again
+//     when the branch moved since (process/explorationSnapshot.ts).
 //   - advance: every defined exploration of the mission takes the steps it can.
 //   - stops (8.2, 3.8, 3.10):
 //       converged                   → "settled" (outcome conclusion / no-conclusion) for the

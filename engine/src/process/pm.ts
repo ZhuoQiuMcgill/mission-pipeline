@@ -10,7 +10,9 @@ import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 //               change names how many runs current proof rests on are from older environments
 //   pmDispatch  claims a ready step once (A1 claimDispatch): the dispatch id, the card leaf
 //               `missions/<m>/dispatches/<d>/card.md`, its material leaves, its leases; a
-//               Constructor's worktree is created at the card's commit (A4)
+//               Constructor's worktree is created at the card's commit (A4); an exploration's step
+//               names the exploration's snapshot in force, taken again before its first step runs
+//               when the target branch moved (explorationSnapshot.ts)
 //   pmRelease   `--ended` / `--abandoned` (§5.4): the worktree removed or kept; the step queued
 //               again at once, counted on the lineage's re-dispatch loop (decision 15: two
 //               re-dispatches, then WI-08 and the Secretary)
@@ -93,6 +95,7 @@ import { fullRunStatus } from './fullRuns.ts';
 import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
 import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/scope.ts';
 import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
+import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts';
 import { materialLeaf } from './seat.ts';
 
 // ---------------------------------------------------------------- shared
@@ -383,6 +386,8 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   let spec = specOf(ctx, task.card);
   const entry = seatCardEntry(spec.card.seat);
   const prior = ctx.memory.read((db) => listDispatches(db, { task: step, limit: 1000 }).length);
+  // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
+  const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
   const out = pmWrite(
     ctx,
     'dispatch',
@@ -392,6 +397,8 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       // a closed mission's production steps are held (§6.7): checked in the claim's own write
       if (heldByClose(tx, spec)) throw new ProcessError('NOT_READY', `mission ${task.mission} is closed: step ${step} is production work and waits until the mission is opened again`);
       spec = refreshDispatchCard(tx, tx.data, spec);
+      // an exploration's step names the snapshot in force, taken again first when nothing of it ran yet and the branch moved
+      spec = claimExplorationStep(tx, spec, head);
       const refreshed = tx.data.put(canonicalJson(spec));
       const n = Number((tx.stmt('SELECT COUNT(*) AS n FROM dispatches').get() as { n: number }).n) + 1;
       const dispatch = `D-${n}`;

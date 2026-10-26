@@ -30,6 +30,12 @@ export type EvidenceId = Brand<string, 'EvidenceId'>;
 export type JudgmentId = Brand<string, 'JudgmentId'>;
 export type EnvLineId = Brand<string, 'EnvLineId'>;
 export type EnvSnapshotId = Brand<string, 'EnvSnapshotId'>;
+/**
+ * The environment line of an exploration starts with this (flow/exploration definition.ts): its
+ * snapshot is the code its seats read, which a resnapshot takes again, and a record bound to an
+ * earlier snapshot of such a line still counts (evaluator/runs.ts runCounts).
+ */
+export const EXPLORATION_ENV_PREFIX = 'xpenv.';
 export type IssueId = Brand<string, 'IssueId'>;
 export type StopId = Brand<string, 'StopId'>;
 export type EpisodeBatchId = Brand<string, 'EpisodeBatchId'>;

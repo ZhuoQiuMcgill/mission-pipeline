@@ -11,7 +11,13 @@ export type ProcessErrorCode =
   | 'LEAF_MISSING'
   | 'LEAF_EDITED'
   /** The step is not ready (claimed, held by a stop, a lease or the git-writes hold). */
-  | 'NOT_READY';
+  | 'NOT_READY'
+  /** `mp pm resnapshot-exploration`: the exploration is settled (reopen it, or define a new one). */
+  | 'EXPLORATION_SETTLED'
+  /** `mp pm resnapshot-exploration`: the target branch's head is the exploration's snapshot already. */
+  | 'SNAPSHOT_CURRENT'
+  /** `mp pm resnapshot-exploration`: a dispatch of the exploration is in flight, or its hand-back is not taken into account yet. */
+  | 'DISPATCH_IN_FLIGHT';
 
 export class ProcessError extends Error {
   readonly code: ProcessErrorCode;

@@ -11,7 +11,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - **Reader**: the steps *(required)*; the quantities to record *(required; empty only when there are assertions)*; the assertions; the data; the addresses you may read; the evidence id; materials.
 - **Interpreter**: the exploration and its question *(required)*; the goal, verbatim; the attack scope; the method version; the attempt register with each attempt's record *(required)*; other evidence; the current interpretation (when revising); the open findings; rulings; materials.
 
-`mp seat <id> checkout` prints the path of a read-only directory holding the project at the commit your card names, for reading. Other seats reading the same commit share it: never write there.
+`mp seat <id> checkout` prints the path of a read-only directory holding the project at the commit your card names, for reading. Other seats reading the same commit share it: never write there. That commit can be newer than the one earlier rounds read, when the PM took the exploration's snapshot again; evidence marked "older environment" was recorded on an older commit and still counts.
 
 ## What you hand back
 Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`), and these fields:
