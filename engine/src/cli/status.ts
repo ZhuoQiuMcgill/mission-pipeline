@@ -7,7 +7,7 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
-import { attemptRecorded } from '../flow/exploration/machine.ts';
+import { attemptRecorded, type AttemptsAmendedBody, type XState } from '../flow/exploration/machine.ts';
 import { PLAN_LINE } from '../flow/plandoc.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
@@ -294,6 +294,13 @@ export async function showItem(p: Project, kind: string, id: string): Promise<Sh
   return { text: [...blocks.flatMap((b) => b.lines), ...extra].join('\n'), json: { items: blocks.map((b) => b.json), ...extraJson } };
 }
 
+/** One amendment of an exploration's method on the user's words (`mp pm amend-attempts`), as the reads show it. */
+export function amendmentLine(b: AttemptsAmendedBody, s?: XState): string {
+  const replaced = b.replaced.map((a) => `${a}${b.replaces[a] !== undefined ? ` (superseding ${b.replaces[a]})` : ''}${s !== undefined && !attemptRecorded(s, a) ? ' [its new record not in yet]' : ''}`);
+  const added = b.added.map((a) => `${a}${s !== undefined && !attemptRecorded(s, a) ? ' [its record not in yet]' : ''}`);
+  return `attempts amended by ${b.words} (amendment ${b.n}): added ${added.length > 0 ? added.join(', ') : 'none'}, replaced ${replaced.length > 0 ? replaced.join(', ') : 'none'}; method ${b.version} in force (the user's judgment ${b.judgment}, no review)${b.reason !== null ? `; reason: ${clip(b.reason, 160)}` : ''}${b.answers !== null ? `; answers repair ${b.answers}` : ''}`;
+}
+
 /** `mp read show exploration <id>` (decision 5): findings, dispositions, Stabilizer verdicts per round. */
 async function showExploration(p: Project, raw: string): Promise<ShowResult | null> {
   const ctx = p.ctx;
@@ -311,7 +318,10 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
     out.push(`  rounds: ${s.rounds} attacked; phase ${s.phase}; version: ${s.version?.id ?? 'none yet'} (${s.versions.length} version(s))`);
     if (s.drift !== null) out.push(`  awaiting a ruling (WI-33): round ${s.drift.round} drifting — ${clip(s.drift.reason, 160)}`);
     // registered attempts the PM had run again (mp pm rerun-attempt): each new record supersedes the earlier one
-    if (s.attemptReruns.size > 0) out.push(`  attempts run again: ${[...s.attemptReruns].map(([a, r]) => `${a} (rerun ${r.n}${r.replaces !== null ? `, superseding ${r.replaces}` : ''}${attemptRecorded(s, a) ? '' : '; its new record not in yet'})`).join(', ')}`);
+    const reruns = [...s.attemptReruns].filter(([, r]) => r.amendment === undefined);
+    if (reruns.length > 0) out.push(`  attempts run again: ${reruns.map(([a, r]) => `${a} (rerun ${r.n}${r.replaces !== null ? `, superseding ${r.replaces}` : ''}${attemptRecorded(s, a) ? '' : '; its new record not in yet'})`).join(', ')}`);
+    // the user's amendments of the method in force (mp pm amend-attempts): no round, no review
+    for (const b of s.amendments) out.push(`  ${amendmentLine(b, s)}`);
     // the current settle (one per opening; a rerun after an environment change reopens it), then the history
     const lastSettle = s.settles.at(-1);
     if (s.settled !== null) out.push(`  settled: ${s.settled.body.outcome} (${s.settled.body.stop})${s.settled.body.artifact !== null ? ` on ${s.settled.body.artifact}` : ''}${s.settles.length > 1 ? ` (settle ${s.settled.n} of ${s.settles.length})` : ''}`);
@@ -327,7 +337,7 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
         );
       }
     }
-    json.push({ mission, exploration: x, turn: s.turn, rounds: s.rounds, version: s.version, stopped: s.stopped, settled: s.settled, settles: s.settles, drift: s.drift, findings: [...s.findings.values()], stabilizations: s.stabilizations, evidence: [...s.evidence.values()] });
+    json.push({ mission, exploration: x, turn: s.turn, rounds: s.rounds, version: s.version, stopped: s.stopped, settled: s.settled, settles: s.settles, drift: s.drift, findings: [...s.findings.values()], stabilizations: s.stabilizations, evidence: [...s.evidence.values()], ...(s.amendments.length > 0 ? { method: s.method?.version ?? null, amendments: s.amendments.map((b) => ({ n: b.n, previous: b.previous, version: b.version, judgment: b.judgment, words: b.words, reason: b.reason, added: b.added, replaced: b.replaced, replaces: b.replaces, withdrawn: b.withdrawn, answers: b.answers })) } : {}) });
   }
   if (json.length === 0) return null;
   return { text: out.join('\n'), json };

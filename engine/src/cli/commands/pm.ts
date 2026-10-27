@@ -44,6 +44,7 @@ import {
   pmFullRun,
   pmReopenExploration,
   pmRerunAttempt,
+  pmAmendAttempts,
   pmFinish,
   pmGrant,
   pmLand,
@@ -875,6 +876,56 @@ const rerunAttempt: Command = {
   },
 };
 
+const amendAttempts: Command = {
+  group: 'pm',
+  name: ['amend-attempts'],
+  summary:
+    "the user decided something about a research exploration's method in force (a scale, a cap, a search extended to more of the domain): on their words, add or replace registered attempts without a round and without review; a new method version is in force, and new or replaced attempts run at once (a replaced attempt's earlier record is superseded, kept as history)",
+  usage: 'mp pm amend-attempts <mission> <exploration> --words W-<n> --file <attempts.json> [--answers R-<n>] [--reason "<text>"]\n       (<attempts.json>: a JSON array of attempts in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)',
+  flags: { words: 'string', file: 'string', answers: 'string', reason: 'string' },
+  identity: (a) => ({
+    positionals: a.positionals,
+    flags: a.flags,
+    attempts: (() => {
+      try {
+        return sha256(readFileSync(String(a.flags['file'] ?? ''), 'utf8'));
+      } catch {
+        return null;
+      }
+    })(),
+  }),
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const x = positional(args, 1, 'exploration');
+    const file = flagStr(args, 'file');
+    if (file === null) throw usage('--file <attempts.json>: a JSON array of attempts in the schema of a method\'s registered attempts (a new id is added, a registered id replaces that attempt)');
+    let attempts: unknown;
+    try {
+      attempts = JSON.parse(readFileSync(file, 'utf8'));
+    } catch (e) {
+      throw usage(`cannot read the attempts ${file}: ${(e as Error).message}`);
+    }
+    const answers = flagStr(args, 'answers');
+    if (answers !== null && !/^R-[1-9][0-9]*$/.test(answers)) throw usage(`--answers names a repair R-<n>, not ${JSON.stringify(answers)}`);
+    const w = wordsArg(p.ctx, args, true)!;
+    const reason = flagStr(args, 'reason');
+    const r = await pmAmendAttempts(p.ctx, { mission: m, exploration: x, attempts, words: w, reason, answers });
+    const run = (a: { readonly step: string | null; readonly evidence: string | null }): string => (a.step !== null ? `step ${a.step} queued (record ${a.evidence})` : 'its run is queued by the next mp pm next');
+    const lines = [
+      `Exploration ${x} of ${m}: the method is amended on the user's words ${w} (amendment ${r.n}). Version ${r.version} is in force, passed by the user's judgment ${r.judgment} (no review); it replaces ${r.previous}. No round spent (${r.rounds} of ${r.allowedRounds} used).`,
+      ...r.added.map((a) => `  added ${a.attempt}: ${run(a)}`),
+      ...r.replaced.map((a) => `  replaced ${a.attempt}: ${a.withdrawn !== null ? `the waiting run of its earlier card (step ${a.withdrawn}) is withdrawn; ` : ''}${run(a)}${a.replaces !== null ? `; its new record supersedes ${a.replaces}, kept as history` : ''}`),
+      ...(r.unchanged.length > 0 ? [`  unchanged: ${r.unchanged.join(', ')} (their records keep counting)`] : []),
+      ...(r.withdrawn !== null ? [`The interpreter step ${r.withdrawn}, queued on the earlier records, is withdrawn: a new one is queued once every attempt of the amended method has its record.`] : []),
+      ...(r.answers !== null ? [`Repair ${r.answers} is answered by this amendment: the round it added is taken back, and no card shows it as an open question.`] : []),
+      `The exploration is in its ${r.phase} phase. mp pm next lists the runs.`,
+    ];
+    return ok(lines.join('\n'), { mission: m, exploration: x, ...r });
+  },
+};
+
 function renderLanding(p: Project, r: LandingResult): { text: string; exitCode: number; wi: string | null } {
   switch (r.kind) {
     case 'landed': {
@@ -1140,6 +1191,7 @@ export const PM_COMMANDS: readonly Command[] = [
   fullRun,
   reopenExploration,
   rerunAttempt,
+  amendAttempts,
   land,
   withdrawDeliveryCmd,
   detachDuplicate,

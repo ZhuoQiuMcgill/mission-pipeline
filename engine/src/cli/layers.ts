@@ -357,6 +357,9 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       for (const d of ds) rev = Math.max(rev, d.rev);
       const flying = ds.filter((d) => d.state === 'in-flight');
       if (flying.length > 0) label = `${label}; ${flying.map((d) => `${d.seat} ${d.dispatch} in flight`).join(', ')}`;
+      // the user's latest amendment of its method (mp pm amend-attempts), while it is not settled
+      const amended = s.amendments.at(-1);
+      if (amended !== undefined && current === null) label = `${label}; attempts amended by ${amended.words}: added ${amended.added.join(', ') || 'none'}, replaced ${amended.replaced.join(', ') || 'none'}`;
       const def = s.def as unknown as Json | null;
       entries.set(k, { kind: 'exploration', id: x, mission: m, title: clip(String(def?.['question'] ?? def?.['deliverable'] ?? def?.['goal'] ?? x), 100), label, changedAt: timeOf(rev), changedRev: rev, blocked: null });
     }
