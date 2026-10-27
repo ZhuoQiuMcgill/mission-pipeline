@@ -12,11 +12,21 @@ export type ProcessErrorCode =
   | 'LEAF_EDITED'
   /** The step is not ready (claimed, held by a stop, a lease or the git-writes hold). */
   | 'NOT_READY'
-  /** `mp pm resnapshot-exploration`: the exploration is settled (reopen it, or define a new one). */
+  /** `mp pm resnapshot-exploration`, `mp pm rerun-attempt`: the exploration is settled (reopen it, or define a new one). */
   | 'EXPLORATION_SETTLED'
   /** `mp pm resnapshot-exploration`: the target branch's head is the exploration's snapshot already. */
   | 'SNAPSHOT_CURRENT'
-  /** `mp pm resnapshot-exploration`: a dispatch of the exploration is in flight, or its hand-back is not taken into account yet. */
+  /** `mp pm rerun-attempt`: the exploration is stopped and waits for the decision layer. */
+  | 'EXPLORATION_STOPPED'
+  /** `mp pm rerun-attempt`: the method in effect registers no such attempt (or no method is in effect). */
+  | 'ATTEMPT_NOT_REGISTERED'
+  /** `mp pm rerun-attempt`: the attempt has no record yet. */
+  | 'ATTEMPT_NO_EVIDENCE'
+  /** `mp pm rerun-attempt`: a run of the attempt is queued or in flight. */
+  | 'ATTEMPT_QUEUED'
+  /** `mp pm rerun-attempt`: the interpretation of the attempts' records is submitted. */
+  | 'INTERPRETATION_SUBMITTED'
+  /** `mp pm resnapshot-exploration`: a dispatch of the exploration is in flight, or its hand-back is not taken into account yet; `mp pm rerun-attempt`: its interpreter is in flight. */
   | 'DISPATCH_IN_FLIGHT';
 
 export class ProcessError extends Error {

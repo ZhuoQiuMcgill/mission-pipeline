@@ -36,6 +36,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
   finish without giving every hung test the same time. Such a rerun is a sampling run: it takes no
   run lock and holds no write lock of the memory while it executes, so other `mp` commands go on.
   `mp config` shows the limit in effect.
+- **`mp pm rerun-attempt`: a registered attempt runs again on the same method version, without a
+  round.** An attempt's blind run can fail for a cause outside the method, such as a time limit
+  raised since. Until now nothing ran it again: `mp pm reopen-exploration` is for a settled
+  exploration, `mp pm renew` reruns only runs from an older environment, and an author's evidence
+  request needs a round of the budget.
+  - `mp pm rerun-attempt <mission> <exploration> <attempt-id>[,<attempt-id>...] --words W-<n> [--reason "<text>"]`
+    queues, per named attempt, a fresh blind run of its registered card (the same steps and
+    commands; constraints in force selected at queue time and at the claim), in the register's
+    order. The words entry and the reason are recorded with it (event `attempt-rerun`).
+  - The new record supersedes the earlier one for every reader: the interpreter's card, the phase
+    check, the attacker's evidence list and its required evidence. The earlier one stays in the
+    memory, and the exploration's hand-off names the record that superseded it. `mp read show
+    exploration` lists the attempts run again.
+  - An exploration in `interpret` whose interpretation is not submitted goes back to `attempts`;
+    the interpreter step queued on the earlier records is withdrawn in the same write, and a new
+    one is queued once the new records are in.
+  - No round is spent and none is added: only the interpreter, which counts no round, reads the
+    new records.
+  - Refused, with nothing written: no such exploration; settled or stopped; not a research
+    exploration, or no method in effect; an attempt the method does not register; an attempt
+    with no record yet, or with a run queued or in flight; the interpreter in flight; an
+    interpretation submitted.
 
 ### Changed
 - **An exploration that has not started reads code landed after its plan took effect.** Its

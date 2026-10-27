@@ -48,6 +48,10 @@
 //                          the first step was dispatched (nothing had run on the old one), or on the
 //                          PM's word; every card from then on names it, and evidence recorded before
 //                          still counts, labelled "older environment"
+//   attempt-rerun (<n>)    the PM's word (`mp pm rerun-attempt`): registered attempts that failed for a
+//                          cause outside the method run again on the same method version, each a fresh
+//                          blind run of its registered card; its new record supersedes the earlier one
+//                          (kept as history), and an interpretation not submitted yet waits for it
 //
 // Settling (code review r1 #3 carried through): an exploration settles at most once per opening, and
 // a rerun that reopens a converged exploration (or a redefinition that clears a stop) opens it again.
@@ -120,6 +124,30 @@ export interface EvidenceTaskInfo {
   readonly requester: string | null;
   /** An evidence execution run again after an environment change: the one it replaces (code review r1 #3). */
   readonly rerunOf?: string;
+  /** A registered attempt run again on the PM's word (`mp pm rerun-attempt`): the record its new one supersedes. */
+  readonly supersedes?: string;
+}
+
+/** The event of the PM's word that registered attempts run again (line "exploration:<id>", key: its number, 1 for the first). */
+export const ATTEMPT_RERUN = 'attempt-rerun';
+
+/**
+ * Registered attempts run again on the same method version (`mp pm rerun-attempt`): each had its
+ * record, and failed for a cause outside the method (a platform's time limit since raised, say). Each
+ * gets a fresh blind run of its registered card, in the register's order; no round is spent.
+ */
+export interface AttemptRerunBody {
+  readonly n: number;
+  /** The attempts, in the register's order. */
+  readonly attempts: readonly string[];
+  /** Each attempt's record its new one supersedes (kept as history). */
+  readonly replaces: Readonly<Record<string, string>>;
+  /** The words entry it rests on, and the PM's reason. */
+  readonly words: string;
+  readonly reason: string | null;
+  /** The interpreter step queued on the earlier records, withdrawn in the same write (consumed as "withdrawn"), or null. */
+  readonly withdrawn: string | null;
+  readonly by: 'pm';
 }
 
 /** The evidence executions to run again (code review r1 #3), under the environment identity named. */
@@ -259,7 +287,9 @@ export type ConsumedBody =
       /** The program generated the record (8.2: a failed or unrun attempt). */
       readonly auto: boolean;
     }
-  | { readonly kind: 'abandoned'; readonly task: string; readonly role: Role; readonly reason: string };
+  | { readonly kind: 'abandoned'; readonly task: string; readonly role: Role; readonly reason: string }
+  /** A queued step taken back before it ran (`mp pm rerun-attempt`: an interpreter queued on records that are superseded). */
+  | { readonly kind: 'withdrawn'; readonly task: string; readonly role: Role; readonly reason: string };
 
 export interface RulingBody {
   readonly id: string;
@@ -465,6 +495,11 @@ export interface XState {
   readonly resnapshots: ResnapshotBody[];
   /** The evidence environment (env snapshot id) each evidence was recorded under: the snapshot in force when it was taken into account. */
   readonly evidenceEnv: Map<string, string>;
+  /**
+   * Registered attempts the PM had run again (`mp pm rerun-attempt`), by attempt: the evidence
+   * sequence when it was asked (only a record after it counts for the attempt) and the record it supersedes.
+   */
+  readonly attemptReruns: Map<string, { readonly n: number; readonly since: number; readonly replaces: string | null }>;
 }
 
 export function emptyState(): XState {
@@ -514,6 +549,7 @@ export function emptyState(): XState {
     repairs: [],
     resnapshots: [],
     evidenceEnv: new Map(),
+    attemptReruns: new Map(),
   };
 }
 
@@ -627,6 +663,16 @@ export function fold(events: readonly XEvent[]): XState {
         }
         break;
       }
+      case ATTEMPT_RERUN: {
+        // registered attempts run again on the same method version: each counts as run only once its
+        // new record is in, so an interpretation not submitted yet waits for them (back to the attempts)
+        const b = e.body as AttemptRerunBody;
+        if (s.method === null) break;
+        for (const a of b.attempts) s.attemptReruns.set(a, { n: b.n, since: s.evidenceSeq, replaces: b.replaces[a] ?? null });
+        if (s.phase === 'interpret') s.phase = 'attempts';
+        s.afterAttack = null;
+        break;
+      }
       case 'settled': {
         // one settle per opening (the step's rule): the first since the last reopening is the current one
         const rec: SettleRecord = { key: e.key, n: s.settles.length + 1, body: e.body as ExplorationSettledBody };
@@ -669,9 +715,12 @@ function consume(s: Mutable, c: ConsumedBody): void {
         s.reruns.set(old, c.evidence);
         if ([...s.reruns.values()].every((v) => v !== null)) applyReruns(s);
       }
-      if (s.phase === 'attempts' && s.method !== null && s.method.attempts.every((a) => [...s.evidence.values()].some((x) => x.attempt === a.id))) s.phase = 'interpret';
+      if (s.phase === 'attempts' && s.method !== null && s.method.attempts.every((a) => attemptRecorded(s, a.id))) s.phase = 'interpret';
       return;
     }
+    case 'withdrawn':
+      // taken back before it ran: nothing follows from it
+      return;
     case 'abandoned':
       // the turn stays with the role (a retry ruling queues it again); decide() stops meanwhile
       s.abandoned = { task: c.task, role: c.role, reason: c.reason };
@@ -1066,6 +1115,24 @@ export function olderSnapshotEvidence(s: XState, id: string): boolean {
   return env !== undefined && s.defined !== null && env !== s.defined.envSnapshot;
 }
 
+/** The evidence sequence after which a registered attempt's record counts: 0, or when the PM last had it run again. */
+function attemptSince(s: XState, attempt: string): number {
+  return s.attemptReruns.get(attempt)?.since ?? 0;
+}
+
+/** Whether a registered attempt has its record: any, or one recorded after the PM last had it run again (`mp pm rerun-attempt`). */
+export function attemptRecorded(s: XState, attempt: string): boolean {
+  const since = attemptSince(s, attempt);
+  return [...s.evidence.values()].some((e) => e.attempt === attempt && e.k > since);
+}
+
+/** An attempt's record that a later run of the same attempt superseded (`mp pm rerun-attempt`): history, on no seat's card. */
+export function supersededAttemptRecord(s: XState, id: string): boolean {
+  const e = s.evidence.get(id);
+  if (e === undefined || e.attempt === null || !s.attemptReruns.has(e.attempt)) return false;
+  return e.k <= attemptSince(s, e.attempt) && attemptRecorded(s, e.attempt);
+}
+
 /** A registered attempt's latest record (code review r2 #5), through the reruns; null before it ran. */
 export function attemptEvidence(s: XState, attempt: string): string | null {
   const last = [...s.evidence.values()].filter((e) => e.attempt === attempt).sort((a, b) => a.k - b.k).at(-1);
@@ -1147,7 +1214,8 @@ export function decide(s: XState, facts: DecideFacts = { spentMicros: null }): A
   if (s.abandoned !== null) return { kind: 'stop', reason: 'seat-abandoned', wi: 'WI-28' };
   // research attempts run side by side (blind, separate units)
   if (s.phase === 'attempts' && s.method !== null) {
-    const queued = new Set([...s.tasks.values()].flatMap((q) => (q.evidence?.attempt != null && q.evidence.requester === null ? [q.evidence.attempt] : [])));
+    // an attempt the PM had run again counts as queued only with a run queued since (its new record)
+    const queued = new Set([...s.tasks.values()].flatMap((q) => (q.evidence?.attempt != null && q.evidence.requester === null && q.evidence.k > attemptSince(s, q.evidence.attempt) ? [q.evidence.attempt] : [])));
     const missing = s.method.attempts.filter((a) => !queued.has(a.id));
     if (missing.length > 0) return { kind: 'attempts', attempts: missing };
     return { kind: 'none', why: 'registered attempts running' };
