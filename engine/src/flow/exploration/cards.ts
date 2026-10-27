@@ -14,7 +14,7 @@ import type { objectConstraints } from '../../seat/cards/inputs.ts';
 import { SEAT_CAPABILITIES } from '../context.ts';
 import type { FlowContent } from '../ports.ts';
 import { xid } from './definition.ts';
-import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, type FindingState, type XState } from './machine.ts';
+import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, supersededAttemptRecord, type FindingState, type XState } from './machine.ts';
 
 type ObjectConstraints = ReturnType<typeof objectConstraints>;
 
@@ -100,8 +100,9 @@ function priorFinding(f: FindingState, m: Materials, i: number, mustRead: boolea
 }
 
 function evidenceItems(s: XState, m: Materials, onlyExtra = false, mustRead: ReadonlySet<string> = new Set()): EvidenceItemT[] {
+  // an attempt's record a later run of it superseded (`mp pm rerun-attempt`) is history, on no card
   return [...s.evidence.values()]
-    .filter((e) => !onlyExtra || e.attempt === null)
+    .filter((e) => (!onlyExtra || e.attempt === null) && !supersededAttemptRecord(s, e.id))
     .sort((a, b) => a.k - b.k)
     .map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt, material: e.report !== null ? m.add(`evidence-${e.id}`, `Evidence ${e.id} report`, e.report, mustRead.has(e.id)) : null }));
 }
