@@ -14,7 +14,7 @@ import type { objectConstraints } from '../../seat/cards/inputs.ts';
 import { SEAT_CAPABILITIES } from '../context.ts';
 import type { FlowContent } from '../ports.ts';
 import { xid } from './definition.ts';
-import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, type FindingState, type XState } from './machine.ts';
+import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, supersededAttemptRecord, type FindingState, type XState } from './machine.ts';
 
 type ObjectConstraints = ReturnType<typeof objectConstraints>;
 
@@ -60,8 +60,14 @@ function common(s: XState, task: string, duties: string, resume: Resume | null, 
     ...(asyncEvidence ? { allowAsyncEvidence: true } : {}),
     ...(continuation !== null ? { continuation } : {}),
     // 4.1.2 (D-10): the repairs that reopened the exploration, an added question on every round's card
-    ...(s.repairs.length > 0 ? { repairs: s.repairs.map((r) => ({ ...r })) } : {}),
+    // (one the user's amendment of the method answered, `mp pm amend-attempts --answers`, is no open question)
+    ...(openRepairs(s).length > 0 ? { repairs: openRepairs(s).map((r) => ({ ...r })) } : {}),
   };
+}
+
+/** The repairs about the exploration still open: those no amendment of the method answered. */
+function openRepairs(s: XState) {
+  return s.repairs.filter((r) => !s.answeredRepairs.has(r.id));
 }
 
 function readOnlyWorkspace(s: XState) {
@@ -100,8 +106,9 @@ function priorFinding(f: FindingState, m: Materials, i: number, mustRead: boolea
 }
 
 function evidenceItems(s: XState, m: Materials, onlyExtra = false, mustRead: ReadonlySet<string> = new Set()): EvidenceItemT[] {
+  // an attempt's record a later run of it superseded (`mp pm rerun-attempt`) is history, on no card
   return [...s.evidence.values()]
-    .filter((e) => !onlyExtra || e.attempt === null)
+    .filter((e) => (!onlyExtra || e.attempt === null) && !supersededAttemptRecord(s, e.id))
     .sort((a, b) => a.k - b.k)
     .map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt, material: e.report !== null ? m.add(`evidence-${e.id}`, `Evidence ${e.id} report`, e.report, mustRead.has(e.id)) : null }));
 }

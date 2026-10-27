@@ -40,6 +40,18 @@
 //                          rests on (code review r1 #3): they run again (the same request, blind),
 //                          then the same position judges the version again with the new records
 //   settled (<x>, <x>#<n>) the step handed a stop to the decision layer (plandoc.ts): one per opening
+//   attempt-rerun (<n>)    the PM's word (`mp pm rerun-attempt`): registered attempts that failed for a
+//                          cause outside the method run again on the same method version, each a fresh
+//                          blind run of its registered card; its new record supersedes the earlier one
+//                          (kept as history), and an interpretation not submitted yet waits for it
+//   attempts-amended (<n>) the user's words (`mp pm amend-attempts`): a decision the user made about the
+//                          method in force (a scale, a cap, a wider search) adds or replaces registered
+//                          attempts without a round and without review. A new method version is in
+//                          force (the user's judgment passes it); an added attempt runs, a replaced one
+//                          runs under its new card (a record it had is superseded, kept as history),
+//                          records of unchanged attempts keep counting, and an interpretation not
+//                          submitted yet waits for the new records. A repair it answers no longer adds
+//                          its round
 //
 // Settling (code review r1 #3 carried through): an exploration settles at most once per opening, and
 // a rerun that reopens a converged exploration (or a redefinition that clears a stop) opens it again.
@@ -91,6 +103,66 @@ export interface EvidenceTaskInfo {
   readonly requester: string | null;
   /** An evidence execution run again after an environment change: the one it replaces (code review r1 #3). */
   readonly rerunOf?: string;
+  /** A registered attempt run again on the PM's word (`mp pm rerun-attempt`): the record its new one supersedes. */
+  readonly supersedes?: string;
+  /** A registered attempt run under the card the user's amendment set (`mp pm amend-attempts`): the amendment's number. */
+  readonly amendment?: number;
+}
+
+/** The event of the user's amendment of the method in force (line "exploration:<id>", key: its number, 1 for the first). */
+export const ATTEMPTS_AMENDED = 'attempts-amended';
+
+/**
+ * The user's decision about the method in force (`mp pm amend-attempts`): registered attempts added or
+ * replaced on their words, without a round and without review (the user owns the decision). The new
+ * method version is in force at once, passed by the user's judgment; no author, attacker or
+ * Stabilizer is dispatched for it.
+ */
+export interface AttemptsAmendedBody {
+  readonly n: number;
+  /** The method version it amends. */
+  readonly previous: string;
+  /** The method version in force from now on: its id, its document (a data value), and the user's judgment that passes it. */
+  readonly version: string;
+  readonly content: string;
+  readonly judgment: string;
+  /** The new version's register: the previous one's in order (a replaced attempt in its place), then the added ones. */
+  readonly attempts: readonly RegisteredAttemptT[];
+  /** The attempts added, and those replaced (both in the new register's order). */
+  readonly added: readonly string[];
+  readonly replaced: readonly string[];
+  /** The record each replaced attempt had, superseded by its new run (kept as history); an attempt with none is absent. */
+  readonly replaces: Readonly<Record<string, string>>;
+  /** Steps taken back before they ran, in the same write (each consumed as "withdrawn"): runs of replaced attempts waiting in the queue, and an interpreter queued on the earlier records. */
+  readonly withdrawn: readonly string[];
+  /** The words entry it rests on, and the PM's reason. */
+  readonly words: string;
+  readonly reason: string | null;
+  /** A repair about this exploration it answers (that repair no longer adds its round), or null. */
+  readonly answers: string | null;
+  readonly by: 'pm';
+}
+
+/** The event of the PM's word that registered attempts run again (line "exploration:<id>", key: its number, 1 for the first). */
+export const ATTEMPT_RERUN = 'attempt-rerun';
+
+/**
+ * Registered attempts run again on the same method version (`mp pm rerun-attempt`): each had its
+ * record, and failed for a cause outside the method (a platform's time limit since raised, say). Each
+ * gets a fresh blind run of its registered card, in the register's order; no round is spent.
+ */
+export interface AttemptRerunBody {
+  readonly n: number;
+  /** The attempts, in the register's order. */
+  readonly attempts: readonly string[];
+  /** Each attempt's record its new one supersedes (kept as history). */
+  readonly replaces: Readonly<Record<string, string>>;
+  /** The words entry it rests on, and the PM's reason. */
+  readonly words: string;
+  readonly reason: string | null;
+  /** The interpreter step queued on the earlier records, withdrawn in the same write (consumed as "withdrawn"), or null. */
+  readonly withdrawn: string | null;
+  readonly by: 'pm';
 }
 
 /** The evidence executions to run again (code review r1 #3), under the environment identity named. */
@@ -226,7 +298,9 @@ export type ConsumedBody =
       /** The program generated the record (8.2: a failed or unrun attempt). */
       readonly auto: boolean;
     }
-  | { readonly kind: 'abandoned'; readonly task: string; readonly role: Role; readonly reason: string };
+  | { readonly kind: 'abandoned'; readonly task: string; readonly role: Role; readonly reason: string }
+  /** A queued step taken back before it ran (`mp pm rerun-attempt`: an interpreter queued on records that are superseded; `mp pm amend-attempts`: also a waiting run of a replaced attempt's earlier card). */
+  | { readonly kind: 'withdrawn'; readonly task: string; readonly role: Role; readonly reason: string };
 
 export interface RulingBody {
   readonly id: string;
@@ -375,8 +449,11 @@ export interface XState {
   discussPending: boolean;
   version: VersionState | null;
   readonly versions: VersionState[];
-  /** Research: the method version that passed and its register. */
-  method: { readonly version: string; readonly attempts: readonly RegisteredAttemptT[] } | null;
+  /**
+   * Research: the method version in force and its register: the one that passed its attack, or the
+   * user's amendment of it (`mp pm amend-attempts`); `judgment` is the pass that decides its position.
+   */
+  method: { readonly version: string; readonly attempts: readonly RegisteredAttemptT[]; readonly judgment?: string } | null;
   /** Research: the register submitted with the current method version. */
   register: readonly RegisteredAttemptT[];
   noConclusion: boolean;
@@ -426,6 +503,18 @@ export interface XState {
   settled: SettleRecord | null;
   /** 4.1.2: the repairs that reopened it, each an added question its later rounds answer. */
   readonly repairs: RepairRef[];
+  /**
+   * Registered attempts the PM had run again (`mp pm rerun-attempt`), or the user's amendment replaced
+   * (`mp pm amend-attempts`, `amendment` its number), by attempt: the evidence sequence when it was
+   * asked (only a record after it counts for the attempt) and the record it supersedes.
+   */
+  readonly attemptReruns: Map<string, { readonly n: number; readonly since: number; readonly replaces: string | null; readonly amendment?: number }>;
+  /** The user's amendments of the method in force (`mp pm amend-attempts`), oldest first. */
+  readonly amendments: AttemptsAmendedBody[];
+  /** The task sequence when each repair about this exploration was recorded (an author task queued after it starts its round). */
+  readonly repairSince: Map<string, number>;
+  /** Repairs an amendment answered (`--answers`), by repair: the amendment's number. They add no round and no card shows them. */
+  readonly answeredRepairs: Map<string, number>;
 }
 
 export function emptyState(): XState {
@@ -473,6 +562,10 @@ export function emptyState(): XState {
     settles: [],
     settled: null,
     repairs: [],
+    attemptReruns: new Map(),
+    amendments: [],
+    repairSince: new Map(),
+    answeredRepairs: new Map(),
   };
 }
 
@@ -554,6 +647,7 @@ export function fold(events: readonly XEvent[]): XState {
           // reopens (its settle becomes history), and the author answers it first
           if (s.repairs.some((r) => r.id === b.repair!.id)) break;
           s.repairs.push(b.repair);
+          s.repairSince.set(b.repair.id, s.seq);
           // one more round, and its closing attacker (a round that passes converges only after one)
           s.rerunRounds += 2;
           if (s.stopped !== null) {
@@ -584,6 +678,40 @@ export function fold(events: readonly XEvent[]): XState {
           }
           s.afterAttack = null;
         }
+        break;
+      }
+      case ATTEMPT_RERUN: {
+        // registered attempts run again on the same method version: each counts as run only once its
+        // new record is in, so an interpretation not submitted yet waits for them (back to the attempts)
+        const b = e.body as AttemptRerunBody;
+        if (s.method === null) break;
+        for (const a of b.attempts) s.attemptReruns.set(a, { n: b.n, since: s.evidenceSeq, replaces: b.replaces[a] ?? null });
+        if (s.phase === 'interpret') s.phase = 'attempts';
+        s.afterAttack = null;
+        break;
+      }
+      case ATTEMPTS_AMENDED: {
+        // the user's decision about the method in force: a new method version in force at once (no
+        // round, no review). A replaced attempt counts as run only once its new card's record is in
+        // (a record it had is superseded); an added one has none yet: an interpretation not submitted
+        // yet waits for them (back to the attempts). Records of unchanged attempts keep counting.
+        const b = e.body as AttemptsAmendedBody;
+        if (s.method === null) break;
+        const v: VersionState = { id: b.version, content: b.content, round: s.rounds, phase: 'method' };
+        s.versions.push(v);
+        s.version = v;
+        s.method = { version: b.version, attempts: b.attempts, judgment: b.judgment };
+        s.register = b.attempts;
+        for (const a of b.replaced) s.attemptReruns.set(a, { n: b.n, since: s.evidenceSeq, replaces: b.replaces[a] ?? null, amendment: b.n });
+        s.amendments.push(b);
+        // a repair it answers: its added round (and its closing attacker) is taken back, and no card shows it
+        if (b.answers !== null && s.repairs.some((r) => r.id === b.answers) && !s.answeredRepairs.has(b.answers)) {
+          s.answeredRepairs.set(b.answers, b.n);
+          s.rerunRounds = Math.max(0, s.rerunRounds - 2);
+        }
+        if (s.phase === 'interpret') s.phase = 'attempts';
+        if (s.phase === 'attempts' && s.method.attempts.every((a) => attemptRecorded(s, a.id))) s.phase = 'interpret';
+        s.afterAttack = null;
         break;
       }
       case 'settled': {
@@ -618,9 +746,12 @@ function consume(s: Mutable, c: ConsumedBody): void {
         s.reruns.set(old, c.evidence);
         if ([...s.reruns.values()].every((v) => v !== null)) applyReruns(s);
       }
-      if (s.phase === 'attempts' && s.method !== null && s.method.attempts.every((a) => [...s.evidence.values()].some((x) => x.attempt === a.id))) s.phase = 'interpret';
+      if (s.phase === 'attempts' && s.method !== null && s.method.attempts.every((a) => attemptRecorded(s, a.id))) s.phase = 'interpret';
       return;
     }
+    case 'withdrawn':
+      // taken back before it ran: nothing follows from it
+      return;
     case 'abandoned':
       // the turn stays with the role (a retry ruling queues it again); decide() stops meanwhile
       s.abandoned = { task: c.task, role: c.role, reason: c.reason };
@@ -868,7 +999,8 @@ function stabilize(s: Mutable, c: Extract<ConsumedBody, { kind: 'stabilized' }>)
       }
       s.turn = 'attacker';
     } else if (s.phase === 'method') {
-      s.method = { version: st.target, attempts: s.register };
+      // the pass that decides the method's position: the Stabilizer's on the version it judged
+      s.method = { version: st.target, attempts: s.register, judgment: c.judgment };
       s.phase = 'attempts';
       s.turn = 'none';
     } else if (st.closing) {
@@ -974,6 +1106,35 @@ export function currentEvidence(s: XState, id: string): string {
   }
 }
 
+/** The evidence sequence after which a registered attempt's record counts: 0, or when the PM last had it run again. */
+function attemptSince(s: XState, attempt: string): number {
+  return s.attemptReruns.get(attempt)?.since ?? 0;
+}
+
+/** Whether a registered attempt has its record: any, or one recorded after the PM last had it run again (`mp pm rerun-attempt`). */
+export function attemptRecorded(s: XState, attempt: string): boolean {
+  const since = attemptSince(s, attempt);
+  return [...s.evidence.values()].some((e) => e.attempt === attempt && e.k > since);
+}
+
+/** An attempt's record that a later run of the same attempt superseded (`mp pm rerun-attempt`): history, on no seat's card. */
+export function supersededAttemptRecord(s: XState, id: string): boolean {
+  const e = s.evidence.get(id);
+  if (e === undefined || e.attempt === null || !s.attemptReruns.has(e.attempt)) return false;
+  return e.k <= attemptSince(s, e.attempt) && attemptRecorded(s, e.attempt);
+}
+
+/**
+ * The user's amendment a registered attempt's next run answers (`mp pm amend-attempts`): the one that
+ * replaced it, or added it and nothing asked for it again since; null for a run of the author's card,
+ * or one the PM had run again (`mp pm rerun-attempt`).
+ */
+export function attemptAmendment(s: XState, attempt: string): number | null {
+  const again = s.attemptReruns.get(attempt);
+  if (again !== undefined) return again.amendment ?? null;
+  return s.amendments.find((b) => b.added.includes(attempt))?.n ?? null;
+}
+
 /** A registered attempt's latest record (code review r2 #5), through the reruns; null before it ran. */
 export function attemptEvidence(s: XState, attempt: string): string | null {
   const last = [...s.evidence.values()].filter((e) => e.attempt === attempt).sort((a, b) => a.k - b.k).at(-1);
@@ -1055,7 +1216,8 @@ export function decide(s: XState, facts: DecideFacts = { spentMicros: null }): A
   if (s.abandoned !== null) return { kind: 'stop', reason: 'seat-abandoned', wi: 'WI-28' };
   // research attempts run side by side (blind, separate units)
   if (s.phase === 'attempts' && s.method !== null) {
-    const queued = new Set([...s.tasks.values()].flatMap((q) => (q.evidence?.attempt != null && q.evidence.requester === null ? [q.evidence.attempt] : [])));
+    // an attempt the PM had run again counts as queued only with a run queued since (its new record)
+    const queued = new Set([...s.tasks.values()].flatMap((q) => (q.evidence?.attempt != null && q.evidence.requester === null && q.evidence.k > attemptSince(s, q.evidence.attempt) ? [q.evidence.attempt] : [])));
     const missing = s.method.attempts.filter((a) => !queued.has(a.id));
     if (missing.length > 0) return { kind: 'attempts', attempts: missing };
     return { kind: 'none', why: 'registered attempts running' };

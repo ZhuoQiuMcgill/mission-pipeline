@@ -8,6 +8,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [Unreleased]
 
+### Added
+- **`mp pm rerun-attempt`: a registered attempt runs again on the same method version, without a
+  round.** An attempt's blind run can fail for a cause outside the method, such as a time limit
+  raised since. Until now nothing ran it again: `mp pm reopen-exploration` is for a settled
+  exploration, `mp pm renew` reruns only runs from an older environment, and an author's evidence
+  request needs a round of the budget.
+  - `mp pm rerun-attempt <mission> <exploration> <attempt-id>[,<attempt-id>...] --words W-<n> [--reason "<text>"]`
+    queues, per named attempt, a fresh blind run of its registered card (the same steps and
+    commands; constraints in force selected at queue time and at the claim), in the register's
+    order. The words entry and the reason are recorded with it (event `attempt-rerun`).
+  - The new record supersedes the earlier one for every reader: the interpreter's card, the phase
+    check, the attacker's evidence list and its required evidence. The earlier one stays in the
+    memory, and the exploration's hand-off names the record that superseded it. `mp read show
+    exploration` lists the attempts run again.
+  - An exploration in `interpret` whose interpretation is not submitted goes back to `attempts`;
+    the interpreter step queued on the earlier records is withdrawn in the same write, and a new
+    one is queued once the new records are in.
+  - No round is spent and none is added: only the interpreter, which counts no round, reads the
+    new records.
+  - Refused, with nothing written: no such exploration; settled or stopped; not a research
+    exploration, or no method in effect; an attempt the method does not register; an attempt
+    with no record yet, or with a run queued or in flight; the interpreter in flight; an
+    interpretation submitted.
+- **`mp pm amend-attempts`: the user's decision about a registered method is applied on their
+  words, without a round and without review.** A research exploration's method in force could
+  change only through a new method version, and so a full author, attacker and Stabilizer round.
+  That is right for the researcher's own choices, but not for a decision the user made and owns,
+  such as a scale, a cap, or a search extended to more of the domain. A repair about the
+  exploration did not help in the `attempts` phase: it only added rounds, and the author's turn
+  came after every old attempt had run and been interpreted.
+  - `mp pm amend-attempts <mission> <exploration> --words W-<n> --file <attempts.json> [--answers R-<n>] [--reason "<text>"]`.
+    The file is a JSON array of attempts in the schema of a method's registered attempts, checked
+    as the author's register is (ids unique, a quantity or an assertion each; unknown fields
+    refused). A new id is added; a registered id replaces that attempt; an object equal to its
+    registered attempt changes nothing.
+  - One write records a new method version in force (event `attempts-amended`): the previous
+    version's document with the register amended and a section "Amended by the user's words
+    W-<n>" that quotes the reason and lists the added and replaced attempts. The user's judgment
+    passes it (executor `user`, its binding carried over from the previous version's deciding
+    pass), so an interpretation that relies on it can be proven. No round is spent; no author,
+    attacker or Stabilizer is dispatched.
+  - Added and replaced attempts get executor steps like every registered attempt, ready at once. A
+    replaced attempt with a record runs again under its new card, and its new record supersedes
+    the earlier one, kept as history (as `mp pm rerun-attempt` does). A run of a replaced
+    attempt's earlier card still waiting in the queue is withdrawn in the same write. Records of
+    unchanged attempts keep counting.
+  - The exploration reaches `interpret` only once every attempt of the amended method has its
+    record. From `interpret`, an interpreter step still queued is withdrawn and the exploration
+    goes back to `attempts`. The interpreter's and attacker's cards name the amended version.
+  - `--answers R-<n>`: a repair about this exploration that the amendment answers. Its added round
+    is taken back, cards stop showing it as an open question, and the repair reads as answered
+    (`mp read tree`, the closing snapshot).
+  - `mp read show exploration`, `mp read status` and `mp read why` show the amendment; the
+    exploration's hand-off lists it.
+  - Refused, with nothing written: no such exploration or words entry (`NOT_ALLOWED`); attempts
+    that do not validate (`ATTEMPTS_INVALID`); nothing changed (`NOTHING_AMENDED`); settled or stopped; not a research exploration
+    or no method in force (`NO_METHOD`); a replaced attempt's run in flight or handed back and not
+    taken into account yet (`ATTEMPT_QUEUED`); an interpreter dispatched, at work, or an
+    interpretation submitted (`INTERPRETER_DISPATCHED`, `DISPATCH_IN_FLIGHT`,
+    `INTERPRETATION_SUBMITTED`); a repair not open (`REPAIR_NOT_OPEN`) or whose round started
+    (`REPAIR_STARTED`).
+
 ### Fixed
 - **The Claude Code adapter no longer records another session's message as the user's words.** A
   message one session sends another arrives as a prompt wrapped in `<cross-session-message …>`, and

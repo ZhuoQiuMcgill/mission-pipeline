@@ -32,11 +32,14 @@ import { attackerCard, authorCard, executorCard, interpreterCard, parseEvidenceR
 import { ExplorationDefinitionSchema, xid, type ExplorationDefinition } from './definition.ts';
 import {
   allowedRounds,
+  attemptAmendment,
+  attemptEvidence,
   blocks,
   decide,
   effectiveSeverity,
   fold,
   pendingTasks,
+  supersededAttemptRecord,
   type Action,
   type ConsumedBody,
   type DefinedBody,
@@ -447,9 +450,18 @@ async function submitQueued(p: ExplorationPorts, mission: MissionId, x: string, 
   const cardHash = p.ledger.content.put(canonicalJson(card));
   // who hands it over (§3.2, U-13): the task it continues, else the round's last consumed task
   const last = [...s.consumed.keys()].map((k) => s.tasks.get(k)).filter((b): b is QueuedBody => b !== undefined).sort((a, b) => a.n - b.n).at(-1);
-  const from = supersedes ?? q.resumeOf ?? last?.task ?? null;
+  // an attempt run again on the PM's word: the run whose record it supersedes
+  const again = q.evidence?.supersedes !== undefined ? [...s.tasks.values()].find((t) => t.evidence?.id === q.evidence?.supersedes)?.task : undefined;
+  const from = supersedes ?? q.resumeOf ?? again ?? last?.task ?? null;
   const objects = [...new Set([...(q.target !== null ? [q.target] : []), ...(s.version !== null ? [s.version.id] : [])])];
-  const t = { ...taskOf(s, q.task, q.lineage, card), handover: { from, objects, step: `exploration ${x}, round ${q.round + (q.role === 'attacker' ? 1 : 0)}: the ${q.role} turn${q.evidence?.rerunOf !== undefined ? ` (a rerun of ${q.evidence.rerunOf})` : ''}` } };
+  const amended = q.evidence?.amendment !== undefined ? s.amendments.find((b) => b.n === q.evidence?.amendment) : undefined;
+  const why =
+    amended !== undefined
+      ? ` (attempt ${q.evidence?.attempt ?? '?'} ${amended.added.includes(q.evidence?.attempt ?? '') ? 'added' : 'replaced'} by the user's words ${amended.words}${q.evidence?.supersedes !== undefined ? `, superseding ${q.evidence.supersedes}` : ''})`
+      : q.evidence?.supersedes !== undefined
+        ? ` (attempt ${q.evidence.attempt ?? '?'} run again on the PM's word, superseding ${q.evidence.supersedes})`
+        : '';
+  const t = { ...taskOf(s, q.task, q.lineage, card), handover: { from, objects, step: `exploration ${x}, round ${q.round + (q.role === 'attacker' ? 1 : 0)}: the ${q.role} turn${q.evidence?.rerunOf !== undefined ? ` (a rerun of ${q.evidence.rerunOf})` : ''}${why}` } };
   if (supersedes !== null) await p.scheduler.supersede(supersedes, t);
   else await p.scheduler.submit(t);
   const body: QueuedBody = { ...q, card: cardHash };
@@ -574,7 +586,19 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const evidence = xid.evidence(mission, x, k);
       const task = xid.task(mission, x, n, 'executor');
       const card = executorCard(s, task, p.ledger.content, at, at.kind, { id: evidence, attempt: at.id });
-      await submitQueued(p, mission, x, s, { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: 'attempt', evidence: { id: evidence, k, attempt: at.id, executor: at.kind, requester: null } }, asCard(card), null);
+      // run again on the PM's word (`mp pm rerun-attempt`): the same registered card, a new record that supersedes the earlier one;
+      // added or replaced by the user's amendment (`mp pm amend-attempts`): the card the amendment set
+      const replaces = s.attemptReruns.get(at.id)?.replaces ?? null;
+      const amendment = attemptAmendment(s, at.id);
+      await submitQueued(
+        p,
+        mission,
+        x,
+        s,
+        { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: 'attempt', evidence: { id: evidence, k, attempt: at.id, executor: at.kind, requester: null, ...(replaces !== null ? { supersedes: replaces } : {}), ...(amendment !== null ? { amendment } : {}) } },
+        asCard(card),
+        null,
+      );
       return;
     }
     case 'resume': {
@@ -648,10 +672,18 @@ export interface ExplorationHandoff {
   readonly stabilizer: ReadonlyArray<{ readonly round: number; readonly verdict: string; readonly drift: string; readonly reason: string; readonly findings: ReadonlyArray<{ readonly finding: string; readonly verdict: string; readonly severity: string; readonly reason: string }> }>;
   readonly unresolvedBlocking: readonly string[];
   readonly residualRisks: readonly string[];
-  readonly evidence: ReadonlyArray<{ readonly id: string; readonly status: string; readonly summary: string; readonly attempt: string | null }>;
+  /** Every record, history included: an attempt's record a later run of it superseded (`mp pm rerun-attempt`) names that run's record. */
+  readonly evidence: ReadonlyArray<{ readonly id: string; readonly status: string; readonly summary: string; readonly attempt: string | null; readonly supersededBy?: string }>;
   readonly questions: readonly string[];
-  /** Research explorations: whether the key answer does not stand (8.2 "没有结论"). */
-  readonly research: { readonly noConclusion: boolean; readonly method: string | null } | null;
+  /**
+   * Research explorations: whether the key answer does not stand (8.2 "没有结论"), the method version
+   * in force, and the user's amendments of the method (`mp pm amend-attempts`), when there were any.
+   */
+  readonly research: {
+    readonly noConclusion: boolean;
+    readonly method: string | null;
+    readonly amendments?: ReadonlyArray<{ readonly n: number; readonly version: string; readonly words: string; readonly reason: string | null; readonly added: readonly string[]; readonly replaced: readonly string[] }>;
+  } | null;
 }
 
 /** The hand-off document of the state as it is (8.2: version, disposition table, residual risks). */
@@ -689,9 +721,15 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
     stabilizer: s.stabilizations.map((j) => ({ round: j.round, verdict: j.verdict, drift: j.drift.verdict, reason: j.drift.reason, findings: j.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason })) })),
     unresolvedBlocking: findings.filter((f) => blocks(f) && f.status !== 'resolved').map((f) => f.id),
     residualRisks: findings.filter((f) => f.residualRisk).map((f) => f.id),
-    evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt })),
+    evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt, ...(e.attempt !== null && supersededAttemptRecord(s, e.id) ? { supersededBy: attemptEvidence(s, e.attempt) ?? '' } : {}) })),
     questions: [...s.questions],
-    research: def.research ? { noConclusion: s.noConclusion, method: s.method?.version ?? null } : null,
+    research: def.research
+      ? {
+          noConclusion: s.noConclusion,
+          method: s.method?.version ?? null,
+          ...(s.amendments.length > 0 ? { amendments: s.amendments.map((b) => ({ n: b.n, version: b.version, words: b.words, reason: b.reason, added: [...b.added], replaced: [...b.replaced] })) } : {}),
+        }
+      : null,
   };
 }
 

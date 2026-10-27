@@ -115,8 +115,10 @@ export interface RepairEntry {
   readonly words: string | null;
   /** What it is about ("task <id>", "exploration <id>"), or null: the plan in effect as a whole. */
   readonly about: string | null;
-  /** Where it stands: decided (amended and/or reopened), architect (its Architect step is under way), exploration (one more round), waiting. */
+  /** Where it stands: decided (amended and/or reopened), architect (its Architect step is under way), exploration (one more round), answered (by the user's amendment of the exploration's method), waiting. */
   readonly state?: string;
+  /** answered: the amendment that answered it, in words ("amendment <n> of exploration <id> (W-<n>)"). */
+  readonly answeredBy?: string;
   /** The tasks it added to the plan in effect, and the tasks it reopened. */
   readonly added?: readonly string[];
   readonly reopened?: readonly string[];
@@ -124,7 +126,7 @@ export interface RepairEntry {
 
 /** The mission's repairs for the closing snapshot, read through the flow's resolver (repairsOf). */
 async function closingRepairs(ctx: ProcessContext, mission: MissionId): Promise<RepairEntry[]> {
-  return (await repairsOf(flowCtx(ctx.ports(), mission))).map((r) => ({ repair: r.id, kind: r.kind, text: r.text, words: r.words, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state: r.state, added: [...r.added], reopened: [...r.reopened] }));
+  return (await repairsOf(flowCtx(ctx.ports(), mission))).map((r) => ({ repair: r.id, kind: r.kind, text: r.text, words: r.words, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state: r.state, added: [...r.added], reopened: [...r.reopened], ...(r.answeredBy !== undefined ? { answeredBy: `amendment ${r.answeredBy.amendment} of exploration ${r.answeredBy.exploration} (${r.answeredBy.words})` } : {}) }));
 }
 
 /** What the close reads before its write (git, and resolvers on the context): the delivered tree's full-run status, the repairs. */
@@ -334,7 +336,7 @@ export function snapshotLines(snap: CloseSnapshot): string[] {
     list('Open or deferred issues', d.issues),
     list('Start risks', d.startRisks),
     list('Proven in an older environment', d.olderEnvironment),
-    list('Repairs', d.repairs?.map((r) => `${r.repair} (${r.kind}${r.words !== null ? `, ${r.words}` : ''}${r.about !== null ? `, about ${r.about}` : ''}): ${r.text}${r.state !== undefined ? ` [${r.state}${(r.added ?? []).length > 0 ? `; added ${r.added!.join(', ')}` : ''}${(r.reopened ?? []).length > 0 ? `; reopened ${r.reopened!.join(', ')}` : ''}]` : ''}`)),
+    list('Repairs', d.repairs?.map((r) => `${r.repair} (${r.kind}${r.words !== null ? `, ${r.words}` : ''}${r.about !== null ? `, about ${r.about}` : ''}): ${r.text}${r.state !== undefined ? ` [${r.state}${r.answeredBy !== undefined ? ` by ${r.answeredBy}` : ''}${(r.added ?? []).length > 0 ? `; added ${r.added!.join(', ')}` : ''}${(r.reopened ?? []).length > 0 ? `; reopened ${r.reopened!.join(', ')}` : ''}]` : ''}`)),
     `Full suite: ${d.fullRun === null ? (snap.fullRun === undefined ? 'not recorded (a close before 4.1.2)' : 'no delivered tree to compare') : d.fullRun.line}`,
     ...(d.labelsRecomputing ? ['Labels were recomputing at close: the proof states above are the last stored ones.'] : []),
   ];

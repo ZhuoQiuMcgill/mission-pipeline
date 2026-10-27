@@ -129,8 +129,38 @@ export type AuthorResult = z.infer<typeof AuthorResultSchema>;
 export function authorVersionDocument(card: AuthorCard, r: AuthorResult): string | null {
   if (r.step !== 'submit' || r.artifact === '') return null;
   if (!card.registerAttempts) return r.artifact;
+  return researchMethodDocument(card.exploration.id, r.artifact, r.attempts);
+}
+
+/** A research method version's document: the method's text and its attempt register. */
+export interface ResearchMethodDoc {
+  readonly format: 'mp4.research-method.v1';
+  readonly exploration: string;
+  readonly method: string;
+  readonly attempts: readonly RegisteredAttemptT[];
+}
+
+/** A research method version's document (the author's submission, or the user's amendment of it: `mp pm amend-attempts`). */
+export function researchMethodDocument(exploration: string, method: string, attempts: readonly RegisteredAttemptT[]): string {
   // canonical: the same document whether built from the seat's hand-back or from the stored result (its key order differs)
-  return canonicalJson({ format: 'mp4.research-method.v1', exploration: card.exploration.id, method: r.artifact, attempts: r.attempts });
+  const doc: ResearchMethodDoc = { format: 'mp4.research-method.v1', exploration, method, attempts };
+  return canonicalJson(doc);
+}
+
+/**
+ * The program's rules on an attempt register (8.2), beyond each attempt's schema: ids unique, and
+ * every attempt records a quantity or checks an assertion. The author's registration and the
+ * user's amendment of a registered method (`mp pm amend-attempts`) both check them.
+ */
+export function registerProblems(attempts: readonly RegisteredAttemptT[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const a of attempts) {
+    if (seen.has(a.id)) out.push(`attempts: id "${a.id}" is registered twice`);
+    seen.add(a.id);
+    if (a.measure.length === 0 && a.assertions.length === 0) out.push(`attempts[${a.id}]: record at least one quantity or check one assertion`);
+  }
+  return out;
 }
 
 function authorProblems(card: AuthorCard, r: AuthorResult, put: (doc: string) => string): string[] {
@@ -146,12 +176,7 @@ function authorProblems(card: AuthorCard, r: AuthorResult, put: (doc: string) =>
   if (card.registerAttempts) {
     if (r.artifact === '') out.push('artifact: a research method is always submitted whole (with its register)');
     if (r.attempts.length === 0) out.push('attempts: a research method registers at least one attempt');
-    const seen = new Set<string>();
-    for (const a of r.attempts) {
-      if (seen.has(a.id)) out.push(`attempts: id "${a.id}" is registered twice`);
-      seen.add(a.id);
-      if (a.measure.length === 0 && a.assertions.length === 0) out.push(`attempts[${a.id}]: record at least one quantity or check one assertion`);
-    }
+    out.push(...registerProblems(r.attempts));
   } else if (r.attempts.length > 0) out.push('attempts: only a research method registers attempts');
   const changed = doc !== null && (card.current === null || put(doc) !== card.current.content);
   out.push(...dispositionProblems(card.openFindings, r.dispositions, new Set(card.evidence.filter((e) => e.status === 'completed').map((e) => e.id)), changed));

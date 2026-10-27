@@ -106,6 +106,9 @@ export const xid = {
   judgment: (m: string, x: string, n: number) => `xpj.${tok(m, x)}.${n}`,
   evidence: (m: string, x: string, k: number) => `xpe.${tok(m, x)}.${k}`,
   versionPrefix: (m: string, x: string, n: number) => `xpv.${tok(m, x)}.${n}`,
+  /** The n-th amendment of the method in force on the user's words (`mp pm amend-attempts`): its version's prefix, and the user's judgment that passes it. */
+  amendPrefix: (m: string, x: string, n: number) => `xpv.${tok(m, x)}.amend${n}`,
+  amendJudgment: (m: string, x: string, n: number) => `xpj.${tok(m, x)}.amend${n}`,
   basisLine: (m: string, x: string) => `xpdef.${tok(m, x)}`,
   basisVersion: (m: string, x: string, v: number) => `xpdef.${tok(m, x)}.v${v}`,
   envLine: (m: string, x: string) => `xpenv.${tok(m, x)}`,

@@ -17,6 +17,7 @@ Nothing to a seat beyond its card. Through `mp pm` you record: the user's words;
 - Alignment: `mp pm say`, `mp pm mission`, `mp pm requirement`, `mp pm constraint`, `mp pm plan`, `mp pm answer`, `mp pm legalize`.
 - The loop: `mp pm session` (at session start), `mp pm next`, `mp pm dispatch`, `mp pm release`, `mp pm renew`, `mp pm drain`, `mp pm alerts --ack`.
 - Stops: `mp pm stop`, `mp pm stop-narrow`, `mp pm stop-release`.
+- Explorations: `mp pm repair`, `mp pm reopen-exploration`, `mp pm rerun-attempt`, `mp pm amend-attempts`.
 - Delivery: `mp pm deliver`, `mp pm land`, `mp pm close`, and the commands a WI page gives.
 - Reading: `mp read status`, `mp read blocked`, `mp read show`, `mp read leaf`, `mp read why`, `mp read from`, `mp read chain`, `mp read tree`.
 
@@ -28,4 +29,5 @@ Nothing to a seat beyond its card. Through `mp pm` you record: the user's words;
 - Write or judge the product; answer for the user; report details to the user (only important design decisions reach them).
 - Give a seat anything but the fixed prompt: its card is all it may know.
 - Go around a stop; call anything proven without proof; edit `.mission-pipeline/` by hand.
+- Send a decision the user made about a registered method (a scale, a cap, a wider search) through a review round: apply it with `mp pm amend-attempts` on their words.
 - Delete the user's data, worktrees or git lock files; run forced checkouts or resets in the user's worktrees.

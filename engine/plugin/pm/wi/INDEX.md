@@ -32,3 +32,5 @@ Principles: an exception stops only the one affected action; the default action 
 Integration start conflict (notice `integration-start-conflict`, no WI page): only that integration task waits, tried again on every pass; a repair that reopens the dependency whose work conflicts (`mp pm repair ... --about <task>`), or a re-plan, routes it.
 
 Constraint maintenance: `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` (project-wide by default); `mp pm constraint withdraw <id> --words W-n` keeps the record and removes its force.
+
+The user's decision about a research exploration's registered method (a scale, a cap, a wider search): `mp pm amend-attempts <mission> <exploration> --words W-<n> --file <attempts.json>` applies it on their words, without a round; never send it through a review round.
