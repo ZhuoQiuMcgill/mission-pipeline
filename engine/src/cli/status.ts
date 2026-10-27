@@ -7,6 +7,7 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
+import { attemptRecorded } from '../flow/exploration/machine.ts';
 import { PLAN_LINE } from '../flow/plandoc.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
@@ -309,6 +310,8 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
     if (def !== null) out.push(`  question: ${clip(String((def as unknown as Record<string, unknown>)['question'] ?? ''), 200)}`, `  the user's goal: ${clip(String((def as unknown as Record<string, unknown>)['goal'] ?? ''), 200)}`);
     out.push(`  rounds: ${s.rounds} attacked; phase ${s.phase}; version: ${s.version?.id ?? 'none yet'} (${s.versions.length} version(s))`);
     if (s.drift !== null) out.push(`  awaiting a ruling (WI-33): round ${s.drift.round} drifting — ${clip(s.drift.reason, 160)}`);
+    // registered attempts the PM had run again (mp pm rerun-attempt): each new record supersedes the earlier one
+    if (s.attemptReruns.size > 0) out.push(`  attempts run again: ${[...s.attemptReruns].map(([a, r]) => `${a} (rerun ${r.n}${r.replaces !== null ? `, superseding ${r.replaces}` : ''}${attemptRecorded(s, a) ? '' : '; its new record not in yet'})`).join(', ')}`);
     // the current settle (one per opening; a rerun after an environment change reopens it), then the history
     const lastSettle = s.settles.at(-1);
     if (s.settled !== null) out.push(`  settled: ${s.settled.body.outcome} (${s.settled.body.stop})${s.settled.body.artifact !== null ? ` on ${s.settled.body.artifact}` : ''}${s.settles.length > 1 ? ` (settle ${s.settled.n} of ${s.settles.length})` : ''}`);

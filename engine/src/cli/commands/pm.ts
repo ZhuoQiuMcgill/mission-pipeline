@@ -43,6 +43,7 @@ import {
   pmDrain,
   pmFullRun,
   pmReopenExploration,
+  pmRerunAttempt,
   pmFinish,
   pmGrant,
   pmLand,
@@ -844,6 +845,36 @@ const reopenExploration: Command = {
   },
 };
 
+const rerunAttempt: Command = {
+  group: 'pm',
+  name: ['rerun-attempt'],
+  summary:
+    "a research exploration's registered attempt failed for a cause outside the method (a time limit since raised, say): run it again on the same method version, a fresh blind run of its registered card, without a round; its new record supersedes the earlier one, kept as history",
+  usage: 'mp pm rerun-attempt <mission> <exploration> <attempt-id>[,<attempt-id>...] --words W-<n> [--reason "<text>"]',
+  flags: { words: 'string', reason: 'string' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const x = positional(args, 1, 'exploration');
+    const attempts = positional(args, 2, 'attempt-id[,attempt-id...]')
+      .split(',')
+      .map((a) => a.trim())
+      .filter((a) => a !== '');
+    if (attempts.length === 0) throw usage('name the registered attempts to run again: <attempt-id>[,<attempt-id>...]');
+    const w = wordsArg(p.ctx, args, true)!;
+    const reason = flagStr(args, 'reason');
+    const r = await pmRerunAttempt(p.ctx, { mission: m, exploration: x, attempts, words: w, reason });
+    const lines = [
+      `Exploration ${x} of ${m}: attempt(s) ${r.attempts.map((a) => a.attempt).join(', ')} run again on the same method version (rerun ${r.n}); no round spent (${r.rounds} of ${r.allowedRounds} used).`,
+      ...r.attempts.map((a) => `  ${a.attempt}: ${a.step !== null ? `step ${a.step} queued (record ${a.evidence})` : 'its run is queued by the next mp pm next'}; its new record supersedes ${a.replaces}, kept as history`),
+      ...(r.withdrawn !== null ? [`The interpreter step ${r.withdrawn}, queued on the earlier records, is withdrawn: a new one is queued once the new records are in.`] : []),
+      `The exploration is in its ${r.phase} phase. mp pm next lists the runs.`,
+    ];
+    return ok(lines.join('\n'), { mission: m, exploration: x, ...r });
+  },
+};
+
 function renderLanding(p: Project, r: LandingResult): { text: string; exitCode: number; wi: string | null } {
   switch (r.kind) {
     case 'landed': {
@@ -1108,6 +1139,7 @@ export const PM_COMMANDS: readonly Command[] = [
   deliver,
   fullRun,
   reopenExploration,
+  rerunAttempt,
   land,
   withdrawDeliveryCmd,
   detachDuplicate,
