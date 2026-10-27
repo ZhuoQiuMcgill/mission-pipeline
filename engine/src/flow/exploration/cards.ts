@@ -66,8 +66,14 @@ function common(s: XState, task: string, duties: string, resume: Resume | null, 
     ...(asyncEvidence ? { allowAsyncEvidence: true } : {}),
     ...(continuation !== null ? { continuation } : {}),
     // 4.1.2 (D-10): the repairs that reopened the exploration, an added question on every round's card
-    ...(s.repairs.length > 0 ? { repairs: s.repairs.map((r) => ({ ...r })) } : {}),
+    // (one the user's amendment of the method answered, `mp pm amend-attempts --answers`, is no open question)
+    ...(openRepairs(s).length > 0 ? { repairs: openRepairs(s).map((r) => ({ ...r })) } : {}),
   };
+}
+
+/** The repairs about the exploration still open: those no amendment of the method answered. */
+function openRepairs(s: XState) {
+  return s.repairs.filter((r) => !s.answeredRepairs.has(r.id));
 }
 
 /** The project constraints in force that a card of this seat shows (9.5; the claim selects them again, refresh.ts). */

@@ -28,13 +28,14 @@ import { planningConstraints } from '../seat/cards/dynamic.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, material, missionClosed, nextBasisVersion, notify, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
-import { PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedTaskIds, repairRef, taskLine, type AmendmentEntry, type DetailedPlanDoc, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
+import { PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedTaskIds, explorationLine, repairRef, taskLine, type AmendmentEntry, type DetailedPlanDoc, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
 import { explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, type EffectiveBody } from './planning.ts';
 import { acceptedProduct, lineAcceptance, pathOwners } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints } from './requirements.ts';
 import { decisionFor, escalateToUser, isApplied, markApplied, raiseEscalation } from './secretary.ts';
 import { recordExplorationRerun } from './exploration/flow.ts';
+import { ATTEMPTS_AMENDED, type AttemptsAmendedBody } from './exploration/machine.ts';
 import { WI } from './wi.ts';
 
 /** One Architect repair attempt (line "repairs", event "attempt", key "<repair>#<k>"). */
@@ -51,25 +52,42 @@ const archRepairTask = (mission: string, repair: string, k: number): string => s
 
 /** A mission's repairs with where each stands (the one resolver: reads, cards and the close snapshot use it). */
 export interface RepairState extends RepairBody {
-  /** exploration: reopened for one more round; architect: its Architect step is under way; decided: amended and/or reopened; waiting: nothing to amend yet. */
-  readonly state: 'exploration' | 'architect' | 'decided' | 'waiting';
+  /**
+   * exploration: reopened for one more round; answered: about an exploration, and answered by the
+   * user's amendment of its method instead of a round (`mp pm amend-attempts --answers`); architect:
+   * its Architect step is under way; decided: amended and/or reopened; waiting: nothing to amend yet.
+   */
+  readonly state: 'exploration' | 'answered' | 'architect' | 'decided' | 'waiting';
   readonly added: readonly string[];
   readonly reopened: readonly string[];
   /** The plan it amended (decided), or works on. */
   readonly dplan: string | null;
+  /** answered: the amendment that answered it (its number on the exploration, and the user's words it rests on). */
+  readonly answeredBy?: { readonly exploration: string; readonly amendment: number; readonly words: string };
 }
 
 export async function repairsOf(ctx: FlowCtx, mission: string = ctx.mission): Promise<RepairState[]> {
   const c = mission === ctx.mission ? ctx : flowCtx(ctx.ports, mission as MissionId);
   const decided = new Map((await eventsOf<RepairDecidedBody>(c, REPAIRS_LINE, 'decided')).map((e) => [e.key, e.body]));
   const attempts = await eventsOf<RepairAttemptBody>(c, REPAIRS_LINE, 'attempt');
-  return (await eventsOf<RepairBody>(c, REPAIRS_LINE, 'repair')).map((e) => {
+  const out: RepairState[] = [];
+  for (const e of await eventsOf<RepairBody>(c, REPAIRS_LINE, 'repair')) {
     const r = e.body;
     const d = decided.get(r.id);
     const a = attempts.filter((x) => x.key.startsWith(`${r.id}#`)).at(-1)?.body;
-    const state: RepairState['state'] = r.about?.kind === 'exploration' ? 'exploration' : d !== undefined ? 'decided' : a !== undefined ? 'architect' : 'waiting';
-    return { ...r, state, added: d?.add ?? [], reopened: d?.reopen.map((x) => x.task) ?? [], dplan: d?.dplan ?? a?.dplan ?? null };
-  });
+    // about an exploration: answered by the user's amendment of its method, or one more round
+    const amended = r.about?.kind === 'exploration' ? (await eventsOf<AttemptsAmendedBody>(c, explorationLine(r.about.id), ATTEMPTS_AMENDED)).find((x) => x.body.answers === r.id)?.body : undefined;
+    const state: RepairState['state'] = r.about?.kind === 'exploration' ? (amended !== undefined ? 'answered' : 'exploration') : d !== undefined ? 'decided' : a !== undefined ? 'architect' : 'waiting';
+    out.push({
+      ...r,
+      state,
+      added: d?.add ?? [],
+      reopened: d?.reopen.map((x) => x.task) ?? [],
+      dplan: d?.dplan ?? a?.dplan ?? null,
+      ...(amended !== undefined && r.about !== null ? { answeredBy: { exploration: r.about.id, amendment: amended.n, words: amended.words } } : {}),
+    });
+  }
+  return out;
 }
 
 /** The repairs as cards show them, by id. */
