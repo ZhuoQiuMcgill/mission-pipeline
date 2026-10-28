@@ -1030,7 +1030,9 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   // the plan version's own required reviews decide (fixed with the object, 10.1); the rule is 3.6's
   // the user's words can waive the plan's reviews for a mission (config `planReviewsWaived`): the plan then
   // takes effect after the mechanical checks and the order ruling, without feasibility and Calibrator ②
-  const waived = ctx.ports.project?.planReviewsWaived?.includes(ctx.mission) ?? false;
+  // an entry is a mission (all its plans) or one detailed plan version (`dplan.<mission>.<n>.<k>`)
+  const waivedList = ctx.ports.project?.planReviewsWaived ?? [];
+  const waived = waivedList.includes(ctx.mission) || waivedList.includes(dplan);
   const fRequired = !waived && ((await objectRecord(ctx, dplan))?.reviews.some((r) => r.review === 'feasibility') ?? feasibilityRequired(plan));
   const risks: string[] = [...plan.risks];
   if (fRequired) {
