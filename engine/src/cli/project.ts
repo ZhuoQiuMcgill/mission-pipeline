@@ -142,7 +142,7 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   // the project's commands, read once from the config into the context (4.1.2): its full suite
   // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there.
   // Its cleanup commands run after each run's commands, before the run's checkout is removed (runs.ts)
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, planReviewsWaived: config.planReviewsWaived ?? [], filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {

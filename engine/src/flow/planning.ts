@@ -1028,7 +1028,10 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
 
   // 3.6 feasibility
   // the plan version's own required reviews decide (fixed with the object, 10.1); the rule is 3.6's
-  const fRequired = (await objectRecord(ctx, dplan))?.reviews.some((r) => r.review === 'feasibility') ?? feasibilityRequired(plan);
+  // the user's words can waive the plan's reviews for a mission (config `planReviewsWaived`): the plan then
+  // takes effect after the mechanical checks and the order ruling, without feasibility and Calibrator ②
+  const waived = ctx.ports.project?.planReviewsWaived?.includes(ctx.mission) ?? false;
+  const fRequired = !waived && ((await objectRecord(ctx, dplan))?.reviews.some((r) => r.review === 'feasibility') ?? feasibilityRequired(plan));
   const risks: string[] = [...plan.risks];
   if (fRequired) {
     const ft = await currentReviewTask(ctx, feasTask(dplan));
@@ -1096,8 +1099,10 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   }
 
   // 3.7 Calibrator ②
-  const c2 = await calibrator2Step(ctx, b, doc, a, dplan, plan);
-  if (c2 !== 'pass') return;
+  if (!waived) {
+    const c2 = await calibrator2Step(ctx, b, doc, a, dplan, plan);
+    if (c2 !== 'pass') return;
+  }
 
   // effective: the standards become basis lines, the tasks go to execution
   if ((await eventOf(ctx, PLAN_LINE, 'effective', dplan)) === null) {

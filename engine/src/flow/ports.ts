@@ -395,6 +395,8 @@ export interface FlowEvaluatorPort {
 export interface FlowProject {
   readonly localCommands: readonly SuiteCommand[];
   readonly fullSuite: readonly SuiteCommand[];
+  /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config `planReviewsWaived`). */
+  readonly planReviewsWaived?: readonly string[];
 }
 
 /** The three ports together, plus the clock and the project's declared commands. */

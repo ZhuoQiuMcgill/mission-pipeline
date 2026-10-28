@@ -71,6 +71,8 @@ export interface ProcessOptions {
   readonly localCommands?: readonly SuiteCommand[];
   /** Run in each run's checkout after its commands, before it is removed (config.json `cleanupCommands`). Default: none. */
   readonly cleanupCommands?: readonly CleanupCommand[];
+  /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config.json `planReviewsWaived`). Default: none. */
+  readonly planReviewsWaived?: readonly string[];
 }
 
 export interface ProcessContext {
@@ -100,6 +102,8 @@ export interface ProcessContext {
   readonly localCommands: readonly SuiteCommand[];
   /** The project's cleanup of a run's checkout (config.json `cleanupCommands`; runs.ts executeRuns); empty when none is configured. */
   readonly cleanupCommands: readonly CleanupCommand[];
+  /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config.json `planReviewsWaived`). */
+  readonly planReviewsWaived: readonly string[];
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -143,6 +147,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     handover: null,
     gitCtx: { memory, git },
     localCommands: o.localCommands ?? [],
+    planReviewsWaived: o.planReviewsWaived ?? [],
     cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);

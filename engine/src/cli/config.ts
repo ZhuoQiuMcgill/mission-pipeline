@@ -68,6 +68,9 @@ export const ConfigSchema = z
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
     fillers: z.record(z.string(), z.string().min(1).max(400).nullable()).default({}),
     commit: z.object({ author: IdentText.optional(), committer: IdentText.optional() }).strict().optional(),
+    // missions whose detailed plans take effect after the mechanical checks and the order ruling, without
+    // the feasibility review and Calibrator ② (the user's words waived them); default none
+    planReviewsWaived: z.array(z.string().min(1).max(200)).max(200).optional(),
   })
   .strict();
 
