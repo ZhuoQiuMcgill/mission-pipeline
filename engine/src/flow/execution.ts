@@ -628,8 +628,15 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   if (reopened === null) return;
   // gate: dependencies accepted; stable mode: proven
   const deps: string[] = [];
+  // config `startOnHandback`: a dependency still in review counts with its verified hand-back (the product
+  // its current attempt recorded); the dependent's own acceptance still waits for the dependency's
+  const early = ctx.ports.project?.startOnHandback?.includes(ctx.mission) ?? false;
   for (const d of t.dependsOn) {
-    const p = await acceptedProduct(ctx, d);
+    let p = await acceptedProduct(ctx, d);
+    if (p === null && early) {
+      const dl = await readLine(ctx, d);
+      p = dl.one<ProductBody>('product', String(dl.k))?.object ?? null;
+    }
     if (p === null) return;
     deps.push(p);
   }

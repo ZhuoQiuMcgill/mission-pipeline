@@ -71,6 +71,8 @@ export const ConfigSchema = z
     // missions whose detailed plans take effect after the mechanical checks and the order ruling, without
     // the feasibility review and Calibrator ② (the user's words waived them); default none
     planReviewsWaived: z.array(z.string().min(1).max(200)).max(200).optional(),
+    // missions whose tasks start on their dependencies' verified hand-backs, while those are still in review
+    startOnHandback: z.array(z.string().min(1).max(200)).max(200).optional(),
   })
   .strict();
 

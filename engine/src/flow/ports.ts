@@ -397,6 +397,8 @@ export interface FlowProject {
   readonly fullSuite: readonly SuiteCommand[];
   /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config `planReviewsWaived`). */
   readonly planReviewsWaived?: readonly string[];
+  /** Missions whose tasks start on their dependencies' verified hand-backs (config `startOnHandback`). */
+  readonly startOnHandback?: readonly string[];
 }
 
 /** The three ports together, plus the clock and the project's declared commands. */

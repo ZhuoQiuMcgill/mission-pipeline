@@ -73,6 +73,8 @@ export interface ProcessOptions {
   readonly cleanupCommands?: readonly CleanupCommand[];
   /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config.json `planReviewsWaived`). Default: none. */
   readonly planReviewsWaived?: readonly string[];
+  /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). Default: none. */
+  readonly startOnHandback?: readonly string[];
 }
 
 export interface ProcessContext {
@@ -104,6 +106,8 @@ export interface ProcessContext {
   readonly cleanupCommands: readonly CleanupCommand[];
   /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config.json `planReviewsWaived`). */
   readonly planReviewsWaived: readonly string[];
+  /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). */
+  readonly startOnHandback: readonly string[];
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -148,6 +152,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     gitCtx: { memory, git },
     localCommands: o.localCommands ?? [],
     planReviewsWaived: o.planReviewsWaived ?? [],
+    startOnHandback: o.startOnHandback ?? [],
     cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);
