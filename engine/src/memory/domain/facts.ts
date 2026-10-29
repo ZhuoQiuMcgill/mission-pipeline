@@ -49,8 +49,13 @@ import { assertNotStopped } from './stops.ts';
 
 /** Request size limits: every write stays bounded (§4.1). */
 export const MAX_RECORDS_PER_REQUEST = 1000;
-/** One record, in UTF-8 bytes of its canonical JSON (core review r3 #10: bytes, not characters). */
-export const MAX_RECORD_BYTES = 64 * 1024;
+/**
+ * One record, in UTF-8 bytes of its canonical JSON (core review r3 #10: bytes, not characters).
+ * An object version lists its scope's concrete paths, so a product whose write scope holds a
+ * whole workspace (about 850 files already reach 64 KiB) needs room; one request still holds
+ * at most MAX_REQUEST_BYTES.
+ */
+export const MAX_RECORD_BYTES = 1024 * 1024;
 /** All records of one request together. */
 export const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
