@@ -207,7 +207,14 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
   const declaredNew = new Set(plan.newInterfaces.map((x) => x.name));
   for (const n of declaredNew) if (!defined.has(n) && !plan.tasks.some((t) => t.implements.includes(n))) failures.push(`interfaces: new interface ${n} is defined by no task`);
   const reused = new Map(plan.reusedInterfaces.map((x) => [x.name, x]));
-  for (const [name, r] of reused) if (!(await i.hasSymbol(r.file, name))) failures.push(`interfaces: reused interface ${name} is not found in ${r.file} of the snapshot`);
+  // a repair's amendment looks up only the reused interfaces its added tasks use: the snapshot has moved on
+  // with accepted work since the plan in effect named its own (a file renamed to its next version, say), and
+  // an amendment may change no existing task to follow it
+  const usedByChecked = (name: string): boolean => plan.tasks.some((t) => checked(t) && (t.calls.includes(name) || t.implements.includes(name)));
+  for (const [name, r] of reused) {
+    if (i.amendment !== undefined && !usedByChecked(name)) continue;
+    if (!(await i.hasSymbol(r.file, name))) failures.push(`interfaces: reused interface ${name} is not found in ${r.file} of the snapshot`);
+  }
   for (const t of plan.tasks) {
     if (!checked(t)) continue;
     for (const n of [...t.calls, ...(t.kind === 'interface' ? [] : t.implements)]) {

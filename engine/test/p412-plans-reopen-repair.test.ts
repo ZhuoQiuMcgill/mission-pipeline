@@ -564,6 +564,24 @@ describe('P3 review S3: the integration rule and amendments', () => {
   });
 });
 
+describe('Repairs and reused interfaces: an amendment looks up only the reused interfaces its added tasks use', () => {
+  it('a reused interface whose file accepted work renamed fails the plan\'s own check, not an amendment whose added tasks do not use it', async () => {
+    const base = detailedPlan(M);
+    const stale = { name: 'Conventions', file: 'docs/conventions_v01.md', location: 'section 2', provenance: { planElements: ['e1'] } };
+    const hasSymbol = async (file: string): Promise<boolean> => file !== 'docs/conventions_v01.md';
+    const tasks = base.tasks.map((t) => (t.id === 'impl' ? { ...t, calls: ['Conventions'] } : t));
+    const plan = { ...base, reusedInterfaces: [stale], tasks };
+    const own = await mechanicalCheck({ pmPlan: pmPlan(M), plan, unsettled: new Set(), hasSymbol });
+    assert.deepEqual(own.failures, ['interfaces: reused interface Conventions is not found in docs/conventions_v01.md of the snapshot']);
+    const fix = { ...(tasks.find((t) => t.id === 'impl') as DetailedTask), id: 'fix', goal: 'Fix the quoting', writeScope: ['src/parser/fix/**'], dependsOn: ['iface'], calls: [] };
+    const amended = await mechanicalCheck({ pmPlan: pmPlan(M), plan: { ...plan, tasks: [...tasks, fix] }, unsettled: new Set(), hasSymbol, amendment: { added: new Set(['fix']) } });
+    assert.equal(amended.ok, true, JSON.stringify(amended.failures));
+    const uses = { ...fix, calls: ['Conventions'] };
+    const usedByAdded = await mechanicalCheck({ pmPlan: pmPlan(M), plan: { ...plan, tasks: [...tasks, uses] }, unsettled: new Set(), hasSymbol, amendment: { added: new Set(['fix']) } });
+    assert.deepEqual(usedByAdded.failures, ['interfaces: reused interface Conventions is not found in docs/conventions_v01.md of the snapshot']);
+  });
+});
+
 describe('P3 review G1: audit basis texts read the plan in effect through the shared resolver', () => {
   it('an amendment never replaces a task the plan already has', () => {
     const plan = detailedPlan(M);
