@@ -78,16 +78,16 @@ export interface CommandOutcome {
 }
 
 /** Runs one command line in `cwd`. */
-export type CommandRunner = (req: { readonly command: string; readonly cwd: string; readonly timeoutMs: number }) => CommandOutcome;
+export type CommandRunner = (req: { readonly command: string; readonly cwd: string; readonly timeoutMs: number; readonly shell?: string }) => CommandOutcome;
 
 /**
  * The platform's shell (§9: verification commands are declared per project and run with the
  * platform's shell), in an environment without the variables that would point git at another
  * repository than the checkout's own.
  */
-export const shellRunner: CommandRunner = ({ command, cwd, timeoutMs }) => {
+export const shellRunner: CommandRunner = ({ command, cwd, timeoutMs, shell }) => {
   const t0 = performance.now();
-  const r = spawnSync(command, { cwd, shell: true, env: withoutRepositoryLocators(process.env), timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync(command, { cwd, shell: shell ?? true, env: withoutRepositoryLocators(process.env), timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const output = Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)]);
   const timedOut = r.error !== undefined && (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
   return { exitCode: r.status, signal: r.signal ?? null, error: r.error !== undefined && !timedOut ? r.error.message : null, timedOut, output, durationMs: Math.round(performance.now() - t0) };
@@ -122,6 +122,14 @@ export function runCwd(fields: Readonly<Record<string, string>>): string {
  */
 export function commandTimeoutFor(ctx: Pick<ProcessContext, 'commandTimeoutMs' | 'experimentCommandTimeoutMs'>, declaration: Pick<RunDeclaration, 'experiment' | 'rerun'>): number {
   return declaration.experiment === true && declaration.rerun === true ? ctx.experimentCommandTimeoutMs : ctx.commandTimeoutMs;
+}
+
+/**
+ * The shell of each command of a run: an experiment executor's rerun (as commandTimeoutFor)
+ * gets `experimentShell` when the project sets one; every other run, the platform's shell.
+ */
+export function commandShellFor(ctx: Pick<ProcessContext, 'experimentShell'>, declaration: Pick<RunDeclaration, 'experiment' | 'rerun'>): string | undefined {
+  return declaration.experiment === true && declaration.rerun === true ? ctx.experimentShell : undefined;
 }
 
 /** One command as a card declares it. `sampled` / `network`: the card's marks (§6.5). */
@@ -421,6 +429,7 @@ async function executeRuns(
   const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
   let cleanup: readonly CleanupFailure[] = [];
   const timeoutMs = commandTimeoutFor(ctx, req.declaration);
+  const shell = commandShellFor(ctx, req.declaration);
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
   await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
   try {
@@ -428,7 +437,7 @@ async function executeRuns(
       const rel = normalizeCwd(c.cwd);
       const cwd = rel === '.' ? dir : join(dir, ...rel.split('/'));
       mkdirSync(cwd, { recursive: true });
-      const out = ctx.runner({ command: c.command, cwd, timeoutMs });
+      const out = ctx.runner({ command: c.command, cwd, timeoutMs, ...(shell === undefined ? {} : { shell }) });
       const runClass = classOf(c);
       const key = canonicalJson({ command: c.command, cwd: rel });
       const prior = reusable[i] ?? (runClass === 'declared' ? staged.get(key) : undefined);
