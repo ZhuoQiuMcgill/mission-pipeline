@@ -75,6 +75,8 @@ import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
 import {
   DetailedPlanDoc,
   DetailedTask,
+  afterCycle,
+  afterOf,
   amendedPlan,
   amendedTaskIds,
   latestEffectiveOf,
@@ -97,6 +99,7 @@ import { currentItems, currentConstraints, itemLine, requirementSetLine, setCont
 import { cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 import { currentSettle, settledArtifactProven } from './exploration/step.ts';
+import { planReviewsWaiver, waiverLabel, type PlanReviewsWaiver } from './waivers.ts';
 
 export interface PmBatchBody {
   readonly batch: string;
@@ -134,6 +137,9 @@ export interface RecheckBody {
 }
 
 export const CAL1_RECHECK = 'cal1-recheck';
+
+/** The code of a PM plan refused for a cycle over `after` (4.1.3, #23). */
+export const AFTER_CYCLE = 'AFTER_CYCLE';
 
 /** Shared by the hand-back gate, which checks supersession inside its write. */
 export function supersededRecheck(task: string, batches: readonly PmBatchBody[], requests: readonly RecheckBody[]): string | null {
@@ -200,6 +206,8 @@ export interface EffectiveBody {
   readonly risks: readonly string[];
   /** Every repair amendment of this plan so far (absent: none). */
   readonly amendments?: readonly AmendmentEntry[];
+  /** 4.1.3 (E-2): the plan took effect without its reviews, on the user's words (or an authorization, or the config key): who, and the reviews it went without. Absent: it had its reviews (or took effect before 4.1.3: waivers.ts derives it). */
+  readonly reviewsWaived?: PlanReviewsWaiver;
 }
 
 const DETAILED_PLAN_PATH = 'plans/detailed-plan.json';
@@ -235,6 +243,10 @@ export async function submitPmBatch(
   const docHash = ports.ledger.content.put(docText);
   const batches = await eventsOf<PmBatchBody>(ctx, PLAN_LINE, 'pm-batch');
   const last = batches.at(-1)?.body ?? null;
+  // 4.1.3 (#23): explorations that wait for each other never start: a new plan version is refused,
+  // with the cycle (the plan recorded already, retried or re-checked, is not refused after the fact)
+  const cycle = last?.doc === docHash ? null : afterCycle(doc);
+  if (cycle !== null) throw Object.assign(new Error(`the PM plan's "after" entries form a cycle: ${cycle.join(' → ')}. Each of these explorations waits for the next one to settle, so none would start: remove one of these "after" entries`), { code: AFTER_CYCLE, detail: { cycle } });
   const lineOf = (item: string): string => itemLine(req.mission, item);
   const changed = (req.changedItems ?? []).map(lineOf);
   const dependent = (req.dependentItems ?? []).map(lineOf);
@@ -409,6 +421,19 @@ export async function planningStep(ctx: FlowCtx): Promise<void> {
   }
   // a crash net for both closes (the batch write, the effective write)
   await closeLeftBehind(ctx, b, doc, batches.slice(0, -1).map((x) => x.body));
+  // 4.1.3 (#23): a plan in effect whose explorations wait for each other (recorded before the check
+  // refused such a plan) is told once, never refused after the fact
+  const cycle = afterCycle(doc);
+  if (cycle !== null) {
+    await tellOnce(ctx, PLAN_LINE, {
+      category: 'after-cycle',
+      wi: WI.dependencyCycle,
+      key: b.plan,
+      trigger: `PM plan ${b.plan} in effect has a cycle over "after": ${cycle.join(' → ')}; each of these explorations waits for the next one to settle, so none of them starts`,
+      defaultAction: `nothing is refused: the explorations of the cycle stay held (mp pm next lists them) and the rest of the plan goes on. To start them, submit a PM plan without one of these "after" entries (mp pm plan submit, with the user's words)`,
+      detail: { plan: b.plan, cycle },
+    });
+  }
   // a re-check of the plan in effect runs beside its decomposition: the plan does not change
   await recheckStep(ctx, b, batches.map((x) => x.body));
   await decompositionStep(ctx, b, doc);
@@ -513,6 +538,13 @@ async function cancelPlanReviews(ctx: FlowCtx, b: PmBatchBody): Promise<void> {
   for (const e of await eventsOf<RecheckBody>(ctx, PLAN_LINE, CAL1_RECHECK)) if (e.body.plan === b.plan) roots.push(...await recheckTasks(ctx, e.body));
   for (const e of await eventsOf<{ root: string; task: string }>(ctx, PLAN_LINE, 'review-rebuild')) if (roots.includes(e.body.root)) roots.push(e.body.task);
   for (const task of roots) if ((await ctx.ports.scheduler.status(task))?.state === 'queued') await ctx.ports.scheduler.cancel(task);
+}
+
+/** A detailed plan's feasibility and Calibrator ② steps still queued, made moot by a waiver of its reviews (4.1.3): cancelled. One in flight finishes; nothing reads it. */
+async function cancelReviewSteps(ctx: FlowCtx, dplan: string): Promise<void> {
+  const roots = [feasTask(dplan), cal2Task(dplan, false), cal2Task(dplan, true)];
+  for (const e of await eventsOf<{ root: string; task: string }>(ctx, PLAN_LINE, 'review-rebuild')) if (roots.includes(e.body.root)) roots.push(e.body.task);
+  for (const t of roots) if ((await ctx.ports.scheduler.status(t))?.state === 'queued') await ctx.ports.scheduler.cancel(t);
 }
 
 async function returnWithdrawnPlan(ctx: FlowCtx, b: PmBatchBody, recheck: RecheckBody | null = null): Promise<boolean> {
@@ -940,7 +972,8 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     // (what to decompose, the routing, the Architect's card, the mechanical check) wait and write
     // nothing; the Calibrator ②, feasibility and order decisions do not rest on it and go on
     if (ex0.recomputing) return;
-    const decomposable = doc.elements.some((e) => e.kind !== 'exploration' && !e.after.some((x) => ex0.unsettled.has(x)));
+    // `after` names explorations by element id or by exploration id (4.1.3, #22: afterOf resolves both)
+    const decomposable = doc.elements.some((e) => e.kind !== 'exploration' && !afterOf(doc, e).explorations.some((x) => ex0.unsettled.has(x)));
     if (!decomposable) {
       // 3.10: nothing to plan before the nearest exploration stands; its settling starts the Architect
       await roundsStep(ctx, b, doc, null, null);
@@ -1026,88 +1059,89 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     }
   }
 
-  // 3.6 feasibility
-  // the plan version's own required reviews decide (fixed with the object, 10.1); the rule is 3.6's
-  // the user's words can waive the plan's reviews for a mission (config `planReviewsWaived`): the plan then
-  // takes effect after the mechanical checks and the order ruling, without feasibility and Calibrator ②
-  // an entry is a mission (all its plans) or one detailed plan version (`dplan.<mission>.<n>.<k>`)
-  const waivedList = ctx.ports.project?.planReviewsWaived ?? [];
-  const waived = waivedList.includes(ctx.mission) || waivedList.includes(dplan);
-  const fRequired = !waived && ((await objectRecord(ctx, dplan))?.reviews.some((r) => r.review === 'feasibility') ?? feasibilityRequired(plan));
-  const risks: string[] = [...plan.risks];
-  if (fRequired) {
-    const ft = await currentReviewTask(ctx, feasTask(dplan));
-    let fb = (await eventOf<FeasBody>(ctx, PLAN_LINE, 'feasibility', ft))?.body ?? null;
-    if (fb === null) {
-      const view = await taskView(ctx, ft);
-      if (view.kind === 'absent') return submitFeasibility(ctx, b, a, dplan, plan, ft);
-      if (view.kind === 'pending' || view.kind === 'evidence') return;
-      if (view.kind === 'failed') {
-        await handleFailure(ctx, { task: ft, lineage, subject: `plan:${b.plan}`, view, canAbandon: false, canReplan: false });
-        return;
-      }
-      const r = view.result as ArchitectFeasibilityResult;
-      if (!view.status.handBack?.records.some((x) => x.kind === 'judgment' && x.judgment === `j.${ft}`)) return internalError(ctx, ft, `the accepted feasibility hand-back of ${ft} has no judgment j.${ft}`);
-      fb = {
-        task: ft,
-        dplan,
-        verdict: r.verdict,
-        judgment: `j.${ft}`,
-        findings: r.findings.filter((f) => f.severity === 'blocking').map((f) => `[${f.id}] ${f.category} (${f.tasks.join(', ')}): ${f.detail} — suggestion: ${f.suggestion}`),
-        risks: r.findings.filter((f) => f.severity === 'risk').map((f) => `[${f.id}] ${f.category}: ${f.detail}`),
-      };
-      await commit(ctx, `flow:feasibility:${ctx.mission}:${ft}`, { events: [ev(ctx, PLAN_LINE, 'feasibility', ft, fb)] });
-    }
-    risks.push(...fb.risks);
-    if (fb.verdict === 'return') {
-      // one revision by the Architect (3.6: feasibility-return, cap 1)
-      const r = await countedReturn(ctx, { line: PLAN_LINE, key: `feasibility:${dplan}`, lineage, loop: 'feasibility-return', signature: shortHash(fb.findings) });
-      if (r.proceed) {
-        await newAttempt(ctx, b, { reason: 'feasibility', previous: dplan, mechanicalFailures: [], feasibilityFindings: fb.findings, instructions: [], conclusions: [] }, a.k + 1);
-        return;
-      }
-      // still unresolved after the revision: the Secretary (accept the risk, send back with its grant, or the user)
-      const id = safeId(`feas.${dplan}`);
-      await raiseEscalation(ctx, {
-        id,
-        source: 'feasibility-unresolved',
-        lineage,
-        subject: `plan:${b.plan}`,
-        summary: `The feasibility review of ${dplan} still finds blocking items after the Architect's revision.`,
-        reasons: [...fb.findings],
-        options: ['accept-risk', 'send-back', 'ask-user'],
-        position: { target: dplan, review: 'feasibility', revokes: fb.judgment },
-        facts: { dplan, findings: fb.findings },
-      });
-      const d = await decisionFor(ctx, id);
-      if (d === null) return;
-      if (d.option === 'send-back') {
-        if (!(await isApplied(ctx, id))) {
-          const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'feasibility-return', by: d.by === 'user' ? 'user' : 'secretary', extra: 1, reason: d.reason });
-          if (!g.granted) {
-            await escalateToUser(ctx, id, `sending ${dplan} back needs one more feasibility return on lineage ${lineage}, and the Secretary's grant is used (${g.why ?? 'refused'}): only the user can allow it`, WI.loopExhausted);
-            return;
-          }
-          await ctx.ports.ledger.loopAttempt({ op: `flow:feasibility-return:${ctx.mission}:${dplan}:granted`, lineage, loop: 'feasibility-return', signature: shortHash([d.instructions]) });
-          await markApplied(ctx, id, { option: 'send-back' });
-        }
-        await newAttempt(ctx, b, { reason: 'secretary', previous: dplan, mechanicalFailures: [], feasibilityFindings: fb.findings, instructions: [d.instructions], conclusions: [] }, a.k + 1);
-        return;
-      }
-      // accept-risk: the ruling (a pass revoking the feasibility negation) came with the decision
-      await markApplied(ctx, id, { option: 'accept-risk', risks: fb.findings });
-      risks.push(...fb.findings.map((f) => `accepted: ${f}`));
-    }
-  }
-
-  // 3.7 Calibrator ②
-  if (!waived) {
-    const c2 = await calibrator2Step(ctx, b, doc, a, dplan, plan);
-    if (c2 !== 'pass') return;
-  }
-
-  // effective: the standards become basis lines, the tasks go to execution
+  // 4.1.3 (E-2; the cause of #35): a plan in effect never goes back through its reviews. A waiver
+  // withdrawn, or the config key changed, after it took effect leaves it in effect, and its rounds
+  // (the re-plan routing below) go on; before 4.1.3 its review gates ran again on every pass
   if ((await eventOf(ctx, PLAN_LINE, 'effective', dplan)) === null) {
+    // 3.6 feasibility: the plan version's own required reviews decide (fixed with the object, 10.1); the rule is 3.6's.
+    // The user's words, or an authorization in force, may waive the plan's reviews (field 4.1.2: the config key
+    // `planReviewsWaived`, labelled so): it then takes effect after the mechanical checks and the order ruling
+    const waiver = await planReviewsWaiver(ctx, dplan);
+    const feasibilityContract = (await objectRecord(ctx, dplan))?.reviews.some((r) => r.review === 'feasibility') ?? feasibilityRequired(plan);
+    const fRequired = waiver === null && feasibilityContract;
+    const risks: string[] = [...plan.risks];
+    if (fRequired) {
+      const ft = await currentReviewTask(ctx, feasTask(dplan));
+      let fb = (await eventOf<FeasBody>(ctx, PLAN_LINE, 'feasibility', ft))?.body ?? null;
+      if (fb === null) {
+        const view = await taskView(ctx, ft);
+        if (view.kind === 'absent') return submitFeasibility(ctx, b, a, dplan, plan, ft);
+        if (view.kind === 'pending' || view.kind === 'evidence') return;
+        if (view.kind === 'failed') {
+          await handleFailure(ctx, { task: ft, lineage, subject: `plan:${b.plan}`, view, canAbandon: false, canReplan: false });
+          return;
+        }
+        const r = view.result as ArchitectFeasibilityResult;
+        if (!view.status.handBack?.records.some((x) => x.kind === 'judgment' && x.judgment === `j.${ft}`)) return internalError(ctx, ft, `the accepted feasibility hand-back of ${ft} has no judgment j.${ft}`);
+        fb = {
+          task: ft,
+          dplan,
+          verdict: r.verdict,
+          judgment: `j.${ft}`,
+          findings: r.findings.filter((f) => f.severity === 'blocking').map((f) => `[${f.id}] ${f.category} (${f.tasks.join(', ')}): ${f.detail} — suggestion: ${f.suggestion}`),
+          risks: r.findings.filter((f) => f.severity === 'risk').map((f) => `[${f.id}] ${f.category}: ${f.detail}`),
+        };
+        await commit(ctx, `flow:feasibility:${ctx.mission}:${ft}`, { events: [ev(ctx, PLAN_LINE, 'feasibility', ft, fb)] });
+      }
+      risks.push(...fb.risks);
+      if (fb.verdict === 'return') {
+        // one revision by the Architect (3.6: feasibility-return, cap 1)
+        const r = await countedReturn(ctx, { line: PLAN_LINE, key: `feasibility:${dplan}`, lineage, loop: 'feasibility-return', signature: shortHash(fb.findings) });
+        if (r.proceed) {
+          await newAttempt(ctx, b, { reason: 'feasibility', previous: dplan, mechanicalFailures: [], feasibilityFindings: fb.findings, instructions: [], conclusions: [] }, a.k + 1);
+          return;
+        }
+        // still unresolved after the revision: the Secretary (accept the risk, send back with its grant, or the user)
+        const id = safeId(`feas.${dplan}`);
+        await raiseEscalation(ctx, {
+          id,
+          source: 'feasibility-unresolved',
+          lineage,
+          subject: `plan:${b.plan}`,
+          summary: `The feasibility review of ${dplan} still finds blocking items after the Architect's revision.`,
+          reasons: [...fb.findings],
+          options: ['accept-risk', 'send-back', 'ask-user'],
+          position: { target: dplan, review: 'feasibility', revokes: fb.judgment },
+          facts: { dplan, findings: fb.findings },
+        });
+        const d = await decisionFor(ctx, id);
+        if (d === null) return;
+        if (d.option === 'send-back') {
+          if (!(await isApplied(ctx, id))) {
+            const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'feasibility-return', by: d.by === 'user' ? 'user' : 'secretary', extra: 1, reason: d.reason });
+            if (!g.granted) {
+              await escalateToUser(ctx, id, `sending ${dplan} back needs one more feasibility return on lineage ${lineage}, and the Secretary's grant is used (${g.why ?? 'refused'}): only the user can allow it`, WI.loopExhausted);
+              return;
+            }
+            await ctx.ports.ledger.loopAttempt({ op: `flow:feasibility-return:${ctx.mission}:${dplan}:granted`, lineage, loop: 'feasibility-return', signature: shortHash([d.instructions]) });
+            await markApplied(ctx, id, { option: 'send-back' });
+          }
+          await newAttempt(ctx, b, { reason: 'secretary', previous: dplan, mechanicalFailures: [], feasibilityFindings: fb.findings, instructions: [d.instructions], conclusions: [] }, a.k + 1);
+          return;
+        }
+        // accept-risk: the ruling (a pass revoking the feasibility negation) came with the decision
+        await markApplied(ctx, id, { option: 'accept-risk', risks: fb.findings });
+        risks.push(...fb.findings.map((f) => `accepted: ${f}`));
+      }
+    }
+
+    // 3.7 Calibrator ②
+    if (waiver === null) {
+      const c2 = await calibrator2Step(ctx, b, doc, a, dplan, plan);
+      if (c2 !== 'pass') return;
+    }
+
+    // effective: the standards become basis lines, the tasks go to execution
     const ix = await basisIndex(ctx);
     const records: BaseRecord[] = [];
     for (const t of plan.tasks) {
@@ -1117,8 +1151,20 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
         if (version !== null) records.push({ kind: 'basis.version', basisKind: 'standard', line: line as BasisLineId, version: version as BasisVersionId, mission: ctx.mission, scope: null });
       }
     }
-    const body: EffectiveBody = { dplan, pmPlan: b.plan, n: b.n, round: b.round, mode: b.mode, tasks: plan.tasks.map((t) => t.id), risks };
-    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body)], records });
+    // a waived plan records who waived its reviews and which it went without (the honest label, E-2);
+    // its review steps still queued are cancelled and their open escalations closed in the same write
+    const plain = (await eventsOf<{ dplan?: string }>(ctx, PLAN_LINE)).filter((e) => e.body.dplan === dplan);
+    const skipped = waiver === null ? [] : [...(feasibilityContract && !plain.some((e) => e.event === 'feasibility') ? ['feasibility'] : []), ...(!plain.some((e) => e.event === 'cal2') ? ['calibrator-2'] : [])];
+    const reviewsWaived: PlanReviewsWaiver | null = waiver === null ? null : { by: waiver.by, ref: waiver.ref, reason: waiver.reason, skipped };
+    const moot = waiver === null ? [] : (await openEscalations(ctx, `plan:${b.plan}`)).filter((e) => e.id === safeId(`cal2.${dplan}`) || e.id === safeId(`feas.${dplan}`)).map((e) => e.id);
+    const close = closing(ctx, moot, `detailed plan ${dplan}: ${reviewsWaived === null ? '' : waiverLabel(reviewsWaived)}`);
+    const body: EffectiveBody = { dplan, pmPlan: b.plan, n: b.n, round: b.round, mode: b.mode, tasks: plan.tasks.map((t) => t.id), risks, ...(reviewsWaived !== null ? { reviewsWaived } : {}) };
+    const guard = carryGuard([close]);
+    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...close.events], records, ...(guard !== undefined ? { guard } : {}) });
+    await cancelSecretarySteps(ctx, moot);
+    // stable mode reads the waived plan as settled by the waiver (execution's gate): its tasks start on it,
+    // and their products read "not fully proven" (the plan has no review to prove it)
+    if (reviewsWaived !== null) await cancelReviewSteps(ctx, dplan);
   }
 
   // 3.10: settled explorations, and re-plan requests from execution
@@ -1298,11 +1344,23 @@ async function roundsStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: Attem
   void doc;
 }
 
-/** Route unanswered requests into the next attempt, versioning every superseded route. */
-async function replanRouting(ctx: FlowCtx, b: PmBatchBody, k: number, current: string | null): Promise<{ instructions: string[]; events: FlowEventInput[] }> {
+/** A re-plan request a decision on a task records (line "plan", event "replan-request", key the escalation). */
+export interface ReplanRequestBody {
+  readonly escalation: string;
+  readonly task: string;
+  readonly instructions: string;
+}
+
+/** A re-plan request answered without an Architect attempt (4.1.3, #35): a repair changed the task's card (event "replan-answered", key the request's). */
+export const REPLAN_ANSWERED = 'replan-answered';
+
+/** Route unanswered requests into the next attempt, versioning every superseded route; `extra`: requests recorded in the same write as the routing. */
+async function replanRouting(ctx: FlowCtx, b: PmBatchBody, k: number, current: string | null, extra: ReadonlyArray<{ readonly key: string; readonly body: ReplanRequestBody }> = []): Promise<{ instructions: string[]; events: FlowEventInput[] }> {
   const instructions: string[] = [];
   const events: FlowEventInput[] = [];
-  for (const r of await eventsOf<{ escalation: string; task: string; instructions: string }>(ctx, PLAN_LINE, 'replan-request')) {
+  const answered = new Set((await eventsOf(ctx, PLAN_LINE, REPLAN_ANSWERED)).map((e) => e.key));
+  for (const r of [...(await eventsOf<ReplanRequestBody>(ctx, PLAN_LINE, 'replan-request')), ...extra]) {
+    if (answered.has(r.key)) continue;
     const routes = (await eventsOf<{ escalation?: string }>(ctx, PLAN_LINE, 'replan-routed')).filter((e) => e.key === r.key || e.body.escalation === r.key);
     if (routes.length > 0) {
       const effective = await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective');
@@ -1313,6 +1371,53 @@ async function replanRouting(ctx: FlowCtx, b: PmBatchBody, k: number, current: s
     events.push(ev(ctx, PLAN_LINE, 'replan-routed', `${r.key}#${routing}`, { escalation: r.key, routing, attempt: k, dplan: dplanObject(ctx.mission, b.n, k) }));
   }
   return { instructions, events };
+}
+
+/** Where a new re-plan request goes (replanRoute). */
+export type ReplanRoute =
+  /** The decision layer is idle on the plan in effect: the Architect attempt that answers it, for the write that records the request (its guard: nobody started that attempt meanwhile). */
+  | { readonly kind: 'now'; readonly attempt: number; readonly events: readonly FlowEventInput[]; readonly absent: NonNullable<import('./ports.ts').AppendGuard>['absent'] }
+  /** The decision layer routes it into the next attempt it starts; `soon`: on the next pass, with nothing for the PM to do. */
+  | { readonly kind: 'later'; readonly soon: boolean; readonly why: string; readonly todo: string };
+
+/**
+ * Where a "replan" decided on a task goes (4.1.3, #35: a re-plan always leads somewhere). The one
+ * reader of the decision layer's state for it, next to the routing it predicts: when the latest PM
+ * plan's latest detailed plan is the one in effect, the Architect attempt that answers the request is
+ * written with the request (`now`); otherwise it is routed into the attempt the decision layer starts
+ * next, and `why` and `todo` say for the PM what that waits on.
+ */
+export async function replanRoute(ctx: FlowCtx, req: ReplanRequestBody): Promise<ReplanRoute> {
+  const later = (soon: boolean, why: string, todo: string): ReplanRoute => ({ kind: 'later', soon, why, todo });
+  if (await missionClosed(ctx)) return later(false, `mission ${ctx.mission} is closed`, `open it again (mp pm mission open ${ctx.mission}) for the re-plan to run`);
+  const latest = (await eventsOf<PmBatchBody>(ctx, PLAN_LINE, 'pm-batch')).at(-1)?.body;
+  if (latest === undefined) return later(false, 'no PM plan is recorded', 'submit one with the user\'s words (mp pm plan submit)');
+  if ((await eventOf(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, latest.plan)) === null) {
+    const base = cal1Task(ctx.mission, latest.n, false);
+    const outcome = (await eventsOf<Cal1Body>(ctx, PLAN_LINE, 'cal1')).filter((e) => e.body.task === base || e.body.task.startsWith(`${base}.`)).at(-1)?.body.outcome;
+    if (outcome === 'fail' || outcome === 'undecided') return later(false, `the latest PM plan ${latest.plan} (batch ${latest.batch}) did not pass Calibrator ①`, `submit a PM plan the user agrees with (mp pm plan submit, with their words): its first Architect attempt takes this re-plan`);
+    return later(false, `Calibrator ① is checking the latest PM plan ${latest.plan} (batch ${latest.batch})`, `run its step (mp pm next): once the plan passes, its first Architect attempt takes this re-plan`);
+  }
+  const list = await attempts(ctx, latest);
+  // nothing decomposed yet: the first attempt routes every open request (decompositionStep, roundsStep)
+  if (list.length === 0) return later(true, `PM plan ${latest.plan} is about to be decomposed`, 'nothing: its first Architect attempt takes this re-plan');
+  const a = list.at(-1) as AttemptBody;
+  const dplan = dplanObject(ctx.mission, latest.n, a.k);
+  if ((await eventOf(ctx, PLAN_LINE, 'effective', dplan)) !== null) {
+    const k = a.k + 1;
+    const key = `${latest.plan}#${k}`;
+    if ((await eventOf(ctx, PLAN_LINE, 'attempt', key)) !== null) return later(true, `attempt ${k} of PM plan ${latest.plan} has just started`, 'nothing: the attempt after it takes this re-plan');
+    const routing = await replanRouting(ctx, latest, k, dplan, [{ key: req.escalation, body: req }]);
+    if (routing.events.length === 0) return later(true, `the plan in effect (${dplan}) answers it already`, 'nothing');
+    const body: AttemptBody = { k, reason: 'replan', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: routing.instructions, conclusions: [] };
+    return { kind: 'now', attempt: k, events: [ev(ctx, PLAN_LINE, 'attempt', key, body), ...routing.events], absent: [{ mission: ctx.mission, line: PLAN_LINE, event: 'attempt', key }] };
+  }
+  const waiting = (await openEscalations(ctx, `plan:${latest.plan}`)).map((e) => `${e.id} (${e.source})`);
+  return later(
+    waiting.length === 0,
+    `attempt ${a.k} of PM plan ${latest.plan} (detailed plan ${dplan}) is not in effect yet${waiting.length > 0 ? `: escalation ${waiting.join(', ')} waits for a decision` : ': its Architect, mechanical checks or reviews are under way'}`,
+    waiting.length > 0 ? `decide ${waiting.length === 1 ? 'it' : 'them'} (mp pm next shows what waits on the user; mp pm answer): once the attempt takes effect, the next one takes this re-plan` : 'run its steps (mp pm next): once it takes effect, the next attempt takes this re-plan',
+  );
 }
 
 // ---------------------------------------------------------------- cards
@@ -1330,6 +1435,9 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const conclusions = [...a.conclusions];
   for (const [id, s] of ex.settled) if (!ex.unsettled.has(id) && !conclusions.some((c) => c.exploration === id)) conclusions.push({ exploration: id, summary: s.body.summary });
   const revision = !(a.k === 1 && a.previous === null);
+  // 4.1.3 (E-2): whether the plan it revises took effect without its reviews, and whether this one's are waived
+  const previousWaiver = revision && a.previous !== null ? await planReviewsWaiver(ctx, a.previous) : null;
+  const nextWaiver = await planReviewsWaiver(ctx, dplan);
   const card: ArchitectDecomposeCard = {
     ...cardBase(ctx, task, {
       duties: revision
@@ -1344,7 +1452,7 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
       object: b.plan,
       round: doc.round,
       order: doc.order,
-      elements: doc.elements.filter((e) => e.kind !== 'exploration').map((e) => ({ id: e.id, kind: e.kind, text: e.text, after: e.after.filter((x) => ex.unsettled.has(x)) })),
+      elements: doc.elements.filter((e) => e.kind !== 'exploration').map((e) => ({ id: e.id, kind: e.kind, text: e.text, after: afterOf(doc, e).explorations.filter((x) => ex.unsettled.has(x)) })),
       goalsBeyond: [...doc.goalsBeyond],
     },
     requirementItems: items.filter((i) => planItems.has(i.line) || i.type === 'acceptance' || i.type === 'limit').map((i) => ({ id: i.line, text: i.text })),
@@ -1363,6 +1471,7 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
       feasibility: { basisLines: [], reliesOn: [b.plan, ...ex.artifacts] },
     },
     projectCommands: projectCommandsOf(ctx),
+    ...(previousWaiver !== null || nextWaiver !== null ? { planReviews: { previous: previousWaiver === null ? null : waiverLabel(previousWaiver), next: nextWaiver === null ? null : waiverLabel(nextWaiver) } } : {}),
   };
   // the elements tab must not be empty (a plan with only explorations has nothing to decompose yet)
   if (card.pmPlan.elements.length === 0) return;

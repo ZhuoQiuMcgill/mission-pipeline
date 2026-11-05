@@ -62,6 +62,7 @@ import {
   pmSay,
   pmStartLegalization,
   pmStop,
+  pmWaive,
   pmWithdrawRequirement,
   wordsText,
   type NextReport,
@@ -621,6 +622,8 @@ const plan: Command = {
     } catch (e) {
       const name = (e as { name?: string }).name;
       if (name === 'LedgerError' || name === 'ProcessError') throw e;
+      // 4.1.3 (#23): explorations waiting for each other: a named refusal that lists the cycle
+      if ((e as { code?: string }).code === 'AFTER_CYCLE') throw refused('AFTER_CYCLE', `${(e as Error).message}. Nothing was recorded`);
       // the plan does not validate: say where, and where its format is
       const issues = name === 'ZodError' ? ((e as { issues?: Array<{ path: Array<string | number>; message: string }> }).issues ?? []).map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ') : (e as Error).message;
       throw refused('BAD_PLAN', `the PM plan does not validate: ${issues}. Its format, prefilled for this mission: mp pm plan template ${m}`);
@@ -629,6 +632,32 @@ const plan: Command = {
       return ok(`The plan document is the plan in effect, unchanged: batch ${r.batch} re-checks ${r.plan} (no new version, no Architect). Calibrator ① judges it again on the requirement items as they are now (mp pm next); a current deciding pass restores its proof; dependents recover only while their own inputs remain current.`, { mission: m, batch: r.batch, plan: r.plan, recheck: true });
     }
     return ok(`PM plan batch ${r.batch} recorded (plan ${r.plan}); Calibrator ① checks it next (mp pm next). The Architect starts only after it passes.`, { mission: m, batch: r.batch, plan: r.plan });
+  },
+};
+
+const waive: Command = {
+  group: 'pm',
+  name: ['waive'],
+  summary: "E-2: waive a mission's plan reviews (the feasibility review and Calibrator ②) on the user's words or an authorization in force, for the whole mission or one detailed plan version; the plan then takes effect after the mechanical checks, labelled so. --withdraw gives later plans their reviews again",
+  usage: 'mp pm waive <mission> plan-reviews [--plan <dplan.<mission>.<n>.<k>>] (--words W-<n> | --authority <item-id>) [--reason "<text>"]\n       mp pm waive <mission> plan-reviews --withdraw (--words W-<n> | --authority <item-id>)',
+  flags: { plan: 'string', words: 'string', authority: 'string', reason: 'string', withdraw: 'boolean' },
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const check = positional(args, 1, 'the check to waive (plan-reviews)');
+    const w = wordsArg(p.ctx, args, false);
+    const authority = flagStr(args, 'authority');
+    if (w === null && authority === null) throw refused('NO_DECISION', 'a waiver needs who decided it: --words W-<n> (the user\'s words) or --authority <item-id> (an authorization item in force that leaves this to the PM); nothing was recorded');
+    if (w !== null && authority !== null) throw usage('give --words or --authority, not both');
+    const withdraw = flagBool(args, 'withdraw');
+    const r = await pmWaive(p.ctx, { mission: m, check, plan: flagStr(args, 'plan'), words: w, authority, reason: flagStr(args, 'reason'), withdraw, request: c.op });
+    const who = r.by === 'words' ? `on ${r.ref}` : `under authorization ${r.ref}`;
+    const head = !r.recorded
+      ? `Nothing to withdraw for mission ${m}.`
+      : r.action === 'withdraw'
+        ? `The plan-review waivers of mission ${m} are withdrawn ${who}: plans not in effect yet get their feasibility review and Calibrator ② again. A plan in effect stays in effect.`
+        : `Plan reviews waived ${who} for ${r.plan !== null ? `detailed plan ${r.plan}` : `every plan of mission ${m} not in effect yet`}: ${r.plan !== null ? 'it takes' : 'each takes'} effect after the mechanical checks and the order ruling, without the feasibility review and Calibrator ②, labelled "took effect without its reviews, ${who}". No other check is waived.`;
+    return ok([head, ...r.notes].join('\n'), r);
   },
 };
 
@@ -1205,6 +1234,7 @@ export const PM_COMMANDS: readonly Command[] = [
   repair,
   constraint,
   plan,
+  waive,
   answer,
   grant,
   legalize,

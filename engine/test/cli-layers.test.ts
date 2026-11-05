@@ -480,7 +480,8 @@ describe('review round 2: an exploration from its machine state and its product 
     const b = bl.json.result.blocked[0] as Layer1Entry;
     assert.equal(b.id, 'impl');
     assert.match(b.label, /^reworks used up \(2 of 2\), product negated/);
-    assert.match(b.blocked!.next, new RegExp(`^ask the user; then mp pm answer m1 ${esc.replace(/\./g, '\\.')} --option <grant\\|replan\\|abandon>`));
+    // 4.1.3 (E-1, #35): the attempt has a verified hand-back, so accept-risk is one of the user's exits too
+    assert.match(b.blocked!.next, new RegExp(`^ask the user; then mp pm answer m1 ${esc.replace(/\./g, '\\.')} --option <grant\\|replan\\|accept-risk\\|abandon>`));
     assert.doesNotMatch(b.blocked!.next, /carried out/);
     assert.equal(b.blocked!.wi, 'WI-08');
     assert.match((await cli(p.dir, ['read', 'blocked'])).out, /next: ask the user; then mp pm answer m1 /);

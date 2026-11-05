@@ -40,6 +40,7 @@ export {
   pmSay,
   pmStartLegalization,
   pmStop,
+  pmWaive,
   pmWithdrawRequirement,
   purposeOf,
   readSteps,
@@ -52,6 +53,8 @@ export {
   type Released,
   type Renewed,
   type UserWait,
+  type WaiveRequest,
+  type Waived,
 } from './pm.ts';
 export {
   commitFiles,

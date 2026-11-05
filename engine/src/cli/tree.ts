@@ -41,6 +41,7 @@ import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
 import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
+import { planReviewsWaiverIn, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { age, clip, filler as fillerText, short } from './render.ts';
 
@@ -422,6 +423,11 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'effective' && typeof b['dplan'] === 'string') {
           const n = nodes.get(objKey(b['dplan']));
           if (n !== undefined) n.state = `${n.state ?? ''}; in effect (tasks ${((b['tasks'] ?? []) as string[]).join(', ')})`.replace(/^; /, '');
+          // 4.1.3 (E-2): a plan that took effect without its reviews says so, and on whose words (waivers.ts, the one resolver)
+          const planEvents = flows.filter((x) => x.mission === f.mission && x.line === PLAN_LINE).map((x) => ({ event: x.event, key: x.key, body: x.body }));
+          const reviews = ((objects.get(b['dplan'])?.['reviews'] ?? null) as Json[] | null)?.map((r) => String(r['review'])) ?? null;
+          const w = planReviewsWaiverIn(planEvents, f.mission, b['dplan'], ctx.planReviewsWaived, reviews);
+          if (n !== undefined && w !== null) addCheck(n, waiverLabel(w));
         }
       } else if (f.line.startsWith('task:')) {
         if (f.event === 'dispatched' && typeof b['dplan'] === 'string') edge(`task:${f.key}`, objKey(b['dplan']), 'planned in');
@@ -439,7 +445,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'accepted' && typeof b['product'] === 'string') {
           const n = nodes.get(objKey(b['product']));
           if (n !== undefined) {
-            addCheck(n, `accepted (${String(b['judgment'] ?? '')})`);
+            const dec = (b['decision'] ?? null) as Json | null;
+            // 4.1.3 (E-1): accepted by a decision with its risks: whose decision, and the open findings it took on
+            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${((b['risks'] ?? []) as unknown[]).length} open finding(s) on the risk list`);
+            else addCheck(n, `accepted (${String(b['judgment'] ?? '')})`);
             // the acceptance names its judgment; the judgment names its Reviewer dispatch and the runs it cites
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
           }
@@ -579,7 +588,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           if (n !== undefined) {
             const add = (b['add'] ?? []) as string[];
             const reopen = ((b['reopen'] ?? []) as Json[]).map((x) => String(x['task']));
-            n.state = `decided: ${add.length > 0 ? `adds ${add.join(', ')}` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.join(', ')}` : 'reopens no task'} (plan ${String(b['dplan'] ?? '')})`;
+            const changed = (b['changed'] ?? []) as string[];
+            n.state = `decided: ${add.length > 0 ? `adds ${add.join(', ')}` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.join(', ')}` : ''} (plan ${String(b['dplan'] ?? '')})`;
             addCheck(n, 'mechanical checks passed (D-10: no Calibrator, no feasibility review)');
             if (typeof b['dplan'] === 'string') edge(n.key, objKey(b['dplan']), 'amends');
           }
