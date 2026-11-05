@@ -63,6 +63,7 @@ import type {
   LoopStatus,
 } from '../flow/ports.ts';
 import type { ProcessContext } from './context.ts';
+import { dispatchStepRuns, stepRuns } from './detached.ts';
 
 /** A refusal the flow retries on its next pass (the engine treats NOT_READY as transient). */
 function retryable(message: string): Error {
@@ -91,6 +92,9 @@ export function readTaskSpec(db: Db & { readonly data?: unknown }, data: { text(
  * asked for evidence the request and the notes. `seat`: the hash of what the seat handed in, so
  * the same hand-back again is recognised (§5.3: one per dispatch).
  */
+// 4.1.3: the data pointers a hand-back cites, as checked (a type only)
+type RecordedData = import('../seat/cards/experiment.ts').RecordedData;
+
 export interface HandbackDoc {
   readonly format: 'mp41.handback.v1';
   readonly kind: 'handed-back' | 'needs-evidence';
@@ -104,18 +108,42 @@ export interface HandbackDoc {
   readonly runs: AcceptedHandBack['runs'];
   /** 5.2 part 5: the continuation judgment it carried was refused: the task goes to a full review. */
   readonly fullReview?: string;
+  /**
+   * 4.1.3 (E-4): the data outside the commit its texts cite, as the program checked it before the
+   * write (path, line, sha256, size, check kind, sample, label), for every seat that may cite it
+   * (seat/cards/experiment.ts recordedData; a blind run's evidence record keeps the same list).
+   */
+  readonly data?: readonly RecordedData[];
 }
 
 /** The flow line the dispatch table's own bookkeeping is on (tasks given up outside the queue, dispatch reads and runs). */
 export const DISPATCH_LINE = (dispatch: string): string => `dispatch:${dispatch}`;
 export const TASKS_LINE = 'tasks';
 
-/** The runs a dispatch had `mp` rerun, in order, with the environment identity each was recorded under (4.1 §6.5). */
-export function dispatchRuns(db: Db, data: { text(h: string): string }, d: { readonly mission: string; readonly dispatch: string }): Array<{ run: string; completed: boolean; envLine?: string; envSnapshot?: string }> {
-  return flowEvents(db, { mission: d.mission as MissionId, line: DISPATCH_LINE(d.dispatch), event: 'run' }).map((e) => {
-    const b = JSON.parse(data.text(e.body)) as { run: string; completed: boolean; envLine?: string; envSnapshot?: string };
-    return { run: b.run, completed: b.completed, ...(b.envLine !== undefined && b.envSnapshot !== undefined ? { envLine: b.envLine, envSnapshot: b.envSnapshot } : {}) };
-  });
+/**
+ * The runs a dispatch had `mp` rerun, in order, with the environment identity each was recorded under
+ * (4.1 §6.5). 4.1.3 (#30): a step dispatched again carries the runs of its earlier, released
+ * dispatches (its card lists them; the seat records from them and cites them), so they come first.
+ * Read through stepRuns (detached.ts), the resolver `mp seat <id> wait` and the carried card read, with
+ * its paging: a run they show is always one a hand-back may cite. Each dispatch's runs in the order
+ * they were recorded.
+ */
+export function dispatchRuns(db: Db, data: { text(h: string): string }, d: { readonly mission: string; readonly dispatch: string; readonly task?: string }): Array<{ run: string; completed: boolean; envLine?: string; envSnapshot?: string }> {
+  const all = d.task === undefined ? dispatchStepRuns(db, data, { mission: d.mission as MissionId, dispatch: d.dispatch }) : stepRuns(db, data, { mission: d.mission as MissionId, dispatch: d.dispatch, task: d.task });
+  const order = [...new Set(all.map((r) => r.dispatch))];
+  return order.flatMap((dispatch) =>
+    all
+      .filter((r) => r.dispatch === dispatch && r.ran !== null)
+      .sort((a, b) => a.revision! - b.revision!)
+      .map((r) => ({ run: r.ran!.run, completed: r.ran!.completed, ...(r.ran!.envLine !== undefined && r.ran!.envSnapshot !== undefined ? { envLine: r.ran!.envLine, envSnapshot: r.ran!.envSnapshot } : {}) })),
+  );
+}
+
+/** The released dispatches of the same step claimed before `d` (4.1.3: the step dispatched again carries their runs). */
+export function earlierDispatches(db: Db, d: Pick<DispatchInfo, 'mission' | 'dispatch' | 'task'>): DispatchInfo[] {
+  const all = listDispatches(db, { task: d.task, limit: 1000 });
+  const self = all.find((x) => x.dispatch === d.dispatch);
+  return all.filter((x) => x.dispatch !== d.dispatch && x.mission === d.mission && x.state === 'released' && (self === undefined || x.claimedRevision < self.claimedRevision));
 }
 
 /** The material pages a dispatch read (`mp seat <id> read`), as `${material}#${page}` keys. */
@@ -369,6 +397,7 @@ function acceptedOf(d: DispatchInfo, doc: HandbackDoc): AcceptedHandBack {
     report: d.reportLeaf,
     runs: doc.runs,
     records: doc.records,
+    ...(doc.data !== undefined && doc.data.length > 0 ? { data: doc.data } : {}),
   };
 }
 
@@ -588,5 +617,5 @@ export class MemoryFlowEvaluator implements FlowEvaluatorPort {
 
 /** The three ports over one process context. */
 export function memoryFlowPorts(ctx: ProcessContext): FlowPorts {
-  return { ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite } };
+  return { ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite, planReviewsWaived: ctx.planReviewsWaived, startOnHandback: ctx.startOnHandback } };
 }

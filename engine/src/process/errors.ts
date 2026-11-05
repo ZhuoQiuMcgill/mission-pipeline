@@ -5,13 +5,17 @@
 export type ProcessErrorCode =
   /** A hand-back or evidence-request file is not where the card says (`.mission-pipeline/tmp/<dispatch>/`), or cannot be read. */
   | 'BAD_FILE'
-  /** The command does not fit the dispatch (not in flight, not this seat's command, an unknown material or command). */
+  /** The command does not fit the dispatch (not in flight, not this seat's command, an unknown material or command), or the state of what it changes (the message says why and the way on). */
   | 'NOT_ALLOWED'
   /** A leaf the command needs is missing or was edited by hand (§3.3: shown, only the steps that need it are held; WI-30). */
   | 'LEAF_MISSING'
   | 'LEAF_EDITED'
   /** The step is not ready (claimed, held by a stop, a lease or the git-writes hold). */
-  | 'NOT_READY';
+  | 'NOT_READY'
+  /** A change to an exploration's method on the user's words (`mp pm repair --attempts|--rerun|--resnapshot`, and the older commands): a run a seat holds (in flight, or handed back and not taken into account yet) would see it change under it. */
+  | 'DISPATCH_IN_FLIGHT'
+  /** A change to a research exploration's method or its attempts: the interpretation of the attempts' records is submitted. */
+  | 'INTERPRETATION_SUBMITTED';
 
 export class ProcessError extends Error {
   readonly code: ProcessErrorCode;

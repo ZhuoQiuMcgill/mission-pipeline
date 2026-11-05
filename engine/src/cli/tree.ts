@@ -39,7 +39,9 @@ import type { ListRef } from '../common/records.ts';
 import { judgmentStates, labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof, olderEnvironmentRun, recordedEnvironment } from '../evaluator/index.ts';
 import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
+import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
 import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
+import { planReviewsWaiverIn, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { age, clip, filler as fillerText, short } from './render.ts';
 
@@ -421,6 +423,11 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'effective' && typeof b['dplan'] === 'string') {
           const n = nodes.get(objKey(b['dplan']));
           if (n !== undefined) n.state = `${n.state ?? ''}; in effect (tasks ${((b['tasks'] ?? []) as string[]).join(', ')})`.replace(/^; /, '');
+          // 4.1.3 (E-2): a plan that took effect without its reviews says so, and on whose words (waivers.ts, the one resolver)
+          const planEvents = flows.filter((x) => x.mission === f.mission && x.line === PLAN_LINE).map((x) => ({ event: x.event, key: x.key, body: x.body }));
+          const reviews = ((objects.get(b['dplan'])?.['reviews'] ?? null) as Json[] | null)?.map((r) => String(r['review'])) ?? null;
+          const w = planReviewsWaiverIn(planEvents, f.mission, b['dplan'], ctx.planReviewsWaived, reviews);
+          if (n !== undefined && w !== null) addCheck(n, waiverLabel(w));
         }
       } else if (f.line.startsWith('task:')) {
         if (f.event === 'dispatched' && typeof b['dplan'] === 'string') edge(`task:${f.key}`, objKey(b['dplan']), 'planned in');
@@ -438,7 +445,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'accepted' && typeof b['product'] === 'string') {
           const n = nodes.get(objKey(b['product']));
           if (n !== undefined) {
-            addCheck(n, `accepted (${String(b['judgment'] ?? '')})`);
+            const dec = (b['decision'] ?? null) as Json | null;
+            // 4.1.3 (E-1): accepted by a decision with its risks: whose decision, and the open findings it took on
+            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${((b['risks'] ?? []) as unknown[]).length} open finding(s) on the risk list`);
+            else addCheck(n, `accepted (${String(b['judgment'] ?? '')})`);
             // the acceptance names its judgment; the judgment names its Reviewer dispatch and the runs it cites
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
           }
@@ -535,6 +545,30 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'rerun') {
           const n = nodes.get(`exploration:${x}`);
           if (n !== undefined) n.state = 'reopened: its evidence executions run again after an environment change';
+        } else if (f.event === ATTEMPTS_AMENDED) {
+          // the user's decision about the method in force (mp pm amend-attempts): a new method version, no round, no review
+          const n = nodes.get(`exploration:${x}`);
+          const words = String(b['words'] ?? '');
+          const added = (b['added'] ?? []) as string[];
+          const replaced = (b['replaced'] ?? []) as string[];
+          if (n !== undefined) n.state = `attempts amended by ${words}: added ${added.join(', ') || 'none'}, replaced ${replaced.join(', ') || 'none'}`;
+          if (typeof b['version'] === 'string') {
+            const v = objNode(b['version'], f.rev);
+            v.title ||= "research method, amended on the user's words";
+            if (!v.state) v.state = labels.has(b['version']) ? `${String(labels.get(b['version']))}${olderNote(b['version'])}` : 'in force';
+            v.by = `the user (${words}), applied by ${pmBy.get(v.key) ?? 'the PM via `mp pm amend-attempts`'}`;
+            edge(v.key, `exploration:${x}`, 'version of');
+            if (typeof b['previous'] === 'string') edge(v.key, objKey(b['previous']), 'amends');
+            if (words !== '') {
+              node('words', words, null, 0);
+              edge(v.key, `words:${words}`, 'the user decided in');
+            }
+            const r = typeof b['answers'] === 'string' ? nodes.get(`repair:${f.mission}/${b['answers']}`) : undefined;
+            if (r !== undefined) {
+              r.state = `answered by the amendment ${String(b['n'] ?? '')} of exploration ${f.line.slice('exploration:'.length)}: it adds no round`;
+              edge(r.key, v.key, 'answered by');
+            }
+          }
         }
       } else if (f.line === REPAIRS_LINE) {
         // 4.1.2 (D-10): a repair the user found, and what it caused
@@ -554,7 +588,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           if (n !== undefined) {
             const add = (b['add'] ?? []) as string[];
             const reopen = ((b['reopen'] ?? []) as Json[]).map((x) => String(x['task']));
-            n.state = `decided: ${add.length > 0 ? `adds ${add.join(', ')}` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.join(', ')}` : 'reopens no task'} (plan ${String(b['dplan'] ?? '')})`;
+            const changed = (b['changed'] ?? []) as string[];
+            n.state = `decided: ${add.length > 0 ? `adds ${add.join(', ')}` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.join(', ')}` : ''} (plan ${String(b['dplan'] ?? '')})`;
             addCheck(n, 'mechanical checks passed (D-10: no Calibrator, no feasibility review)');
             if (typeof b['dplan'] === 'string') edge(n.key, objKey(b['dplan']), 'amends');
           }
@@ -698,6 +733,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         n.by = `${decision.by ?? `the ${String(rec['executor'])}`}; written when the decision was carried out`;
         edge(n.key, decision.key, 'carries out');
       }
+      // the user's pass on a method amended on their words (mp pm amend-attempts), applied by the PM
+      if (rec['executor'] === 'user' && decision === undefined && pmBy.has(n.key)) n.by = `the user, applied by ${pmBy.get(n.key)}`;
       edge(n.key, objKey(target), 'judges');
       for (const e of list(rec['evidence'])) {
         runIds.add(e);
@@ -901,6 +938,8 @@ export function pmResultKeys(command: string, j: Json): string[] {
   if (command === 'land' && s(j['intent'])) keys.push(`landing:${j['intent']}`);
   if (command === 'stop' && s(j['stop'])) keys.push(`stop:${j['stop']}`);
   if (command === 'answer' && s(j['mission']) && s(j['escalation'])) keys.push(`decision:${j['mission']}/${j['escalation']}`);
+  if (command === 'amend-attempts' && s(j['version'])) keys.push(`object:${j['version']}`);
+  if (command === 'amend-attempts' && s(j['judgment'])) keys.push(`judgment:${j['judgment']}`);
   return keys;
 }
 

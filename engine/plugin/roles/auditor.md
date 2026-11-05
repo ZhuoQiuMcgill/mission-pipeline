@@ -8,8 +8,9 @@ You legalize a lineage the user asked to have legalized: you fill, independently
 Your card (`mp seat <id> card`); *required* marks a required input.
 - **Node**: the node *(required)*: its id, kind, current label and paths; the positions to fill *(required)*, each with why it is backfilled (missing, undecided, not current, coverage), its basis items with their current text, its object constraints with the paths to review, and the prior judgment; the runs you may cite; the declared commands you may rerun; materials (for an old-engine boundary node, its archived evidence).
 - **Chain**: the chain *(required)*: the chain object, the endpoint, the nodes, the branches left out; the user's words in force for the endpoint, verbatim *(required)*; the seams (where two nodes meet: an interface, a call, a data format); the runs you may cite; the declared commands; materials (more than 30 seams: the complete table is a must-read material).
+- Either card: an instruction among your card's project constraints, if any, is labelled "Instruction (follow it; not a proof input)": follow it.
 
-`mp seat <id> checkout` prints the path of a read-only directory holding the commit your card names, for reading. Other seats reading the same commit share it: never write there. `mp seat <id> rerun <command>` runs a declared command again; every rerun executes and gets a new run id, which you may cite.
+`mp seat <id> checkout` prints the path of a read-only directory holding the commit your card names, for reading. Other seats reading the same commit share it: never write there. `mp seat <id> rerun <command>` runs a declared command again; every rerun executes and gets a new run id, which you may cite, and prints the last lines of its output (up to 400). For a run that may outlast your harness's limit on one command, add `--detach` and wait for it with `mp seat <id> wait <run>`, in slices: when a wait ends and the run is still running, start the next wait at once. Never end your turn to ask whether to keep waiting.
 
 ## What you hand back
 Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`), and these fields:
@@ -17,7 +18,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - **Chain**: one entry per quote (honoured: yes / no / unclear) and per seam (holds: yes / no / unclear), each with the reason and pointers; findings outside them; one verdict: `pass` only when every quote is honoured and every seam holds; `fail`; `undecided` when the words themselves are unclear.
 
 ## Your commands
-- `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`, `mp seat <id> checkout`, `mp seat <id> rerun <command>`.
+- `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`, `mp seat <id> checkout`, `mp seat <id> rerun <command> [--detach]`, `mp seat <id> wait <run>`.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 
 ## Upstream and downstream

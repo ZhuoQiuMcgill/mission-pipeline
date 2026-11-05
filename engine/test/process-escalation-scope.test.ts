@@ -320,8 +320,7 @@ describe('class B: a temporary state is never written as a permanent record', ()
       const m = `m9${type[0]}`;
       await startExploration(p, m, { rounds: 3, type });
       await step(p.ctx, 'researcher-author', () => submit('v1: an LRU cache'));
-      await step(p.ctx, 'crititor', (c) => attack([], c));
-      await step(p.ctx, 'stabilizer', (c) => judge(c, 'in-scope', 'general'));
+      // 4.1.3 (E-3): the round's Stabilizer converges it; its hand-back comes while the labels recompute
       await step(p.ctx, 'crititor', (c) => attack([], c));
       await seedFanout(p, m, 400);
       await frontier(p, m);

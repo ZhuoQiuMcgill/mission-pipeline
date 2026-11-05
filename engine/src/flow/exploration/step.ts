@@ -2,7 +2,9 @@
 // the decision layer (src/flow/plandoc.ts) and the Secretary (src/flow/secretary.ts).
 //
 //   - start: every exploration element of a PM plan that passed Calibrator ① (event
-//     "pm-plan-effective" on line "plan") is defined here (4.3: defined by the PM with the user).
+//     "pm-plan-effective" on line "plan") is defined here (4.3: defined by the PM with the user),
+//     its snapshot the target branch's head then; the dispatch of its first step takes it again
+//     when the branch moved since (process/explorationSnapshot.ts).
 //   - advance: every defined exploration of the mission takes the steps it can.
 //   - stops (8.2, 3.8, 3.10):
 //       converged                   → "settled" (outcome conclusion / no-conclusion) for the
@@ -10,10 +12,15 @@
 //       budget exhausted, the same  → an escalation to the Secretary (sources exploration-budget,
 //       fatal class twice, no         exploration-repeated-fatal) with the options the program
 //       progress                      can carry out: grant more rounds (the Secretary once, then
-//                                     the user, WI-08), accept the current version with its
+//                                     the user, WI-08; 4.1.3: with the decision's instructions on
+//                                     the next cards, and the findings it is for, which get the
+//                                     author's turn), accept the current version with its
 //                                     open findings as residual risks (a ruling pass revokes the
-//                                     version's negation), send back with a new direction, re-plan
-//                                     (settled as no conclusion), give up (settled likewise)
+//                                     version's negation), or, when nothing fatal or serious is
+//                                     unresolved and no direction question waits, plain "accept"
+//                                     (4.1.3, E-1: converged by the decision, no risk list), send
+//                                     back with a new direction, re-plan (settled as no
+//                                     conclusion), give up (settled likewise)
 //   - direction questions (an escalated finding, 4.3 讨论 / 8.2 处置) → an escalation (source
 //     exploration-direction): answer / send back (the author revises per the answer), accept the
 //     risk, or ask the user; the decision becomes an exploration ruling.
@@ -33,17 +40,18 @@
 
 import { canonicalJson, sha256 } from '../../common/hash.ts';
 import type { MissionId } from '../../common/ids.ts';
+import type { JudgmentRecord } from '../../common/records.ts';
 import { idPart, missionClosed, safeId, type FlowCtx } from '../context.ts';
 import { registerFlowStep } from '../engine.ts';
 import { EXPLORATION_SETTLED, PLAN_LINE, PM_PLAN_EFFECTIVE, PmPlanDoc, explorationLine, type ExplorationSettledBody, type PmPlanEffectiveBody } from '../plandoc.ts';
 import { handleFailure } from '../failures.ts';
 import type { FlowEventInput, FlowTaskStatus } from '../ports.ts';
-import { cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, openEscalations, raiseEscalation, type Carry } from '../secretary.ts';
+import { cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, decisionFor, deciderJudgment, deciderOf, escalateToUser, escalation, isApplied, openEscalations, raiseEscalation, rulingJudgmentId, type Carry, type Decider } from '../secretary.ts';
 import type { DecisionOption } from '../../seat/cards/secretary.ts';
 import { explorationDefinition, xid, type ExplorationDefinition } from './definition.ts';
 import { advanceExploration, buildHandoff, defineExploration, explorationState, explorationStateAfter, recordExplorationRerun, redefineExploration, rulingEvent, type ExplorationHandoff } from './flow.ts';
 import { versionEvidence } from './cards.ts';
-import { allowedRounds, currentEvidence, directionPending, effectiveSeverity, pendingTasks, settleKey, settleSince, type QueuedBody, type RulingBody, type SettleRecord, type StopReason, type XState } from './machine.ts';
+import { allowedRounds, currentEvidence, directionPending, effectiveSeverity, lastPass, pendingTasks, phaseFindings, settleKey, settleSince, type QueuedBody, type RulingBody, type SettleRecord, type StopReason, type XState } from './machine.ts';
 import { WI } from '../wi.ts';
 
 /** The decision layer's exploration element (plandoc.ts) as this flow's definition. */
@@ -281,6 +289,18 @@ const SOURCE: Partial<Record<StopReason, 'exploration-budget' | 'exploration-rep
 
 const STOP_OPTIONS: readonly DecisionOption[] = ['grant', 'accept-risk', 'send-back', 'replan', 'abandon', 'ask-user'];
 
+/**
+ * The options of a stop's escalation. Sending back adds no rounds (review r1 #7): offered only while
+ * some are left. Accepting waits for any direction question's ruling (code review r1 #2). 4.1.3 (E-1,
+ * #46): when nothing fatal or serious is unresolved, plain "accept" (converged by the decision, no
+ * risk list) takes the place of accepting residual risks.
+ */
+function stopOptions(s: XState, h: ExplorationHandoff): DecisionOption[] {
+  const clear = h.unresolvedBlocking.length === 0 && !directionPending(s);
+  const out = STOP_OPTIONS.filter((o) => (o !== 'send-back' || allowedRounds(s) - s.rounds > 0) && (o !== 'accept-risk' || (!directionPending(s) && !clear)));
+  return clear ? ['accept', ...out] : out;
+}
+
 function handoffOf(ctx: FlowCtx, s: XState): ExplorationHandoff | null {
   if (s.stopped === null) return null;
   return JSON.parse(ctx.ports.ledger.content.get(s.stopped.handoff)) as ExplorationHandoff;
@@ -297,7 +317,8 @@ function summaryOf(ctx: FlowCtx, s: XState, h: ExplorationHandoff): string {
     }
   }
   const risks = h.residualRisks.length > 0 ? `; ${h.residualRisks.length} finding(s) accepted as residual risks` : '';
-  return `Version ${h.version?.id ?? '(none)'} after ${h.rounds} round(s) (${h.reason})${risks}; ${h.findings.length} finding(s) in total, ${h.unresolvedBlocking.length} fatal or serious unresolved.`;
+  const accepted = h.accepted !== undefined ? `, accepted by the decision (${h.accepted.by})` : '';
+  return `Version ${h.version?.id ?? '(none)'} after ${h.rounds} round(s) (${h.reason}${accepted})${risks}; ${h.findings.length} finding(s) in total, ${h.unresolvedBlocking.length} fatal or serious unresolved.`;
 }
 
 function unresolvedOf(h: ExplorationHandoff): string[] {
@@ -357,10 +378,13 @@ async function carryDecision(
   option: DecisionOption,
   rulings: readonly RulingBody[],
   end?: { readonly stop: ExplorationSettledBody['stop']; readonly outcome: ExplorationSettledBody['outcome']; readonly handoff: (now: XState) => ExplorationHandoff | null },
+  judgment?: JudgmentRecord | null,
 ): Promise<void> {
   if (await isApplied(ctx, id)) return;
   const events = rulings.map((r) => rulingEvent(ctx.mission, x, r));
-  const carries: Carry[] = [await carryOut(ctx, id, { option })];
+  // a judgment the decider makes in this write (4.1.3: plain "accept" on a version no pass stands on) rides with its "applied"
+  const carried0 = await carryOut(ctx, id, { option, ...(judgment != null ? { accepted: judgment.target, judgment: judgment.judgment } : {}) });
+  const carries: Carry[] = [judgment != null ? { ...carried0, records: [...carried0.records, judgment] } : carried0];
   let stale: string[] = [];
   let now: XState | null = null;
   if (end !== undefined) {
@@ -375,6 +399,34 @@ async function carryDecision(
   }
   await commitCarrying(ctx, xid.op(ctx.mission, x, `carry:${id}`), events, carries, stale);
   if (now !== null) await cancelQueuedSeats(ctx, now);
+}
+
+/**
+ * The decider's pass on the version plain "accept" settles on (4.1.3, E-1): the latest one. When no pass
+ * of the exploration's position stands on it (typically the author's revision after the last round, its
+ * findings left general), the decision's own judgment passes it, written in the decision's write:
+ * j.sec.<escalation> when the Secretary decided, j.user.<escalation> when the user did, never one in the
+ * program's name. Its contract inputs are those of the position's latest judgment (the round's
+ * Stabilizer), as the Stabilizer's pass on a revision takes them (stabilizer.ts). Null: a pass stands on
+ * it already, the escalation's own ruling passes it (carryOut), or there is no judgment to take the
+ * inputs from.
+ */
+async function acceptJudgment(ctx: FlowCtx, s: XState, id: string, by: Decider | null): Promise<JudgmentRecord | null> {
+  const latest = s.version;
+  const base = s.stabilizations.at(-1)?.judgment;
+  if (by === null || latest === null || base === undefined) return null;
+  // a pass that does not prove the version (a round judged under a definition the exploration has since
+  // replaced) does not stand: the decision's own judgment passes it on the current definition (sol final review r1)
+  const stale = lastPass(s, latest.id) !== null && !s.negations.has(latest.id) && (await ctx.ports.evaluator.labels([latest.id])).labels[latest.id] !== 'proven';
+  if (lastPass(s, latest.id) !== null && !s.negations.has(latest.id) && !stale) return null;
+  const position = (await escalation(ctx, id))?.position ?? null;
+  if (position?.target === latest.id) return null;
+  const suffix = position !== null ? 'latest' : undefined;
+  const from = await ctx.ports.ledger.judgment(base);
+  if (from === null || (await ctx.ports.ledger.judgment(rulingJudgmentId(id, by, suffix))) !== null) return null;
+  const inputs = stale && s.defined !== null ? { ...from, bases: ctx.ports.ledger.content.putList([s.defined.basisVersion]) } : from;
+  // the one writer of a decider's ruling (flow/secretary.ts deciderJudgment): the same id, executor and fields as a task's
+  return deciderJudgment({ escalation: id, by, ...(suffix !== undefined ? { suffix } : {}), target: latest.id, review: from.review, inputs, revokes: s.negations.get(latest.id) ?? null });
 }
 
 /**
@@ -430,6 +482,9 @@ async function routeStop(ctx: FlowCtx, x: string): Promise<boolean> {
   if (source === undefined) return false; // the decision layer's own stop
   const id = escId(ctx.mission, x, `stop${s.stopped.n}`);
   const rt = rulingTarget(s);
+  // the findings a grant may name (4.1.3, #39): every one of the phase not resolved, general ones too
+  const mine = new Set(phaseFindings(s).map((f) => f.id));
+  const nameable = h.findings.filter((f) => f.status !== 'resolved' && mine.has(f.id));
   await raiseEscalation(ctx, {
     id,
     source,
@@ -437,10 +492,12 @@ async function routeStop(ctx: FlowCtx, x: string): Promise<boolean> {
     subject: explorationLine(x),
     summary: `Exploration ${x} stopped without converging (${s.stopped.reason}, ${s.rounds} of ${h.allowedRounds} rounds): ${h.unresolvedBlocking.length} fatal or serious in-scope finding(s) unresolved.`,
     // 4.1 §6.3: the findings, the dispositions and the Stabilizer's judgments go to the Secretary
-    reasons: [...unresolvedOf(h), ...h.stabilizer.map((j) => `Stabilizer, round ${j.round}: ${j.drift}; ${j.findings.map((f) => `${f.finding.slice(0, 24)} ${f.verdict} (${f.severity}): ${f.reason}`).join('; ')}`)],
-    // sending back adds no rounds (review r1 #7): it is offered only while some are left
-    // sending back adds no rounds (review r1 #7); accepting waits for any direction question's ruling (code review r1 #2)
-    options: STOP_OPTIONS.filter((o) => (o !== 'send-back' || allowedRounds(s) - s.rounds > 0) && (o !== 'accept-risk' || !directionPending(s))),
+    reasons: [
+      ...unresolvedOf(h),
+      ...h.stabilizer.map((j) => `Stabilizer, round ${j.round}: ${j.drift}; ${j.findings.map((f) => `${f.finding.slice(0, 24)} ${f.verdict} (${f.severity}${f.answered === true ? ', answered' : ''}): ${f.reason}`).join('; ')}`),
+      ...(nameable.length > 0 ? [`A grant may name the findings it is for (their ids; the author gets a turn on them, general ones too): ${nameable.map((f) => `${f.id} (${f.severity}, ${f.status})`).join('; ')}`] : []),
+    ],
+    options: stopOptions(s, h),
     position: rt !== null ? { target: rt.version.id, review: 'crititor', revokes: rt.negation } : null,
     facts: { handoff: s.stopped.handoff, reason: s.stopped.reason, wi: s.stopped.wi, version: h.version?.id ?? null, unresolved: h.unresolvedBlocking, decision: h.decision, stabilizer: h.stabilizer },
   });
@@ -585,11 +642,18 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
             await escalateToUser(ctx, id, `exploration ${x}: the ledger refused the Secretary's grant (${g.why ?? 'refused'}); only the user can grant more rounds (6.5, WI-08)`, 'WI-08');
             return true;
           }
-          await carryDecision(ctx, x, id, d.option, [{ id, decision: 'extend', findings: [], text: d.reason, extraRounds: extra, extraMicros: extraSpend(s, extra), by }]);
+          // 4.1.3 (#38, #39): the decision's instructions go to the next rounds' cards; the findings it names (of this exploration) get the author's turn
+          const named = (d.findings ?? []).filter((f) => s.findings.has(f));
+          await carryDecision(ctx, x, id, d.option, [{ id, decision: 'extend', findings: named, text: d.reason, ...(d.instructions.trim() !== '' ? { instructions: d.instructions } : {}), extraRounds: extra, extraMicros: extraSpend(s, extra), by }]);
           break;
         }
-        case 'accept-risk':
         case 'accept':
+          // 4.1.3 (E-1, #46): nothing fatal or serious unresolved: the decision accepts the latest
+          // version; the machine ends the round as converged by it and settles it like any convergence
+          const j = await acceptJudgment(ctx, s, id, deciderOf(d.by));
+          await carryDecision(ctx, x, id, d.option, [{ id, decision: 'accept', findings: [], text: d.reason, extraRounds: 0, by, ...(j !== null ? { judgment: j.judgment } : {}) }], undefined, j);
+          break;
+        case 'accept-risk':
           // the findings become residual risks and the exploration settles on the version the stop's
           // position named; the ruling pass that revokes its negation rides in the same write
           await carryDecision(ctx, x, id, d.option, [{ id, decision: 'accept-risk', findings: [...h.unresolvedBlocking], text: d.reason, extraRounds: 0, by }], {

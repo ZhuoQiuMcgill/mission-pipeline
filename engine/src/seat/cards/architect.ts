@@ -19,7 +19,7 @@ import type { ContentHash, JudgmentId, MissionId, ObjectVersionId } from '../../
 import type { BaseRecord, JudgmentRecord, ListRef, ObjectVersionRecord, ReviewContract } from '../../common/records.ts';
 import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
-import { DetailedPlanDoc, DetailedTask, TaskProvenance, elementsOf, feasibilityRequired, planIdProblems, type StoredDetailedPlan } from '../../flow/plandoc.ts';
+import { DetailedPlanDoc, DetailedTask, TaskProvenance, elementsOf, feasibilityRequired, planIdProblems, taskCardHash, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import { MECHANICAL_RULES } from '../../flow/mechanical.ts';
 import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
@@ -84,6 +84,12 @@ export const ArchitectDecomposeCardSchema = z.object({
   }),
   /** 4.1.2: the project's commands (local tests a task may run; the full suite only the integration task's Reviewer runs). Absent on cards queued before it existed. */
   projectCommands: ProjectCommands.optional(),
+  /**
+   * 4.1.3 (E-2): the plan reviews waived on the user's words: `previous`, the label of the plan this
+   * revision revises when it took effect without its reviews; `next`, the waiver in force for the plan
+   * this card hands back. Absent: no waiver either way.
+   */
+  planReviews: z.object({ previous: z.string().nullable(), next: z.string().nullable() }).optional(),
 });
 export type ArchitectDecomposeCard = z.infer<typeof ArchitectDecomposeCardSchema>;
 
@@ -237,6 +243,16 @@ function renderRevision(c: ArchitectDecomposeCard): string {
   );
 }
 
+/** 4.1.3 (E-2): the plan reviews waived on the user's words, as the decomposition card says it. */
+function renderPlanReviews(c: ArchitectDecomposeCard): string {
+  const p = c.planReviews;
+  if (p === undefined || (p.previous === null && p.next === null)) return '';
+  return list("The plan's reviews (waived on the user's words)", [
+    ...(p.previous !== null ? [`The plan this revision revises: ${p.previous}.`] : []),
+    ...(p.next !== null ? [`The plan you hand back: ${p.next}.`] : []),
+  ]);
+}
+
 export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
   const r = c.revision;
   // a revision card queued before the previous plan became a material: the plan inline, in full
@@ -253,6 +269,7 @@ export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
     `## Git history (exported)\n${c.history.gitLog || '(none)'}\n\n` +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms, ${h.costMicros} micro-dollars`)) +
     renderPlanningRules(c.projectCommands) +
+    renderPlanReviews(c) +
     renderRevision(c) +
     renderMaterials(c.materials ?? []) +
     inline
@@ -428,7 +445,11 @@ export type ArchitectRepairCard = z.infer<typeof ArchitectRepairCardSchema>;
 export const ArchitectRepairResultShape = {
   reopen: z.array(z.object({ task: z.string().min(1).describe('A task with an accepted product, listed on the card.'), issue: z.string().min(1).describe('What its work must fix for this repair.') })).describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
   add: z.array(DetailedTask).describe('New tasks the repair needs, added to the plan in effect (fresh ids; dependsOn the existing tasks whose work they build on or whose paths they touch).'),
-  note: z.string().describe('Why this repair is these reopenings and additions, in a few sentences.'),
+  change: z
+    .array(DetailedTask)
+    .optional()
+    .describe('4.1.3: tasks of the plan in effect with no accepted product whose card the repair changes (the same id and kind; a new goal, standards, write scope, commands or dependencies). Each starts a new attempt under its new card, carrying its earlier work on. Never a task with an accepted product: reopen that one.'),
+  note: z.string().describe('Why this repair is these reopenings, changes and additions, in a few sentences.'),
 };
 const ArchitectRepairResultSchema = z.object(ArchitectRepairResultShape);
 export type ArchitectRepairResult = z.infer<typeof ArchitectRepairResultSchema>;
@@ -442,8 +463,9 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
     list('Tasks', p.tasks.map((t) => `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing'}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t.provenance)})`)) +
     list('PM plan elements an added task may trace to', c.elements.map((e) => `[${e.id}] (${e.kind}) ${e.text}`)) +
     list('Accepted work a repair may reopen (task: product, attempt, paths it changed)', c.accepted.map((a) => `${a.task}: ${a.product} (attempt ${a.attempt}): ${a.changedPaths.join(', ') || 'no path'}`)) +
+    list('Tasks with no accepted product (a repair may change their card)', p.tasks.filter((t) => !c.accepted.some((a) => a.task === t.id)).map((t) => t.id)) +
     list('Who changed the paths the repair is about', c.owners.map((o) => `${o.path}: ${o.owners.map((x) => `${x.task} (${x.product}, attempt ${x.attempt}${x.current ? '' : ', an earlier version'})`).join('; ') || 'no accepted product'}`)) +
-    '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. Existing tasks keep their cards: change none of them. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect").\n\n' +
+    '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. A task with an accepted product keeps its card. A task with no accepted product (not on the accepted list) may get a changed card under "change": the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs; it then starts a new attempt and carries its earlier work on. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect").\n\n' +
     renderPlanningRules(c.projectCommands) +
     (c.revision !== null ? list('Mechanical check failures of your previous hand-back to fix', c.revision.mechanicalFailures) : '') +
     renderMaterials(c.materials ?? [])
@@ -452,7 +474,8 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
 
 export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult): string[] {
   const out: string[] = [];
-  if (r.reopen.length === 0 && r.add.length === 0) out.push('reopen, add: a repair reopens at least one task or adds at least one');
+  const change = r.change ?? [];
+  if (r.reopen.length === 0 && r.add.length === 0 && change.length === 0) out.push('reopen, add, change: a repair reopens, changes or adds at least one task');
   const accepted = new Set(c.accepted.map((a) => a.task));
   const named = r.reopen.map((x) => x.task);
   for (const t of new Set(named)) {
@@ -465,11 +488,24 @@ export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult)
     if (existing.has(id)) out.push(`add: task id "${id}" is a task of the plan in effect: an added task gets a fresh id (existing tasks keep their cards)`);
     if (ids.filter((x) => x === id).length > 1) out.push(`add: task id "${id}" is used more than once`);
   }
+  // 4.1.3: a changed card is of a task of the plan in effect with no accepted product, the same id and kind, and differs
+  const changed = change.map((t) => t.id);
+  for (const t of change) {
+    const now = c.plan.tasks.find((x) => x.id === t.id);
+    if (now === undefined) out.push(`change: task "${t.id}" is not a task of the plan in effect (an added task goes under add)`);
+    else {
+      if (accepted.has(t.id)) out.push(`change: task "${t.id}" has an accepted product: it keeps its card (reopen it with the issue its work must fix)`);
+      if (t.kind !== now.kind) out.push(`change[${t.id}].kind: a changed card keeps the task's kind (${now.kind})`);
+      if (taskCardHash(t) === taskCardHash(now)) out.push(`change[${t.id}]: the card is unchanged`);
+    }
+    if (changed.filter((x) => x === t.id).length > 1) out.push(`change: task "${t.id}" is named more than once`);
+    if (named.includes(t.id)) out.push(`change: task "${t.id}" is also reopened: a task is either reopened or changed`);
+  }
   const elements = new Set(c.elements.map((e) => e.id));
-  for (const t of r.add) {
-    for (const e of elementsOf(t.provenance)) if (!elements.has(e)) out.push(`add[${t.id}].provenance: "${e}" is not an element of the PM plan`);
-    for (const d of t.dependsOn) if (!existing.has(d) && !ids.includes(d)) out.push(`add[${t.id}].dependsOn: "${d}" is not a task of the plan in effect or of this repair`);
-    if (t.estimate.basis.trim() === '') out.push(`add[${t.id}].estimate.basis: give the basis of the estimate`);
+  for (const [where, t] of [...r.add.map((t) => ['add', t] as const), ...change.map((t) => ['change', t] as const)]) {
+    for (const e of elementsOf(t.provenance)) if (!elements.has(e)) out.push(`${where}[${t.id}].provenance: "${e}" is not an element of the PM plan`);
+    for (const d of t.dependsOn) if (!existing.has(d) && !ids.includes(d)) out.push(`${where}[${t.id}].dependsOn: "${d}" is not a task of the plan in effect or of this repair`);
+    if (t.estimate.basis.trim() === '') out.push(`${where}[${t.id}].estimate.basis: give the basis of the estimate`);
   }
   return out;
 }

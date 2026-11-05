@@ -349,6 +349,26 @@ function outputMissions(db: Db, outputs: readonly DeliveryTarget[]): string[] {
   return [...out];
 }
 
+/**
+ * The check of `--authority <item>` (D-8: delegation is an authorization): the item's line when it is an
+ * authorization item in force in the mission, else a refusal that says why and that `nothing` happened.
+ * Shared by the commands that rest on the user's words or an authorization (mp pm full-run, mp pm waive).
+ */
+export async function authorizationInForce(ctx: ProcessContext, mission: string, authority: string, nothing: string): Promise<string> {
+  let line: string;
+  try {
+    line = authority.startsWith('item.') ? authority : itemLine(mission, authority);
+  } catch (e) {
+    throw new ProcessError('NOT_ALLOWED', `--authority ${authority}: ${(e as Error).message}`);
+  }
+  const items = await currentItems(flowCtx(ctx.ports(), mission as MissionId));
+  const item = items.find((i) => i.line === line);
+  if (item === undefined || item.type !== 'authorization' || item.state !== 'valid') {
+    throw new ProcessError('NOT_ALLOWED', `${authority} is not an authorization item in force in mission ${mission}${item !== undefined ? (item.type !== 'authorization' ? ` (it is a ${item.type} item)` : ` (it is ${item.state})`) : ''}: ${nothing}`);
+  }
+  return line;
+}
+
 export interface PmFullRunRequest {
   readonly mission: string;
   /** The user's words that agreed to this full run (W-<n>), or */
@@ -373,21 +393,7 @@ export async function pmFullRun(ctx: ProcessContext, req: PmFullRunRequest): Pro
   if (words === null && authority === null) throw new ProcessError('NOT_ALLOWED', 'a full run at the end of a mission is decided by the user (--words W-<n>: their agreement) or under an authorization they gave (--authority <item-id>): the record must show who decided; nothing was run');
   if (req.reason.trim() === '') throw new ProcessError('NOT_ALLOWED', '--reason: why the changes since the last full run are worth another one');
   if (ctx.fullSuite.length === 0) throw new ProcessError('NOT_ALLOWED', 'no full suite is configured (config.json fullSuite): there is nothing to run');
-  let cited: string | null = null;
-  if (authority !== null) {
-    let line: string;
-    try {
-      line = authority.startsWith('item.') ? authority : itemLine(req.mission, authority);
-    } catch (e) {
-      throw new ProcessError('NOT_ALLOWED', `--authority ${authority}: ${(e as Error).message}`);
-    }
-    const items = await currentItems(flowCtx(ctx.ports(), req.mission as MissionId));
-    const item = items.find((i) => i.line === line);
-    if (item === undefined || item.type !== 'authorization' || item.state !== 'valid') {
-      throw new ProcessError('NOT_ALLOWED', `${authority} is not an authorization item in force in mission ${req.mission}${item !== undefined ? (item.type !== 'authorization' ? ` (it is a ${item.type} item)` : ` (it is ${item.state})`) : ''}: nothing was run`);
-    }
-    cited = line;
-  }
+  const cited = authority === null ? null : await authorizationInForce(ctx, req.mission, authority, 'nothing was run');
   // the outputs `mp pm finish` would deliver by default (finish.ts acceptedOutputs: the plan in effect, with its repairs)
   const outputs = req.outputs !== undefined && req.outputs.length > 0 ? req.outputs : await acceptedOutputs(ctx, req.mission);
   // the scope a delivery of these outputs would have (the delivery's resolver), before anything is built or run

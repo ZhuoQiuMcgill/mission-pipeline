@@ -357,6 +357,9 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       for (const d of ds) rev = Math.max(rev, d.rev);
       const flying = ds.filter((d) => d.state === 'in-flight');
       if (flying.length > 0) label = `${label}; ${flying.map((d) => `${d.seat} ${d.dispatch} in flight`).join(', ')}`;
+      // the user's latest amendment of its method (mp pm amend-attempts), while it is not settled
+      const amended = s.amendments.at(-1);
+      if (amended !== undefined && current === null) label = `${label}; attempts amended by ${amended.words}: added ${amended.added.join(', ') || 'none'}, replaced ${amended.replaced.join(', ') || 'none'}`;
       const def = s.def as unknown as Json | null;
       entries.set(k, { kind: 'exploration', id: x, mission: m, title: clip(String(def?.['question'] ?? def?.['deliverable'] ?? def?.['goal'] ?? x), 100), label, changedAt: timeOf(rev), changedRev: rev, blocked: null });
     }
@@ -431,7 +434,9 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
         ? `open the mission again if the user wants its production to go on (mp pm mission open ${h.mission})`
         : h.why.startsWith('git writes')
           ? 'confirm this copy is the one in use (mp pm confirm-copy, WI-31)'
-          : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
+          : h.why.startsWith('exploration')
+            ? 'it starts by itself once the explorations it waits for settle (their own blocks are listed here)'
+            : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
     block(ofStep(h.step, String(h.mission)), `${h.step} (${h.seat}) is held: ${h.why}`, next, h.wi);
   }
   // dispatches: in flight under a stop, in flight too long, a hand-back after a stop

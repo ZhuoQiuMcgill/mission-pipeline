@@ -230,6 +230,8 @@ export interface AcceptedHandBack {
   readonly runs: ReadonlyArray<{ readonly run: string; readonly completed: boolean; readonly envLine?: string; readonly envSnapshot?: string }>;
   /** The records accepted with it: judgments, object versions, issues. */
   readonly records: readonly BaseRecord[];
+  /** 4.1.3 (E-4): the data outside the commit its texts cite, as the program checked it at the hand-back (none: it cites none, or it is from before 4.1.3). */
+  readonly data?: readonly import('../seat/cards/experiment.ts').RecordedData[];
 }
 
 export interface FlowTaskStatus {
@@ -395,6 +397,10 @@ export interface FlowEvaluatorPort {
 export interface FlowProject {
   readonly localCommands: readonly SuiteCommand[];
   readonly fullSuite: readonly SuiteCommand[];
+  /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config `planReviewsWaived`). */
+  readonly planReviewsWaived?: readonly string[];
+  /** Missions whose tasks start on their dependencies' verified hand-backs (config `startOnHandback`). */
+  readonly startOnHandback?: readonly string[];
 }
 
 /** The three ports together, plus the clock and the project's declared commands. */

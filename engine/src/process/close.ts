@@ -36,7 +36,8 @@ import { decisionLabels, decidingViews, labelBatch, labelStatus, olderEnvironmen
 import { appendRecords, closeMission, currentDelivery, factById, flowEvents, LedgerError, listDispatches, missionCloses, releaseDispatch, setMission, taskQueue, wordsEntry, type Db, type DispatchInfo, type MissionClose, type WriteTx } from '../memory/index.ts';
 import { deliveryDocument } from '../delivery/delivery.ts';
 import { PLAN_LINE, PM_PLAN_EFFECTIVE, SECRETARY_LINE, explorationLine, taskLine } from '../flow/plandoc.ts';
-import { acceptedStartOf, lineAcceptance } from '../flow/execution.ts';
+import { acceptedStartOf, lineAcceptance, riskAcceptance } from '../flow/execution.ts';
+import { planReviewsWaiver, waiverLabel } from '../flow/waivers.ts';
 import { flowCtx } from '../flow/context.ts';
 import { fold } from '../flow/exploration/machine.ts';
 import { latestEffective, planInEffect } from '../flow/planning.ts';
@@ -115,16 +116,23 @@ export interface RepairEntry {
   readonly words: string | null;
   /** What it is about ("task <id>", "exploration <id>"), or null: the plan in effect as a whole. */
   readonly about: string | null;
-  /** Where it stands: decided (amended and/or reopened), architect (its Architect step is under way), exploration (one more round), waiting. */
+  /** Where it stands: decided (amended and/or reopened), architect (its Architect step is under way), exploration (one more round), answered (by the user's amendment of the exploration's method), waiting. */
   readonly state?: string;
+  /** answered: the change that answered it, in words ("amendment <n> of exploration <id> (W-<n>)"; 4.1.3: also "rerun <n>", "snapshot <n>"). */
+  readonly answeredBy?: string;
   /** The tasks it added to the plan in effect, and the tasks it reopened. */
   readonly added?: readonly string[];
   readonly reopened?: readonly string[];
+  /** 4.1.3: the tasks whose card it changed. */
+  readonly changed?: readonly string[];
 }
+
+/** A change that answered a repair about an exploration (4.1.3, E-5), as the close snapshot names it. */
+const CHANGE_WORDS: Readonly<Record<'attempts-amended' | 'attempt-rerun' | 'resnapshotted', string>> = { 'attempts-amended': 'amendment', 'attempt-rerun': 'rerun', resnapshotted: 'snapshot' };
 
 /** The mission's repairs for the closing snapshot, read through the flow's resolver (repairsOf). */
 async function closingRepairs(ctx: ProcessContext, mission: MissionId): Promise<RepairEntry[]> {
-  return (await repairsOf(flowCtx(ctx.ports(), mission))).map((r) => ({ repair: r.id, kind: r.kind, text: r.text, words: r.words, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state: r.state, added: [...r.added], reopened: [...r.reopened] }));
+  return (await repairsOf(flowCtx(ctx.ports(), mission))).map((r) => ({ repair: r.id, kind: r.kind, text: r.text, words: r.words, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state: r.state, added: [...r.added], reopened: [...r.reopened], ...((r.changed ?? []).length > 0 ? { changed: [...r.changed!] } : {}), ...(r.answeredBy !== undefined ? { answeredBy: `${CHANGE_WORDS[r.answeredBy.change]} ${r.answeredBy.n} of exploration ${r.answeredBy.exploration} (${r.answeredBy.words})` } : {}) }));
 }
 
 /** What the close reads before its write (git, and resolvers on the context): the delivered tree's full-run status, the repairs. */
@@ -139,6 +147,30 @@ interface CloseInputs {
   /** The mission's current delivery as read before the write, with its tree and the full-run status of that tree. */
   readonly delivered: { readonly delivery: string; readonly tree: string | null; readonly fullRun: FullRunStatus | null } | null;
   readonly repairs: readonly RepairEntry[];
+  /** 4.1.3 (E-2): the mission's plans that took effect without their reviews (flow/waivers.ts, the one resolver). */
+  readonly planReviews: readonly PlanReviewsEntry[];
+}
+
+/** A plan that took effect without its reviews, as the closing snapshot lists it (4.1.3, E-2). */
+export interface PlanReviewsEntry {
+  readonly dplan: string;
+  readonly by: string;
+  readonly ref: string;
+  readonly skipped: readonly string[];
+  /** "this plan took effect without its reviews (feasibility, Calibrator ②), on W-n". */
+  readonly label: string;
+}
+
+/** The plans of the mission that took effect without their reviews, read through the flow's resolver (planReviewsWaiver). */
+async function closingPlanReviews(ctx: ProcessContext, mission: MissionId): Promise<PlanReviewsEntry[]> {
+  const fc = flowCtx(ctx.ports(), mission);
+  const plans = [...new Set(ctx.memory.read((db) => flowEvents(db, { mission, line: PLAN_LINE, event: 'effective', limit: 10_000 }).filter((e) => !e.key.includes('#')).map((e) => e.key)))];
+  const out: PlanReviewsEntry[] = [];
+  for (const dplan of plans) {
+    const w = await planReviewsWaiver(fc, dplan);
+    if (w !== null) out.push({ dplan, by: w.by, ref: w.ref, skipped: [...(w.skipped ?? [])], label: waiverLabel(w) });
+  }
+  return out;
 }
 
 /** The closing snapshot document (4.1.2: the honest state of the work, fields added to v1; nothing in it refuses the close). */
@@ -168,6 +200,10 @@ export interface CloseSnapshot {
   /** Proven outputs whose deciding runs were recorded under an older environment identity. */
   readonly olderEnvironment: readonly string[];
   readonly repairs: readonly RepairEntry[];
+  /** 4.1.3 (E-2): the plans that took effect without their reviews, and on whose words (absent: a close before 4.1.3). */
+  readonly planReviews?: readonly PlanReviewsEntry[];
+  /** 4.1.3 (E-1): outputs a decision accepted with their risks (no Reviewer passed them), with the findings taken on (absent: a close before 4.1.3). */
+  readonly acceptedWithRisk?: ReadonlyArray<{ readonly task: string; readonly product: string; readonly escalation: string; readonly by: string; readonly words: string | null; readonly risks: readonly string[] }>;
   /** The full-run status against the delivered tree (null: no delivery, or the delivery changed while closing). */
   readonly fullRun: { readonly tree: string | null; readonly line: string; readonly status: FullRunStatus | null } | null;
   readonly labelsRecomputing: boolean;
@@ -187,9 +223,14 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
   const unfinishedTasks: string[] = [];
   const abandoned: string[] = [];
   const startRisks: string[] = [];
+  const acceptedWithRisk: NonNullable<CloseSnapshot['acceptedWithRisk']>[number][] = [];
   for (const t of tasks) {
-    const selected = lineAcceptance(flowEvents(tx, { mission, line: taskLine(t), limit: 10_000 }).map((e) => ({ revision: Number(e.revision), event: e.event, key: e.key, body: body<unknown>(tx, e.body) })));
+    const events = flowEvents(tx, { mission, line: taskLine(t), limit: 10_000 }).map((e) => ({ revision: Number(e.revision), event: e.event, key: e.key, body: body<unknown>(tx, e.body) }));
+    const selected = lineAcceptance(events);
     if (selected.abandoned) { abandoned.push(t); continue; }
+    // accepted by a decision with its risks (4.1.3): the findings it took on, quoted (the flow's resolver)
+    const ra = selected.product === null ? null : riskAcceptance(events);
+    if (ra !== null) acceptedWithRisk.push({ task: t, product: ra.product, escalation: ra.escalation, by: ra.by, words: ra.words, risks: [...ra.risks] });
     if (selected.product === null) { unfinishedTasks.push(t); continue; }
     const start = checked.get(t);
     let risk: string | null = null;
@@ -272,6 +313,8 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
   const risks = [
     ...(planMoved ? ['the plan in effect changed while closing: its tasks are those read before; close again for the current plan'] : []),
     ...startRisks,
+    ...inputs.planReviews.map((p) => `plan ${p.dplan}: ${p.label}`),
+    ...acceptedWithRisk.flatMap((a) => (a.risks.length > 0 ? a.risks.map((r) => `task ${a.task} (${a.product}): ${r}`) : [`task ${a.task} (${a.product}): accepted with its risk on ${a.escalation}`])),
     ...notProven.map((x) => `not proven: ${x}`),
     ...deliveredNotProven.map((x) => `not proven: ${x}`),
     ...issueRisks,
@@ -297,6 +340,8 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
     startRisks,
     olderEnvironment,
     repairs: inputs.repairs,
+    planReviews: inputs.planReviews,
+    acceptedWithRisk,
     fullRun,
     labelsRecomputing: recomputing,
     risks,
@@ -334,7 +379,10 @@ export function snapshotLines(snap: CloseSnapshot): string[] {
     list('Open or deferred issues', d.issues),
     list('Start risks', d.startRisks),
     list('Proven in an older environment', d.olderEnvironment),
-    list('Repairs', d.repairs?.map((r) => `${r.repair} (${r.kind}${r.words !== null ? `, ${r.words}` : ''}${r.about !== null ? `, about ${r.about}` : ''}): ${r.text}${r.state !== undefined ? ` [${r.state}${(r.added ?? []).length > 0 ? `; added ${r.added!.join(', ')}` : ''}${(r.reopened ?? []).length > 0 ? `; reopened ${r.reopened!.join(', ')}` : ''}]` : ''}`)),
+    list('Repairs', d.repairs?.map((r) => `${r.repair} (${r.kind}${r.words !== null ? `, ${r.words}` : ''}${r.about !== null ? `, about ${r.about}` : ''}): ${r.text}${r.state !== undefined ? ` [${r.state}${r.answeredBy !== undefined ? ` by ${r.answeredBy}` : ''}${(r.added ?? []).length > 0 ? `; added ${r.added!.join(', ')}` : ''}${(r.reopened ?? []).length > 0 ? `; reopened ${r.reopened!.join(', ')}` : ''}${(r.changed ?? []).length > 0 ? `; changed the card of ${r.changed!.join(', ')}` : ''}]` : ''}`)),
+    // 4.1.3 (absent from an older snapshot: not shown)
+    ...(snap.planReviews !== undefined ? [list('Plans that took effect without their reviews', snap.planReviews.map((p) => `${p.dplan}: ${p.label}`))] : []),
+    ...(snap.acceptedWithRisk !== undefined ? [list('Accepted with their risks by a decision (no Reviewer passed them)', snap.acceptedWithRisk.map((a) => `task ${a.task} (${a.product}) on ${a.escalation} by ${a.by === 'user' ? `the user${a.words !== null ? ` (${a.words})` : ''}` : 'the Secretary'}: ${a.risks.length} finding(s)`))] : []),
     `Full suite: ${d.fullRun === null ? (snap.fullRun === undefined ? 'not recorded (a close before 4.1.2)' : 'no delivered tree to compare') : d.fullRun.line}`,
     ...(d.labelsRecomputing ? ['Labels were recomputing at close: the proof states above are the last stored ones.'] : []),
   ];
@@ -405,7 +453,7 @@ export async function pmClose(ctx: ProcessContext, missionId: string, req: { rea
   const tasks = inEffect !== null ? inEffect.plan.tasks.map((t) => t.id) : [...((await latestEffective(fc))?.tasks ?? [])];
   const checked = new Map<string, Awaited<ReturnType<typeof acceptedStartOf>>>();
   for (const task of tasks) checked.set(task, await acceptedStartOf(fc, task));
-  const inputs: CloseInputs = { words: req.words ?? null, plan: { tasks, effective: effectiveCount }, delivered: deliveredInputs(ctx, mission), repairs: await closingRepairs(ctx, mission) };
+  const inputs: CloseInputs = { words: req.words ?? null, plan: { tasks, effective: effectiveCount }, delivered: deliveredInputs(ctx, mission), repairs: await closingRepairs(ctx, mission), planReviews: await closingPlanReviews(ctx, mission) };
   const op = stateOp(ctx, 'close', mission, req);
   let repeated = true;
   const out = ctx.memory.write({ op, payload: { mission, mode: req.mode, waitRunning, words: req.words ?? null, request: req.request ?? null }, command: 'close', filler: ctx.filler }, (tx) => {

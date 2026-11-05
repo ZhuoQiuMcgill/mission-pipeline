@@ -1,20 +1,26 @@
 // The exploration's cards (design 4.1 §6.3, §5.4; 4.0 4.3, 8.2, 6.2): built from the state alone
-// (machine.ts) and an explicit selection of current object constraints for review cards. Every card carries what the memory
+// (machine.ts) and an explicit selection of the project constraints in force (9.5: every seat's, by
+// dynamic.ts constraintsForExploration; the object constraints review cards bind). Every card carries what the memory
 // knows (the product's current version, every finding with its disposition and the Stabilizer's
 // verdict, the evidence executions, the discussion, the rulings), so a seat that continues after
 // evidence loses only its conversation, never the facts: its new card carries its notes and the
-// evidence (§5.4).
+// evidence (§5.4). The seats that know the exploration also read what the explorations planned
+// before it handed on (predecessors.ts): the author must, the others may; a blind executor never.
 
 import { CARD_FORMAT, materialPageCount, type ContinuationT, type MaterialRef } from '../../seat/cards/common.ts';
 import type { CrititorCard, EvidenceItemT, NewVersionT, PriorFindingT } from '../../seat/cards/crititor.ts';
-import type { ExperimentCard } from '../../seat/cards/experiment.ts';
+import { executorReportOf, type ExperimentCard, type ExecutorReport, type RecordedData } from '../../seat/cards/experiment.ts';
 import type { AuthorCard, InterpreterCard, ReaderCard, RegisteredAttemptT } from '../../seat/cards/researcher.ts';
 import type { StabilizerCard } from '../../seat/cards/stabilizer.ts';
 import type { objectConstraints } from '../../seat/cards/inputs.ts';
+import { constraintsForExploration } from '../../seat/cards/dynamic.ts';
+import type { ConstraintBody } from '../requirements.ts';
+import { OLDER_ENVIRONMENT } from '../../evaluator/renew.ts';
 import { SEAT_CAPABILITIES } from '../context.ts';
 import type { FlowContent } from '../ports.ts';
-import { xid } from './definition.ts';
-import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, phaseFindings, type FindingState, type XState } from './machine.ts';
+import { xid, type ExplorationDefinition } from './definition.ts';
+import { allowedRounds, attemptEvidence, blocks, currentEvidence, effectiveSeverity, olderSnapshotEvidence, phaseFindings, supersededAttemptRecord, type EvidenceState, type FindingState, type XState } from './machine.ts';
+import { predecessorMaterials, withPredecessorMaterials, type Predecessor } from './predecessors.ts';
 
 type ObjectConstraints = ReturnType<typeof objectConstraints>;
 
@@ -34,6 +40,14 @@ class Materials {
   add(id: string, title: string, ref: string, mustRead: boolean): string {
     if (!this.list.some((m) => m.id === id)) this.list.push({ id, title, ref, pages: materialPageCount(this.content.get(ref)), mustRead });
     return id;
+  }
+  /** A value's text, or null when the store has none (a card is still built). */
+  text(ref: string): string | null {
+    try {
+      return this.content.get(ref);
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -60,12 +74,62 @@ function common(s: XState, task: string, duties: string, resume: Resume | null, 
     ...(asyncEvidence ? { allowAsyncEvidence: true } : {}),
     ...(continuation !== null ? { continuation } : {}),
     // 4.1.2 (D-10): the repairs that reopened the exploration, an added question on every round's card
-    ...(s.repairs.length > 0 ? { repairs: s.repairs.map((r) => ({ ...r })) } : {}),
+    // (one the user's amendment of the method answered, `mp pm amend-attempts --answers`, is no open question)
+    ...(openRepairs(s).length > 0 ? { repairs: openRepairs(s).map((r) => ({ ...r })) } : {}),
   };
+}
+
+/** The repairs about the exploration still open: those no amendment of the method answered. */
+function openRepairs(s: XState) {
+  return s.repairs.filter((r) => !s.answeredRepairs.has(r.id));
+}
+
+/** The project constraints in force that a card of this seat shows (9.5; the claim selects them again, refresh.ts). */
+function projectConstraints(s: XState, seat: string, inForce: readonly ConstraintBody[]) {
+  const { def } = defined(s);
+  return constraintsForExploration(inForce, seat, def.mission, def.exploration);
 }
 
 function readOnlyWorkspace(s: XState) {
   return { snapshot: defined(s).d.snapshot.path, writablePaths: [] as string[] };
+}
+
+/**
+ * A queued card as its dispatch hands it over (process/explorationSnapshot.ts): the commit it names
+ * and a blind card's evidence binding are the exploration's as they stand at the claim, so a card
+ * queued before a resnapshot reads the new snapshot, and the evidence it lists from an older snapshot
+ * is labelled as on a card built now. Everything else is the card as it was queued; a card that
+ * needs none of it (every card of an exploration whose snapshot was not taken again) is returned as
+ * it is.
+ */
+export function cardAtClaim<C extends { readonly seat: string } & Readonly<Record<string, unknown>>>(s: XState, card: C): C {
+  const d = s.defined;
+  if (d === null) return card;
+  let out: Record<string, unknown> = card;
+  const ws = card['workspace'] as { readonly snapshot: string } | undefined;
+  if (ws !== undefined && ws.snapshot !== d.snapshot.path) out = { ...out, workspace: { ...ws, snapshot: d.snapshot.path } };
+  // a blind card's evidence is a binding (the others' evidence is a list of records)
+  if (card.seat === 'researcher-reader' || card.seat === 'constructor-experiment') {
+    const ev = card['evidence'] as { readonly envLine: string; readonly envSnapshot: string };
+    if (ev.envLine !== d.envLine || ev.envSnapshot !== d.envSnapshot) out = { ...out, evidence: { ...ev, envLine: d.envLine, envSnapshot: d.envSnapshot } };
+    return out as C;
+  }
+  const due = (id: string | null, summary: string): boolean => id !== null && olderSnapshotEvidence(s, id) && !summary.endsWith(OLDER_MARK);
+  const relabel = <T extends { readonly summary: string }>(items: readonly T[], id: (x: T) => string | null): T[] | null =>
+    items.some((x) => due(id(x), x.summary)) ? items.map((x) => (due(id(x), x.summary) ? { ...x, summary: `${x.summary}${OLDER_MARK}` } : x)) : null;
+  const evidence = Array.isArray(card['evidence']) ? relabel(card['evidence'] as ReadonlyArray<{ readonly id: string; readonly summary: string }>, (x) => x.id) : null;
+  if (evidence !== null) out = { ...out, evidence };
+  // an interpreter's attempts, each with its latest record
+  const attempts = Array.isArray(card['attempts']) ? relabel(card['attempts'] as ReadonlyArray<{ readonly evidence: string | null; readonly summary: string }>, (x) => x.evidence) : null;
+  if (attempts !== null) out = { ...out, attempts };
+  return out as C;
+}
+
+const OLDER_MARK = ` (${OLDER_ENVIRONMENT})`;
+
+/** An evidence summary as the cards show it: one recorded under an older snapshot (before a resnapshot) still counts, and says so. */
+export function evidenceSummary(s: XState, e: EvidenceState): string {
+  return olderSnapshotEvidence(s, e.id) ? `${e.summary}${OLDER_MARK}` : e.summary;
 }
 
 function explorationRef(s: XState, focus: 'product' | 'method' | 'reasoning') {
@@ -96,18 +160,43 @@ function priorFinding(f: FindingState, m: Materials, i: number, mustRead: boolea
     disposition: f.disposition === null ? null : { action: f.disposition.action, note: f.disposition.note, evidence: f.disposition.evidence, question: f.disposition.question },
     ruling: f.ruling,
     scope: f.scope,
+    ...(f.answered !== null ? { answered: f.answered } : {}),
   };
 }
 
 function evidenceItems(s: XState, m: Materials, onlyExtra = false, mustRead: ReadonlySet<string> = new Set()): EvidenceItemT[] {
+  // an attempt's record a later run of it superseded (`mp pm rerun-attempt`) is history, on no card
   return [...s.evidence.values()]
-    .filter((e) => !onlyExtra || e.attempt === null)
+    .filter((e) => (!onlyExtra || e.attempt === null) && !supersededAttemptRecord(s, e.id))
     .sort((a, b) => a.k - b.k)
-    .map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt, material: e.report !== null ? m.add(`evidence-${e.id}`, `Evidence ${e.id} report`, e.report, mustRead.has(e.id)) : null }));
+    .map((e) => {
+      const report = executorReportMaterial(e, m, `Evidence ${e.id}`);
+      return { id: e.id, status: e.status, summary: evidenceSummary(s, e), attempt: e.attempt, material: e.report !== null ? m.add(`evidence-${e.id}`, `Evidence ${e.id} report`, e.report, mustRead.has(e.id)) : null, ...(report !== null ? { executorReport: report } : {}) };
+    });
+}
+
+/**
+ * 4.1.3 (#45): the executor's own report of an evidence run (report.md, with the appendices the
+ * method asked for), kept with its record, as a readable material of the cards that read the
+ * evidence: the author's, the attacker's and the interpreter's. A blind executor's card has no
+ * evidence, so never this. Null: the executor wrote none, or the record is from before 4.1.3.
+ */
+function executorReportMaterial(e: EvidenceState, m: Materials, what: string): string | null {
+  const r: ExecutorReport | null = e.report === null ? null : executorReportOf(m.text(e.report));
+  if (r === null) return null;
+  return m.add(`evidence-${e.id}-executor`, `${what}: the executor's report${r.kept !== undefined ? ` (cut at ${r.kept} of ${r.bytes} bytes)` : ''}`, r.ref, false);
 }
 
 function rulings(s: XState): string[] {
-  return s.rulings.filter((r) => r.decision !== 'extend' && r.decision !== 'retry' && r.text.trim() !== '').map((r) => `(${r.decision}${r.findings.length > 0 ? ` on ${r.findings.join(', ')}` : ''}, by ${r.by}) ${r.text}`);
+  return s.rulings.flatMap((r) => {
+    if (r.decision === 'retry') return [];
+    // a grant shows on the cards only with the decision's instructions or the findings it is for (4.1.3, #38, #39)
+    if (r.decision === 'extend') {
+      if (r.instructions === undefined && r.findings.length === 0) return [];
+      return [`(grant of ${r.extraRounds} round(s)${r.findings.length > 0 ? ` for ${r.findings.join(', ')}` : ''}, by ${r.by}) ${r.instructions ?? r.text}`];
+    }
+    return r.text.trim() !== '' ? [`(${r.decision}${r.findings.length > 0 ? ` on ${r.findings.join(', ')}` : ''}, by ${r.by}) ${r.text}`] : [];
+  });
 }
 
 /** What a version of this phase relies on: a research interpretation, its method version (review r1 #2). */
@@ -156,7 +245,7 @@ function newVersion(s: XState, n: number): NewVersionT {
 const AUTHOR_DUTIES =
   'You own this exploration\'s product. Each turn pick one step: discuss the framing, ask for evidence (request-evidence), or submit a new version with a disposition for every open finding.';
 
-export function authorCard(s: XState, n: number, task: string, content: FlowContent, resume: Resume | null): AuthorCard {
+export function authorCard(s: XState, n: number, task: string, content: FlowContent, resume: Resume | null, inForce: readonly ConstraintBody[], preds: readonly Predecessor[] = []): AuthorCard {
   const { def } = defined(s);
   const m = new Materials(content);
   if (s.version !== null) m.add('version', `Current version ${s.version.id}`, s.version.content, true);
@@ -167,7 +256,9 @@ export function authorCard(s: XState, n: number, task: string, content: FlowCont
   const other = findings.filter((f) => f.status !== 'open');
   return {
     ...common(s, task, def.duties.trim() !== '' ? def.duties : AUTHOR_DUTIES, resume, true, [], m),
+    ...dataCheckedField(s),
     seat: 'researcher-author',
+    constraints: [...def.constraints, ...projectConstraints(s, 'researcher-author', inForce)],
     workspace: readOnlyWorkspace(s),
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
@@ -181,13 +272,13 @@ export function authorCard(s: XState, n: number, task: string, content: FlowCont
     evidence: evidenceItems(s, m),
     discussion: [...s.discussion],
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, true)),
     newVersion: newVersion(s, n),
     registerAttempts: s.phase === 'method',
   };
 }
 
-export function interpreterCard(s: XState, n: number, task: string, content: FlowContent): InterpreterCard {
+export function interpreterCard(s: XState, n: number, task: string, content: FlowContent, inForce: readonly ConstraintBody[], preds: readonly Predecessor[] = []): InterpreterCard {
   const { def } = defined(s);
   if (s.method === null) throw new Error('interpretation before the method passed');
   const m = new Materials(content);
@@ -203,7 +294,9 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
   const all = [...s.findings.values()];
   return {
     ...common(s, task, 'Interpret the records of the registered attempts; you took part in none of the executions.', null, false),
+    ...dataCheckedField(s),
     seat: 'researcher-interpreter',
+    constraints: [...def.constraints, ...projectConstraints(s, 'researcher-interpreter', inForce)],
     workspace: readOnlyWorkspace(s),
     exploration: explorationRef(s, 'reasoning'),
     goal: def.goal,
@@ -212,14 +305,16 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
     attempts: s.method.attempts.map((a: RegisteredAttemptT) => {
       const latest = attemptEvidence(s, a.id);
       const e = latest !== null ? (s.evidence.get(latest) ?? null) : null;
+      const report = e !== null ? executorReportMaterial(e, m, `Attempt ${a.id}`) : null;
       return {
         id: a.id,
         kind: a.kind,
         purpose: a.purpose,
         evidence: e?.id ?? null,
         status: e?.status ?? 'not-run',
-        summary: e?.summary ?? 'no record',
+        summary: e !== null ? evidenceSummary(s, e) : 'no record',
         material: e !== null && e.report !== null ? m.add(`evidence-${e.id}`, `Attempt ${a.id} record`, e.report, true) : null,
+        ...(report !== null ? { executorReport: report } : {}),
       };
     }),
     evidence: evidenceItems(s, m, true),
@@ -229,12 +324,12 @@ export function interpreterCard(s: XState, n: number, task: string, content: Flo
     openFindings: open.map((f) => priorFinding(f, m, all.indexOf(f), true)),
     otherFindings: other.map((f) => priorFinding(f, m, all.indexOf(f), false)),
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, false)),
     newVersion: newVersion(s, n),
   };
 }
 
-export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null, constraints: ObjectConstraints): CrititorCard {
+export function attackerCard(s: XState, n: number, task: string, content: FlowContent, mode: 'attack' | 'discuss', fresh: boolean, resume: Resume | null, constraints: ObjectConstraints, inForce: readonly ConstraintBody[], preds: readonly Predecessor[] = []): CrititorCard {
   const { d, def } = defined(s);
   const m = new Materials(content);
   const target = s.version;
@@ -246,12 +341,14 @@ export function attackerCard(s: XState, n: number, task: string, content: FlowCo
   baseMaterials(s, m);
   const all = [...s.findings.values()];
   const mine = phaseFindings(s);
-  // the closing attacker gets a fresh view: only what is still to be checked, not the history
+  // a fresh attacker (after a redefinition) gets a fresh view: only what is still to be checked, not the history
   const shown = fresh ? mine.filter((f) => f.status !== 'resolved') : mine;
   return {
     ...common(s, task, 'Attack the version adversarially and re-check every finding marked awaiting-recheck.', resume, true, [], m),
+    ...dataCheckedField(s),
     seat: 'crititor',
-    constraints: mode === 'attack' ? [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list] : [...def.constraints],
+    // the object constraints it reviews against are those the judgment binds; the instructions are context
+    constraints: [...(mode === 'attack' ? [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list] : def.constraints), ...projectConstraints(s, 'crititor', inForce).filter((c) => c.kind === 'instruction')],
     workspace: readOnlyWorkspace(s),
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
@@ -267,7 +364,7 @@ export function attackerCard(s: XState, n: number, task: string, content: FlowCo
     evidence: evidenceItems(s, m, false, new Set(shown.flatMap((f) => (f.status === 'awaiting-recheck' && f.disposition?.evidence != null ? [f.disposition.evidence] : [])))),
     discussion: fresh ? [] : [...s.discussion],
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, false)),
     binding:
       mode === 'attack' && target !== null
         ? {
@@ -297,6 +394,29 @@ export interface EvidenceRequestDoc {
   readonly commands?: ReadonlyArray<{ readonly id: string; readonly command: string; readonly cwd?: string }>;
 }
 
+/**
+ * 4.1.3 (E-4): the data outside the commit this exploration's hand-backs cited, each as mp checked it
+ * at that hand-back (stored with what the flow took in, flow.ts consumption; never hashed again here),
+ * once per pointer, in the order they came in. The cards that read the exploration list each pointer
+ * with its label, so a seat reading a version, a finding or a record tells a partial check from a full one.
+ */
+export function checkedData(s: XState): RecordedData[] {
+  const out = new Map<string, RecordedData>();
+  for (const c of s.consumed.values()) for (const d of ('data' in c ? (c.data ?? []) : [])) if (!out.has(d.pointer)) out.set(d.pointer, d);
+  return [...out.values()];
+}
+
+/** The card field of the checked data (absent when none is cited: the card as before 4.1.3). */
+function dataCheckedField(s: XState): { dataChecked?: Array<{ pointer: string; check: 'full' | 'partial'; label: string }> } {
+  const d = checkedData(s);
+  return d.length === 0 ? {} : { dataChecked: d.map((x) => ({ pointer: x.pointer, check: x.check, label: x.label })) };
+}
+
+/** The executor a request gets: its own, else the exploration's default (4.3 证据执行). The flow and the request's check (process/seat.ts) read it here. */
+export function requestExecutor(req: Pick<EvidenceRequestDoc, 'executor'>, def: Pick<ExplorationDefinition, 'evidenceExecutor'>): 'experiment' | 'reading' {
+  return req.executor ?? def.evidenceExecutor;
+}
+
 export function parseEvidenceRequest(doc: string): EvidenceRequestDoc | null {
   try {
     const v = JSON.parse(doc) as Record<string, unknown>;
@@ -322,6 +442,7 @@ export function executorCard(
   req: EvidenceRequestDoc,
   executor: 'experiment' | 'reading',
   evidence: { readonly id: string; readonly attempt: string | null },
+  inForce: readonly ConstraintBody[],
 ): ExperimentCard | ReaderCard {
   const { d, def } = defined(s);
   // blind (4.3, review r1 #19): no material of the exploration (not the PM plan, not the document
@@ -336,15 +457,16 @@ export function executorCard(
     materials: m.list,
   };
   const duties = 'Carry out the evidence run exactly as the steps say and record what happened.';
-  // execution instructions only: object constraints and decision quotes carry intent, not steps
+  // execution instructions only: object constraints and decision quotes carry intent, not steps;
+  // of the project's, only the instructions written for this blind seat (dynamic.ts constraintsForExploration)
   // blind: no intent (§4.3), so no repair either
-  const blindCommon = (extra: readonly string[]) => { const { repairs: _repairs, ...c } = common(s, task, duties, null, false, extra) as ReturnType<typeof common> & { repairs?: unknown }; void _repairs; return { ...c, decisionQuotes: [], constraints: def.constraints.filter((k) => k.kind === 'instruction') }; };
+  const blindCommon = (seat: string, extra: readonly string[]) => { const { repairs: _repairs, ...c } = common(s, task, duties, null, false, extra) as ReturnType<typeof common> & { repairs?: unknown }; void _repairs; return { ...c, decisionQuotes: [], constraints: [...def.constraints.filter((k) => k.kind === 'instruction'), ...projectConstraints(s, seat, inForce)] }; };
   if (executor === 'reading') {
     const net = def.readingNetwork.length > 0 ? ['net'] : [];
-    return { ...blindCommon(net), seat: 'researcher-reader', workspace: readOnlyWorkspace(s), network: { allowed: [...def.readingNetwork] }, ...blind };
+    return { ...blindCommon('researcher-reader', net), seat: 'researcher-reader', workspace: readOnlyWorkspace(s), network: { allowed: [...def.readingNetwork] }, ...blind };
   }
   return {
-    ...blindCommon([]),
+    ...blindCommon('constructor-experiment', []),
     seat: 'constructor-experiment',
     workspace: { snapshot: d.snapshot.path, writablePaths: [...def.experimentPaths] },
     interpreter: '',
@@ -360,7 +482,7 @@ export function executorCard(
  * dispositions, earlier in-scope findings still open, the first and the current version, the
  * earlier rounds' judgments and the rulings. Its judgment binds the attack judgment's contract.
  */
-export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent, constraints: ObjectConstraints): StabilizerCard {
+export function stabilizerCard(s: XState, n: number, task: string, content: FlowContent, constraints: ObjectConstraints, inForce: readonly ConstraintBody[], preds: readonly Predecessor[] = []): StabilizerCard {
   const { d, def: current0 } = defined(s);
   const st = s.stabilizing;
   if (st === null) throw new Error('no round to stabilize');
@@ -382,8 +504,9 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
   const earlier = phaseFindings(s).filter((f) => !round.has(f.id) && f.scope === 'in-scope' && f.status !== 'resolved' && blocks(f));
   return {
     ...common(s, task, 'Judge this round of the attack against the definition and the user\'s words: which findings bind the author, which shift the direction, and whether the work drifts.', null, false, [], m),
+    ...dataCheckedField(s),
     seat: 'stabilizer',
-    constraints: [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list],
+    constraints: [...def.constraints.filter((c) => c.kind === 'instruction'), ...constraints.list, ...projectConstraints(s, 'stabilizer', inForce).filter((c) => c.kind === 'instruction')],
     exploration: explorationRef(s, focusOf(s)),
     goal: def.goal,
     attackScope: def.attackScope,
@@ -398,7 +521,7 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
       (j) => `round ${j.round} (${j.verdict}): ${j.drift.verdict}${j.drift.reason !== '' ? ` — ${j.drift.reason}` : ''}; ${j.findings.map((f) => `${f.finding.slice(0, 24)} ${f.verdict} (${f.severity})`).join(', ')}`,
     ),
     rulings: rulings(s),
-    materials: m.list,
+    materials: withPredecessorMaterials(m.list, predecessorMaterials(preds, content, false)),
     binding: {
       judgment: xid.judgment(def.mission, def.exploration, n),
       bases: content.putList([basis]),
@@ -412,6 +535,29 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
     requiredEvidence: [...st.evidence],
     pendingDirection: pendingDirectionOf(s, round),
   };
+}
+
+/**
+ * #25 (E-3): a Stabilizer's card as its hand-back is judged (the position's verdict and the pass on
+ * the author's revision): the direction questions and the standing of the findings it lists as the
+ * record holds them at the hand-back, not as they were when the card was built, so a ruling recorded
+ * while the Stabilizer ran counts. Everything else is the card it was given; returned as it is when
+ * nothing changed.
+ */
+export function stabilizerCardAtHandBack(s: XState, card: StabilizerCard): StabilizerCard {
+  const round = new Set(card.findings.map((f) => f.id));
+  const now = (f: PriorFindingT): PriorFindingT => {
+    const x = s.findings.get(f.id);
+    if (x === undefined) return f;
+    const disposition = x.disposition === null ? null : { action: x.disposition.action, note: x.disposition.note, evidence: x.disposition.evidence, question: x.disposition.question };
+    if (x.status === f.status && x.ruling === f.ruling && JSON.stringify(disposition) === JSON.stringify(f.disposition)) return f;
+    return { ...f, status: x.status, disposition, ruling: x.ruling };
+  };
+  const findings = card.findings.map(now);
+  const earlier = card.earlier.map(now);
+  const pendingDirection = pendingDirectionOf(s, round);
+  const same = findings.every((f, i) => f === card.findings[i]) && earlier.every((f, i) => f === card.earlier[i]) && JSON.stringify(pendingDirection) === JSON.stringify(card.pendingDirection ?? []);
+  return same ? card : { ...card, findings, earlier, pendingDirection };
 }
 
 /** The direction questions waiting for a ruling apart from this round's findings (code review r1 #2). */

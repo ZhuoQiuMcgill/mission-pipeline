@@ -28,4 +28,6 @@ export const WI = {
   explorationRuling: 'WI-33',
   /** Current plan judgments leave newly applicable object constraints uncovered. */
   planConstraintGap: 'WI-34',
+  /** A dependency cycle (the labels' WI-16); 4.1.3: also explorations whose `after` entries wait for each other (#23). */
+  dependencyCycle: 'WI-16',
 } as const;

@@ -29,12 +29,14 @@
 // them again); the first writer of that event wins, the other adopts it.
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
+import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
 import type { Collection } from '../git/workspace.ts';
-import { continuationCheck, type ContinuationRequest } from '../evaluator/index.ts';
+import { continuationCheck, sampleRunId, type ContinuationRequest } from '../evaluator/index.ts';
 import {
   appendRecords,
   assertNotStopped,
@@ -59,14 +61,21 @@ import { EvidenceRequestSchema, isIntegrationCard, rerunCommands, rerunnableComm
 import { isFullSuiteCommand } from '../common/fullSuite.ts';
 import type { ReviewerCard } from '../seat/card.ts';
 import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/common.ts';
-import { handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
+import { handBackDataTexts, handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
+import { dataPaths, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
+import { checkDataFiles } from '../common/dataFile.ts';
+import { explorationCardAtHandBack } from './explorationSnapshot.ts';
 import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
 import { productObjectId, verificationStopped } from './actions.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
-import { runOnCommit, type RecordedRun } from './runs.ts';
+import { groupShellRunner, newRunId, normalizeCwd, RERUN_TAIL, runOnCommit, shellRunner, type RecordedRun } from './runs.ts';
+import { DETACHED_END_EVENT, DETACHED_EVENT, noticeLost, processStart, recordDetachedEnd, spawnRerunWorker, stepRuns, WAIT_DEFAULT_SECONDS, WAIT_MAX_SECONDS, WAIT_POLL_MS, type DetachedBody, type DetachedEndBody, type DetachSpawner, type RunEventBody, type StepRun, type WorkerStarted } from './detached.ts';
+import { foldExploration } from '../flow/exploration/predecessors.ts';
+import { requestExecutor } from '../flow/exploration/cards.ts';
+import { explorationLine } from '../flow/plandoc.ts';
 import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
 import { tagScope } from '../delivery/scope.ts';
 import { pathOwners } from '../flow/execution.ts';
@@ -186,11 +195,15 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promi
   return { path: c.path, commit: c.commit };
 }
 
-/**
- * `mp seat <id> rerun <command-id>` (§6.5, decision 11): a declared command of the card, run by
- * `mp` on a clean checkout of the card's commit: a sampling run, new run id, executed every time.
- */
-export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<{ readonly run: string; readonly passed: boolean; readonly summary: string; readonly leaf: string | null }> {
+/** What a rerun of a card's declared command runs on: the dispatch, the command, the card's commit (the checks of `mp seat <id> rerun`). */
+export interface RerunTarget {
+  readonly v: DispatchView;
+  readonly c: { readonly id: string; readonly command: string; readonly cwd?: string };
+  readonly snap: string;
+}
+
+/** The checks of `mp seat <id> rerun` (a stop first), for a foreground rerun, a detached one and its worker alike. */
+export function rerunTarget(ctx: ProcessContext, dispatch: string, commandId: string): RerunTarget {
   const v = dispatchView(ctx, dispatch);
   // a stop stops (§6.6): nothing is run in its scope, refused before any other refusal
   ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this rerun'));
@@ -203,24 +216,177 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
   if (c === undefined) throw new ProcessError('NOT_ALLOWED', `"${commandId}" is not a declared command on the card (ids: ${rerunnableCommands(v.card, { fullSuite: ctx.fullSuite }).map((x) => x.id).join(', ')})`);
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
-  const r = await runOnCommit(ctx, {
+  return { v, c, snap };
+}
+
+/** A rerun's result as the seat sees it, from `mp seat <id> rerun` or, for a detached one, `mp seat <id> wait`. */
+export interface RerunResult {
+  /** The evidence id to cite. */
+  readonly run: string;
+  readonly passed: boolean;
+  readonly summary: string;
+  readonly leaf: string | null;
+  /** The last lines of its output, passing or failing (4.1.3, #37), within RERUN_TAIL. */
+  readonly tail: string;
+}
+
+/**
+ * The runOnCommit request of a rerun, foreground or detached: the same declaration, fields and
+ * evidence, and the dispatch line's "run" event in the recording write (4.1.3: with the kept tail and
+ * the time). `check`: more checks inside that write (a detached run's worker: not stopped).
+ */
+function rerunRequest(t: RerunTarget, extra: { readonly detached?: string; readonly check?: (tx: WriteTx) => void } = {}) {
+  const { v, c, snap } = t;
+  const dispatch = v.info.dispatch;
+  return {
     mission: v.info.mission,
     commit: snap,
     commands: [c],
     purpose: `rerun of ${c.id} by dispatch ${dispatch}`,
-    declaration: { by: 'mp', checkout: 'clean', declared: true, rerun: true, experiment: v.card.seat === 'constructor-experiment' },
+    declaration: { by: 'mp', checkout: 'clean', declared: true, rerun: true, experiment: v.card.seat === 'constructor-experiment' } as const,
     fields: { dispatch },
+    tail: RERUN_TAIL,
+    keepPassingTail: true,
     also: (tx: WriteTx, runs: readonly RecordedRun[], _run: string, records: readonly EvidenceRecord[]) => {
+      extra.check?.(tx);
       for (const x of runs) {
         // the run's environment identity (4.1 §6.5): an experiment's evidence that cites it is bound to it
         const rec = records.find((r) => r.evidence === x.evidence);
         const env = rec !== undefined ? { envLine: rec.envLine as string, envSnapshot: rec.envSnapshot as string } : {};
-        appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'run', key: x.evidence, body: tx.data.put(canonicalJson({ run: x.evidence, command: c.id, completed: x.fields['status'] === 'completed', exit: x.fields['exit'], ...env })) as ContentHash }]);
+        const body: RunEventBody = { run: x.evidence, command: c.id, completed: x.fields['status'] === 'completed', exit: x.fields['exit'] ?? 'none', ...env, ...(x.tail !== '' ? { tail: tx.data.put(x.tail) } : {}), at: tx.at, ...(extra.detached !== undefined ? { detached: extra.detached } : {}) };
+        appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'run', key: x.evidence, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
       }
     },
-  });
+  };
+}
+
+/**
+ * `mp seat <id> rerun <command-id>` (§6.5, decision 11): a declared command of the card, run by
+ * `mp` on a clean checkout of the card's commit: a sampling run, new run id, executed every time.
+ * 4.1.3: the result carries the last lines of the output, passing or failing (#37).
+ */
+export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<RerunResult> {
+  const t = rerunTarget(ctx, dispatch, commandId);
+  const r = await runOnCommit(ctx, rerunRequest(t));
   const x = r.runs[0]!;
-  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf };
+  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail };
+}
+
+/** A detached rerun as `mp seat <id> rerun --detach` answers: its run id and the evidence id its result is recorded under. */
+export interface DetachedStart {
+  readonly run: string;
+  readonly evidence: string;
+  readonly pid: number;
+  readonly dispatch: string;
+}
+
+/**
+ * `mp seat <id> rerun <command-id> --detach` (4.1.3, #30): the rerun runs in a worker process of its
+ * own (detached.ts), which records it as running against the dispatch; this returns its run id at
+ * once. The checks are the foreground rerun's, here first and again in the worker.
+ */
+export async function seatRerunDetached(ctx: ProcessContext, dispatch: string, commandId: string, spawner: DetachSpawner = spawnRerunWorker): Promise<DetachedStart> {
+  const t = rerunTarget(ctx, dispatch, commandId);
+  const w = await spawner(ctx, { dispatch, command: t.c.id });
+  return { ...w, dispatch };
+}
+
+/** Refused inside a detached run's recording write: it was stopped (nothing of it is recorded). */
+class RunStopped extends Error {}
+
+/**
+ * The worker of a detached rerun (`mp seat <id> rerun <command-id> --worker`, detached.ts): the
+ * foreground rerun's checks, then the run recorded as running (its pid, start time and host), `ready`
+ * called, and the command run and recorded exactly as a foreground rerun, with the command in its own
+ * process group (groupShellRunner). When `stopping` fires (SIGTERM from `mp pm stop`), or a stop or a
+ * "stopped" record is there when it records, nothing of the run is recorded and it is recorded as
+ * stopped. A worker error after `ready` is recorded as lost, with the reason.
+ */
+export async function seatRerunWorker(ctx: ProcessContext, dispatch: string, commandId: string, o: { readonly ready: (w: WorkerStarted) => void; readonly stopping?: AbortSignal }): Promise<{ readonly start: WorkerStarted; readonly state: 'finished' | 'stopped' | 'lost'; readonly result: RerunResult | null }> {
+  const t = rerunTarget(ctx, dispatch, commandId);
+  const run = newRunId('rerun');
+  const evidence = sampleRunId(`${run}.${idPart(t.c.id)}`);
+  const line = DISPATCH_LINE(dispatch);
+  const started: DetachedBody = { run, evidence, command: t.c.id, dispatch, task: t.v.info.task, pid: process.pid, start: processStart(process.pid), host: hostname(), startedAt: ctx.now() };
+  ctx.memory.write({ op: `detached:${run}`, payload: { run, dispatch } }, (tx) => {
+    assertNotStopped(tx, t.v.info.tag, 'this rerun');
+    if (dispatchInfo(tx, dispatch)?.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${dispatch} is no longer in flight: a rerun is for a dispatch in flight`);
+    appendRecords(tx, [{ kind: 'flow.event', mission: t.v.info.mission, line, event: DETACHED_EVENT, key: run, body: tx.data.put(canonicalJson({ ...started, startedAt: tx.at })) as ContentHash }]);
+  });
+  const start: WorkerStarted = { run, evidence, pid: process.pid };
+  o.ready(start);
+  const check = (tx: WriteTx): void => {
+    if (o.stopping?.aborted === true) throw new RunStopped('the worker was told to stop');
+    if (flowEventExists(tx, { mission: t.v.info.mission, line, event: DETACHED_END_EVENT, key: run })) {
+      const end = flowEvents(tx, { mission: t.v.info.mission, line, event: DETACHED_END_EVENT }).find((e) => e.key === run);
+      // "lost" is a reader's inference: a result that arrives after it still counts; "stopped" does not
+      if (end !== undefined && (JSON.parse(tx.data.text(end.body)) as DetachedEndBody).outcome === 'stopped') throw new RunStopped('it was recorded as stopped');
+    }
+    if (stoppedFor(tx, t.v.info.tag)) throw new RunStopped('a stop covers it');
+  };
+  // the platform's shell, the command in its own process group; a test's runner as it is
+  const runner = ctx.runner === shellRunner ? groupShellRunner(o.stopping !== undefined ? { stopping: o.stopping } : {}) : ctx.runner;
+  const cleanupRunner = ctx.runner === shellRunner ? groupShellRunner() : ctx.runner;
+  try {
+    const r = await runOnCommit(ctx, { ...rerunRequest(t, { detached: run, check }), run, evidenceId: () => evidence, runner, cleanupRunner, recordRetries: 3 });
+    const x = r.runs[0]!;
+    return { start, state: 'finished', result: { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail } };
+  } catch (e) {
+    const stopped = e instanceof RunStopped || o.stopping?.aborted === true;
+    const why = stopped ? `stopped: ${e instanceof RunStopped ? e.message : 'the worker was told to stop'}` : `its worker failed: ${(e as Error).message}`;
+    try {
+      recordDetachedEnd(ctx, started, stopped ? 'stopped' : 'lost', why);
+    } catch {
+      /* the next look (mp pm next, mp seat <id> wait) records it as lost once this worker is gone */
+    }
+    return { start, state: stopped ? 'stopped' : 'lost', result: null };
+  }
+}
+
+/** What `mp seat <id> wait <run>` answers. */
+export interface WaitAnswer {
+  readonly run: string;
+  readonly evidence: string;
+  readonly state: StepRun['state'];
+  /** Finished: the result as a foreground rerun returns it. */
+  readonly result: RerunResult | null;
+  /** Stopped or lost: why. */
+  readonly why: string | null;
+  /** Running: since when (ms). */
+  readonly since: number | null;
+  /** The dispatch that started it. */
+  readonly startedBy: string;
+  readonly waitedMs: number;
+}
+
+/**
+ * `mp seat <id> wait <run> [--seconds <n>]` (4.1.3, #30): waits up to `seconds` (default 50 minutes,
+ * below common harness limits on one command) for a run of this step, a detached one of this dispatch
+ * or one an earlier dispatch of the step started (the card lists them), and answers its state:
+ * running, or finished with its result as a foreground rerun returns it (a recorded run at once, with
+ * its recorded tail), or stopped or lost. A running run whose worker is gone is recorded as lost.
+ */
+export async function seatWait(ctx: ProcessContext, dispatch: string, runId: string, o: { readonly seconds?: number; readonly pollMs?: number } = {}): Promise<WaitAnswer> {
+  const v = dispatchView(ctx, dispatch);
+  inFlight(v, 'a wait');
+  allows(ctx, v, 'rerun');
+  const seconds = o.seconds ?? WAIT_DEFAULT_SECONDS;
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds > WAIT_MAX_SECONDS) throw new ProcessError('NOT_ALLOWED', `--seconds is 0 to ${WAIT_MAX_SECONDS}`);
+  const t0 = Date.now();
+  const deadline = t0 + seconds * 1000;
+  const data = ctx.memory.data;
+  for (;;) {
+    const runs = ctx.memory.read((db) => stepRuns(db, data, v.info));
+    let r = runs.find((x) => x.run === runId || x.evidence === runId);
+    if (r === undefined) throw new ProcessError('NOT_ALLOWED', `no run ${runId} for this step (its runs: ${runs.map((x) => x.run).join(', ') || 'none'})`);
+    if (r.state === 'running' && noticeLost(ctx, r)) r = ctx.memory.read((db) => stepRuns(db, data, v.info)).find((x) => x.run === r!.run) ?? r;
+    const waitedMs = Date.now() - t0;
+    if (r.state !== 'running' || Date.now() >= deadline) {
+      const result = r.state === 'finished' ? { run: r.evidence, passed: r.passed === true, summary: r.summary ?? '', leaf: r.leaf, tail: r.tail } : null;
+      return { run: r.run, evidence: r.evidence, state: r.state, result, why: r.why, since: r.detached?.startedAt ?? null, startedBy: r.dispatch, waitedMs };
+    }
+    await new Promise((res) => setTimeout(res, Math.max(1, Math.min(o.pollMs ?? WAIT_POLL_MS, deadline - Date.now()))));
+  }
 }
 
 /** An integration task's Reviewer card (the flow marks it; `full-run` is offered when the project declares a full suite). */
@@ -415,7 +581,7 @@ export async function seatHandback(ctx: ProcessContext, dispatch: string, files:
 }
 
 /** The seat's records of an accepted hand-back (the Reviewer's judgment and findings are built here). */
-function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: ReadonlyArray<{ run: string; completed: boolean }>): BaseRecord[] {
+function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: ReadonlyArray<{ run: string; completed: boolean }>, more: { readonly report: string; readonly data?: DataChecks }): BaseRecord[] {
   const data = ctx.memory.data;
   const content = { put: (d: string) => data.put(d), putList: (xs: readonly string[]) => data.putList(xs), getList: (r: { hash: string; count: number }) => data.getList(r as never) };
   if (v.card.seat === 'reviewer') {
@@ -423,7 +589,21 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
     const r = fields as ReviewerResult;
     return [judgmentRecord(card, r, data.putList(citedEvidence(card, r, runs))), ...findingRecords(card, r, content, v.info.dispatch)];
   }
-  return handBackRecords(v.card, fields, { launch: v.info.dispatch, runs, content });
+  // 4.1.3: a blind executor's report is kept with its evidence record; the leaf is the one this hand-back files
+  const report = { text: more.report, leaf: dispatchLeaf(v.info.mission, v.info.dispatch, 'report'), fields };
+  // #25 (E-3): a Stabilizer's position is judged with the direction questions as they stand at its hand-back
+  const card = v.card.seat === 'stabilizer' ? ctx.memory.read((db) => explorationCardAtHandBack(db, data, v.info.mission as MissionId, v.spec.lineage, v.card)) : v.card;
+  return handBackRecords(card, fields, { launch: v.info.dispatch, runs, content, report, ...(more.data !== undefined ? { data: more.data } : {}) });
+}
+
+/**
+ * 4.1.3 (E-4): the data files a hand-back's data pointers name, each checked once, here, before
+ * the write transaction (hashing a large file never runs inside it). Undefined when it cites none:
+ * such a hand-back is checked exactly as before.
+ */
+async function handBackDataChecks(v: DispatchView, fields: unknown): Promise<DataChecks | undefined> {
+  const paths = dataPaths(handBackDataTexts(v.card, fields));
+  return paths.length === 0 ? undefined : await checkDataFiles(paths);
 }
 
 /** The flow event that records why a Secretary dispatch was taken back at its hand-back (its escalation was already decided or closed). */
@@ -482,15 +662,19 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   const runs = ctx.memory.read((db) => dispatchRuns(db, data, v.info));
   let candidate: CandidateInfo | null = null;
   let records: BaseRecord[] = [];
+  let dataChecks: DataChecks | undefined;
+  let dataCited: RecordedData[] = [];
   if (!late) {
     // the role's rules (decision 14: refused hand-backs do not count; the seat fixes them and runs again)
     const reads = ctx.memory.read((db) => dispatchReads(db, v.info));
     const snap = cardSnapshot(v);
     const snapFiles = snap !== null && COMMIT.test(snap) ? (ctx.snapshotFiles !== null ? ctx.snapshotFiles(snap) : commitFiles(ctx, snap)) : null;
+    dataChecks = await handBackDataChecks(v, input.fields);
     const problems = [
       ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not read (mp seat ${dispatch} read <material> --page <n>)`),
-      ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}) }),
+      ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}), ...(dataChecks !== undefined ? { data: dataChecks } : {}) }),
       ...integrationPassProblems(ctx, v, input.fields),
+      ...attemptCommandProblems(ctx, v, input.fields),
     ];
     const unique = [...new Set(problems)];
     if (unique.length > 0) return refuse(ctx, dispatch, 'handback', unique);
@@ -501,7 +685,9 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       if (c.kind !== 'candidate') return refuse(ctx, dispatch, 'handback', collectionProblems(c));
       candidate = { commit: c.commit, base: c.base, changedPaths: [...new Set([...c.added, ...c.modified, ...c.deleted, ...c.modeChanged])].sort(), ignored: c.ignored.paths, ignoredTotal: c.ignored.total };
     }
-    records = recordsOf(ctx, v, input.fields, runs);
+    records = recordsOf(ctx, v, input.fields, runs, { report: input.report, ...(dataChecks !== undefined ? { data: dataChecks } : {}) });
+    // every seat's data pointers, with the check made, kept with the hand-back's records (one parser and renderer for all)
+    if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks);
   }
   const out = ctx.memory.write({ op: `handback:${dispatch}`, payload: { seat: seatHash } }, (tx) => {
     // 5.2 part 5: a continuation judgment is committed only after the labels' check passed for it, carrying
@@ -527,6 +713,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       notes: null,
       runs,
       ...(fullReview !== null ? { fullReview } : {}),
+      ...(dataCited.length > 0 ? { data: dataCited } : {}),
     };
     const r = recordHandback(tx, { dispatch, report: input.report, result: doc, filler: input.filler ?? null });
     if (r.accepted && kept.length > 0) appendRecords(tx, kept);
@@ -645,12 +832,82 @@ export async function seatRequestEvidence(ctx: ProcessContext, dispatch: string,
   return recordEvidenceRequest(ctx, dispatch, { request: req, notes: notesText, ...(files.filler !== undefined ? { filler: files.filler } : {}) });
 }
 
+/**
+ * 4.1.3 (E-4, #43): what the executor's `mp seat <id> rerun` is certain to refuse, or never offers,
+ * for the commands an evidence request or a registered attempt declares, refused when they are
+ * asked for, with the reason, so the seat fixes it in the same dispatch:
+ *   - a working directory the run refuses (normalizeCwd, the run's own normalizer over normalRelDir:
+ *     absolute, leaving the checkout, or inside .git);
+ *   - an id declared twice (the rerun runs the first one only);
+ *   - the project's full suite (never rerun from a card, D-5);
+ *   - commands on a reading (a reader has no rerun: they would never run).
+ */
+export function evidenceCommandProblems(ctx: Pick<ProcessContext, 'fullSuite'>, where: string, commands: ReadonlyArray<{ readonly id: string; readonly command: string; readonly cwd?: string }>, executor: 'experiment' | 'reading'): string[] {
+  const out: string[] = [];
+  if (executor === 'reading' && commands.length > 0) out.push(`${where}: a reading runs no commands (its executor reads sources and has no rerun): ask for an experiment (executor "experiment") to run them, or leave them out`);
+  const seen = new Set<string>();
+  commands.forEach((c, i) => {
+    const at = `${where}[${i}] (${c.id})`;
+    if (seen.has(c.id)) out.push(`${at}: the id "${c.id}" is declared twice: give each command its own id (the executor runs one with mp seat <id> rerun <command-id>)`);
+    seen.add(c.id);
+    try {
+      normalizeCwd(c.cwd);
+    } catch (e) {
+      // the rerun's own reason, without its code
+      const why = e instanceof ProcessError ? (e.message.startsWith(`${e.code}: `) ? e.message.slice(e.code.length + 2) : e.message) : (e as Error).message;
+      out.push(`${at}: ${why}: use "." or a path relative to the repository root, or leave cwd out (an absolute path goes in the command text)`);
+      return;
+    }
+    if (isFullSuiteCommand(ctx.fullSuite, c.command, c.cwd)) out.push(`${at}: "${c.command}" is the project's full suite: it is never rerun from a card (the integration review runs it)`);
+  });
+  return out;
+}
+
+/** The executor an exploration seat's request gets (its own, else the exploration's default), read from the memory. */
+function requestedExecutor(ctx: ProcessContext, v: DispatchView, req: { readonly executor?: 'experiment' | 'reading' }): 'experiment' | 'reading' {
+  if (req.executor !== undefined) return req.executor;
+  const x = (v.card['exploration'] as { id?: unknown } | undefined)?.id;
+  if (typeof x !== 'string') return 'experiment';
+  const data = ctx.memory.data;
+  const q = { mission: v.info.mission as MissionId, line: explorationLine(x) };
+  // the definition in force: its definition events only (the machine's own fold)
+  const rows = ctx.memory.read((db) => [...flowEvents(db, { ...q, event: 'defined' }), ...flowEvents(db, { ...q, event: 'redefined' })]).sort((a, b) => Number(a.revision) - Number(b.revision));
+  const s = foldExploration(rows.map((e) => ({ event: e.event, key: e.key, body: JSON.parse(data.text(e.body)) as unknown })));
+  return s.def === null ? 'experiment' : requestExecutor(req, s.def);
+}
+
+/**
+ * The commands an attempt register declares, each attempt's checked as a request's are (4.1.3, E-4): the
+ * author's register at its hand-back, and the user's attempts through the repair entry (`mp pm repair
+ * --attempts`, the older `mp pm amend-attempts`), so a run the rerun would refuse is refused when it is
+ * registered.
+ */
+export function registerCommandProblems(ctx: Pick<ProcessContext, 'fullSuite'>, attempts: ReadonlyArray<{ readonly id: string; readonly kind: 'experiment' | 'reading'; readonly commands?: ReadonlyArray<{ readonly id: string; readonly command: string; readonly cwd?: string }> }>): string[] {
+  return attempts.flatMap((a) => evidenceCommandProblems(ctx, `attempts[${a.id}].commands`, a.commands ?? [], a.kind));
+}
+
+/** A research author's attempt register (4.1.3): the commands each attempt declares, checked as a request's are. */
+function attemptCommandProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
+  if (v.card.seat !== 'researcher-author' || v.card['registerAttempts'] !== true) return [];
+  const r = seatCardEntry(v.card.seat).resultSchema.safeParse(fields);
+  if (!r.success) return [];
+  const attempts = (r.data as { step: string; attempts: ReadonlyArray<{ id: string; kind: 'experiment' | 'reading'; commands?: ReadonlyArray<{ id: string; command: string; cwd?: string }> }> });
+  if (attempts.step !== 'submit') return [];
+  return registerCommandProblems(ctx, attempts.attempts);
+}
+
 /** The core of seatRequestEvidence (tests call it with the content directly). */
 export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: string, input: { readonly request: unknown; readonly notes: string; readonly filler?: Filler | null; readonly advance?: boolean }): Promise<HandBackAnswer> {
   const v = dispatchView(ctx, dispatch);
   const parsed = EvidenceRequestSchema.safeParse(input.request);
   if (!parsed.success) return refuse(ctx, dispatch, 'request-evidence', parsed.error.issues.map((i) => `request.${i.path.join('.')}: ${i.message}`));
   if (parsed.data.measure.length === 0 && parsed.data.assertions.length === 0) return refuse(ctx, dispatch, 'request-evidence', ['request: record at least one quantity or check one assertion']);
+  // 4.1.3 (E-4): what the executor's rerun would refuse later is refused now (a dispatch is not spent on it)
+  const commands = parsed.data.commands ?? [];
+  if (commands.length > 0) {
+    const cp = evidenceCommandProblems(ctx, 'request.commands', commands, requestedExecutor(ctx, v, parsed.data));
+    if (cp.length > 0) return refuse(ctx, dispatch, 'request-evidence', cp);
+  }
   const seatHash = sha256(canonicalJson({ report: input.notes, request: parsed.data }));
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(ctx.memory.data, v.info);

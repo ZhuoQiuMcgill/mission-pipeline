@@ -63,10 +63,7 @@ async function exploration(p: ProcessProject, mission: string): Promise<void> {
   await step(ctx, 'researcher-author', () => ({ step: 'submit', message: 'v1', artifact: 'v1: an LRU cache', dispositions: [], directionQuestions: [], attempts: [] }));
   await step(ctx, 'crititor', () => ({ findings: [{ severity: 'serious', class: 'cost out of control', title: 'the cache costs memory', basis: 'the passage', consequence: 'memory', direction: 'size it', evidence: [] }], rechecks: [], settled: [], reply: 'assessment' }));
   await step(ctx, 'researcher-author', (c: AuthorCard) => ({ step: 'submit', message: 'v2', artifact: 'v2: a sized LRU cache', dispositions: c.openFindings.map((f) => ({ finding: f.id, action: 'revise', note: 'sized' })), directionQuestions: [], attempts: [] }));
-  await step(ctx, 'stabilizer', (c: StabilizerCard) => ({ findings: c.findings.map((f) => ({ finding: f.id, verdict: 'out-of-scope', severity: 'general', reason: 'outside the scope', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
-  await step(ctx, 'crititor', (c: CrititorCard) => ({ findings: [], rechecks: c.priorFindings.filter((f) => f.status === 'awaiting-recheck').map((f) => ({ finding: f.id, resolved: 'yes', reason: 'fixed', evidence: [] })), settled: [], reply: 'ok' }));
-  // every attack round is stabilized; then only the closing attacker is left
-  await step(ctx, 'stabilizer', (c: StabilizerCard) => ({ findings: c.findings.map((f) => ({ finding: f.id, verdict: 'in-scope', severity: 'general', reason: 'checked', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
+  // the round's Stabilizer is left: its judgment (the finding out of scope) converges it on the revision (4.1.3)
 }
 
 describe('mp read status: layer 0, plus the layer-1 entries of exactly the subtasks that changed since the user last asked', () => {
@@ -88,11 +85,7 @@ describe('mp read status: layer 0, plus the layer-1 entries of exactly the subta
       const pass = reviewerPass(c) as { judgments: Array<Record<string, unknown>> };
       return { ...pass, judgments: pass.judgments.map((j) => ({ ...j, met: 'no', reason: 'the check is missing a case' })), verdict: 'rework' };
     });
-    await step(p.ctx, 'crititor', (c: CrititorCard) => {
-      assert.equal(c.fresh, true, 'the closing attacker');
-      return { findings: [], rechecks: [], settled: [], reply: 'ok' };
-    });
-    await step(p.ctx, 'stabilizer', () => ({ findings: [], round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
+    await step(p.ctx, 'stabilizer', (c: StabilizerCard) => ({ findings: c.findings.map((f) => ({ finding: f.id, verdict: 'out-of-scope', severity: 'general', reason: 'outside the scope', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
     // --no-mark keeps the cursor: the same changes twice
     const a = await cli(p.dir, ['read', 'status', '--json', '--no-mark']);
     const b = await cli(p.dir, ['read', 'status', '--json', '--no-mark']);
@@ -480,7 +473,8 @@ describe('review round 2: an exploration from its machine state and its product 
     const b = bl.json.result.blocked[0] as Layer1Entry;
     assert.equal(b.id, 'impl');
     assert.match(b.label, /^reworks used up \(2 of 2\), product negated/);
-    assert.match(b.blocked!.next, new RegExp(`^ask the user; then mp pm answer m1 ${esc.replace(/\./g, '\\.')} --option <grant\\|replan\\|abandon>`));
+    // 4.1.3 (E-1, #35): the attempt has a verified hand-back, so accept-risk is one of the user's exits too
+    assert.match(b.blocked!.next, new RegExp(`^ask the user; then mp pm answer m1 ${esc.replace(/\./g, '\\.')} --option <grant\\|replan\\|accept-risk\\|abandon>`));
     assert.doesNotMatch(b.blocked!.next, /carried out/);
     assert.equal(b.blocked!.wi, 'WI-08');
     assert.match((await cli(p.dir, ['read', 'blocked'])).out, /next: ask the user; then mp pm answer m1 /);
@@ -640,7 +634,8 @@ describe('review round 3: history is not current state', () => {
 
   it('reopened after a move, the re-check fails and the budget runs out: the machine stop, the conclusion only as history', async () => {
     const p = fresh(PROBE);
-    await convergedOnExperiment(p, 'm2', 3);
+    // converged in its second round (4.1.3: no closing round), the budget's last
+    await convergedOnExperiment(p, 'm2', 2);
     await moveAndRecheck(p, 'm2', 'no');
     for (let i = 0; i < 6; i++) {
       const k = (await pmNext(p.ctx)).ready[0]?.kind;

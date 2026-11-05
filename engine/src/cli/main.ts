@@ -188,9 +188,18 @@ async function main(): Promise<void> {
     env: process.env,
     stdin: () => readFileSync(0, 'utf8'),
   });
-  if (out.stdout) process.stdout.write(out.stdout);
-  if (out.stderr) process.stderr.write(out.stderr);
+  // 4.1.3: wait until the output is written: past a full pipe (64 KiB), a write is queued, and the
+  // forced exit below would drop its end while a slow reader (a harness) has not read it yet
+  if (out.stdout) await written(process.stdout, out.stdout);
+  if (out.stderr) await written(process.stderr, out.stderr);
   process.exitCode = out.exitCode;
+}
+
+/** Write `text`; resolves once it is handed to the operating system (or the reader is gone). */
+function written(stream: NodeJS.WriteStream, text: string): Promise<void> {
+  return new Promise((resolve) => {
+    stream.write(text, () => resolve());
+  });
 }
 
 function real(p: string): string {

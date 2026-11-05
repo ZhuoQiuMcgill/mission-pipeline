@@ -8,7 +8,8 @@
 //   operating system and version, architecture, and the
 //   output of each version command the project declares in
 //   `.mission-pipeline/config.json` under ENVIRONMENT_CONFIG_KEY (for example
-//   `node --version`, `python3 --version`, the test runner's version). The
+//   `node --version`, `python3 --version`, the test runner's version), and the
+//   project's shell (config.json `shell`, 4.1.3) when it sets one. The
 //   identity is the sha256 of the run method and parts' canonical JSON; the parts are kept for
 //   reading (env.snapshot `parts`): each output shortened, with the sha256 of
 //   the whole output (`digests`), so the identity covers all of it.
@@ -50,6 +51,8 @@ export const ENVIRONMENT_CONFIG_KEY = 'environment';
 export interface EnvironmentConfig {
   /** The version commands whose output is part of the identity, in the order declared (at most 64). */
   readonly versionCommands: readonly string[];
+  /** 4.1.3 (#27): the project's shell (config.json `shell`), part of the identity when set: it changes what every declared command does. */
+  readonly shell?: string;
 }
 
 export interface EnvironmentIdentity {
@@ -67,14 +70,16 @@ const COMMANDS_MAX = 64;
 export function environmentConfig(config: unknown): EnvironmentConfig {
   if (config === null || config === undefined) return { versionCommands: [] };
   if (typeof config !== 'object' || Array.isArray(config)) throw new LedgerError('BAD_REQUEST', 'config.json is not a JSON object');
+  const shellKey = (config as Record<string, unknown>)['shell'];
+  const shell = typeof shellKey === 'string' && shellKey !== '' ? { shell: shellKey.slice(0, 400) } : {};
   const entry = (config as Record<string, unknown>)[ENVIRONMENT_CONFIG_KEY];
-  if (entry === undefined || entry === null) return { versionCommands: [] };
+  if (entry === undefined || entry === null) return { versionCommands: [], ...shell };
   const cmds = typeof entry === 'object' && !Array.isArray(entry) ? (entry as Record<string, unknown>).versionCommands : undefined;
-  if (cmds === undefined) return { versionCommands: [] };
+  if (cmds === undefined) return { versionCommands: [], ...shell };
   if (!Array.isArray(cmds) || cmds.length > COMMANDS_MAX || !cmds.every((c) => typeof c === 'string' && c.trim() !== '' && c.length <= 1000)) {
     throw new LedgerError('BAD_REQUEST', `config.json "${ENVIRONMENT_CONFIG_KEY}.versionCommands" is a list of at most ${COMMANDS_MAX} commands (each 1 to 1000 characters)`);
   }
-  return { versionCommands: [...new Set(cmds as string[])] };
+  return { versionCommands: [...new Set(cmds as string[])], ...shell };
 }
 
 /** The project's declaration, from `<project>/.mission-pipeline/config.json` (no file: no version commands). */
@@ -145,7 +150,8 @@ export function observeEnvironment(projectDir: string, config: EnvironmentConfig
     versions[c] = clip(full);
     digests[c] = sha256(full);
   }
-  return { os: platform(), osVersion: release(), arch: arch(), versions, digests };
+  // 4.1.3 (#27): the project's shell when it sets one (absent, the identity is what it was before)
+  return { os: platform(), osVersion: release(), arch: arch(), versions, digests, ...(config.shell !== undefined ? { shell: config.shell } : {}) };
 }
 
 export function environmentIdentity(parts: EnvironmentParts): EnvSnapshotId {

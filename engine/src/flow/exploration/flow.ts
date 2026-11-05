@@ -10,13 +10,13 @@
 // unnecessary to send again (a crash in between sends the same notice again: a no-op).
 
 import { canonicalJson, sha256 } from '../../common/hash.ts';
-import { currentConstraints } from '../requirements.ts';
+import { currentConstraints, type ConstraintBody } from '../requirements.ts';
 import { objectConstraints } from '../../seat/cards/inputs.ts';
 import type { MissionId } from '../../common/ids.ts';
-import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord } from '../../common/records.ts';
+import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, JudgmentRecord, PlainBasisVersionRecord } from '../../common/records.ts';
 import { attackOutcome, crititorEvidence, crititorFindingDocument, crititorFindingIds, versionId, type CrititorCard, type CrititorResult } from '../../seat/cards/crititor.ts';
-import { stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
-import { blindEvidenceRecord, blindReportDocument, failedEvidenceRecord, type BlindResult, type ExperimentCard } from '../../seat/cards/experiment.ts';
+import { revisionJudgment, stabilizedRevision, stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
+import { blindEvidenceRecord, blindReportDocument, evidenceDataNote, failedEvidenceRecord, type BlindResult, type ExperimentCard } from '../../seat/cards/experiment.ts';
 import {
   authorSubmittedVersion,
   interpretationDocument,
@@ -28,21 +28,28 @@ import {
   type ReaderCard,
 } from '../../seat/cards/researcher.ts';
 import type { AnyCard, AppendGuard, FlowEventInput, FlowLedgerPort, FlowNotice, FlowSchedulerPort, FlowTask, FlowTaskStatus } from '../ports.ts';
-import { attackerCard, authorCard, executorCard, interpreterCard, parseEvidenceRequest, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
+import { attackerCard, authorCard, cardAtClaim, checkedData, evidenceSummary, executorCard, interpreterCard, parseEvidenceRequest, requestExecutor, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
 import { ExplorationDefinitionSchema, xid, type ExplorationDefinition } from './definition.ts';
+import { predecessorsOf } from './predecessors.ts';
 import {
   allowedRounds,
+  attemptAmendment,
+  attemptEvidence,
+  attemptRun,
   blocks,
   decide,
   effectiveSeverity,
   fold,
   pendingTasks,
+  RESNAPSHOTTED,
+  supersededAttemptRecord,
   type Action,
   type ConsumedBody,
   type DefinedBody,
   type Disposition,
   type QueuedBody,
   type RerunBody,
+  type ResnapshotBody,
   type Role,
   type RulingBody,
   type StopReason,
@@ -79,8 +86,9 @@ async function load(p: ExplorationPorts, mission: MissionId, x: string): Promise
  * Define an exploration (the decision layer's call, 4.3): the definition becomes a basis line
  * (its version is what every attack judgment binds, 10.1 "Crititor 攻击与裁决"), the evidence
  * environment line is registered (7.2: the exploration's evidence stays applicable while it is
- * current), and the snapshot the seats read is fixed. Idempotent; a different definition under
- * the same id is refused (FACT_CONFLICT).
+ * current), and the snapshot the seats read is taken: the target branch's head (taken again only
+ * by resnapshotEntries' two routes). Idempotent; a different definition under the same id is
+ * refused (FACT_CONFLICT).
  */
 export async function defineExploration(p: ExplorationPorts, input: ExplorationDefinition): Promise<void> {
   const def = ExplorationDefinitionSchema.parse(input);
@@ -98,12 +106,55 @@ export async function defineExploration(p: ExplorationPorts, input: ExplorationD
     basisLine: xid.basisLine(def.mission, def.exploration),
     basisVersion: xid.basisVersion(def.mission, def.exploration, 1),
     envLine: xid.envLine(def.mission, def.exploration),
-    envSnapshot: xid.envSnapshot(def.mission, def.exploration, p.ledger.content.put(canonicalJson({ snapshot: snapshot.commit, mission: def.mission, exploration: def.exploration }))),
+    envSnapshot: envSnapshotOf(def.mission, def.exploration, snapshot.commit, (d) => p.ledger.content.put(d)),
     snapshot: { path: snapshot.path, commit: snapshot.commit },
   };
   const basis: PlainBasisVersionRecord = { kind: 'basis.version', basisKind: 'standard', line: body.basisLine as never, version: body.basisVersion as never, mission, scope: null };
   const env: EnvSnapshotRecord = { kind: 'env.snapshot', line: body.envLine as never, snapshot: body.envSnapshot as never };
   await p.ledger.append(xid.op(def.mission, def.exploration, 'define'), { events: [{ mission, line: line(def.exploration), event: DEFINED, key: 'definition', body }], records: [basis, env] });
+}
+
+/** The evidence environment of a snapshot: the same commit gives the same id (definition and resnapshot alike). */
+function envSnapshotOf(mission: string, x: string, commit: string, put: (doc: string) => string): string {
+  return xid.envSnapshot(mission, x, put(canonicalJson({ snapshot: commit, mission, exploration: x })));
+}
+
+/**
+ * The snapshot the seats read, taken again from the target branch (it moved since the exploration
+ * was defined, or since its last resnapshot): the event that makes every later card name it, and its
+ * evidence environment, a new env.snapshot on the exploration's env line (7.2). Nothing is queued
+ * or rerun by it. Evidence recorded before still counts (the evaluator's runCounts: a snapshot the
+ * line had), and every read of the exploration labels it "older environment". Two routes write these
+ * in one write with their checks (process/explorationSnapshot.ts): the dispatch of an exploration's
+ * first step, and `mp pm resnapshot-exploration`. Null when the snapshot is that commit already.
+ */
+export function resnapshotEntries(
+  s: XState,
+  snapshot: { readonly path: string; readonly commit: string },
+  put: (doc: string) => string,
+  by: { readonly by: ResnapshotBody['by']; readonly step?: string | null; readonly words?: string | null; readonly answers?: string | null },
+): { readonly event: FlowEventInput; readonly record: EnvSnapshotRecord; readonly body: ResnapshotBody } | null {
+  const d = s.defined;
+  const def = s.def;
+  if (d === null || def === null) throw new Error('exploration not defined');
+  if (snapshot.commit === d.snapshot.commit) return null;
+  const n = s.resnapshots.length + 1;
+  const body: ResnapshotBody = {
+    n,
+    snapshot: { path: snapshot.path, commit: snapshot.commit },
+    envSnapshot: envSnapshotOf(def.mission, def.exploration, snapshot.commit, put),
+    previous: { commit: d.snapshot.commit, envSnapshot: d.envSnapshot },
+    by: by.by,
+    step: by.step ?? null,
+    words: by.words ?? null,
+    // 4.1.3: the repair it answers (written only when there is one, so older shapes stay as they were)
+    ...(by.answers !== undefined && by.answers !== null ? { answers: by.answers } : {}),
+  };
+  return {
+    event: { mission: def.mission as MissionId, line: line(def.exploration), event: RESNAPSHOTTED, key: String(n), body },
+    record: { kind: 'env.snapshot', line: d.envLine as never, snapshot: body.envSnapshot as never },
+    body,
+  };
 }
 
 /**
@@ -189,8 +240,14 @@ export interface AdvanceReport {
 /** Take every step that can be taken now (bounded), then report. */
 export async function advanceExploration(p: ExplorationPorts, mission: MissionId, x: string, maxSteps = 64, onFailed?: FailedTaskHook): Promise<AdvanceReport> {
   let steps = 0;
+  let swept = false;
   for (;;) {
     const s = await load(p, mission, x);
+    if (!swept) {
+      // a step taken back (consumed "withdrawn") that the queue still holds: its cancel was lost after the write
+      swept = true;
+      for (const [task, c] of s.consumed) if (c.kind === 'withdrawn' && (await p.scheduler.status(task))?.state === 'queued') await p.scheduler.cancel(task);
+    }
     if (s.def === null) return report(x, s, steps, 'undefined', 'not defined');
     if (steps >= maxSteps) return report(x, s, steps, 'running', 'step budget of this call used; call again');
     if (await consumeFinished(p, mission, x, s, onFailed)) {
@@ -225,6 +282,28 @@ function cardOf<C>(p: ExplorationPorts, q: QueuedBody): C {
   return JSON.parse(p.ledger.content.get(q.card)) as C;
 }
 
+/**
+ * 4.1.3 (#31): a method its author revises after a repair (machine.ts `reentry`) while runs of its
+ * register wait in the queue: the runs of attempts the author's new version drops or changes are
+ * withdrawn if they are only queued (never dispatched), in the write that takes the version into
+ * account. Runs in flight finish; those of unchanged attempts keep their place.
+ */
+async function withdrawnByRevision(p: ExplorationPorts, s: XState, c: ConsumedBody): Promise<Array<{ readonly q: QueuedBody; readonly body: ConsumedBody }>> {
+  if (c.kind !== 'author' || c.step !== 'submit' || s.reentry === null || s.method === null || s.phase !== 'method') return [];
+  const next = new Map(c.attempts.map((a) => [a.id, canonicalJson(a)]));
+  const out: Array<{ readonly q: QueuedBody; readonly body: ConsumedBody }> = [];
+  for (const q of pendingTasks(s)) {
+    if (!attemptRun(q) || q.evidence?.attempt == null) continue;
+    const was = s.method.attempts.find((a) => a.id === q.evidence!.attempt);
+    if (was !== undefined && next.get(was.id) === canonicalJson(was)) continue;
+    const st = await p.scheduler.status(q.task);
+    if (st === null || st.state !== 'queued' || st.dispatches.length > 0) continue;
+    const how = next.has(q.evidence.attempt) ? 'changes it' : 'drops it';
+    out.push({ q, body: { kind: 'withdrawn', task: q.task, role: q.role, reason: `the author's new method version ${c.version ?? ''} (after repair ${s.reentry.repair}) ${how}: its run was only queued` } });
+  }
+  return out;
+}
+
 /** Take the first finished task into account; true when something was appended. */
 async function consumeFinished(p: ExplorationPorts, mission: MissionId, x: string, s: XState, onFailed?: FailedTaskHook): Promise<boolean> {
   for (const q of pendingTasks(s).sort((a, b) => a.n - b.n)) {
@@ -242,7 +321,7 @@ async function consumeFinished(p: ExplorationPorts, mission: MissionId, x: strin
     if (body === null) continue;
     const records: BaseRecord[] = [];
     if (body.kind === 'evidence' && !body.auto && q.role === 'executor' && st.handBack !== null) {
-      const card = cardOf<ExperimentCard | ReaderCard>(p, q);
+      const card = cardAtClaim(s, cardOf<ExperimentCard | ReaderCard>(p, q));
       // the experiment's evidence record is the program's (the hand-back made none): its claims checked against the dispatch's runs
       if (!st.handBack.records.some((x) => x.kind === 'evidence' && x.evidence === card.evidence.id)) records.push(blindRecordOf(p, card, st.handBack.result as BlindResult, st.handBack));
     }
@@ -250,7 +329,9 @@ async function consumeFinished(p: ExplorationPorts, mission: MissionId, x: strin
       records.push(failedEvidenceRecord({ id: q.evidence.id, envLine: (s.defined as DefinedBody).envLine, envSnapshot: (s.defined as DefinedBody).envSnapshot, attempt: q.evidence.attempt }, 'failed', st.note ?? 'given up', q.evidence.executor));
     }
     await notifyConsumption(p, mission, x, s, q, body);
-    await p.ledger.append(xid.op(mission, x, `consume:${q.task}`), { events: [{ mission, line: line(x), event: 'consumed', key: q.task, body }], records });
+    const withdrawn = await withdrawnByRevision(p, s, body);
+    await p.ledger.append(xid.op(mission, x, `consume:${q.task}`), { events: [{ mission, line: line(x), event: 'consumed', key: q.task, body }, ...withdrawn.map((w) => ({ mission, line: line(x), event: 'consumed', key: w.q.task, body: w.body }))], records });
+    for (const w of withdrawn) await p.scheduler.cancel(w.q.task);
     return true;
   }
   return false;
@@ -262,6 +343,24 @@ function dispositions(ds: AuthorResult['dispositions']): Disposition[] {
 
 /** The flow's reading of a finished task, or null while it is not finished. */
 function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTaskStatus): ConsumedBody | null {
+  const body = consumedBody(p, s, q, st);
+  // 4.1.3 (E-4): the data the hand-back cites, as checked at it, travels with what the flow took in;
+  // the cards built from the state label each pointer with it (cards.ts checkedData)
+  const data = st.handBack?.data;
+  if (body === null || data === undefined || data.length === 0) return body;
+  switch (body.kind) {
+    case 'author':
+    case 'interpretation':
+    case 'attack':
+    case 'discuss-reply':
+    case 'evidence':
+      return { ...body, data };
+    default:
+      return body;
+  }
+}
+
+function consumedBody(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTaskStatus): ConsumedBody | null {
   if (st.state === 'abandoned') {
     if (q.role === 'executor') return { kind: 'evidence', task: q.task, evidence: q.evidence?.id ?? '', status: 'failed', summary: `the run was given up: ${st.note ?? 'no reason recorded'}`, report: null, attempt: q.evidence?.attempt ?? null, auto: true };
     return { kind: 'abandoned', task: q.task, role: q.role, reason: st.note ?? 'given up' };
@@ -333,20 +432,30 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
     case 'stabilizer': {
       const card = cardOf<StabilizerCard>(p, q);
       const r = hb.result as StabilizerResult;
+      // #25 (E-3): the position's verdict and the pass on the author's revision as its hand-back
+      // recorded them, judged with the direction questions as they stood then (a ruling that came
+      // while the Stabilizer ran counts: process/explorationSnapshot.ts explorationCardAtHandBack);
+      // a hand-back without them reads its card, as before
+      const recorded = (id: string): JudgmentRecord | undefined => hb.records.find((x): x is JudgmentRecord => x.kind === 'judgment' && x.judgment === id);
+      const own = recorded(card.binding.judgment);
+      const onRevision = recorded(revisionJudgment(card.binding.judgment));
+      const revision = own !== undefined ? (onRevision !== undefined ? { version: onRevision.target as string, judgment: onRevision.judgment as string } : null) : stabilizedRevision(card, r);
       return {
         kind: 'stabilized',
         task: q.task,
         round: card.round,
         target: card.target,
         judgment: card.binding.judgment,
-        verdict: stabilizedVerdict(card, r),
-        findings: r.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, question: f.question.trim() !== '' ? f.question : null })),
+        verdict: own?.verdict ?? stabilizedVerdict(card, r),
+        findings: r.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, question: f.question.trim() !== '' ? f.question : null, ...(f.answered === true ? { answered: true as const } : {}) })),
         drift: { verdict: r.round.verdict, reason: r.round.reason, question: r.round.question.trim() !== '' ? r.round.question : null },
         result: hb.resultHash,
+        ...(revision !== null ? { revision } : {}),
       };
     }
     case 'executor': {
-      const card = cardOf<ExperimentCard | ReaderCard>(p, q);
+      // bound as its dispatch was (cardAtClaim: a resnapshot waits while a dispatch is in flight)
+      const card = cardAtClaim(s, cardOf<ExperimentCard | ReaderCard>(p, q));
       const r = hb.result as BlindResult;
       const rec = blindRecordOf(p, card, r, hb);
       const status = rec.fields['status'] === 'completed' ? 'completed' : 'unverified';
@@ -355,7 +464,7 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
         task: q.task,
         evidence: card.evidence.id,
         status,
-        summary: `${status === 'unverified' ? `UNVERIFIED (${rec.fields['unbacked'] ?? '?'} claim(s) rest on no program record) | ` : ''}${blindSummary(card, r)}`,
+        summary: `${status === 'unverified' ? `UNVERIFIED (${rec.fields['unbacked'] ?? '?'} claim(s) rest on no program record) | ` : ''}${blindSummary(card, r)}${evidenceDataNote(rec)}`,
         report: rec.fields['report'] ?? put(blindReportDocument(card, r)),
         attempt: card.evidence.attempt,
         auto: false,
@@ -365,15 +474,15 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
 }
 
 /**
- * The evidence record of a blind run (review r1 #20): a reading's comes with the hand-back (its
- * url:<address> pointers were checked against the card's addresses); an experiment's is the
- * program's, written here from the claims checked against the dispatch's runs (`mp seat <id> rerun`).
+ * The evidence record of a blind run (review r1 #20): it comes with the hand-back (a reading's url:
+ * pointers were checked against the card's addresses, an experiment's claims against the dispatch's
+ * runs, `mp seat <id> rerun`; 4.1.3: data pointers against their files, and the executor's report
+ * kept). An experiment's hand-back recorded before 4.1.3 carries none: the program writes it here
+ * from the claims and the runs, as then.
  */
 function blindRecordOf(p: ExplorationPorts, card: ExperimentCard | ReaderCard, r: BlindResult, hb: NonNullable<FlowTaskStatus['handBack']>): EvidenceRecord {
-  if (card.seat === 'researcher-reader') {
-    const rec = hb.records.find((x): x is EvidenceRecord => x.kind === 'evidence' && x.evidence === card.evidence.id);
-    if (rec !== undefined) return rec;
-  }
+  const rec = hb.records.find((x): x is EvidenceRecord => x.kind === 'evidence' && x.evidence === card.evidence.id);
+  if (rec !== undefined) return rec;
   return blindEvidenceRecord(card, r, card.seat === 'researcher-reader' ? 'reading' : 'experiment', { content: p.ledger.content }, card.seat === 'researcher-reader' ? null : hb.runs);
 }
 
@@ -447,9 +556,20 @@ async function submitQueued(p: ExplorationPorts, mission: MissionId, x: string, 
   const cardHash = p.ledger.content.put(canonicalJson(card));
   // who hands it over (§3.2, U-13): the task it continues, else the round's last consumed task
   const last = [...s.consumed.keys()].map((k) => s.tasks.get(k)).filter((b): b is QueuedBody => b !== undefined).sort((a, b) => a.n - b.n).at(-1);
-  const from = supersedes ?? q.resumeOf ?? last?.task ?? null;
+  // an attempt run again on the PM's word: the run whose record it supersedes
+  const again = q.evidence?.supersedes !== undefined ? [...s.tasks.values()].find((t) => t.evidence?.id === q.evidence?.supersedes)?.task : undefined;
+  const from = supersedes ?? q.resumeOf ?? again ?? last?.task ?? null;
   const objects = [...new Set([...(q.target !== null ? [q.target] : []), ...(s.version !== null ? [s.version.id] : [])])];
-  const t = { ...taskOf(s, q.task, q.lineage, card), handover: { from, objects, step: `exploration ${x}, round ${q.round + (q.role === 'attacker' ? 1 : 0)}: the ${q.role} turn${q.evidence?.rerunOf !== undefined ? ` (a rerun of ${q.evidence.rerunOf})` : ''}` } };
+  const amended = q.evidence?.amendment !== undefined ? s.amendments.find((b) => b.n === q.evidence?.amendment) : undefined;
+  const why =
+    amended !== undefined
+      ? ` (attempt ${q.evidence?.attempt ?? '?'} ${amended.added.includes(q.evidence?.attempt ?? '') ? 'added' : 'replaced'} by the user's words ${amended.words}${q.evidence?.supersedes !== undefined ? `, superseding ${q.evidence.supersedes}` : ''})`
+      : q.evidence?.method !== undefined
+        ? ` (attempt ${q.evidence.attempt ?? '?'} under its card in method ${q.evidence.method}, after a repair${q.evidence.supersedes !== undefined ? `, superseding ${q.evidence.supersedes}` : ''})`
+        : q.evidence?.supersedes !== undefined
+          ? ` (attempt ${q.evidence.attempt ?? '?'} run again on the PM's word, superseding ${q.evidence.supersedes})`
+          : '';
+  const t = { ...taskOf(s, q.task, q.lineage, card), handover: { from, objects, step: `exploration ${x}, round ${q.round + (q.role === 'attacker' ? 1 : 0)}: the ${q.role} turn${q.evidence?.rerunOf !== undefined ? ` (a rerun of ${q.evidence.rerunOf})` : ''}${why}` } };
   if (supersedes !== null) await p.scheduler.supersede(supersedes, t);
   else await p.scheduler.submit(t);
   const body: QueuedBody = { ...q, card: cardHash };
@@ -458,39 +578,45 @@ async function submitQueued(p: ExplorationPorts, mission: MissionId, x: string, 
 
 const asCard = (c: object): AnyCard => c as unknown as AnyCard;
 
-async function constraintsForVersion(p: ExplorationPorts, mission: MissionId, target: string | null) {
+async function constraintsForVersion(p: ExplorationPorts, target: string | null, inForce: readonly ConstraintBody[]) {
   const obj = target === null ? null : await p.ledger.objectVersion(target);
-  return obj === null ? { applicable: [], checks: [], list: [] } : objectConstraints(await currentConstraints({ ports: p, mission }), obj);
+  return obj === null ? { applicable: [], checks: [], list: [] } : objectConstraints(inForce, obj);
 }
 
 async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XState, a: Exclude<Action, { kind: 'none' }>): Promise<void> {
   const lineage = xid.lineage(mission, x);
   const n = s.seq + 1;
   const base = { n, round: s.rounds, phase: s.phase, fresh: false, target: null, judgment: null, evidence: null, resumeOf: null, versionPrefix: null, lineage, ...(s.defined !== null ? { basis: s.defined.basisVersion } : {}) };
+  // the project constraints in force (9.5): every card built now selects its own from them
+  const constraintsInForce = () => currentConstraints({ ports: p, mission });
+  // the explorations planned before this one (predecessors.ts): what they handed on, on the cards of the seats that know it
+  const predecessors = () => predecessorsOf(p.ledger, mission, x);
   switch (a.kind) {
     case 'stop':
       await stop(p, mission, x, s, a.reason, a.wi);
       return;
     case 'author': {
       const task = xid.task(mission, x, n, 'author');
-      await submitQueued(p, mission, x, s, { ...base, task, role: 'author', purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, null)), null);
+      await submitQueued(p, mission, x, s, { ...base, task, role: 'author', purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, null, await constraintsInForce(), await predecessors())), null);
       return;
     }
     case 'interpreter': {
       const task = xid.task(mission, x, n, 'interpreter');
-      await submitQueued(p, mission, x, s, { ...base, task, role: 'interpreter', purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content)), null);
+      await submitQueued(p, mission, x, s, { ...base, task, role: 'interpreter', purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content, await constraintsInForce(), await predecessors())), null);
       return;
     }
     case 'attacker': {
       const task = xid.task(mission, x, n, 'attacker');
-      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null, await constraintsForVersion(p, mission, s.version?.id ?? null));
+      const all = await constraintsInForce();
+      const card = attackerCard(s, n, task, p.ledger.content, a.mode, a.fresh, null, await constraintsForVersion(p, s.version?.id ?? null, all), all, await predecessors());
       await submitQueued(p, mission, x, s, { ...base, task, role: 'attacker', purpose: a.mode, fresh: a.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), null);
       return;
     }
     case 'stabilizer': {
       // a new instance each round (4.1 §6.3)
       const task = xid.task(mission, x, n, 'stabilizer');
-      const card = stabilizerCard(s, n, task, p.ledger.content, await constraintsForVersion(p, mission, s.stabilizing?.target ?? null));
+      const all = await constraintsInForce();
+      const card = stabilizerCard(s, n, task, p.ledger.content, await constraintsForVersion(p, s.stabilizing?.target ?? null, all), all, await predecessors());
       await submitQueued(p, mission, x, s, { ...base, task, role: 'stabilizer', purpose: 'stabilize', target: card.target, judgment: card.binding.judgment }, asCard(card), null);
       return;
     }
@@ -502,7 +628,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const task = xid.task(mission, x, n, 'executor');
       const doc = aw.request !== null ? safeGet(p, aw.request) : null;
       const req: EvidenceRequestDoc | null = doc === null ? null : parseEvidenceRequest(doc);
-      const executor = req?.executor ?? (s.def as ExplorationDefinition).evidenceExecutor;
+      const executor = requestExecutor(req ?? {}, s.def as ExplorationDefinition);
       const evLineage = xid.evidenceLineage(mission, x, k);
       if (req === null || a.overCap) {
         // an unreadable request, or one past the turn's cap (6.5): the program records the run as
@@ -533,7 +659,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
         });
         return;
       }
-      const card = executorCard(s, task, p.ledger.content, req, executor, { id: evidence, attempt: null });
+      const card = executorCard(s, task, p.ledger.content, req, executor, { id: evidence, attempt: null }, await constraintsInForce());
       await submitQueued(p, mission, x, s, { ...base, task, lineage: evLineage, role: 'executor', purpose: 'evidence', evidence: { id: evidence, k, attempt: null, executor, requester: aw.requester } }, asCard(card), null);
       return;
     }
@@ -554,7 +680,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const k = s.evidenceSeq + 1;
       const evidence = xid.evidence(mission, x, k);
       const task = xid.task(mission, x, n, 'executor');
-      const card = executorCard(s, task, p.ledger.content, req, orig.evidence.executor, { id: evidence, attempt: orig.evidence.attempt });
+      const card = executorCard(s, task, p.ledger.content, req, orig.evidence.executor, { id: evidence, attempt: orig.evidence.attempt }, await constraintsInForce());
       await submitQueued(
         p,
         mission,
@@ -573,8 +699,21 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const k = s.evidenceSeq + 1;
       const evidence = xid.evidence(mission, x, k);
       const task = xid.task(mission, x, n, 'executor');
-      const card = executorCard(s, task, p.ledger.content, at, at.kind, { id: evidence, attempt: at.id });
-      await submitQueued(p, mission, x, s, { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: 'attempt', evidence: { id: evidence, k, attempt: at.id, executor: at.kind, requester: null } }, asCard(card), null);
+      const card = executorCard(s, task, p.ledger.content, at, at.kind, { id: evidence, attempt: at.id }, await constraintsInForce());
+      // run again on the PM's word (`mp pm rerun-attempt`): the same registered card, a new record that supersedes the earlier one;
+      // added or replaced by the user's amendment (`mp pm amend-attempts`): the card the amendment set
+      const replaces = s.attemptReruns.get(at.id)?.replaces ?? null;
+      const amendment = attemptAmendment(s, at.id);
+      const method = s.attemptReruns.get(at.id)?.method;
+      await submitQueued(
+        p,
+        mission,
+        x,
+        s,
+        { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: 'attempt', evidence: { id: evidence, k, attempt: at.id, executor: at.kind, requester: null, ...(replaces !== null ? { supersedes: replaces } : {}), ...(amendment !== null ? { amendment } : {}), ...(method !== undefined ? { method } : {}) } },
+        asCard(card),
+        null,
+      );
       return;
     }
     case 'resume': {
@@ -582,20 +721,21 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const rq = s.tasks.get(a.requester);
       if (aw === null || rq === undefined) return;
       const ev = aw.evidence !== null ? s.evidence.get(aw.evidence) : undefined;
-      const text = ev === undefined ? 'The evidence run left no record.' : `Evidence ${ev.id} (${ev.status}): ${ev.summary}${ev.report !== null ? `\nFull report: material evidence-${ev.id}.` : ''}`;
+      const text = ev === undefined ? 'The evidence run left no record.' : `Evidence ${ev.id} (${ev.status}): ${evidenceSummary(s, ev)}${ev.report !== null ? `\nFull report: material evidence-${ev.id}.` : ''}`;
       // §5.4: continuation is a new card with the notes the seat saved and the evidence, never a harness session
       const resume: Resume = { previous: a.requester, notes: aw.notes, evidence: text };
       const task = xid.task(mission, x, n, rq.role);
       const common = { ...base, task, role: rq.role, resumeOf: a.requester, lineage: rq.lineage };
       if (rq.role === 'author') {
-        await submitQueued(p, mission, x, s, { ...common, purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, resume)), a.requester);
+        await submitQueued(p, mission, x, s, { ...common, purpose: 'author', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(authorCard(s, n, task, p.ledger.content, resume, await constraintsInForce(), await predecessors())), a.requester);
       } else if (rq.role === 'attacker') {
         const mode = rq.purpose === 'discuss' ? 'discuss' : 'attack';
-        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume, await constraintsForVersion(p, mission, s.version?.id ?? null));
+        const all = await constraintsInForce();
+        const card = attackerCard(s, n, task, p.ledger.content, mode, rq.fresh, resume, await constraintsForVersion(p, s.version?.id ?? null, all), all, await predecessors());
         await submitQueued(p, mission, x, s, { ...common, purpose: mode, fresh: rq.fresh, target: card.target, judgment: card.binding?.judgment ?? null }, asCard(card), a.requester);
       } else {
         // interpreters and executors cannot ask for evidence; nothing to continue
-        await submitQueued(p, mission, x, s, { ...common, purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content)), a.requester);
+        await submitQueued(p, mission, x, s, { ...common, purpose: 'interpret', versionPrefix: xid.versionPrefix(mission, x, n) }, asCard(interpreterCard(s, n, task, p.ledger.content, await constraintsInForce(), await predecessors())), a.requester);
       }
       return;
     }
@@ -643,15 +783,29 @@ export interface ExplorationHandoff {
     /** The Stabilizer's verdict and severity (4.1 §6.3), null before its round was stabilized. */
     readonly scope: string | null;
     readonly judgedSeverity: string | null;
+    /** The round whose Stabilizer judged the author's answer resolves it (no re-check), when it did. */
+    readonly answered?: number;
   }>;
   /** The Stabilizer's judgments, round by round (4.1 §6.3): what goes to the Secretary with the findings. */
-  readonly stabilizer: ReadonlyArray<{ readonly round: number; readonly verdict: string; readonly drift: string; readonly reason: string; readonly findings: ReadonlyArray<{ readonly finding: string; readonly verdict: string; readonly severity: string; readonly reason: string }> }>;
+  readonly stabilizer: ReadonlyArray<{ readonly round: number; readonly verdict: string; readonly drift: string; readonly reason: string; readonly findings: ReadonlyArray<{ readonly finding: string; readonly verdict: string; readonly severity: string; readonly reason: string; readonly answered?: true }> }>;
   readonly unresolvedBlocking: readonly string[];
   readonly residualRisks: readonly string[];
-  readonly evidence: ReadonlyArray<{ readonly id: string; readonly status: string; readonly summary: string; readonly attempt: string | null }>;
+  /** Every record, history included: an attempt's record a later run of it superseded (`mp pm rerun-attempt`) names that run's record. */
+  readonly evidence: ReadonlyArray<{ readonly id: string; readonly status: string; readonly summary: string; readonly attempt: string | null; readonly supersededBy?: string }>;
   readonly questions: readonly string[];
-  /** Research explorations: whether the key answer does not stand (8.2 "没有结论"). */
-  readonly research: { readonly noConclusion: boolean; readonly method: string | null } | null;
+  /** 4.1.3 (E-4): the data outside the commit its hand-backs cited, each with the check made at hand-back (absent when none). */
+  readonly dataChecked?: ReadonlyArray<import('../../seat/cards/experiment.ts').RecordedData>;
+  /** 4.1.3 (E-1): the decision that accepted the conclusion at the budget step (the stop is "converged" by it), when one did. */
+  readonly accepted?: { readonly ruling: string; readonly by: string; readonly text: string; readonly judgment?: string };
+  /**
+   * Research explorations: whether the key answer does not stand (8.2 "没有结论"), the method version
+   * in force, and the user's amendments of the method (`mp pm amend-attempts`), when there were any.
+   */
+  readonly research: {
+    readonly noConclusion: boolean;
+    readonly method: string | null;
+    readonly amendments?: ReadonlyArray<{ readonly n: number; readonly version: string; readonly words: string; readonly reason: string | null; readonly added: readonly string[]; readonly replaced: readonly string[] }>;
+  } | null;
 }
 
 /** The hand-off document of the state as it is (8.2: version, disposition table, residual risks). */
@@ -685,22 +839,44 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
       ruling: f.ruling,
       scope: f.scope,
       judgedSeverity: f.judgedSeverity,
+      ...(f.answered !== null ? { answered: f.answered } : {}),
     })),
-    stabilizer: s.stabilizations.map((j) => ({ round: j.round, verdict: j.verdict, drift: j.drift.verdict, reason: j.drift.reason, findings: j.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason })) })),
+    stabilizer: s.stabilizations.map((j) => ({
+      round: j.round,
+      verdict: j.verdict,
+      drift: j.drift.verdict,
+      reason: j.drift.reason,
+      findings: j.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, ...(f.answered === true ? { answered: true as const } : {}) })),
+    })),
     unresolvedBlocking: findings.filter((f) => blocks(f) && f.status !== 'resolved').map((f) => f.id),
     residualRisks: findings.filter((f) => f.residualRisk).map((f) => f.id),
-    evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: e.summary, attempt: e.attempt })),
+    evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: evidenceSummary(s, e), attempt: e.attempt, ...(e.attempt !== null && supersededAttemptRecord(s, e.id) ? { supersededBy: attemptEvidence(s, e.attempt) ?? '' } : {}) })),
     questions: [...s.questions],
-    research: def.research ? { noConclusion: s.noConclusion, method: s.method?.version ?? null } : null,
+    ...(checkedData(s).length > 0 ? { dataChecked: checkedData(s) } : {}),
+    ...(reason === 'converged' && s.accepted !== null ? { accepted: { ruling: s.accepted.id, by: s.accepted.by, text: s.accepted.text, ...(s.accepted.judgment !== undefined ? { judgment: s.accepted.judgment } : {}) } } : {}),
+    research: def.research
+      ? {
+          noConclusion: s.noConclusion,
+          method: s.method?.version ?? null,
+          ...(s.amendments.length > 0 ? { amendments: s.amendments.map((b) => ({ n: b.n, version: b.version, words: b.words, reason: b.reason, added: [...b.added], replaced: [...b.replaced] })) } : {}),
+        }
+      : null,
   };
 }
 
 const DECIDE = 'the Secretary decides (an escalation on this exploration; WI-08 for the PM): grant more rounds (the Secretary once, then only the user), accept the current version with its open findings as residual risks, send it back with a new direction, re-plan, or give it up';
 
+/** The stop's words when the budget step's plain "accept" ended it (E-1). */
+function acceptedText(r: RulingBody): string {
+  return `the decision (${r.by}) accepted the latest version at the budget step: nothing fatal or serious was unresolved and no direction question waited, so it converged by the decision, with no risk list (E-1)`;
+}
+
+const CONVERGED_ANSWERED = "the last round left no unresolved fatal or serious finding: its Stabilizer judged that the author's revisions or rebuttals answer the findings (answered), so they were resolved without a re-check round (8.2 stop 1, 4.1 §6.3)";
+
 const STOP_TEXT: Readonly<Record<StopReason, { readonly category: string; readonly trigger: string; readonly action: string }>> = {
   converged: {
     category: 'exploration-converged',
-    trigger: 'the latest round on the frozen version, the closing attacker\'s included, left no unresolved fatal or serious finding (8.2 stop 1)',
+    trigger: 'the latest round left no unresolved fatal or serious finding in scope on the version it judged, its Stabilizer judged it on track, and no direction question waits (8.2 stop 1, E-3)',
     action: 'no further round is queued; the product and its disposition table go to acceptance (8.2 acceptance): the decision layer routes it by decision type (3.10)',
   },
   'budget-exhausted': {
@@ -735,12 +911,15 @@ async function stop(p: ExplorationPorts, mission: MissionId, x: string, s: XStat
   const h = buildHandoff(s, reason, wi);
   const handoff = p.ledger.content.put(canonicalJson(h));
   const t = STOP_TEXT[reason];
+  // converged on the Stabilizer's answered findings (4.1 §6.3), or accepted by the decision (E-1): said so
+  const answered = reason === 'converged' && (s.stabilizations.at(-1)?.findings.some((f) => f.answered === true) ?? false);
+  const accepted = reason === 'converged' && s.accepted !== null ? acceptedText(s.accepted) : null;
   await p.ledger.notify({
     category: t.category,
     wi,
     key: `${x}:${n}`,
     mission,
-    trigger: `exploration ${x}: ${t.trigger}; ${s.rounds} of ${allowedRounds(s)} rounds used`,
+    trigger: `exploration ${x}: ${accepted ?? (answered ? CONVERGED_ANSWERED : t.trigger)}; ${s.rounds} of ${allowedRounds(s)} rounds used`,
     defaultAction: t.action,
     detail: { exploration: x, handoff, version: h.version?.id ?? null, unresolvedBlocking: h.unresolvedBlocking, residualRisks: h.residualRisks, acceptance: h.acceptance },
   });

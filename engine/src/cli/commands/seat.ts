@@ -4,7 +4,8 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, type FullRunMarker, type HandBackAnswer } from '../../process/index.ts';
+import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, seatRerunDetached, seatRerunWorker, seatWait, WAIT_DEFAULT_SECONDS, type FullRunMarker, type HandBackAnswer, type RerunResult, type WorkerMessage } from '../../process/index.ts';
+import { LedgerError } from '../../memory/index.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
 import { CliError, EXIT, refused, usage } from '../errors.ts';
@@ -89,16 +90,106 @@ const checkout: Command = {
   },
 };
 
+/** A rerun's result as the seat reads it, foreground or from `wait` (4.1.3: with the last lines of its output, passing or failing). */
+function rerunLines(r: RerunResult): string[] {
+  return [
+    `Run ${r.run}: ${r.passed ? 'passed' : 'failed'} — ${r.summary}${r.leaf !== null ? `\nSummary: .mission-pipeline/${r.leaf}` : ''}`,
+    ...(r.tail !== '' ? ['Last lines of its output:', r.tail, '(end of the output)'] : []),
+    `Cite it as your card says: evidence:${r.run} (a judgment) or run:${r.run} (a blind experiment).`,
+  ];
+}
+
 const rerun: Command = {
   group: 'seat',
   name: ['rerun'],
-  summary: 'mp runs a declared command of your card on a clean checkout: a new run id every time, which you may cite',
-  usage: 'mp seat <dispatch> rerun <command-id>',
-  flags: {},
+  summary: 'mp runs a declared command of your card on a clean checkout: a new run id every time, which you may cite; --detach runs it in the background (then mp seat <dispatch> wait <run>)',
+  usage: 'mp seat <dispatch> rerun <command-id> [--detach]',
+  flags: { detach: 'boolean', worker: 'boolean' },
   decides: true,
   async run(c, args) {
-    const r = await seatRerun(P(c).ctx, dispatchOf(args), positional(args, 1, 'command id (on your card)'));
-    return ok(`Run ${r.run}: ${r.passed ? 'passed' : 'failed'} — ${r.summary}${r.leaf !== null ? `\nSummary: .mission-pipeline/${r.leaf}` : ''}\nCite it as your card says: evidence:${r.run} (a judgment) or run:${r.run} (a blind experiment).`, r, 0);
+    const d = dispatchOf(args);
+    const id = positional(args, 1, 'command id (on your card)');
+    if (flagBool(args, 'worker')) return worker(P(c), d, id);
+    if (flagBool(args, 'detach')) {
+      const r = await seatRerunDetached(P(c).ctx, d, id);
+      const lines = [
+        `Run ${r.run} started in the background (worker pid ${r.pid}); its result will be recorded as evidence ${r.evidence}.`,
+        `Wait for it: mp seat ${d} wait ${r.run}   (up to ${WAIT_DEFAULT_SECONDS / 60} minutes a call; --seconds <n> for another limit)`,
+        'When a wait ends with the run still running, start the next wait at once. Never end your turn to ask whether to keep waiting.',
+      ];
+      return ok(lines.join('\n'), r, 0);
+    }
+    const r = await seatRerun(P(c).ctx, d, id);
+    return ok(rerunLines(r).join('\n'), r, 0);
+  },
+};
+
+/**
+ * `--worker` (4.1.3, #30; started by `--detach`, never by a seat): run and record the rerun in this
+ * process, which outlives the command that started it; tell that command over IPC once the run is
+ * recorded as running (or why it was refused). SIGTERM, SIGINT and SIGHUP tell it to stop: it ends its
+ * command's process group, cleans up and records the run as stopped.
+ */
+async function worker(p: Project, dispatch: string, command: string): Promise<CommandResult> {
+  const send = (m: WorkerMessage): void => {
+    try {
+      process.send?.(m);
+    } catch {
+      /* the starting command is gone: nobody waits for the answer */
+    }
+  };
+  const stop = new AbortController();
+  const onSignal = (): void => stop.abort();
+  const signals: NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+  for (const sig of signals) process.on(sig, onSignal);
+  let ready = false;
+  try {
+    const r = await seatRerunWorker(p.ctx, dispatch, command, {
+      stopping: stop.signal,
+      ready: (w) => {
+        ready = true;
+        send({ kind: 'ready', ...w });
+        try {
+          process.disconnect?.();
+        } catch {
+          /* no channel */
+        }
+      },
+    });
+    return ok(`Run ${r.start.run}: ${r.state}`, r, 0);
+  } catch (e) {
+    if (!ready) send({ kind: 'error', ledger: e instanceof LedgerError, code: (e as { code?: string }).code ?? 'NOT_ALLOWED', message: (e as Error).message.replace(/^[A-Z_]+: /, '') });
+    throw e;
+  } finally {
+    for (const sig of signals) process.off(sig, onSignal);
+  }
+}
+
+const wait: Command = {
+  group: 'seat',
+  name: ['wait'],
+  summary: 'wait for a run of your step started with rerun --detach (or listed on your card): its result when it finished, or "running" after the wait',
+  usage: `mp seat <dispatch> wait <run> [--seconds <n>]   (default ${WAIT_DEFAULT_SECONDS / 60} minutes)`,
+  flags: { seconds: 'string' },
+  async run(c, args) {
+    const d = dispatchOf(args);
+    const run = positional(args, 1, 'run id (from rerun --detach, or on your card)');
+    const sec = flagStr(args, 'seconds');
+    const seconds = sec === null ? undefined : Number(sec);
+    if (seconds !== undefined && (!Number.isFinite(seconds) || seconds < 0)) throw usage('--seconds is a number of seconds, from 0');
+    const r = await seatWait(P(c).ctx, d, run, seconds === undefined ? {} : { seconds });
+    const lines =
+      r.state === 'finished' && r.result !== null
+        ? rerunLines(r.result)
+        : r.state === 'running'
+          ? [
+              `Run ${r.run} is still running${r.since !== null ? ` (since ${new Date(r.since).toISOString()})` : ''}; its result will be recorded as evidence ${r.evidence}.`,
+              `Wait again at once: mp seat ${d} wait ${r.run}. Never end your turn to ask whether to keep waiting.`,
+            ]
+          : r.state === 'stopped'
+            ? [`Run ${r.run} was stopped (${r.why ?? 'a stop'}): it has no result. Hand back what you have and say so.`]
+            : [`Run ${r.run} was lost: ${r.why ?? 'its worker ended without a result'}. Run the command again if you need its result (mp seat ${d} rerun ${'<command-id>'} --detach).`];
+    return ok(lines.join('\n'), r, 0);
   },
 };
 
@@ -226,4 +317,4 @@ const requestEvidence: Command = {
   },
 };
 
-export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, fullRun, owners, handback, requestEvidence];
+export const SEAT_COMMANDS: readonly Command[] = [card, read, checkout, rerun, wait, fullRun, owners, handback, requestEvidence];

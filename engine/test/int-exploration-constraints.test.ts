@@ -14,9 +14,10 @@ test('exploration: object constraints before the first turn bind both required p
   const author = only(w, 'researcher-author');
   const claimed = dispatchView(w.ports.ctx, pmDispatch(w.ports.ctx, author.task).dispatch).card;
   assert.deepEqual(claimed, author.card, 'the author is unchanged at dispatch');
-  assert.deepEqual(claimed['constraints'], []);
+  assert.deepEqual(claimed['constraints'], [{ id: 'constraint.all', text: 'Keep private details out of the result', kind: 'object' }], 'the author sees the object constraint its product is reviewed against');
   assert.deepEqual(await w.scheduler.run(author.task, { handBack: submit('design v1') }), []); await w.advance();
-  for (let round = 0; round < 2; round++) {
+  // 4.1.3 (E-3): one round converges (its attacker passed, its Stabilizer on track): no closing round
+  for (let round = 0; round < 1; round++) {
     const c = cardOf<CrititorCard>(w, 'crititor');
     assert.ok(c.constraints.some((x) => x.id === 'constraint.all'));
     assert.ok(w.ledger.content.getList(c.binding!.constraints as never).some((x) => x.includes('constraint.all')));
@@ -61,10 +62,8 @@ for (const arrival of ['crititor-running', 'stabilizer-running', 'after-judgment
   const { flowCtx } = await import('../src/flow/context.ts');
   const { explorationStep } = await import('../src/flow/exploration/step.ts');
   const w = await world(); w.autoStabilize = false;
+  // 4.1.3 (E-3): the first round is the one that converges (no closing round): the constraint arrives in it
   await w.advance(); await hand(w, 'researcher-author', submit('design v1')); await w.advance();
-  await hand(w, 'crititor', attack()); await w.advance();
-  const first = cardOf<StabilizerCard>(w, 'stabilizer');
-  await hand(w, 'stabilizer', stabilizeAll(first)); await w.advance();
   let target: string;
   const add = () => recordConstraint(w.ports, { mission: M, constraint: 'arrival', kind: 'object', text: 'Bound the result', scope: { paths: ['**'], taskTypes: [] } });
   if (arrival === 'crititor-running') {

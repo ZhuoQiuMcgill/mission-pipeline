@@ -15,13 +15,17 @@
 // then the next round. Every attack round is stabilized (code review r1 #1): a round that left the
 // author nothing to answer (the attacker passed it, or found nothing) is dispositioned with no
 // dispositions and goes to the Stabilizer at once, which judges its findings (general ones too)
-// and the drift; the closing round too. Only in-scope findings bind the author; a finding judged
-// out of scope or shifting direction never refutes the version. The round is evaluated after its
-// stabilization: whether it passed (no in-scope fatal or serious finding unresolved on the same
-// version: a closing attacker next, or convergence after the closing round), the same class of
-// fatal finding not fixed twice, no progress. The round budget (default 3) ends after the last
-// round is stabilized; an exploration that has not converged then goes to the Secretary with the
-// findings, the dispositions and the Stabilizer's judgments (WI-08, whose extension rule stays).
+// and the drift. Only in-scope findings bind the author; a finding judged
+// out of scope or shifting direction never refutes the version. The Stabilizer may judge that the
+// author's revision or rebuttal answers an in-scope finding ("answered"): it is resolved at once,
+// without the attacker's re-check (a later attacker may still re-check it, and "no" reopens it).
+// The round is evaluated after its stabilization, by the one rule (4.1.3, E-3: roundEnd): whether it
+// passed (no in-scope fatal or serious finding unresolved on the version its judgment passed, the
+// author's revision included when the Stabilizer answered findings: convergence at once, in any
+// round), the same class of fatal
+// finding not fixed twice, no progress. The round budget (default 3) ends after the last round is
+// stabilized; an exploration that has not converged then goes to the Secretary with the findings,
+// the dispositions and the Stabilizer's judgments (WI-08, whose extension rule stays).
 //
 // A direction question is pending (code review r1 #2) while any of these waits for its ruling at
 // the Secretary: an author's direction question, a finding the author escalated (any severity), a
@@ -40,6 +44,27 @@
 //                          rests on (code review r1 #3): they run again (the same request, blind),
 //                          then the same position judges the version again with the new records
 //   settled (<x>, <x>#<n>) the step handed a stop to the decision layer (plandoc.ts): one per opening
+//   resnapshotted (<n>)    the snapshot the seats read was taken again from the target branch: before
+//                          the first step was dispatched (nothing had run on the old one), or on the
+//                          PM's word; every card from then on names it, and evidence recorded before
+//                          still counts, labelled "older environment"
+//   attempt-rerun (<n>)    the PM's word (`mp pm rerun-attempt`): registered attempts that failed for a
+//                          cause outside the method run again on the same method version, each a fresh
+//                          blind run of its registered card; its new record supersedes the earlier one
+//                          (kept as history), and an interpretation not submitted yet waits for it
+//   attempts-amended (<n>) the user's words (`mp pm amend-attempts`): a decision the user made about the
+//                          method in force (a scale, a cap, a wider search) adds or replaces registered
+//                          attempts without a round and without review. A new method version is in
+//                          force (the user's judgment passes it); an added attempt runs, a replaced one
+//                          runs under its new card (a record it had is superseded, kept as history),
+//                          records of unchanged attempts keep counting, and an interpretation not
+//                          submitted yet waits for the new records. A repair it answers no longer adds
+//                          its round
+// 4.1.3 (E-5): `mp pm repair --about <x>` with a change form (`--attempts`, `--rerun`, `--resnapshot`)
+// writes the same three events, each answering the repair it records in the same write (`answers`);
+// the older commands write a repair too. A repair with no change form (rerun, `repair.authorTurn`)
+// gives the author the turn at once: in the attempts phase the method goes back to its author, and
+// records of attempts the author's new version leaves unchanged keep counting.
 //
 // Settling (code review r1 #3 carried through): an exploration settles at most once per opening, and
 // a rerun that reopens a converged exploration (or a redefinition that clears a stop) opens it again.
@@ -49,20 +74,26 @@
 //
 // Rules (8.2): a round passes when no fatal or serious finding is unresolved after it (resolved:
 // revised and confirmed by the attacker's re-check, rebutted by an evidence execution the attacker
-// confirmed covers the counterexample, or accepted by the user as a residual risk). A pass by the
-// continuing attacker calls in a closing attacker (a new session, 4.3 连续性) on the same frozen
-// version; a pass by the closing attacker converges. The closing attacker continues as the
-// attacker if it finds something. Stops: converged; budget exhausted (rounds); the same class of
+// confirmed covers the counterexample, revised or rebutted and judged answered by the Stabilizer,
+// or accepted by the user as a residual risk). 4.1.3 (E-3): one rule ends every round (`roundEnd`):
+// a round converges when its Stabilizer judged it on track, no direction question waits for a
+// ruling, and every in-scope fatal or serious finding of the phase is resolved on the version the
+// round's judgment passed (the current one), in any round: the budget's last, a granted one, a
+// re-check after a ruling. No closing attacker is called in any more; a fresh attacker comes in only
+// after a redefinition (the round was judged under an older definition). The budget only limits
+// whether another round may start. Stops: converged; budget exhausted (rounds); the same class of
 // fatal finding not fixed in two consecutive rounds; no progress (6.5: two consecutive rounds
 // with the same unresolved findings and nothing new). Research explorations (4.3): the method
 // (with its attempt register) is attacked until a round passes; the registered attempts run
 // blind; an interpreter who took part in none of it writes the interpretation, which is then
 // attacked on its reasoning until it converges.
 
+import { canonicalJson } from '../../common/hash.ts';
 import type { ExplorationDefinition } from './definition.ts';
 import type { ExplorationSettledBody, RepairRef } from '../plandoc.ts';
 import { isBlocking, type Severity } from '../../seat/cards/crititor.ts';
 import type { RegisteredAttemptT } from '../../seat/cards/researcher.ts';
+import type { RecordedData } from '../../seat/cards/experiment.ts';
 
 // ---------------------------------------------------------------- event bodies
 
@@ -82,6 +113,27 @@ export interface DefinedBody {
   readonly snapshot: { readonly path: string; readonly commit: string };
 }
 
+/** The event of a snapshot taken again (line "exploration:<id>", key: its number, 1 for the first). */
+export const RESNAPSHOTTED = 'resnapshotted';
+
+/** A snapshot taken again from the target branch (the branch moved since the exploration was defined, or since its last one). */
+export interface ResnapshotBody {
+  readonly n: number;
+  /** The commit the seats read from now on, and its evidence environment (a new env.snapshot on the exploration's env line). */
+  readonly snapshot: { readonly path: string; readonly commit: string };
+  readonly envSnapshot: string;
+  /** The snapshot it replaces. */
+  readonly previous: { readonly commit: string; readonly envSnapshot: string };
+  /** dispatch: taken when its first step was dispatched (nothing had run yet); pm: `mp pm resnapshot-exploration`. */
+  readonly by: 'dispatch' | 'pm';
+  /** The step whose dispatch took it (by dispatch). */
+  readonly step: string | null;
+  /** The words entry it rests on (by pm). */
+  readonly words: string | null;
+  /** 4.1.3: the repair about this exploration it answers, recorded in the same write (absent before 4.1.3). */
+  readonly answers?: string | null;
+}
+
 export interface EvidenceTaskInfo {
   readonly id: string;
   readonly k: number;
@@ -91,6 +143,72 @@ export interface EvidenceTaskInfo {
   readonly requester: string | null;
   /** An evidence execution run again after an environment change: the one it replaces (code review r1 #3). */
   readonly rerunOf?: string;
+  /** A registered attempt run again on the PM's word (`mp pm rerun-attempt`): the record its new one supersedes. */
+  readonly supersedes?: string;
+  /** A registered attempt run under the card the user's amendment set (`mp pm amend-attempts`): the amendment's number. */
+  readonly amendment?: number;
+  /** 4.1.3 (#31): a registered attempt run under its changed card, the method having passed again after a repair: that method version. */
+  readonly method?: string;
+}
+
+/** The event of the user's amendment of the method in force (line "exploration:<id>", key: its number, 1 for the first). */
+export const ATTEMPTS_AMENDED = 'attempts-amended';
+
+/**
+ * The user's decision about the method in force (`mp pm amend-attempts`): registered attempts added or
+ * replaced on their words, without a round and without review (the user owns the decision). The new
+ * method version is in force at once, passed by the user's judgment; no author, attacker or
+ * Stabilizer is dispatched for it.
+ */
+export interface AttemptsAmendedBody {
+  readonly n: number;
+  /** The method version it amends. */
+  readonly previous: string;
+  /** The method version in force from now on: its id, its document (a data value), and the user's judgment that passes it. */
+  readonly version: string;
+  readonly content: string;
+  readonly judgment: string;
+  /** The new version's register: the previous one's in order (a replaced attempt in its place), then the added ones. */
+  readonly attempts: readonly RegisteredAttemptT[];
+  /** The attempts added, and those replaced (both in the new register's order). */
+  readonly added: readonly string[];
+  readonly replaced: readonly string[];
+  /** The record each replaced attempt had, superseded by its new run (kept as history); an attempt with none is absent. */
+  readonly replaces: Readonly<Record<string, string>>;
+  /** Steps taken back before they ran, in the same write (each consumed as "withdrawn"): runs of replaced attempts waiting in the queue, and an interpreter queued on the earlier records. */
+  readonly withdrawn: readonly string[];
+  /** The words entry it rests on, and the PM's reason. */
+  readonly words: string;
+  readonly reason: string | null;
+  /** A repair about this exploration it answers (that repair no longer adds its round), or null. */
+  readonly answers: string | null;
+  readonly by: 'pm';
+  /** 4.1.3: the repair this change recorded itself, when it answers an earlier one (`answers`): both read as answered. */
+  readonly repair?: string;
+}
+
+/** The event of the PM's word that registered attempts run again (line "exploration:<id>", key: its number, 1 for the first). */
+export const ATTEMPT_RERUN = 'attempt-rerun';
+
+/**
+ * Registered attempts run again on the same method version (`mp pm rerun-attempt`): each had its
+ * record, and failed for a cause outside the method (a platform's time limit since raised, say). Each
+ * gets a fresh blind run of its registered card, in the register's order; no round is spent.
+ */
+export interface AttemptRerunBody {
+  readonly n: number;
+  /** The attempts, in the register's order. */
+  readonly attempts: readonly string[];
+  /** Each attempt's record its new one supersedes (kept as history). */
+  readonly replaces: Readonly<Record<string, string>>;
+  /** The words entry it rests on, and the PM's reason. */
+  readonly words: string;
+  readonly reason: string | null;
+  /** The interpreter step queued on the earlier records, withdrawn in the same write (consumed as "withdrawn"), or null. */
+  readonly withdrawn: string | null;
+  readonly by: 'pm';
+  /** 4.1.3: the repair about this exploration it answers, recorded in the same write (absent before 4.1.3). */
+  readonly answers?: string | null;
 }
 
 /** The evidence executions to run again (code review r1 #3), under the environment identity named. */
@@ -102,6 +220,12 @@ export interface RerunBody {
    * as an added question (on every card of the round); its settled conclusion stays as history.
    */
   readonly repair?: RepairRef;
+  /**
+   * 4.1.3 (E-5, #31): the author gets the turn at once, even in the attempts phase (the method goes
+   * back to its author; runs in flight finish). Absent on a repair recorded before 4.1.3: it adds
+   * its rounds and the turn stays as it was.
+   */
+  readonly authorTurn?: true;
 }
 
 export interface QueuedBody {
@@ -114,7 +238,7 @@ export interface QueuedBody {
   readonly card: string;
   readonly round: number;
   readonly phase: Phase;
-  /** Attacker: the closing attacker's first session (fresh). */
+  /** Attacker: a fresh session (4.1.3: only after a redefinition; before, the closing attacker's first). */
   readonly fresh: boolean;
   readonly target: string | null;
   readonly judgment: string | null;
@@ -151,6 +275,8 @@ export interface FindingVerdict {
   readonly severity: Severity;
   readonly reason: string;
   readonly question: string | null;
+  /** The author's revision or rebuttal answers it: resolved by this judgment, without a re-check (absent: not answered). */
+  readonly answered?: true;
 }
 
 export type ConsumedBody =
@@ -166,6 +292,8 @@ export type ConsumedBody =
       readonly directionQuestions: readonly string[];
       readonly attempts: readonly RegisteredAttemptT[];
       readonly result: string | null;
+      /** 4.1.3 (E-4): the data outside the commit its hand-back cited, as checked at the hand-back (flow.ts consumption). */
+      readonly data?: readonly RecordedData[];
     }
   | {
       readonly kind: 'interpretation';
@@ -177,6 +305,8 @@ export type ConsumedBody =
       readonly message: string;
       readonly dispositions: readonly Disposition[];
       readonly result: string | null;
+      /** 4.1.3 (E-4): as the author's. */
+      readonly data?: readonly RecordedData[];
     }
   | {
       readonly kind: 'attack';
@@ -192,8 +322,10 @@ export type ConsumedBody =
       readonly result: string | null;
       /** The evidence the round's judgment requires (the Stabilizer's judgment binds the same). */
       readonly evidence?: readonly string[];
+      /** 4.1.3 (E-4): as the author's. */
+      readonly data?: readonly RecordedData[];
     }
-  | { readonly kind: 'discuss-reply'; readonly task: string; readonly reply: string; readonly result: string | null }
+  | { readonly kind: 'discuss-reply'; readonly task: string; readonly reply: string; readonly result: string | null; readonly data?: readonly RecordedData[] }
   | {
       readonly kind: 'stabilized';
       readonly task: string;
@@ -206,6 +338,8 @@ export type ConsumedBody =
       readonly findings: readonly FindingVerdict[];
       readonly drift: { readonly verdict: 'on-track' | 'drifting'; readonly reason: string; readonly question: string | null };
       readonly result: string | null;
+      /** The pass its answered findings made on the author's revision, a version the round did not attack (stabilizer.ts), when they made one. */
+      readonly revision?: { readonly version: string; readonly judgment: string };
     }
   | {
       readonly kind: 'needs-evidence';
@@ -225,8 +359,12 @@ export type ConsumedBody =
       readonly attempt: string | null;
       /** The program generated the record (8.2: a failed or unrun attempt). */
       readonly auto: boolean;
+      /** 4.1.3 (E-4): as the author's (a blind run's data pointers, checked at its hand-back). */
+      readonly data?: readonly RecordedData[];
     }
-  | { readonly kind: 'abandoned'; readonly task: string; readonly role: Role; readonly reason: string };
+  | { readonly kind: 'abandoned'; readonly task: string; readonly role: Role; readonly reason: string }
+  /** A queued step taken back before it ran (`mp pm rerun-attempt`: an interpreter queued on records that are superseded; `mp pm amend-attempts`: also a waiting run of a replaced attempt's earlier card). */
+  | { readonly kind: 'withdrawn'; readonly task: string; readonly role: Role; readonly reason: string };
 
 export interface RulingBody {
   readonly id: string;
@@ -240,14 +378,22 @@ export interface RulingBody {
    * keep-direction (4.1 §6.3, WI-33): the definition stands: the listed findings the Stabilizer
    * judged shifting direction are set aside, a drift is cleared, and the rounds go on.
    * A redirect also clears a drift.
+   * accept (4.1.3, E-1): the budget step's plain acceptance, when nothing fatal or serious is
+   * unresolved and no direction question waits: the round ends as converged by the decision (the
+   * method passes to its attempts), with no risk list.
    */
-  readonly decision: 'accept-risk' | 'redirect' | 'extend' | 'stop' | 'answer' | 'retry' | 'resume' | 'keep-direction';
+  readonly decision: 'accept-risk' | 'redirect' | 'extend' | 'stop' | 'answer' | 'retry' | 'resume' | 'keep-direction' | 'accept';
+  /** extend (4.1.3, #39): the findings the grant is for (general ones too): the author gets a turn on those still open. Empty: none named. */
   readonly findings: readonly string[];
   /** answer: the author task whose direction questions it answers (they stop being pending). */
   readonly answers?: string;
   /** keep-direction / redirect: the ruling of the drift's own escalation (only it clears the drift, code review r2 #1). */
   readonly drift?: true;
   readonly text: string;
+  /** accept (4.1.3, E-1): the decider's pass on the version it accepts, written in the same write (absent: a pass of the position stood on it already). */
+  readonly judgment?: string;
+  /** extend (4.1.3, #38): the decision's instructions, shown on the next rounds' cards (absent: none given, or recorded before 4.1.3). */
+  readonly instructions?: string;
   readonly extraRounds: number;
   /** extend: more spend for the exploration (micro-dollars), when its spend budget was the limit. */
   readonly extraMicros?: number;
@@ -297,6 +443,8 @@ export interface FindingState {
   scope: FindingScope | null;
   judgedSeverity: Severity | null;
   question: string | null;
+  /** The round whose Stabilizer judged the author's revision or rebuttal answers it (resolved without a re-check), or null; cleared when it is reopened. */
+  answered: number | null;
   /** Re-check outcomes, oldest first. */
   readonly rechecks: Array<{ readonly round: number; readonly resolved: 'yes' | 'no'; readonly reason: string }>;
 }
@@ -345,7 +493,7 @@ export interface Stabilizing {
   /** The findings the Stabilizer judges: the round's new ones and those its re-check reopened (none: it judges the round). */
   readonly findings: readonly string[];
   readonly evidence: readonly string[];
-  /** The attacker session was the closing attacker's. */
+  /** The attacker session was a fresh one (the closing attacker's before 4.1.3). */
   readonly closing: boolean;
   /** Fatal classes unresolved before the round (8.2 #3). */
   readonly fatalBefore: readonly string[];
@@ -355,6 +503,14 @@ export interface Stabilizing {
   readonly again?: boolean;
   /** The definition version the round's attacker card was built under; its Stabilizer binds the same (final review F1). */
   readonly basis?: string;
+}
+
+/** A round whose end waits for a direction ruling (E-3): once ruled, the one rule ends it from the state then. */
+export interface WaitingRound extends Stabilizing {
+  /** The version its judgment was about, the position's verdict recorded, and that judgment. */
+  readonly judged: string;
+  readonly verdict: 'pass' | 'fail' | 'undecided';
+  readonly judgment: string;
 }
 
 export interface XState {
@@ -375,8 +531,11 @@ export interface XState {
   discussPending: boolean;
   version: VersionState | null;
   readonly versions: VersionState[];
-  /** Research: the method version that passed and its register. */
-  method: { readonly version: string; readonly attempts: readonly RegisteredAttemptT[] } | null;
+  /**
+   * Research: the method version in force and its register: the one that passed its attack, or the
+   * user's amendment of it (`mp pm amend-attempts`); `judgment` is the pass that decides its position.
+   */
+  method: { readonly version: string; readonly attempts: readonly RegisteredAttemptT[]; readonly judgment?: string } | null;
   /** Research: the register submitted with the current method version. */
   register: readonly RegisteredAttemptT[];
   noConclusion: boolean;
@@ -386,9 +545,9 @@ export interface XState {
   readonly discussion: Array<{ readonly from: 'author' | 'attacker'; readonly round: number; readonly text: string }>;
   readonly rulings: RulingBody[];
   /** Resumable sessions per role (6.2: only after an evidence request is the state kept). */
-  /** The current attacker session is the closing attacker's (it continues after a fresh start). */
+  /** The current attacker session is a fresh one (it continues after a fresh start). */
   attackerClosing: boolean;
-  /** The next attacker turn must start the closing attacker (fresh). */
+  /** The next attacker turn must start a fresh attacker (4.1.3: after a redefinition). */
   needClosing: boolean;
   awaitingEvidence: AwaitingEvidence | null;
   /** The last attack round, evaluated, while no task has been queued since. */
@@ -426,6 +585,30 @@ export interface XState {
   settled: SettleRecord | null;
   /** 4.1.2: the repairs that reopened it, each an added question its later rounds answer. */
   readonly repairs: RepairRef[];
+  /** The snapshots taken again, oldest first (`defined` holds the one in force). */
+  readonly resnapshots: ResnapshotBody[];
+  /** The evidence environment (env snapshot id) each evidence was recorded under: the snapshot in force when it was taken into account. */
+  readonly evidenceEnv: Map<string, string>;
+  /**
+   * Registered attempts the PM had run again (`mp pm rerun-attempt`), or the user's amendment replaced
+   * (`mp pm amend-attempts`, `amendment` its number), by attempt: the evidence sequence when it was
+   * asked (only a record after it counts for the attempt) and the record it supersedes.
+   */
+  readonly attemptReruns: Map<string, { readonly n: number; readonly since: number; readonly replaces: string | null; readonly amendment?: number; readonly method?: string }>;
+  /** The user's amendments of the method in force (`mp pm amend-attempts`), oldest first. */
+  readonly amendments: AttemptsAmendedBody[];
+  /** The task sequence when each repair about this exploration was recorded (an author task queued after it starts its round). */
+  readonly repairSince: Map<string, number>;
+  /** Repairs an amendment answered (`--answers`), by repair: the amendment's number. They add no round and no card shows them. */
+  readonly answeredRepairs: Map<string, number>;
+  /** 4.1.3 (E-3): the round whose end waits for a direction ruling, or null. */
+  waitingRound: WaitingRound | null;
+  /** 4.1.3 (E-1): the decision that accepted the conclusion at the budget step, until the next step is queued (the stop says it was the decision's). */
+  accepted: RulingBody | null;
+  /** 4.1.3 (#31): a method sent back to its author by a repair (the attempts phase it left), until it passes again. */
+  reentry: { readonly repair: string; readonly since: number } | null;
+  /** 4.1.3 (#31): the repairs recorded with `authorTurn`: each gives the author a turn before the exploration can end. */
+  readonly authorTurns: Set<string>;
 }
 
 export function emptyState(): XState {
@@ -473,6 +656,16 @@ export function emptyState(): XState {
     settles: [],
     settled: null,
     repairs: [],
+    resnapshots: [],
+    evidenceEnv: new Map(),
+    attemptReruns: new Map(),
+    amendments: [],
+    repairSince: new Map(),
+    answeredRepairs: new Map(),
+    waitingRound: null,
+    accepted: null,
+    reentry: null,
+    authorTurns: new Set(),
   };
 }
 
@@ -533,6 +726,7 @@ export function fold(events: readonly XEvent[]): XState {
           s.attackerClosing = true;
           s.needClosing = false;
         }
+        s.accepted = null;
         break;
       }
       case 'consumed':
@@ -554,8 +748,10 @@ export function fold(events: readonly XEvent[]): XState {
           // reopens (its settle becomes history), and the author answers it first
           if (s.repairs.some((r) => r.id === b.repair!.id)) break;
           s.repairs.push(b.repair);
-          // one more round, and its closing attacker (a round that passes converges only after one)
+          s.repairSince.set(b.repair.id, s.seq);
+          // two more rounds (a research method sent back to its author needs one, its interpretation another)
           s.rerunRounds += 2;
+          if (b.authorTurn === true) s.authorTurns.add(b.repair.id);
           if (s.stopped !== null) {
             s.stopped = null;
             s.settled = null;
@@ -565,6 +761,19 @@ export function fold(events: readonly XEvent[]): XState {
             s.needClosing = false;
             s.attackerClosing = false;
             if (s.turn === 'none' || s.turn === 'await-ruling' || s.turn === 'attacker') s.turn = 'author';
+          } else if (b.authorTurn === true && (s.phase === 'attempts' || s.phase === 'interpret') && s.method !== null) {
+            // 4.1.3 (#31): the method goes back to its author at once; runs in flight finish, and the
+            // records of attempts its new version leaves unchanged keep counting (methodPasses)
+            s.reentry = { repair: b.repair.id, since: s.seq };
+            s.phase = 'method';
+            s.turn = 'author';
+            s.afterAttack = null;
+            s.needClosing = false;
+            s.attackerClosing = false;
+          } else if (b.authorTurn === true && (s.turn === 'attacker' || s.turn === 'await-ruling' || s.turn === 'none') && turnTasks(s).length === 0) {
+            // 4.1.3 (#31): the author answers the repair first (one at work finishes its turn; the round's end gives it then)
+            s.turn = 'author';
+            s.afterAttack = null;
           }
           break;
         }
@@ -586,11 +795,60 @@ export function fold(events: readonly XEvent[]): XState {
         }
         break;
       }
+      case ATTEMPT_RERUN: {
+        // registered attempts run again on the same method version: each counts as run only once its
+        // new record is in, so an interpretation not submitted yet waits for them (back to the attempts)
+        const b = e.body as AttemptRerunBody;
+        if (s.method === null) break;
+        for (const a of b.attempts) s.attemptReruns.set(a, { n: b.n, since: s.evidenceSeq, replaces: b.replaces[a] ?? null });
+        if (s.phase === 'interpret') s.phase = 'attempts';
+        s.afterAttack = null;
+        break;
+      }
+      case ATTEMPTS_AMENDED: {
+        // the user's decision about the method in force: a new method version in force at once (no
+        // round, no review). A replaced attempt counts as run only once its new card's record is in
+        // (a record it had is superseded); an added one has none yet: an interpretation not submitted
+        // yet waits for them (back to the attempts). Records of unchanged attempts keep counting.
+        const b = e.body as AttemptsAmendedBody;
+        if (s.method === null) break;
+        const v: VersionState = { id: b.version, content: b.content, round: s.rounds, phase: 'method' };
+        s.versions.push(v);
+        s.version = v;
+        s.method = { version: b.version, attempts: b.attempts, judgment: b.judgment };
+        s.register = b.attempts;
+        for (const a of b.replaced) s.attemptReruns.set(a, { n: b.n, since: s.evidenceSeq, replaces: b.replaces[a] ?? null, amendment: b.n });
+        s.amendments.push(b);
+        // a repair it answers: its added rounds are taken back, and no card shows it
+        if (b.answers !== null && s.repairs.some((r) => r.id === b.answers) && !s.answeredRepairs.has(b.answers)) {
+          s.answeredRepairs.set(b.answers, b.n);
+          s.rerunRounds = Math.max(0, s.rerunRounds - 2);
+          // 4.1.3: the repair had sent the method back to its author, who had not started: it comes back in force
+          if (s.reentry?.repair === b.answers) {
+            s.reentry = null;
+            s.phase = 'attempts';
+            s.turn = 'none';
+          }
+        }
+        if (s.phase === 'interpret') s.phase = 'attempts';
+        if (s.phase === 'attempts' && s.method.attempts.every((a) => attemptRecorded(s, a.id))) s.phase = 'interpret';
+        s.afterAttack = null;
+        break;
+      }
       case 'settled': {
         // one settle per opening (the step's rule): the first since the last reopening is the current one
         const rec: SettleRecord = { key: e.key, n: s.settles.length + 1, body: e.body as ExplorationSettledBody };
         s.settles.push(rec);
         if (s.settled === null) s.settled = rec;
+        break;
+      }
+      case RESNAPSHOTTED: {
+        // the snapshot the seats read, taken again: every card from now on names it; nothing is
+        // queued or invalidated by it (evidence recorded before still counts: olderSnapshotEvidence)
+        const b = e.body as ResnapshotBody;
+        if (s.defined === null) break;
+        s.defined = { ...s.defined, snapshot: { path: b.snapshot.path, commit: b.snapshot.commit }, envSnapshot: b.envSnapshot };
+        s.resnapshots.push(b);
         break;
       }
       default:
@@ -612,15 +870,19 @@ function consume(s: Mutable, c: ConsumedBody): void {
     case 'evidence': {
       const k = q?.evidence?.k ?? s.evidenceSeq;
       s.evidence.set(c.evidence, { id: c.evidence, k, status: c.status, summary: c.summary, report: c.report, attempt: c.attempt });
+      if (s.defined !== null) s.evidenceEnv.set(c.evidence, s.defined.envSnapshot);
       if (s.awaitingEvidence !== null && s.awaitingEvidence.executor === c.task) s.awaitingEvidence.evidence = c.evidence;
       const old = q?.evidence?.rerunOf;
       if (old !== undefined && s.reruns.has(old)) {
         s.reruns.set(old, c.evidence);
         if ([...s.reruns.values()].every((v) => v !== null)) applyReruns(s);
       }
-      if (s.phase === 'attempts' && s.method !== null && s.method.attempts.every((a) => [...s.evidence.values()].some((x) => x.attempt === a.id))) s.phase = 'interpret';
+      if (s.phase === 'attempts' && s.method !== null && s.method.attempts.every((a) => attemptRecorded(s, a.id))) s.phase = 'interpret';
       return;
     }
+    case 'withdrawn':
+      // taken back before it ran: nothing follows from it
+      return;
     case 'abandoned':
       // the turn stays with the role (a retry ruling queues it again); decide() stops meanwhile
       s.abandoned = { task: c.task, role: c.role, reason: c.reason };
@@ -687,7 +949,10 @@ function applyReruns(s: Mutable): void {
     const rep = s.reruns.get(d.evidence);
     if (rep === undefined || rep === null) continue;
     f.disposition = { ...d, evidence: rep };
-    if (f.status === 'resolved' && d.action === 'rebut') f.status = 'awaiting-recheck';
+    if (f.status === 'resolved' && d.action === 'rebut') {
+      f.status = 'awaiting-recheck';
+      f.answered = null;
+    }
   }
   s.discussPending = false;
   s.needClosing = false;
@@ -714,6 +979,12 @@ export function blocks(f: FindingState): boolean {
   return f.scope !== 'out-of-scope' && f.scope !== 'shifts-direction' && isBlocking(effectiveSeverity(f));
 }
 
+/** A finding the Stabilizer may judge answered: revised, or rebutted with an evidence execution, and waiting for its re-check (stabilizer.ts). */
+function answerable(f: FindingState): boolean {
+  const d = f.disposition;
+  return f.status === 'awaiting-recheck' && d !== null && (d.action === 'revise' || (d.action === 'rebut' && d.evidence !== null));
+}
+
 /**
  * A direction question waits for its ruling at the Secretary (4.1 §6.3, code review r1 #2): an
  * author's question, a finding the author escalated (any severity) or the Stabilizer judged
@@ -723,15 +994,123 @@ export function directionPending(s: XState): boolean {
   return s.drift !== null || s.pendingQuestions.length > 0 || [...s.findings.values()].some((f) => f.status === 'awaiting-ruling');
 }
 
-/** The turn after a ruling cleared the last direction question: the author for open findings, else a re-check round (the position's next judgment). */
+/**
+ * The turn after a ruling cleared the last direction question: the round that waited for it ends by
+ * the one rule (E-3), judged with the ruling (a new Stabilizer judges it again when its position was
+ * left pending). Without such a round (a ruling on an earlier question): the author for open
+ * findings, else a re-check round.
+ */
 function afterRuling(s: Mutable): void {
   if (s.turn !== 'await-ruling' || directionPending(s)) return;
-  s.turn = phaseFindings(s).some((f) => f.status === 'open') ? 'author' : 'attacker';
+  const w = s.waitingRound;
+  s.waitingRound = null;
+  if (w === null) {
+    s.turn = phaseFindings(s).some((f) => f.status === 'open') ? 'author' : 'attacker';
+    return;
+  }
+  const end = roundEnd(s, { judged: w.judged, verdict: w.verdict, basis: w.basis, again: false });
+  if (applyEnd(s, w, end, w.judged, w.judgment)) s.afterAttack = { round: w.round, verdict: w.verdict, converged: true, fatalRepeat: [], noProgress: false };
+}
+
+/** How an attack round ends (E-3): the one rule's outcome. */
+export type RoundEnd = 'converged' | 'author' | 'attack' | 'await-ruling' | 'rejudge';
+
+/**
+ * 4.1.3 (E-3): the one rule that ends an attack round, applied to every round once its Stabilizer
+ * judged it (a normal round, the budget's last, a granted one, a re-check, a research method's pass,
+ * a round whose findings the Stabilizer answered) and again once a ruling it waited for is recorded.
+ * It reads the state as it is then, never a card:
+ *   author        an in-scope fatal or serious finding is open (the author answers it), or a repair
+ *                 waits for the author's turn (4.1.3, #31)
+ *   attack        one is unresolved on the version (it waits for the attacker's re-check), or the
+ *                 author's revision is not the version the judgment passed, or the round was judged
+ *                 under an older definition (a fresh attacker under the current one)
+ *   await-ruling  a direction question waits for its ruling
+ *   rejudge       nothing stands between the round and its end but its recorded verdict, left pending
+ *                 or failed by a ruling that came after its card: one new Stabilizer judges it again
+ *   converged     on track, nothing waits for a ruling, everything in scope fatal or serious resolved
+ *                 (by a re-check or `answered`), on the version the judgment passed
+ * The budget is not part of it: it only limits whether another round may start (decide()).
+ */
+export function roundEnd(s: XState, r: { readonly judged: string; readonly verdict: 'pass' | 'fail' | 'undecided'; readonly basis?: string | undefined; readonly again: boolean }): RoundEnd {
+  const mine = phaseFindings(s);
+  if (mine.some((f) => f.status === 'open' && blocks(f)) || repairAwaitsAuthor(s)) return 'author';
+  if (mine.some((f) => blocks(f) && f.status !== 'resolved' && f.status !== 'awaiting-ruling') || s.version?.id !== r.judged) return 'attack';
+  if (directionPending(s)) return 'await-ruling';
+  if (staleBasis(s, r.basis)) return 'attack';
+  if (r.verdict !== 'pass') return r.again ? 'attack' : 'rejudge';
+  return 'converged';
+}
+
+/** Whether the round's judgment was pinned to a definition version that is no longer current (final review F1). */
+function staleBasis(s: XState, basis: string | undefined): boolean {
+  return basis !== undefined && s.defined !== null && basis !== s.defined.basisVersion;
+}
+
+/** The turn a round's end gives (true: converged). A method's pass moves it to its attempts. */
+function applyEnd(s: Mutable, st: Stabilizing, end: RoundEnd, judged: string, judgment: string): boolean {
+  switch (end) {
+    case 'author':
+      s.turn = 'author';
+      return false;
+    case 'attack':
+      s.turn = 'attacker';
+      // after a redefinition the re-check is a fresh attacker under the current definition (final review F1)
+      if (staleBasis(s, st.basis) && s.phase !== 'method') s.needClosing = true;
+      return false;
+    case 'await-ruling':
+      s.turn = 'await-ruling';
+      return false;
+    case 'rejudge':
+      // the same round judged again from a current card; a finding a ruling settled since is not judged again
+      s.stabilizing = { ...st, findings: st.findings.filter((id) => !(s.findings.get(id)?.status === 'resolved' && s.findings.get(id)?.ruling !== null)), again: true };
+      s.turn = 'stabilizer';
+      return false;
+    case 'converged':
+      if (s.phase === 'method') {
+        methodPasses(s, judged, judgment);
+        return false;
+      }
+      s.turn = 'none';
+      return true;
+  }
+}
+
+/**
+ * The method's pass (the version its position passed, and that judgment): its register is in force,
+ * and the attempts run. 4.1.3 (#31): when it passes again after a repair sent it back to its author,
+ * a record counts for an attempt only while its registered card is unchanged (equal as registered);
+ * a changed or new one runs under its card (a record it had is superseded, kept as history).
+ */
+function methodPasses(s: Mutable, version: string, judgment: string | null): void {
+  const before = s.method;
+  s.method = { version, attempts: s.register, ...(judgment !== null ? { judgment } : {}) };
+  s.phase = 'attempts';
+  s.turn = 'none';
+  if (before === null) return;
+  s.reentry = null;
+  const was = new Map(before.attempts.map((a) => [a.id, canonicalJson(a)]));
+  for (const a of s.register) {
+    if (was.get(a.id) === canonicalJson(a)) continue;
+    s.attemptReruns.set(a.id, { n: 0, since: s.evidenceSeq, replaces: attemptEvidence(s, a.id), method: version });
+  }
+  if (s.method.attempts.every((a) => attemptRecorded(s, a.id))) s.phase = 'interpret';
+}
+
+/** A repair recorded with `authorTurn` (4.1.3, #31) whose author turn has not come: no author or interpreter step queued since it. */
+export function repairAwaitsAuthor(s: XState): boolean {
+  for (const id of s.authorTurns) {
+    if (s.answeredRepairs.has(id)) continue;
+    const since = s.repairSince.get(id) ?? 0;
+    if (![...s.tasks.values()].some((q) => (q.role === 'author' || q.role === 'interpreter') && q.n > since && s.consumed.get(q.task)?.kind !== 'withdrawn')) return true;
+  }
+  return false;
 }
 
 function attack(s: Mutable, c: Extract<ConsumedBody, { kind: 'attack' }>): void {
   s.rounds++;
   s.lastAttack = c;
+  s.waitingRound = null;
   // fatal classes unresolved before this round (for "the same class not fixed twice", 8.2 #3)
   const fatalBefore = [...new Set([...s.findings.values()].filter((f) => blocks(f) && effectiveSeverity(f) === 'fatal' && f.status !== 'resolved').map((f) => f.class))];
   const reopened: string[] = [];
@@ -741,14 +1120,16 @@ function attack(s: Mutable, c: Extract<ConsumedBody, { kind: 'attack' }>): void 
     f.rechecks.push({ round: s.rounds, resolved: r.resolved, reason: r.reason });
     if (r.resolved === 'yes') f.status = 'resolved';
     else {
+      // also a finding the Stabilizer judged answered: the attacker found it not fixed after all
       f.status = 'open';
       f.disposition = null;
+      f.answered = null;
       reopened.push(f.id);
     }
   }
   for (const n of c.findings) {
     if (!s.findings.has(n.id)) {
-      s.findings.set(n.id, { ...n, round: s.rounds, version: c.target, phase: s.phase, status: 'open', disposition: null, ruling: null, residualRisk: false, rechecks: [], scope: null, judgedSeverity: null, question: null });
+      s.findings.set(n.id, { ...n, round: s.rounds, version: c.target, phase: s.phase, status: 'open', disposition: null, ruling: null, residualRisk: false, rechecks: [], scope: null, judgedSeverity: null, question: null, answered: null });
     }
   }
   // the Crititor's own judgment fails only on an in-scope finding left unresolved; anything else is
@@ -772,7 +1153,7 @@ function attack(s: Mutable, c: Extract<ConsumedBody, { kind: 'attack' }>): void 
   // the next turn follows the findings as they stand now, not the card's view (a ruling that arrived
   // while the attacker ran may have resolved or reopened what the card showed): the author answers
   // the round when it left findings to answer; otherwise it is dispositioned as it is and goes to the
-  // Stabilizer at once (code review r1 #1: every round is stabilized, the closing round included)
+  // Stabilizer at once (code review r1 #1: every round is stabilized)
   const open = mine.filter((f) => f.status === 'open');
   s.turn = c.verdict !== 'pass' && open.length > 0 ? 'author' : 'stabilizer';
   s.afterAttack = null;
@@ -783,16 +1164,28 @@ function attack(s: Mutable, c: Extract<ConsumedBody, { kind: 'attack' }>): void 
  * is evaluated (code review r1 #1: after stabilization): passed or not, the 8.2 stops, the next turn.
  */
 function stabilize(s: Mutable, c: Extract<ConsumedBody, { kind: 'stabilized' }>): void {
+  const answered: string[] = [];
   for (const v of c.findings) {
     const f = s.findings.get(v.finding);
     if (f === undefined) continue;
     f.scope = v.verdict;
     f.judgedSeverity = v.severity;
     f.question = v.question;
+    // the same round judged again (code review r2 #4): an earlier answer stands only if given again
+    if (f.answered !== null && f.status === 'resolved') {
+      f.status = 'awaiting-recheck';
+      f.answered = null;
+    }
     // out of scope: never binds the author, never refutes (an escalated one still waits for its
-    // ruling: only the ruling clears it); shifting direction: not fixed, a question for the Secretary
+    // ruling: only the ruling clears it); shifting direction: not fixed, a question for the Secretary;
+    // answered: the author's revision or rebuttal resolves it, without the attacker's re-check
     if (v.verdict === 'out-of-scope' && f.status !== 'awaiting-ruling') f.status = 'resolved';
     else if (v.verdict === 'shifts-direction') f.status = 'awaiting-ruling';
+    else if (v.answered === true && answerable(f)) {
+      f.status = 'resolved';
+      f.answered = c.round;
+      answered.push(f.id);
+    }
   }
   if (c.drift.verdict === 'drifting') s.drift = { round: c.round, reason: c.drift.reason, question: c.drift.question };
   if (c.verdict === 'fail') s.negations.set(c.target, c.judgment);
@@ -828,57 +1221,28 @@ function stabilize(s: Mutable, c: Extract<ConsumedBody, { kind: 'stabilized' }>)
   const noProgress = sig.length >= 2 && sig[sig.length - 1] !== null && sig[sig.length - 1] === sig[sig.length - 2];
   const prevFailed = new Set(s.fatalFailed.length >= 2 ? s.fatalFailed[s.fatalFailed.length - 2] : []);
   const fatalRepeat = [...failed].filter((k) => prevFailed.has(k));
-  // the next turn
-  const mine = phaseFindings(s);
-  let converged = false;
-  if (mine.some((f) => f.status === 'open' && blocks(f))) {
-    // a finding the Stabilizer made binding (a severity it raised): the author answers it
-    s.turn = 'author';
-  } else {
-    // the round passed: nothing in scope, fatal or serious, unresolved on the version it attacked
-    const passed = !mine.some((f) => blocks(f) && f.status !== 'resolved' && f.status !== 'awaiting-ruling') && s.version?.id === st.target;
-    // a round pinned to a definition version that is no longer current never converges (final
-    // review F1): after a redefinition the closing round is a fresh attacker under the current
-    // version, then its Stabilizer (no round left: the budget stop, WI-08)
-    const stale = st.basis !== undefined && s.defined !== null && st.basis !== s.defined.basisVersion;
-    if (!passed) s.turn = 'attacker';
-    else if (stale && !directionPending(s)) {
-      s.turn = 'attacker';
-      if (s.phase !== 'method') s.needClosing = true;
-    } else if (directionPending(s)) {
-      // only the ruling stands between it and passing (4.1 §6.3): it waits; once ruled, the closing
-      // attacker comes in (or, after the closing round, continues) for the position's next judgment
-      s.turn = 'await-ruling';
-      // a round with no fatal or serious finding at all passed: the closing attacker is next; one
-      // whose blocking finding waits for the ruling is re-checked first
-      const clean = !mine.some((f) => blocks(f) && f.status !== 'resolved');
-      if (s.phase !== 'method' && ((clean && !st.closing) || stale)) s.needClosing = true;
-    } else if (c.verdict !== 'pass') {
-      // a round passes only on a recorded pass (code review r2 #4). "undecided": the Stabilizer judged
-      // from a card whose direction question has been ruled since; one new Stabilizer judges the same
-      // round from a current card (not a new round), and its evaluation replaces this one. A "fail"
-      // (a blocking finding a ruling has settled since): the attacker's re-check round judges again
-      if (c.verdict === 'undecided' && st.again !== true) {
-        s.signatures.pop();
-        s.fatalFailed.pop();
-        s.stabilizing = { ...st, again: true };
-        s.turn = 'stabilizer';
-        s.afterAttack = null;
-        return;
-      }
-      s.turn = 'attacker';
-    } else if (s.phase === 'method') {
-      s.method = { version: st.target, attempts: s.register };
-      s.phase = 'attempts';
-      s.turn = 'none';
-    } else if (st.closing) {
-      converged = true;
-      s.turn = 'none';
-    } else {
-      s.needClosing = true;
-      s.turn = 'attacker';
-    }
+  // the next turn, by the one rule (E-3). The version the Stabilizer's judgment passed: the one the
+  // round attacked, or the author's revision when nothing in scope fatal or serious is left on it, the
+  // findings answered or judged general or out of scope (4.1 §6.3; 4.1.3 sol final review r1: the
+  // pass is recorded at hand-back, stabilizedRevision; one recorded before 4.1.3 always came with an answer)
+  const rv = c.revision !== undefined && s.version?.id === c.revision.version ? c.revision : null;
+  // answers about the author's revision whose pass on it was left pending (a direction question on the
+  // card, ruled since): the round is about the revision, and a new Stabilizer passes it (#25)
+  const pendingRevision = rv === null && answered.length > 0 && c.verdict !== 'pass' && s.version !== null && s.version.id !== st.target;
+  const judged = rv?.version ?? (pendingRevision ? s.version!.id : st.target);
+  const verdict = rv !== null ? 'pass' : c.verdict;
+  const judgment = rv?.judgment ?? c.judgment;
+  const end = roundEnd(s, { judged, verdict, basis: st.basis, again: st.again === true });
+  if (end === 'rejudge') {
+    // the same round judged again from a current card (code review r2 #4): its evaluation replaces this one
+    s.signatures.pop();
+    s.fatalFailed.pop();
+    applyEnd(s, st, end, judged, judgment);
+    s.afterAttack = null;
+    return;
   }
+  if (end === 'await-ruling') s.waitingRound = { ...st, judged, verdict, judgment };
+  const converged = applyEnd(s, st, end, judged, judgment);
   s.afterAttack = { round: st.round, verdict: c.verdict, converged, fatalRepeat, noProgress };
 }
 
@@ -904,6 +1268,7 @@ function rule(s: Mutable, r: RulingBody): void {
         if (f === undefined) continue;
         f.status = 'open';
         f.disposition = null;
+        f.answered = null;
         f.ruling = r.text;
         reopened = true;
         // a direction the ruling took is the author's to answer now (4.1 §6.3, WI-33)
@@ -926,14 +1291,47 @@ function rule(s: Mutable, r: RulingBody): void {
       if (r.drift === true) s.drift = null;
       afterRuling(s);
       break;
-    case 'extend':
+    case 'extend': {
       s.extraRounds += r.extraRounds;
       s.extraMicros += r.extraMicros ?? 0;
       if (s.stopped !== null && s.stopped.reason !== 'converged' && s.stopped.reason !== 'stopped-by-decision') s.stopped = null;
       // a grant restarts no-progress detection (6.5 as for loop grants)
       s.signatures.length = 0;
       s.fatalFailed.length = 0;
-      s.afterAttack = null;
+      // 4.1.3 (#39): the findings the grant names that are not resolved get the author's (interpreter's)
+      // turn, general ones too: one awaiting its re-check is open again for the author, with the grant's
+      // instructions as its ruling (one waiting for a direction ruling stays with the Secretary)
+      const mine = new Set(phaseFindings(s).map((f) => f.id));
+      const named = r.findings.map((id) => s.findings.get(id)).filter((f): f is FindingState => f !== undefined && mine.has(f.id) && (f.status === 'open' || f.status === 'awaiting-recheck'));
+      for (const f of named) {
+        if (f.status === 'awaiting-recheck') f.status = 'open';
+        if (r.instructions !== undefined) f.ruling = r.instructions;
+      }
+      if (named.length > 0 && (s.turn === 'attacker' || s.turn === 'none' || s.turn === 'await-ruling')) {
+        s.turn = 'author';
+        s.afterAttack = null;
+      }
+      // a budget stop an engine before 4.1.3 recorded on a round the one rule ends (it waited for a
+      // closing attacker): the round converged, and the grant needs no round for it (E-3)
+      if (s.afterAttack?.converged !== true) s.afterAttack = null;
+      break;
+    }
+    case 'accept':
+      // 4.1.3 (E-1): nothing fatal or serious unresolved and no direction question waiting: the
+      // decision accepts the latest version; the round ends as converged by the decision (a method
+      // passes to its attempts), with no risk list
+      if (s.stopped !== null && s.stopped.reason !== 'converged' && s.stopped.reason !== 'stopped-by-decision') s.stopped = null;
+      s.signatures.length = 0;
+      s.fatalFailed.length = 0;
+      s.accepted = r;
+      s.waitingRound = null;
+      if (s.phase === 'method' && s.version !== null) {
+        methodPasses(s, s.version.id, r.judgment ?? lastPass(s, s.version.id));
+        s.afterAttack = null;
+      } else {
+        s.turn = 'none';
+        s.afterAttack = { round: s.rounds, verdict: 'pass', converged: true, fatalRepeat: [], noProgress: false };
+      }
       break;
     case 'resume':
       if (s.stopped !== null && s.stopped.reason !== 'converged' && s.stopped.reason !== 'stopped-by-decision') s.stopped = null;
@@ -972,6 +1370,54 @@ export function currentEvidence(s: XState, id: string): string {
     if (rep === undefined || rep === null || seen.has(rep)) return cur;
     cur = rep;
   }
+}
+
+/**
+ * Whether an evidence was recorded under an older snapshot than the one the seats read now (a
+ * resnapshot came after it): it still counts, and every read labels it "older environment". Never
+ * true for an exploration whose snapshot was not taken again.
+ */
+export function olderSnapshotEvidence(s: XState, id: string): boolean {
+  const env = s.evidenceEnv.get(id);
+  return env !== undefined && s.defined !== null && env !== s.defined.envSnapshot;
+}
+
+/** The evidence sequence after which a registered attempt's record counts: 0, or when the PM last had it run again. */
+function attemptSince(s: XState, attempt: string): number {
+  return s.attemptReruns.get(attempt)?.since ?? 0;
+}
+
+/** Whether a registered attempt has its record: any, or one recorded after the PM last had it run again (`mp pm rerun-attempt`). */
+export function attemptRecorded(s: XState, attempt: string): boolean {
+  const since = attemptSince(s, attempt);
+  return [...s.evidence.values()].some((e) => e.attempt === attempt && e.k > since);
+}
+
+/** An attempt's record that a later run of the same attempt superseded (`mp pm rerun-attempt`): history, on no seat's card. */
+export function supersededAttemptRecord(s: XState, id: string): boolean {
+  const e = s.evidence.get(id);
+  if (e === undefined || e.attempt === null || !s.attemptReruns.has(e.attempt)) return false;
+  return e.k <= attemptSince(s, e.attempt) && attemptRecorded(s, e.attempt);
+}
+
+/**
+ * The user's amendment a registered attempt's next run answers (`mp pm amend-attempts`): the one that
+ * replaced it, or added it and nothing asked for it again since; null for a run of the author's card,
+ * or one the PM had run again (`mp pm rerun-attempt`).
+ */
+export function attemptAmendment(s: XState, attempt: string): number | null {
+  const again = s.attemptReruns.get(attempt);
+  if (again !== undefined) return again.amendment ?? null;
+  return s.amendments.find((b) => b.added.includes(attempt))?.n ?? null;
+}
+
+/** The latest pass of this exploration's position on a version (a Stabilizer's judgment, or its pass on the author's revision), or null. */
+export function lastPass(s: XState, version: string): string | null {
+  for (const j of [...s.stabilizations].reverse()) {
+    if (j.revision?.version === version) return j.revision.judgment;
+    if (j.target === version && j.verdict === 'pass') return j.judgment;
+  }
+  return null;
 }
 
 /** A registered attempt's latest record (code review r2 #5), through the reruns; null before it ran. */
@@ -1027,6 +1473,16 @@ export function pendingTasks(s: XState): QueuedBody[] {
   return [...s.tasks.values()].filter((q) => !s.consumed.has(q.task));
 }
 
+/** A registered attempt's own blind run (not an answer to a request, not a rerun after an environment change). */
+export function attemptRun(q: QueuedBody): boolean {
+  return q.role === 'executor' && q.evidence != null && q.evidence.attempt != null && q.evidence.requester === null && q.evidence.rerunOf === undefined;
+}
+
+/** Pending tasks that hold the exploration's turn: all but registered attempts' own runs, which run beside the method's author (4.1.3, #31). */
+export function turnTasks(s: XState): QueuedBody[] {
+  return pendingTasks(s).filter((q) => !attemptRun(q));
+}
+
 /** Facts decide() needs from outside the events: the exploration's spend so far (null: not metered here). */
 export interface DecideFacts {
   readonly spentMicros: number | null;
@@ -1055,12 +1511,14 @@ export function decide(s: XState, facts: DecideFacts = { spentMicros: null }): A
   if (s.abandoned !== null) return { kind: 'stop', reason: 'seat-abandoned', wi: 'WI-28' };
   // research attempts run side by side (blind, separate units)
   if (s.phase === 'attempts' && s.method !== null) {
-    const queued = new Set([...s.tasks.values()].flatMap((q) => (q.evidence?.attempt != null && q.evidence.requester === null ? [q.evidence.attempt] : [])));
+    // an attempt the PM had run again counts as queued only with a run queued since (its new record)
+    // (a run taken back before it ran never brings a record: 4.1.3, a method that passed again may register it unchanged)
+    const queued = new Set([...s.tasks.values()].flatMap((q) => (q.evidence?.attempt != null && q.evidence.requester === null && q.evidence.k > attemptSince(s, q.evidence.attempt) && s.consumed.get(q.task)?.kind !== 'withdrawn' ? [q.evidence.attempt] : [])));
     const missing = s.method.attempts.filter((a) => !queued.has(a.id));
     if (missing.length > 0) return { kind: 'attempts', attempts: missing };
     return { kind: 'none', why: 'registered attempts running' };
   }
-  if (pendingTasks(s).length > 0) return { kind: 'none', why: 'a seat task is running' };
+  if (turnTasks(s).length > 0) return { kind: 'none', why: 'a seat task is running' };
   // evidence executions to run again after an environment change (code review r1 #3), one at a time
   for (const [old, rep] of s.reruns) {
     if (rep !== null) continue;

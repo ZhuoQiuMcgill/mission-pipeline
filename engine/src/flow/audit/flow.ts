@@ -574,11 +574,15 @@ async function evidenceFor(ctx: FlowCtx, targets: ReadonlySet<string>, extra: re
   for (const c of await ctx.ports.ledger.records(['judgment'])) if (targets.has(c.record.target)) for (const e of ctx.ports.ledger.content.getList(c.record.evidence)) ids.add(e);
   const recs = new Map((await ctx.ports.ledger.records(['evidence'])).map((c) => [c.record.evidence as string, c.record as EvidenceRecord]));
   const envCurrent = new Map<string, string>();
-  for (const c of await ctx.ports.ledger.records(['env.snapshot'])) envCurrent.set(c.record.line, c.record.snapshot);
+  const envHad = new Map<string, Set<string>>();
+  for (const c of await ctx.ports.ledger.records(['env.snapshot'])) {
+    envCurrent.set(c.record.line, c.record.snapshot);
+    envHad.set(c.record.line, (envHad.get(c.record.line) ?? new Set()).add(c.record.snapshot));
+  }
   const revoked = new Set((await ctx.ports.ledger.records(['evidence.revoked'])).map((c) => c.record.evidence as string));
   return [...ids].sort().flatMap((id) => {
     const r = recs.get(id);
-    if (r === undefined || revoked.has(id) || !runCounts(r, envCurrent.get(r.envLine))) return [];
+    if (r === undefined || revoked.has(id) || !runCounts(r, envCurrent.get(r.envLine), (s) => envHad.get(r.envLine)?.has(s) === true)) return [];
     const f = Object.entries(r.fields).slice(0, 6).map(([k, v]) => `${k}=${v.length > 60 ? `${v.slice(0, 57)}...` : v}`);
     return [{ id, command: r.fields['command'] ?? '(recorded run)', summary: `${r.runClass} run: ${f.join(', ')}` }];
   });

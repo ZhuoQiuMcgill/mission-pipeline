@@ -156,7 +156,7 @@ describe('P3: dispatch context, Secretary apply and constraints', () => {
     await recordConstraint(w, { mission: M, constraint: 'object', kind: 'object', text: 'Do not expose private fields', scope: { paths: ['**'], taskTypes: [] } });
     const d = pmDispatch(w.ctx, task);
     const v = dispatchView(w.ctx, d.dispatch);
-    assert.match(d.card, /Late user decision/); assert.match(d.card, /Instruction \(context only; not a proof input\)/);
+    assert.match(d.card, /Late user decision/); assert.match(d.card, /Instruction \(follow it; not a proof input\)/);
     assert.match(d.card, /Do not expose private fields/);
     const auth = (v.card['materials'] as Array<{ id: string; ref: string }> | undefined)?.find((m) => m.id === 'authorizations');
     if (kind === 'secretary') assert.equal(w.memory.data.text(auth!.ref), '(none)');

@@ -1,16 +1,19 @@
-import { withdrawConstraint } from '../memory/domain/constraints.ts';
+import { constraintApplies, constraintPatternProblem, CONSTRAINT_PATTERN_FORMS, withdrawConstraint } from '../memory/domain/constraints.ts';
 import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 // The PM's dispatch loop and commands (design 4.1 §5.1, §5.4, §6.5, §6.6; decisions 8, 15, 18).
 //
 //   pmNext      one bounded label batch (A2), the landing recovery (A4), worktrees of finished
 //               dispatches removed, the process advanced; then, notices first (marked delivered):
 //               the ready steps (seat, task, mission, purpose, parallel), the steps held (a stop,
-//               a lease, the git-writes hold), what waits on the user, the dispatches in flight
-//               with their age. 4.1.2: after an environment change, no renew step; one notice per
-//               change names how many runs current proof rests on are from older environments
+//               a lease, the git-writes hold, an exploration planned after others not settled
+//               yet), what waits on the user, the dispatches in flight with their age. 4.1.2:
+//               after an environment change, no renew step; one notice per change names how
+//               many runs current proof rests on are from older environments
 //   pmDispatch  claims a ready step once (A1 claimDispatch): the dispatch id, the card leaf
 //               `missions/<m>/dispatches/<d>/card.md`, its material leaves, its leases; a
-//               Constructor's worktree is created at the card's commit (A4)
+//               Constructor's worktree is created at the card's commit (A4); an exploration's step
+//               names the exploration's snapshot in force, taken again before its first step runs
+//               when the target branch moved (explorationSnapshot.ts)
 //   pmRelease   `--ended` / `--abandoned` (§5.4): the worktree removed or kept; the step queued
 //               again at once, counted on the lineage's re-dispatch loop (decision 15: two
 //               re-dispatches, then WI-08 and the Secretary)
@@ -67,16 +70,22 @@ import {
   type StopRequest,
   type WriteTx,
 } from '../memory/index.ts';
-import { recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
-import { submitPmBatch } from '../flow/planning.ts';
+import { constraintLine, currentConstraints, recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
+import { planInEffect, submitPmBatch } from '../flow/planning.ts';
+import { constraintsForTask } from '../seat/cards/dynamic.ts';
 import { recordRepair } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
-import { answerEscalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
+import { answerEscalation, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
+import { flowCtx, missionClosed } from '../flow/context.ts';
+import { explorationState } from '../flow/exploration/flow.ts';
+import { pendingTasks } from '../flow/exploration/machine.ts';
+import { pmAmendAttempts, pmRerunAttempt, type AttemptsAmended, type AttemptsRerun } from './explorationAttempts.ts';
+import { pmResnapshotExploration, type Resnapshotted } from './explorationSnapshot.ts';
 import { RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, type ReviewNeededBody } from '../flow/plandoc.ts';
 import { scopesOverlap } from '../flow/mechanical.ts';
 import { legalizationState, requestLegalization, startLegalization, type LegalizationRequest } from '../flow/audit/index.ts';
 import type { ReconcileReport } from '../flow/engine.ts';
-import type { ConstraintScope } from '../common/records.ts';
+import type { ConstraintScope, ObjectScope } from '../common/records.ts';
 import { renderSeatCard, handBackFiles } from '../seat/card.ts';
 import type { MaterialRef } from '../seat/cards/common.ts';
 import type { DecisionOption } from '../seat/cards/secretary.ts';
@@ -86,14 +95,19 @@ import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
-import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
+import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, taskStatus, type TaskSpecDoc } from './ports.ts';
 import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { fullRunLine, heldByClose } from './close.ts';
-import { fullRunStatus } from './fullRuns.ts';
+import { authorizationInForce, fullRunStatus } from './fullRuns.ts';
+import { CONFIG_KEY, REVIEWS_WAIVER, WAIVABLE_CHECKS, waiversInForce, type ReviewsWaiverBody } from '../flow/waivers.ts';
+import { PLAN_LINE } from '../flow/plandoc.ts';
 import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
 import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/scope.ts';
 import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
+import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts';
+import { heldByPredecessors } from './explorationAfter.ts';
 import { materialLeaf } from './seat.ts';
+import { carriedRunLines, detachedRunNotes, stopDetachedRuns, type DetachedRunNote } from './detached.ts';
 
 // ---------------------------------------------------------------- shared
 
@@ -223,6 +237,8 @@ export interface NextReport {
   readonly landings: RecoveryReport | null;
   /** Flow steps that failed this time (each also a WI-20 notice). */
   readonly errors: readonly string[];
+  /** 4.1.3 (#30): detached runs that ended (finished, or lost: their worker is gone) for a dispatch still in flight. */
+  readonly detachedRuns: readonly DetachedRunNote[];
 }
 
 /** Steps conflict when they write overlapping paths or need the same exclusive resource. */
@@ -261,6 +277,12 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
       }
       if (entry.exportsProduct === true && gitHeld !== null) {
         held.push({ ...base, why: `git writes are held since this folder was moved or copied: ${gitHeld.reason}`, wi: 'WI-31' });
+        continue;
+      }
+      // an exploration planned after others starts once they settled (explorationAfter.ts)
+      const after = heldByPredecessors(db, ctx.memory.data, spec);
+      if (after !== null) {
+        held.push({ ...base, why: after, wi: null });
         continue;
       }
       const busy = (spec.exclusive ?? []).filter((r) => leased.has(r));
@@ -336,6 +358,13 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
   // 4.1.2: an environment change is told once (runs from older environments still count), never a ready step
   const olderEnvironmentRuns = noticeOlderEnvironment(ctx);
   const steps = readSteps(ctx);
+  // 4.1.3 (#30): a detached run that ended while its dispatch is in flight (its seat may be gone); a lost one is recorded so
+  let detachedRuns: DetachedRunNote[] = [];
+  try {
+    detachedRuns = detachedRunNotes(ctx);
+  } catch (e) {
+    errors.push(`detached runs: ${(e as Error).message}`);
+  }
   const data = ctx.memory.data;
   const notices = ctx.memory.read((db) => listNotices(db, data)).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
   if (o.markDelivered !== false) markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
@@ -347,6 +376,7 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
     labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since },
     landings,
     errors,
+    detachedRuns,
   };
 }
 
@@ -374,6 +404,30 @@ export interface Dispatched {
   readonly prompt: string;
 }
 
+/** How long `mp pm dispatch` waits before it tries its write again after OVER_BUDGET: a short random delay, so a burst spreads out. */
+export const DISPATCH_RETRY_MS = { min: 100, max: 600 } as const;
+
+/**
+ * 4.1.3 (#33): a burst of dispatches can push one write over its work budget by waiting, not by work.
+ * The write rolled back cleanly, so it is tried once more by itself after a short random delay; a
+ * second OVER_BUDGET says that a plain retry is safe and nothing was written. The budget is unchanged.
+ */
+function claimOnceMore<T>(claim: () => T): T {
+  try {
+    return claim();
+  } catch (e) {
+    if (!(e instanceof LedgerError) || e.code !== 'OVER_BUDGET') throw e;
+  }
+  const ms = DISPATCH_RETRY_MS.min + Math.floor(Math.random() * (DISPATCH_RETRY_MS.max - DISPATCH_RETRY_MS.min));
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  try {
+    return claim();
+  } catch (e) {
+    if (e instanceof LedgerError && e.code === 'OVER_BUDGET') throw new LedgerError('OVER_BUDGET', `${e.message}. mp pm dispatch tried twice (the machine is busy): nothing was written, and running the same command again is safe`);
+    throw e;
+  }
+}
+
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
 export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Dispatched {
   settleLabels(ctx);
@@ -383,19 +437,31 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   let spec = specOf(ctx, task.card);
   const entry = seatCardEntry(spec.card.seat);
   const prior = ctx.memory.read((db) => listDispatches(db, { task: step, limit: 1000 }).length);
-  const out = pmWrite(
+  // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
+  const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
+  const queued = spec;
+  const claim = (): { dispatch: string; card: string; cardLeaf: string; worktree: string | null } => pmWrite(
     ctx,
     'dispatch',
     `dispatch:${step}:${prior + 1}`,
     { step, attempt: prior + 1, filler },
     (tx) => {
+      // a retry starts again from the queued spec (4.1.3, #33)
+      spec = queued;
       // a closed mission's production steps are held (§6.7): checked in the claim's own write
       if (heldByClose(tx, spec)) throw new ProcessError('NOT_READY', `mission ${task.mission} is closed: step ${step} is production work and waits until the mission is opened again`);
+      // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
+      const after = heldByPredecessors(tx, tx.data, spec);
+      if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
       spec = refreshDispatchCard(tx, tx.data, spec);
+      // an exploration's step names the snapshot in force, taken again first when nothing of it ran yet and the branch moved
+      spec = claimExplorationStep(tx, spec, head);
       const refreshed = tx.data.put(canonicalJson(spec));
       const n = Number((tx.stmt('SELECT COUNT(*) AS n FROM dispatches').get() as { n: number }).n) + 1;
       const dispatch = `D-${n}`;
-      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite });
+      // 4.1.3 (#30): a step dispatched again lists the runs its earlier dispatches made
+      const carriedRuns = carriedRunLines(tx, tx.data, { mission: task.mission as MissionId, task: step, dispatch });
+      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite, carriedRuns });
       const claimed = claimDispatch(tx, { dispatch, task: step, seat: spec.card.seat, capabilities: spec.capabilities, filler, worktree: entry.exportsProduct === true, card });
       // the materials as leaves (§5.2): `mp seat <id> read` reads them, hash-checked
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
@@ -406,6 +472,7 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     },
     filler,
   );
+  const out = claimOnceMore(claim);
   mkdirSync(join(ctx.memory.paths.tmp, out.dispatch), { recursive: true });
   let worktree: string | null = null;
   if (entry.exportsProduct === true) {
@@ -678,10 +745,18 @@ export function pmDrain(ctx: ProcessContext, o: { readonly maxBatches?: number }
 }
 
 /** `mp pm stop "<the words>"` (§6.6): written before anything queued; "stop recorded; N dispatches in flight". */
-export function pmStop(ctx: ProcessContext, req: { readonly stop: string; readonly scope: StopRequest['scope']; readonly words: string; readonly wordsEntry?: string | null; readonly at?: number }): { readonly committed: boolean; readonly inFlight: number; readonly message: string } {
+export function pmStop(ctx: ProcessContext, req: { readonly stop: string; readonly scope: StopRequest['scope']; readonly words: string; readonly wordsEntry?: string | null; readonly at?: number }): { readonly committed: boolean; readonly inFlight: number; readonly message: string; readonly detached: ReadonlyArray<{ readonly run: string; readonly dispatch: string; readonly outcome: 'stopped' | 'lost' }> } {
   const r: StopRequest & { wordsEntry: string | null } = { stop: req.stop as StopId, scope: req.scope, words: req.words, at: req.at ?? ctx.now(), wordsEntry: req.wordsEntry ?? null };
   const out = ctx.memory.write({ op: `stop:${req.stop}`, payload: r, stop: true, command: 'stop', filler: ctx.filler }, (tx) => commitStop(tx, r));
-  return { ...out, message: `stop recorded; ${out.inFlight} dispatch${out.inFlight === 1 ? ' was' : 'es were'} in flight in its scope: stop them in your harness and report what it confirmed` };
+  // 4.1.3 (#30): a stop stops the detached runs in its scope too (their process groups), recorded as stopped
+  let detached: ReturnType<typeof stopDetachedRuns> = [];
+  try {
+    detached = stopDetachedRuns(ctx, req.scope, req.stop);
+  } catch {
+    /* the stop is recorded: a worker refuses its result when it sees it */
+  }
+  const stopped = detached.filter((x) => x.outcome === 'stopped').map((x) => `${x.run} (${x.dispatch})`);
+  return { ...out, detached, message: `stop recorded; ${out.inFlight} dispatch${out.inFlight === 1 ? ' was' : 'es were'} in flight in its scope: stop them in your harness and report what it confirmed${stopped.length > 0 ? `; mp stopped ${stopped.length} detached run${stopped.length === 1 ? '' : 's'} in its scope: ${stopped.join(', ')}` : ''}` };
 }
 
 // ---------------------------------------------------------------- the PM's flow commands
@@ -749,13 +824,33 @@ export async function pmRequirement(
   return { version };
 }
 
+/** A change form of `mp pm repair` (4.1.3, E-5): the user's decision about an exploration's method, applied directly. */
+export type RepairChange =
+  /** `answers`: an earlier repair about the exploration this change settles, named by the PM (4.1.3: never linked by the program). */
+  | { readonly form: 'attempts'; readonly attempts: unknown; readonly answers?: string | null }
+  | { readonly form: 'rerun'; readonly attempts: readonly string[] }
+  | { readonly form: 'resnapshot' };
+
+/** What a change form did: the result of the change it applied. */
+export type RepairChanged =
+  | { readonly form: 'attempts'; readonly result: AttemptsAmended }
+  | { readonly form: 'rerun'; readonly result: AttemptsRerun }
+  | { readonly form: 'resnapshot'; readonly result: Resnapshotted };
+
 /**
- * `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<reason>" [--about <task|exploration>]`
- * (4.1.2, D-9, D-10): the user tried the product and found a problem. The reason must occur verbatim in
- * the words entry (the requirement items' check); the PM chooses the kind. About an exploration it
- * reopens it for one more round; otherwise an Architect repair step amends the plan in effect.
+ * `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<reason>" [--about <task|exploration>]
+ * [--attempts <file.json> [--answers R-<n>] | --rerun <attempt-id>[,...] | --resnapshot]` (4.1.2, D-9, D-10; 4.1.3, E-5): the user
+ * tried the product and found a problem. The reason must occur verbatim in the words entry (the
+ * requirement items' check); the PM chooses the kind. About an exploration it reopens it for one more
+ * round, the author's turn at once (in the attempts phase the method goes back to its author); with a
+ * change form the user's decision about its method is applied directly instead, with the mechanical
+ * checks only, and answers the repair in the same write. Otherwise an Architect repair step amends the
+ * plan in effect.
  */
-export async function pmRepair(ctx: ProcessContext, req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null }> {
+export async function pmRepair(
+  ctx: ProcessContext,
+  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null },
+): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged }> {
   ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
   const mission = req.mission as MissionId;
   let about: { kind: 'task' | 'exploration'; id: string } | null = null;
@@ -763,9 +858,38 @@ export async function pmRepair(ctx: ProcessContext, req: { readonly mission: str
     const isExploration = ctx.memory.read((db) => flowEvents(db, { mission, line: `exploration:${req.about}`, event: 'defined', limit: 1 }).length > 0);
     about = { kind: isExploration ? 'exploration' : 'task', id: req.about };
   }
+  if (req.change !== undefined) {
+    // a change form: the user's decision about an exploration's method, applied directly (no round)
+    if (about?.kind !== 'exploration') throw new LedgerError('BAD_REQUEST', `a change form (--attempts, --rerun, --resnapshot) is about an exploration: --about names one${about !== null ? ` (${about.id} is not an exploration of ${req.mission})` : ''}`);
+    if (await missionClosed(flowCtx(ctx.ports(), mission))) throw new LedgerError('BAD_REQUEST', `mission ${req.mission} is closed: a repair is recorded before the mission is closed`);
+    const repair = { kind: req.kind, text: req.text };
+    const base = { mission: req.mission, exploration: about.id, words: req.words, repair, command: 'repair' as const };
+    const changed: RepairChanged =
+      req.change.form === 'attempts'
+        ? { form: 'attempts', result: await pmAmendAttempts(ctx, { ...base, attempts: req.change.attempts, reason: req.reason ?? req.text, answers: req.change.answers ?? null }) }
+        : req.change.form === 'rerun'
+          ? { form: 'rerun', result: await pmRerunAttempt(ctx, { ...base, attempts: req.change.attempts, reason: req.reason ?? req.text }) }
+          : { form: 'resnapshot', result: await pmResnapshotExploration(ctx, base) };
+    return { repair: changed.result.repair ?? '', repeated: false, about, changed };
+  }
+  // about an exploration in its attempts phase (4.1.3, #31): the method goes back to its author at once.
+  // An interpreter step only queued is withdrawn in the repair's write; one a seat holds protects the record.
+  const withdraw: Array<{ task: string; role: 'interpreter' }> = [];
+  if (about?.kind === 'exploration') {
+    const s = await explorationState(ctx.ports(), mission, about.id);
+    if ((s.phase === 'attempts' || s.phase === 'interpret') && s.method !== null && s.stopped === null) {
+      for (const q of pendingTasks(s)) {
+        if (q.role !== 'interpreter') continue;
+        const st = ctx.memory.read((db) => taskStatus(db, ctx.memory.data, q.task));
+        if (st?.state === 'queued') withdraw.push({ task: q.task, role: 'interpreter' });
+        else if (st?.state === 'done' || st?.state === 'waiting-evidence') throw new ProcessError('INTERPRETATION_SUBMITTED', `the interpreter of exploration ${about.id} handed back (step ${q.task}): run mp pm next, then this again (the repair then goes to the interpretation's rounds)`);
+        else throw new ProcessError('DISPATCH_IN_FLIGHT', `the interpreter of exploration ${about.id} is at work (step ${q.task}, ${st?.note ?? st?.state ?? 'dispatched'}): wait for its hand-back (the repair then goes to the interpretation's rounds), or release it and run this again (the method then goes back to its author)`);
+      }
+    }
+  }
   let r: { readonly id: string; readonly repeated: boolean };
   try {
-    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about });
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}) });
   } catch (e) {
     if (e instanceof LedgerError || e instanceof ProcessError) throw e;
     throw new LedgerError('BAD_REQUEST', (e as Error).message);
@@ -774,19 +898,136 @@ export async function pmRepair(ctx: ProcessContext, req: { readonly mission: str
   return { repair: r.id, repeated: r.repeated, about };
 }
 
+export interface WaiveRequest {
+  readonly mission: string;
+  /** The check waived: only "plan-reviews" (the feasibility review and Calibrator ②) in 4.1.3. */
+  readonly check: string;
+  /** One detailed plan version (dplan.<mission>.<n>.<k>); absent: every plan of the mission not in effect yet. */
+  readonly plan?: string | null;
+  /** The user's words entry (W-<n>) the waiver rests on, or */
+  readonly words?: string | null;
+  /** an authorization item in force that leaves this to the PM (D-8). */
+  readonly authority?: string | null;
+  readonly reason?: string | null;
+  /** Withdraw the waivers in force: later plans get their reviews again (a plan in effect stays in effect). */
+  readonly withdraw?: boolean;
+  /** The caller's request id (the CLI's --op): a retry of the same request records once. */
+  readonly request?: string | null;
+}
+
+export interface Waived {
+  readonly mission: string;
+  readonly check: string;
+  readonly action: 'waive' | 'withdraw';
+  /** False when nothing changed (a withdrawal with no waiver in force). */
+  readonly recorded: boolean;
+  /** The waiver's number on the record (key "plan-reviews#<n>"). */
+  readonly n: number | null;
+  readonly plan: string | null;
+  readonly by: 'words' | 'authority';
+  readonly ref: string;
+  /** What the PM should know (stable mode, the deprecated config key). */
+  readonly notes: readonly string[];
+}
+
+/**
+ * `mp pm waive <mission> plan-reviews [--plan <dplan>] (--words W-<n> | --authority <item>) [--reason "<text>"]`
+ * and `--withdraw` (4.1.3, E-2): a process check waived on the user's words, on the record. The waiver
+ * cites the words entry or an authorization item in force (the full run's check, reused); its scope is
+ * the mission or one detailed plan version not in effect yet. Planning reads it (flow/waivers.ts
+ * planReviewsWaiver): the plan takes effect after the mechanical checks and the order ruling, labelled
+ * "this plan took effect without its reviews, on W-n". A withdrawal gives later plans their reviews again
+ * (and stops the deprecated config key from waiving them); a plan in effect stays in effect.
+ */
+export async function pmWaive(ctx: ProcessContext, req: WaiveRequest): Promise<Waived> {
+  if (!(WAIVABLE_CHECKS as readonly string[]).includes(req.check)) throw new ProcessError('NOT_ALLOWED', `"${req.check}" is not a check a waiver can name: in this version only plan-reviews (the feasibility review and Calibrator ②) is waivable; nothing was recorded`);
+  const mission = req.mission as MissionId;
+  const words = req.words ?? null;
+  const authority = req.authority ?? null;
+  if ((words === null) === (authority === null)) throw new ProcessError('NOT_ALLOWED', 'a waiver rests on the user\'s words (--words W-<n>) or on an authorization item in force (--authority <item>), one of them: the record shows who decided; nothing was recorded');
+  if (words !== null) wordsText(ctx, words);
+  const ref = words ?? (await authorizationInForce(ctx, req.mission, authority!, 'nothing was recorded'));
+  const by: Waived['by'] = words !== null ? 'words' : 'authority';
+  const events = await ctx.ports().ledger.events({ mission, line: PLAN_LINE });
+  const plan = req.plan ?? null;
+  const notes: string[] = [];
+  const config = ctx.planReviewsWaived.includes(req.mission) || ctx.planReviewsWaived.some((x) => x.startsWith(`dplan.${req.mission}.`));
+  if (req.withdraw === true) {
+    if (plan !== null) throw new ProcessError('NOT_ALLOWED', 'a withdrawal withdraws every plan-reviews waiver of the mission in force: give no --plan');
+    if (waiversInForce(events).length === 0 && !config) return { mission: req.mission, check: req.check, action: 'withdraw', recorded: false, n: null, plan: null, by, ref, notes: [`No waiver of the plan reviews is in force for mission ${req.mission}: nothing changed.`] };
+    if (config) notes.push(`The config key ${CONFIG_KEY} also names mission ${req.mission} (or one of its plans): the withdrawal on the record overrides it from now on. Remove the key from config.json.`);
+  } else {
+    if (plan !== null) {
+      const prefix = `dplan.${req.mission}.`;
+      if (!plan.startsWith(prefix) || !/^[0-9]+\.[0-9]+$/.test(plan.slice(prefix.length))) throw new ProcessError('NOT_ALLOWED', `--plan names a detailed plan version of mission ${req.mission} (dplan.${req.mission}.<n>.<k>), not ${plan}; nothing was recorded`);
+      if (events.some((e) => e.event === 'effective' && e.key === plan)) throw new ProcessError('NOT_ALLOWED', `detailed plan ${plan} is in effect already: a waiver covers plans not in effect yet (that one stays in effect as it is); nothing was recorded`);
+    }
+    const mode = (events.filter((e) => e.event === 'pm-batch').at(-1)?.body as { mode?: string } | undefined)?.mode;
+    if (mode === 'stable') notes.push(`Mission ${req.mission} is in stable mode: its tasks start on the waived plan as the waiver settles it, and their products read "not fully proven" (the plan has no review to prove it).`);
+  }
+  const body: Omit<ReviewsWaiverBody, 'n'> = { check: 'plan-reviews', action: req.withdraw === true ? 'withdraw' : 'waive', dplan: plan, by, ref, reason: req.reason !== undefined && req.reason !== null && req.reason.trim() !== '' ? req.reason.trim().slice(0, 2000) : null };
+  const prior = events.filter((e) => e.event === REVIEWS_WAIVER).length;
+  const op = req.request !== undefined && req.request !== null && req.request !== '' ? `waive:${req.mission}:req:${req.request}` : `waive:${req.mission}:${prior + 1}:${sha256(canonicalJson(body)).slice(0, 16)}`;
+  const n = pmWrite(ctx, 'waive', op, { mission: req.mission, ...body }, (tx) => {
+    const k = flowEvents(tx, { mission, line: PLAN_LINE, event: REVIEWS_WAIVER, limit: 10_000 }).length + 1;
+    const full: ReviewsWaiverBody = { ...body, n: k };
+    appendRecords(tx, [{ kind: 'flow.event', mission, line: PLAN_LINE, event: REVIEWS_WAIVER, key: `plan-reviews#${k}`, body: tx.data.put(canonicalJson(full)) as ContentHash }]);
+    return k;
+  });
+  await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm waive ${req.mission} ${req.check}${req.withdraw === true ? ' --withdraw' : ''}` });
+  return { mission: req.mission, check: req.check, action: body.action, recorded: true, n, plan, by, ref, notes };
+}
+
 /** `mp pm requirement withdraw <mission> <item> --reason ...`. */
 export async function pmWithdrawRequirement(ctx: ProcessContext, req: { readonly mission: string; readonly item: string; readonly reason: string }): Promise<void> {
   await withdrawItem(ctx.ports(), { mission: req.mission as MissionId, item: req.item, reason: req.reason });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm requirement withdraw' });
 }
 
+/** What a constraint's scope reaches now (4.1.3, #36): current object versions, and the tasks of each mission's plan in effect. */
+export interface ConstraintReach {
+  /** Object versions no later version revises, that the scope applies to (memory/domain/constraints.ts constraintApplies). */
+  readonly objects: number;
+  /** Tasks of the plans in effect whose cards take the constraint (seat/cards/dynamic.ts constraintsForTask), as "<mission>/<task>". */
+  readonly tasks: readonly string[];
+}
+
+/**
+ * The reach of a constraint scope now, read with the resolvers the labels and the cards use: an object
+ * constraint by constraintApplies over the current object versions, either kind by constraintsForTask
+ * over the tasks of each mission's plan in effect.
+ */
+export async function constraintReach(ctx: ProcessContext, c: { readonly kind: 'object' | 'instruction'; readonly scope: ConstraintScope }): Promise<ConstraintReach> {
+  const body = { line: 'constraint.reach', version: 'reach', kind: c.kind, text: '', scope: c.scope };
+  const objects = c.kind !== 'object' ? 0 : ctx.memory.read((db) => {
+    const rows = db.stmt("SELECT record FROM log WHERE kind = 'object.version'").all() as Array<{ record: string }>;
+    const recs = rows.map((r) => JSON.parse(r.record) as { object: string; mission: string; scope?: ObjectScope; predecessor?: string });
+    const revised = new Set(recs.flatMap((r) => (r.predecessor !== undefined ? [r.predecessor] : [])));
+    return recs.filter((r) => !revised.has(r.object) && r.scope !== undefined && constraintApplies(body, { scope: r.scope, mission: r.mission })).length;
+  });
+  const missions = c.scope.mission !== undefined ? [c.scope.mission as MissionId] : await ctx.ports().ledger.missions();
+  const tasks: string[] = [];
+  for (const m of missions) {
+    const p = await planInEffect(flowCtx(ctx.ports(), m));
+    for (const t of p?.plan.tasks ?? []) if (constraintsForTask([body], t, m).length > 0) tasks.push(`${m}/${t.id}`);
+  }
+  return { objects, tasks };
+}
+
 /** `mp pm constraint add <mission> <constraint> --kind object|instruction --text ... [--paths] [--task-types] [--words W-<n>]`. */
-export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string; readonly words?: string }): Promise<{ readonly version: string }> {
+export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string; readonly words?: string }): Promise<{ readonly version: string; readonly reach: ConstraintReach; readonly scopeChanged: boolean }> {
   const scope: ConstraintScope = { ...req.scope, ...(req.missionScope !== undefined ? { mission: req.missionScope } : {}) };
+  // 4.1.3 (#36): a pattern the matcher cannot read is refused at once, with the forms it reads and the nearest one
+  const bad = scope.paths.flatMap((p) => { const x = constraintPatternProblem(p); return x === null ? [] : [`"${p}": ${x.problem}; the nearest form is "${x.suggestion}"`]; });
+  if (bad.length > 0) throw new ProcessError('NOT_ALLOWED', `the scope's path patterns: ${bad.join('; ')}. A scope path is ${CONSTRAINT_PATTERN_FORMS}. Nothing was recorded`);
   if (req.words !== undefined) wordsText(ctx, req.words);
+  const line = constraintLine(req.constraint);
+  const before = (await currentConstraints(flowCtx(ctx.ports(), req.mission as MissionId))).find((c) => c.line === line);
   const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope, ...(req.words !== undefined ? { words: req.words } : {}) });
   await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint' });
-  return { version };
+  // the same id and text keep the version: say so when only the scope changed (#36: it looked unchanged)
+  const scopeChanged = before !== undefined && before.version === version && canonicalJson(before.scope) !== canonicalJson(scope);
+  return { version, reach: await constraintReach(ctx, { kind: req.kind, scope }), scopeChanged };
 }
 
 /** Withdraw a constraint under the user's recorded words; never delete its record. */
@@ -813,9 +1054,21 @@ export async function pmPlan(
   return out;
 }
 
-/** `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n]`: the user's decision. */
-export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly instructions?: string; readonly grantExtra?: number }): Promise<void> {
+/**
+ * `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n] [--findings F,...]`:
+ * the user's decision. 4.1.3 (#39): a grant on an exploration may name the findings it is for.
+ */
+export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<void> {
   const text = wordsText(ctx, req.words);
+  const findings = [...new Set((req.findings ?? []).map((f) => f.trim()).filter((f) => f !== ''))];
+  if (findings.length > 0) {
+    if (req.option !== 'grant') throw new LedgerError('BAD_REQUEST', '--findings goes with --option grant (the findings the granted round is for)');
+    const line = (await escalation(flowCtx(ctx.ports(), req.mission as MissionId), req.escalation))?.subject ?? null;
+    if (line === null || !line.startsWith('exploration:')) throw new LedgerError('BAD_REQUEST', `--findings names findings of an exploration; escalation ${req.escalation} is not about one`);
+    const s = await explorationState(ctx.ports(), req.mission as MissionId, line.slice('exploration:'.length));
+    const unknown = findings.filter((f) => !s.findings.has(f));
+    if (unknown.length > 0) throw new LedgerError('BAD_REQUEST', `${line.slice('exploration:'.length)} has no finding ${unknown.join(', ')} (mp read show exploration lists its findings)`);
+  }
   await answerEscalation(ctx.ports(), {
     mission: req.mission as MissionId,
     escalation: req.escalation,
@@ -823,6 +1076,7 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
     words: `${text} (${req.words})`,
     ...(req.instructions !== undefined ? { instructions: req.instructions } : {}),
     ...(req.grantExtra !== undefined ? { grantExtra: req.grantExtra } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
   });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm answer' });
 }

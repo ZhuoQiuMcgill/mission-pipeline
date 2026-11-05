@@ -5,7 +5,14 @@
 //
 //   about an exploration   the exploration is reopened for one more round with the repair as an added
 //                          question (exploration/flow.ts recordExplorationRerun); its settled
-//                          conclusion stays in the record as history; a new settle is routed again
+//                          conclusion stays in the record as history; a new settle is routed again.
+//                          4.1.3 (E-5, #31): the author gets the turn at once, even in the attempts
+//                          phase (the method goes back to its author; a queued interpreter is
+//                          withdrawn in the same write). With a change form (`--attempts`, `--rerun`,
+//                          `--resnapshot`) the user's decision about the method is applied directly
+//                          instead (process/explorationAttempts.ts, explorationSnapshot.ts): the repair
+//                          and the change are one write, the change answers the repair, and no round
+//                          is added
 //   otherwise              an Architect repair step (card "architect-repair") on the plan in effect:
 //                          its hand-back reopens tasks with accepted products and/or adds tasks. Only
 //                          the mechanical checks apply (mechanical.ts, the plan in effect plus the
@@ -28,13 +35,14 @@ import { planningConstraints } from '../seat/cards/dynamic.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, material, missionClosed, nextBasisVersion, notify, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
-import { PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedTaskIds, repairRef, taskLine, type AmendmentEntry, type DetailedPlanDoc, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
-import { explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, type EffectiveBody } from './planning.ts';
+import { PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedTaskIds, explorationLine, repairRef, taskLine, type AmendmentEntry, type DetailedPlanDoc, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
+import { explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { acceptedProduct, lineAcceptance, pathOwners } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints } from './requirements.ts';
 import { decisionFor, escalateToUser, isApplied, markApplied, raiseEscalation } from './secretary.ts';
 import { recordExplorationRerun } from './exploration/flow.ts';
+import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED, type AttemptRerunBody, type AttemptsAmendedBody, type ConsumedBody, type ResnapshotBody, type Role } from './exploration/machine.ts';
 import { WI } from './wi.ts';
 
 /** One Architect repair attempt (line "repairs", event "attempt", key "<repair>#<k>"). */
@@ -51,25 +59,73 @@ const archRepairTask = (mission: string, repair: string, k: number): string => s
 
 /** A mission's repairs with where each stands (the one resolver: reads, cards and the close snapshot use it). */
 export interface RepairState extends RepairBody {
-  /** exploration: reopened for one more round; architect: its Architect step is under way; decided: amended and/or reopened; waiting: nothing to amend yet. */
-  readonly state: 'exploration' | 'architect' | 'decided' | 'waiting';
+  /**
+   * exploration: reopened for one more round; answered: about an exploration, and answered by a
+   * change the user's decision made to its method instead of a round (4.1.3: `mp pm repair --attempts`,
+   * `--rerun`, `--resnapshot`; before: `mp pm amend-attempts --answers`); architect: its Architect
+   * step is under way; decided: amended and/or reopened; waiting: nothing to amend yet.
+   */
+  readonly state: 'exploration' | 'answered' | 'architect' | 'decided' | 'waiting';
   readonly added: readonly string[];
   readonly reopened: readonly string[];
+  /** 4.1.3: the tasks whose card it changed (absent: none). */
+  readonly changed?: readonly string[];
   /** The plan it amended (decided), or works on. */
   readonly dplan: string | null;
+  /**
+   * answered: the change that answered it (its event, its number on the exploration, and the user's
+   * words it rests on); `amendment` is that number for an amendment of the attempts.
+   */
+  readonly answeredBy?: { readonly exploration: string; readonly change: 'attempts-amended' | 'attempt-rerun' | 'resnapshotted'; readonly n: number; readonly amendment?: number; readonly words: string };
+}
+
+/** The change about an exploration that answered a repair (4.1.3: any of the three change forms), or null. */
+async function answeringChange(c: FlowCtx, r: RepairBody): Promise<RepairState['answeredBy'] | null> {
+  if (r.about?.kind !== 'exploration') return null;
+  const x = r.about.id;
+  const line = explorationLine(x);
+  const amended = (await eventsOf<AttemptsAmendedBody>(c, line, ATTEMPTS_AMENDED)).find((e) => e.body.answers === r.id || e.body.repair === r.id)?.body;
+  if (amended !== undefined) return { exploration: x, change: ATTEMPTS_AMENDED, n: amended.n, amendment: amended.n, words: amended.words };
+  const rerun = (await eventsOf<AttemptRerunBody>(c, line, ATTEMPT_RERUN)).find((e) => e.body.answers === r.id)?.body;
+  if (rerun !== undefined) return { exploration: x, change: ATTEMPT_RERUN, n: rerun.n, words: rerun.words };
+  const snap = (await eventsOf<ResnapshotBody>(c, line, RESNAPSHOTTED)).find((e) => e.body.answers === r.id)?.body;
+  if (snap !== undefined) return { exploration: x, change: RESNAPSHOTTED, n: snap.n, words: snap.words ?? r.words };
+  return null;
+}
+
+/**
+ * The repair a change form records in the write that applies it (4.1.3, E-5): its id (after the
+ * repairs recorded so far) and its body. The caller checked the reason against the words entry.
+ */
+export function changeFormRepair(recorded: number, req: { readonly words: string; readonly kind: RepairKind; readonly text: string; readonly exploration: string }): RepairBody {
+  if (!(REPAIR_KINDS as readonly string[]).includes(req.kind)) throw new Error(`a repair's kind is one of ${REPAIR_KINDS.join(', ')}`);
+  if (req.text.trim() === '') throw new Error("a repair records the user's reason");
+  return { id: `R-${recorded + 1}`, words: req.words, kind: req.kind, text: req.text, about: { kind: 'exploration', id: req.exploration } };
 }
 
 export async function repairsOf(ctx: FlowCtx, mission: string = ctx.mission): Promise<RepairState[]> {
   const c = mission === ctx.mission ? ctx : flowCtx(ctx.ports, mission as MissionId);
   const decided = new Map((await eventsOf<RepairDecidedBody>(c, REPAIRS_LINE, 'decided')).map((e) => [e.key, e.body]));
   const attempts = await eventsOf<RepairAttemptBody>(c, REPAIRS_LINE, 'attempt');
-  return (await eventsOf<RepairBody>(c, REPAIRS_LINE, 'repair')).map((e) => {
+  const out: RepairState[] = [];
+  for (const e of await eventsOf<RepairBody>(c, REPAIRS_LINE, 'repair')) {
     const r = e.body;
     const d = decided.get(r.id);
     const a = attempts.filter((x) => x.key.startsWith(`${r.id}#`)).at(-1)?.body;
-    const state: RepairState['state'] = r.about?.kind === 'exploration' ? 'exploration' : d !== undefined ? 'decided' : a !== undefined ? 'architect' : 'waiting';
-    return { ...r, state, added: d?.add ?? [], reopened: d?.reopen.map((x) => x.task) ?? [], dplan: d?.dplan ?? a?.dplan ?? null };
-  });
+    // about an exploration: answered by a change to its method on the user's decision, or one more round
+    const answered = await answeringChange(c, r);
+    const state: RepairState['state'] = r.about?.kind === 'exploration' ? (answered !== null ? 'answered' : 'exploration') : d !== undefined ? 'decided' : a !== undefined ? 'architect' : 'waiting';
+    out.push({
+      ...r,
+      state,
+      added: d?.add ?? [],
+      reopened: d?.reopen.map((x) => x.task) ?? [],
+      ...((d?.changed ?? []).length > 0 ? { changed: [...d!.changed!] } : {}),
+      dplan: d?.dplan ?? a?.dplan ?? null,
+      ...(answered !== null ? { answeredBy: answered } : {}),
+    });
+  }
+  return out;
 }
 
 /** The repairs as cards show them, by id. */
@@ -87,7 +143,15 @@ export async function repairRefs(ctx: FlowCtx, ids: Iterable<string>): Promise<R
  */
 export async function recordRepair(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null },
+  req: {
+    readonly mission: MissionId;
+    readonly words: string;
+    readonly kind: RepairKind;
+    readonly text: string;
+    readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
+    /** About an exploration in its attempts phase (4.1.3, #31): its interpreter step, only queued, withdrawn in the same write. */
+    readonly withdraw?: ReadonlyArray<{ readonly task: string; readonly role: Role }>;
+  },
 ): Promise<{ readonly id: string; readonly repeated: boolean }> {
   const ctx = flowCtx(ports, req.mission);
   if (!(REPAIR_KINDS as readonly string[]).includes(req.kind)) throw new Error(`a repair's kind is one of ${REPAIR_KINDS.join(', ')}`);
@@ -108,8 +172,14 @@ export async function recordRepair(
   if (req.about?.kind === 'exploration') {
     const x = req.about.id;
     if ((await eventsOf(ctx, `exploration:${x}`, 'defined')).length === 0) throw new Error(`mission ${req.mission} has no exploration ${x}`);
-    // one more round with the repair as an added question; the settled conclusion stays as history (one write)
-    await recordExplorationRerun(ports, req.mission, x, { evidence: [], environment: `repair:${id}`, repair: repairRef(body) }, { events: [event] });
+    // one more round with the repair as an added question, the author's turn at once (4.1.3); the
+    // settled conclusion stays as history; a queued interpreter on the method it sends back is withdrawn (one write)
+    const withdrawn = (req.withdraw ?? []).map((w) => {
+      const c: ConsumedBody = { kind: 'withdrawn', task: w.task, role: w.role, reason: `repair ${id} sent the method back to its author: the interpretation waits for the method's new version` };
+      return ev(ctx, explorationLine(x), 'consumed', w.task, c);
+    });
+    await recordExplorationRerun(ports, req.mission, x, { evidence: [], environment: `repair:${id}`, repair: repairRef(body), authorTurn: true }, { events: [event, ...withdrawn] });
+    for (const w of req.withdraw ?? []) await ports.scheduler.cancel(w.task);
     return { id, repeated: false };
   }
   if (pie === null) throw new Error(`mission ${req.mission} has no detailed plan in effect: a repair amends the plan in effect (plan the work with mp pm plan submit first)`);
@@ -164,7 +234,8 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   }
   const result = view.result as ArchitectRepairResult;
   const added = result.add;
-  // the mechanical checks only (D-10): the plan in effect plus the added tasks
+  const change = result.change ?? [];
+  // the mechanical checks only (D-10): the plan in effect with the changed cards (4.1.3), plus the added tasks
   let mc = (await eventOf<MechanicalResult>(ctx, REPAIRS_LINE, 'mechanical-check', task))?.body ?? null;
   if (mc === null) {
     const doc = await pmPlanDoc(ctx, eff.pmPlan);
@@ -172,13 +243,14 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
     const ex = await explorationState(ctx, doc);
     if (ex.recomputing) return;
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
+    const before = new Map(change.flatMap((c) => { const t = plan.tasks.find((x) => x.id === c.id); return t === undefined ? [] : [[c.id, t] as const]; }));
     mc = await mechanicalCheck({
       pmPlan: doc,
-      plan: { ...plan, tasks: [...plan.tasks, ...added] },
+      plan: { ...plan, tasks: [...plan.tasks.map((t) => change.find((c) => c.id === t.id) ?? t), ...added] },
       unsettled: ex.unsettled,
       hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }),
       fullSuite: ctx.ports.project?.fullSuite ?? [],
-      amendment: { added: new Set(added.map((t) => t.id)) },
+      amendment: { added: new Set(added.map((t) => t.id)), ...(before.size > 0 ? { changed: before } : {}) },
       // the tasks earlier repairs added stay outside the integration rule (S3)
       amended: amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)),
     });
@@ -246,17 +318,29 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     else reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product });
   }
   const added: readonly DetailedTask[] = result.add;
-  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen };
+  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now (one accepted meanwhile keeps its card, said)
+  const changed: DetailedTask[] = [];
+  for (const c of result.change ?? []) {
+    if ((await acceptedProduct(ctx, c.id)) !== null || !plan.tasks.some((t) => t.id === c.id)) skipped.push(c.id);
+    else changed.push(c);
+  }
+  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}) };
   const events = [ev(ctx, REPAIRS_LINE, 'decided', r.id, body)];
   const records: BaseRecord[] = [];
-  if (added.length > 0) {
-    const entry: AmendmentEntry = { repair: r.id, tasks: added, reopen: reopen.map((x) => ({ task: x.task, issue: x.issue })), arch: task };
+  if (added.length > 0 || changed.length > 0) {
+    const entry: AmendmentEntry = { repair: r.id, tasks: added, reopen: reopen.map((x) => ({ task: x.task, issue: x.issue })), arch: task, ...(changed.length > 0 ? { changed } : {}) };
     const n = (eff.amendments ?? []).length + 1;
     const amended: EffectiveBody = { ...eff, tasks: [...eff.tasks, ...added.map((t) => t.id)], amendments: [...(eff.amendments ?? []), entry] };
     events.push(ev(ctx, PLAN_LINE, 'effective', `${eff.dplan}#a${n}`, amended));
-    // the added tasks' standards become basis lines, as a plan's do when it takes effect
+    // a re-plan a changed task waits for is answered by the change (#35): it is not routed to the Architect any more
+    const changedIds = new Set(changed.map((t) => t.id));
+    const answered = new Set((await eventsOf(ctx, PLAN_LINE, REPLAN_ANSWERED)).map((e) => e.key));
+    for (const q of await eventsOf<{ task: string }>(ctx, PLAN_LINE, 'replan-request')) {
+      if (changedIds.has(q.body.task) && !answered.has(q.key)) events.push(ev(ctx, PLAN_LINE, REPLAN_ANSWERED, q.key, { escalation: q.key, task: q.body.task, repair: r.id }));
+    }
+    // the added tasks' standards, and the changed cards', become basis lines, as a plan's do when it takes effect
     const ix = await basisIndex(ctx);
-    for (const t of added) {
+    for (const t of [...added, ...changed]) {
       for (const s of t.standards) {
         const line = standardLine(ctx.mission, t.id, s.id);
         const version = nextBasisVersion(ix, line, shortHash(s.text));
@@ -269,9 +353,9 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     category: 'repair-decided',
     wi: null,
     key: r.id,
-    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${skipped.length > 0 ? `; ${skipped.join(', ')} ${skipped.length === 1 ? 'is' : 'are'} not accepted any more and ${skipped.length === 1 ? 'was' : 'were'} left out` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
-    defaultAction: 'the work goes on: the added tasks run like any task of the plan, each reopened task gets a new attempt with the repair on its card; nothing else is re-reviewed (D-10)',
-    detail: { repair: r.id, dplan: eff.dplan, added: added.map((t) => t.id), reopen, skipped, orderChanges: mc.orderChanges },
+    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.map((t) => t.id).join(', ')}` : ''}${skipped.length > 0 ? `; ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} left out (no longer accepted to reopen, or accepted meanwhile so its card stays)` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
+    defaultAction: `the work goes on: the added tasks run like any task of the plan, each reopened task gets a new attempt with the repair on its card${changed.length > 0 ? ', each changed task starts a new attempt under its new card and carries its earlier work on' : ''}; nothing else is re-reviewed (D-10)`,
+    detail: { repair: r.id, dplan: eff.dplan, added: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), skipped, orderChanges: mc.orderChanges },
   });
 }
 
@@ -294,7 +378,7 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
   const owners = (await pathOwners(ctx, about)).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
   const card: ArchitectRepairCard = {
     ...cardBase(ctx, task, {
-      duties: `Turn repair ${r.id} into the least work that fixes it: reopen the tasks whose accepted work causes it, and add tasks only for work no existing task owns. Change no existing task. Only the program's mechanical checks follow (no Calibrator, no feasibility review).`,
+      duties: `Turn repair ${r.id} into the least work that fixes it: reopen the tasks whose accepted work causes it, change the card of a task with no accepted product when the repair is about its card, and add tasks only for work no existing task owns. A task with an accepted product keeps its card. Only the program's mechanical checks follow (no Calibrator, no feasibility review).`,
       constraints: planningConstraints(await currentConstraints(ctx), ctx.mission),
     }),
     repairs: [repairRef(r)],

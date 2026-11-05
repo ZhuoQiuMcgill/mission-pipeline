@@ -185,7 +185,7 @@ export const EvidenceRequestSchema = z.object({
   measure: z.array(z.string().min(1)).describe('The quantities to record (may be empty only when there are assertions).'),
   assertions: z.array(z.string().min(1)).describe('The assertions to check (holds / does not hold / not checked).'),
   executor: z.enum(['experiment', 'reading']).optional().describe('experiment: commands are run; reading: sources are read.'),
-  commands: z.array(Command).optional().describe('experiment: the commands the steps run (the executor runs each with mp seat <id> rerun <command-id>).'),
+  commands: z.array(Command).optional().describe('experiment: the commands the steps run (the executor runs each with mp seat <id> rerun <command-id>). Each id once; cwd is "." or a path relative to the repository root (or left out): an absolute path goes in the command text.'),
 });
 export type EvidenceRequest = z.infer<typeof EvidenceRequestSchema>;
 
@@ -275,7 +275,9 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
         break;
       case 'rerun':
-        lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunnableCommands(card, o).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite.`);
+        lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunnableCommands(card, o).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite. It prints the result and the last lines of the output.`);
+        // 4.1.3 (#30): a long run does not depend on this seat's lifetime
+        lines.push(`\`mp seat ${dispatch} rerun <command-id> --detach\`: the same run in the background, for a run that may outlast your harness's limit on one command. It prints the run id at once. Then \`mp seat ${dispatch} wait <run>\` waits up to 50 minutes (\`--seconds <n>\` for another limit) and prints the result, or says that the run is still running. Wait in slices: when a wait ends and the run is still running, start the next wait at once. Never end your turn to ask whether to keep waiting.`);
         break;
       case 'owners':
         lines.push(`\`mp seat ${dispatch} owners <path>...\`: which accepted products of this mission changed each path (a path, or a directory ending in "/"), with their task and attempt.`);
@@ -295,11 +297,22 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
 }
 
 /**
+ * 4.1.3 (#30): the runs the step's earlier dispatches made (a step dispatched again, its seat gone),
+ * one line each (process/pm.ts lists them at the claim): the seat records from them and does not run
+ * them again; a run still running is waited on.
+ */
+function carriedRunsSection(o: { readonly dispatch: string; readonly carriedRuns?: readonly string[] }): string {
+  const runs = o.carriedRuns ?? [];
+  if (runs.length === 0) return '';
+  return `\n\n## Runs already made for this step\nEarlier dispatches of this step had \`mp\` run these. Record from their results and do not run them again. \`mp seat ${o.dispatch} wait <run>\` prints a run's result and the last lines of its output (at once when it has finished); for a run still running, it waits.\n${runs.map((r) => `- ${r}`).join('\n')}`;
+}
+
+/**
  * The card as the seat receives it (§5.2): written by `mp pm dispatch` as the leaf
  * `dispatches/<dispatch>/card.md`, printed by `mp seat <dispatch> card`. `projectDir`: the
  * project whose role pages are used (its own copy, else the installed page).
  */
-export function renderSeatCard(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: { readonly dispatch: string; readonly projectDir?: string | null } & CardProject): string {
+export function renderSeatCard(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: { readonly dispatch: string; readonly projectDir?: string | null; readonly carriedRuns?: readonly string[] } & CardProject): string {
   const e = seatCardEntry(card.seat);
   const parsed = e.schema.parse(card) as { readonly seat: string; readonly task: string; readonly mission: string; readonly workspace?: { snapshot: string; writablePaths: readonly string[] } };
   const f = handBackFiles(o.dispatch);
@@ -334,7 +347,7 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
     '',
     '# This task',
     '',
-    `${where}${e.render(parsed)}`.trimEnd() + suiteNote + fullRun,
+    `${where}${e.render(parsed)}`.trimEnd() + suiteNote + fullRun + carriedRunsSection(o),
     '',
     '## Your commands',
     '',

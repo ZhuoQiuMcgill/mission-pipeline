@@ -112,22 +112,11 @@ describe('process: exploration with the Stabilizer (4.1 §6.3)', () => {
     assert.notEqual(ctx.memory.read((db) => decisionLabels(db, [v1]))[v1], 'negated', 'an out-of-scope serious finding never refutes the version');
     s = await explorationState(ctx.ports(), M, X);
     assert.equal([...s.findings.values()][0]?.scope, 'out-of-scope');
-    // round 2 passes, the closing attacker passes, each round stabilized: converged
-    await step(ctx, 'crititor', (c: CrititorCard) => attack([], c));
-    await step(ctx, 'stabilizer', (c: StabilizerCard) => {
-      assert.deepEqual(c.findings, [], 'a round without findings is stabilized too (code review r1 #1)');
-      return judge(c, 'in-scope', 'general');
-    });
-    await step(ctx, 'crititor', (c: CrititorCard) => {
-      assert.equal(c.fresh, true, 'the closing attacker');
-      return attack([], c);
-    });
-    s = await explorationState(ctx.ports(), M, X);
-    assert.equal(s.stopped, null, 'not converged before the closing round is stabilized');
-    await step(ctx, 'stabilizer', (c: StabilizerCard) => judge(c, 'in-scope', 'general'));
-    s = await explorationState(ctx.ports(), M, X);
+    // nothing in scope fatal or serious is left on the author's revision: the Stabilizer's pass on it ends the
+    // round, converged on the revision, with no attack round on it (4.1.3, E-3; sol final review r1)
     assert.equal(s.stopped?.reason, 'converged');
     const v2 = s.version!.id;
+    assert.notEqual(v2, v1);
     assert.equal(ctx.memory.read((db) => decisionLabels(db, [v2]))[v2], 'proven');
   });
 
@@ -181,7 +170,7 @@ describe('process: exploration with the Stabilizer (4.1 §6.3)', () => {
     });
     await pmNext(ctx);
     s = await explorationState(ctx.ports(), M, X);
-    assert.equal(s.turn, 'attacker', 'ruled: the position\'s next judgment');
+    assert.equal(s.turn, 'stabilizer', 'ruled: the round that waited is judged again with the ruling (4.1.3, E-3)');
     assert.equal([...s.findings.values()][0]?.status, 'resolved');
   });
 
@@ -197,7 +186,7 @@ describe('process: exploration with the Stabilizer (4.1 §6.3)', () => {
     });
     let s = await explorationState(ctx.ports(), M, X);
     assert.equal(s.stopped, null);
-    assert.equal(s.turn, 'await-ruling', 'the round passed: only the ruling stands before the closing attacker');
+    assert.equal(s.turn, 'await-ruling', 'the round passed: only the ruling stands before its end');
     const v1 = s.version!.id;
     assert.notEqual(ctx.memory.read((db) => decisionLabels(db, [v1]))[v1], 'proven', 'pending while the question waits');
     const next = await pmNext(ctx);
@@ -209,11 +198,8 @@ describe('process: exploration with the Stabilizer (4.1 §6.3)', () => {
     await pmNext(ctx);
     s = await explorationState(ctx.ports(), M, X);
     assert.deepEqual(s.pendingQuestions, [], 'only the ruling cleared it');
-    // the closing attacker, then its Stabilizer: converged
-    await step(ctx, 'crititor', (c: CrititorCard) => {
-      assert.equal(c.fresh, true);
-      return attack([], c);
-    });
+    // 4.1.3 (E-3): one new Stabilizer judges the round with the ruling (no attack round): converged
+    assert.equal((await pmNext(ctx)).ready.filter((r) => r.kind === 'crititor').length, 0);
     await step(ctx, 'stabilizer', (c: StabilizerCard) => {
       assert.deepEqual(c.pendingDirection ?? [], []);
       return judge(c, 'in-scope', 'general');

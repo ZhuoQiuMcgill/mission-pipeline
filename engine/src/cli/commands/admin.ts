@@ -7,7 +7,7 @@ import { recompute } from '../../evaluator/index.ts';
 import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { CliError, EXIT, usage } from '../errors.ts';
-import { configPath, DEFAULT_COMMIT_IDENT, fullSuiteSource, parseConfig, readConfig } from '../config.ts';
+import { configPath, DEFAULT_COMMIT_IDENT, experimentCommandTimeoutOf, fullSuiteSource, parseConfig, readConfig, shellsInEffect } from '../config.ts';
 import { fullSuiteOf } from '../../common/fullSuite.ts';
 import { copyDocs, mpInit, mpVersion, type PointerTarget } from '../init.ts';
 import type { Project } from '../project.ts';
@@ -60,6 +60,7 @@ const config: Command = {
     const cfg = parseConfig(JSON.parse(readFileSync(file, 'utf8')));
     const src = fullSuiteSource(cfg);
     const suite = fullSuiteOf(cfg);
+    const shells = shellsInEffect(cfg);
     const lines = [
       `.mission-pipeline/config.json is valid.`,
       ...(src.both ? ['Warning: both fullSuite and the deprecated closingChecks are present; fullSuite is used and closingChecks is ignored (remove it).'] : []),
@@ -70,13 +71,22 @@ const config: Command = {
         suite.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}${x.cwd !== undefined ? ` (in ${x.cwd})` : ''}`),
         'none',
       ),
+      ...section("Run cleanup: cleanupCommands (in each run's checkout, after its commands, before mp removes it)", cfg.cleanupCommands.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),
       `Commit identity: author ${cfg.commit?.author ?? `${DEFAULT_COMMIT_IDENT} (default)`}; committer ${cfg.commit?.committer ?? (cfg.commit?.author !== undefined ? 'the author' : `${DEFAULT_COMMIT_IDENT} (default)`)}`,
       ...section('Environment identity: version commands', cfg.environment.versionCommands, 'none (operating system and architecture only)'),
       ...section('Exclusive resources', cfg.exclusiveResources, 'none'),
       ...section('Filler hints', Object.entries(cfg.fillers).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`), 'none'),
+      // 4.1.3 (E-2): a project setting is not a waiver; the key still waives (labelled so) so running missions go on
+      ...((cfg.planReviewsWaived ?? []).length > 0 ? [`Warning: planReviewsWaived is deprecated (a project setting is not a waiver). It still waives the plan reviews of ${cfg.planReviewsWaived!.join(', ')}, labelled "waived by config; no words on record". Record the user's words instead: mp pm waive <mission> plan-reviews --words W-<n> (--plan <dplan> for one plan version), then remove the key.`] : []),
+      ...section('Tasks that start on their dependencies\' verified hand-backs while those are in review: startOnHandback (fast mode; never an integration task; the acceptance still waits)', cfg.startOnHandback ?? [], 'none'),
       `Command timeout: ${Math.round(cfg.commandTimeoutMs / 1000)} s`,
+      `Experiment command timeout (an exploration's experiment reruns): ${Math.round(experimentCommandTimeoutOf(cfg) / 1000)} s${cfg.experimentCommandTimeoutMs === undefined ? ' (experimentCommandTimeoutMs not set: the command timeout)' : ''}`,
+      // 4.1.3 (#27): the shell in effect per run class
+      `Shell of declared commands (local tests, reruns, renewals, full runs, cleanup): ${shells.declared}${shells.declaredFrom === 'shell' ? ' (shell; part of the environment identity)' : " (the platform's shell; shell not set)"}`,
+      `Shell of an exploration's experiment reruns: ${shells.experimentReruns}${shells.experimentFrom === 'experimentShell' ? ' (experimentShell)' : shells.experimentFrom === 'shell' ? ' (experimentShell not set: shell)' : " (neither experimentShell nor shell set: the platform's shell)"}`,
+      ...[cfg.shell, cfg.experimentShell].filter((x): x is string => x !== undefined && !existsSync(x)).map((x) => `Warning: the shell ${x} does not exist on this machine: every command it runs fails to start.`),
     ];
-    return ok(lines.join('\n'), { ...cfg, fullSuiteReadFrom: src.key, fullSuiteKeysBoth: src.both });
+    return ok(lines.join('\n'), { ...cfg, fullSuiteReadFrom: src.key, fullSuiteKeysBoth: src.both, experimentCommandTimeoutMsInEffect: experimentCommandTimeoutOf(cfg), shellInEffect: { declared: shells.declared, experimentReruns: shells.experimentReruns } });
   },
 };
 

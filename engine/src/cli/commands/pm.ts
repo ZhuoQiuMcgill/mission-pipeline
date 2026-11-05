@@ -43,6 +43,9 @@ import {
   pmDrain,
   pmFullRun,
   pmReopenExploration,
+  pmResnapshotExploration,
+  pmRerunAttempt,
+  pmAmendAttempts,
   pmFinish,
   pmGrant,
   pmLand,
@@ -55,10 +58,13 @@ import {
   pmRelease,
   pmRenew,
   pmRepair,
+  type RepairChange,
+  type RepairChanged,
   pmRequirement,
   pmSay,
   pmStartLegalization,
   pmStop,
+  pmWaive,
   pmWithdrawRequirement,
   wordsText,
   type NextReport,
@@ -174,6 +180,8 @@ export function renderNext(p: Project, n: NextReport, hints: Readonly<Record<str
   lines.push(...section('Held', n.held.map((h) => `${h.step}: ${h.seat} in ${h.mission} — ${h.why}${h.wi !== null ? ` [${wiText(h.wi, p.dir)}]` : ''}`)));
   lines.push(...section('Waiting on the user', n.waitingOnUser.map((w) => `${w.mission} ${w.escalation}: ${clip(w.summary, 200)} — options ${w.options.join(', ')} (mp pm answer ${w.mission} ${w.escalation} --option <option> --words W-<n>)`)));
   lines.push(...section('In flight', n.inFlight.map((d) => `${d.dispatch}: ${d.seat} on ${d.step} (${d.mission}), ${age(d.ageMs)}, ${filler(d.filler)}`)));
+  // 4.1.3 (#30): detached runs that ended while their dispatch is in flight; mp cannot see whether the seat is alive
+  lines.push(...section('Detached runs that ended (their dispatch is in flight)', (n.detachedRuns ?? []).map((r) => r.text)));
   if (n.labels.recomputing) lines.push(`Labels recomputing: ${n.labels.toVisit} to visit, ${n.labels.toRecompute} to recompute${n.labels.since !== null ? ` (since ${age(Date.now() - n.labels.since)})` : ''}; decisions that need "proven" wait.`);
   if (n.errors.length > 0) lines.push(...section('Flow errors (each also a notice)', n.errors));
   if (n.ready.length > 0) lines.push('', 'Dispatch: mp pm dispatch <step> --filled-by "<harness>/<model>", then start the seat with the prompt it prints.');
@@ -512,12 +520,46 @@ const requirement: Command = {
   },
 };
 
+/** The attempts file of a change form (a JSON array of registered attempts). */
+function attemptsFile(file: string): unknown {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw usage(`cannot read the attempts ${file}: ${(e as Error).message}`);
+  }
+}
+
+/** The ids of a --rerun list, or of rerun-attempt's positional. */
+function attemptIds(raw: string): string[] {
+  const ids = raw.split(',').map((a) => a.trim()).filter((a) => a !== '');
+  if (ids.length === 0) throw usage('name the registered attempts to run again: <attempt-id>[,<attempt-id>...]');
+  return ids;
+}
+
 const repair: Command = {
   group: 'pm',
   name: ['repair'],
-  summary: 'a problem the user found trying the product, as a repair (D-10): the user\'s reason verbatim from their words, the kind you choose; the Architect amends the plan in effect under the mechanical checks only (about an exploration: one more round)',
-  usage: 'mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user\'s reason, verbatim from W-n>" [--about <task-id|exploration-id>]',
-  flags: { words: 'string', kind: 'string', text: 'string', about: 'string' },
+  summary:
+    "a problem the user found trying the product, as a repair (D-10): the user's reason verbatim from their words, the kind you choose; the Architect amends the plan in effect under the mechanical checks only. About an exploration: the author gets the turn at once (in the attempts phase the method goes back to its author); with a change form the user's decision about its method takes effect directly, with no round and no review (E-5)",
+  usage:
+    'mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user\'s reason, verbatim from W-n>" [--about <task-id|exploration-id>]\n' +
+    '       [--attempts <attempts.json> [--answers R-<n>] | --rerun <attempt-id>[,<attempt-id>...] | --resnapshot]   (change forms, about an exploration)\n' +
+    '       --attempts: add or replace registered attempts (a JSON array in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)\n' +
+    '       --answers R-<n>: with --attempts, this change also settles that earlier repair (its author turn is taken back); without it, a change while the method is back with its author is refused\n' +
+    '       --rerun: run registered attempts again on the same method version; --resnapshot: the exploration reads the target branch as it is now',
+  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean' },
+  identity: (a) => ({
+    positionals: a.positionals,
+    flags: a.flags,
+    attempts: (() => {
+      if (typeof a.flags['attempts'] !== 'string') return null;
+      try {
+        return sha256(readFileSync(String(a.flags['attempts']), 'utf8'));
+      } catch {
+        return null;
+      }
+    })(),
+  }),
   async run(c, args) {
     const p = P(c);
     const m = missionArg(args, 0);
@@ -527,17 +569,70 @@ const repair: Command = {
     const text = flagStr(args, 'text');
     if (text === null || text.trim() === '') throw usage(`--text: the user's reason, verbatim from ${words}`);
     const about = flagStr(args, 'about');
-    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}) });
-    const what = r.about?.kind === 'exploration' ? `exploration ${r.about.id} is reopened for one more round with it as an added question` : 'an Architect repair step amends the plan in effect (mechanical checks only); mp pm next lists it';
+    const file = flagStr(args, 'attempts');
+    const rerun = flagStr(args, 'rerun');
+    const forms = [file !== null, rerun !== null, flagBool(args, 'resnapshot')].filter((x) => x).length;
+    if (forms > 1) throw usage('one change form at a time: --attempts, --rerun or --resnapshot');
+    if (forms > 0 && about === null) throw usage('a change form is about an exploration: --about <exploration-id>');
+    const answers = flagStr(args, 'answers');
+    if (answers !== null && file === null) throw usage('--answers goes with --attempts: the change that settles an earlier repair about the exploration');
+    if (answers !== null && !/^R-[1-9][0-9]*$/.test(answers)) throw usage(`--answers names a repair R-<n>, not ${JSON.stringify(answers)}`);
+    const change: RepairChange | undefined = file !== null ? { form: 'attempts', attempts: attemptsFile(file), ...(answers !== null ? { answers } : {}) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
+    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}) });
+    if (r.changed !== undefined) {
+      const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...changedLines(m, about!, words, r.changed)];
+      return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: false, about: r.about, changed: r.changed });
+    }
+    const what = r.about?.kind === 'exploration' ? `exploration ${r.about.id} is reopened with it as an added question; its author gets the turn now (in the attempts phase the method goes back to its author)` : 'an Architect repair step amends the plan in effect (mechanical checks only); mp pm next lists it';
     return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${what}.`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about });
   },
 };
+
+/** What a change form did, as lines (the same for `mp pm repair` and the older commands). */
+function changedLines(m: string, x: string, w: string, c: RepairChanged): string[] {
+  const run = (a: { readonly step: string | null; readonly evidence: string | null }): string => (a.step !== null ? `step ${a.step} queued (record ${a.evidence})` : 'its run is queued by the next mp pm next');
+  if (c.form === 'resnapshot') {
+    const r = c.result;
+    return [`Exploration ${x} of ${m} now reads ${short(r.snapshot)} (it read ${short(r.previous)}): every card dispatched from now on names it. Nothing runs again by itself; ${r.olderEvidence.length} evidence execution(s) recorded before still count, marked "older environment".`];
+  }
+  if (c.form === 'rerun') {
+    const r = c.result;
+    return [
+      `Exploration ${x} of ${m}: attempt(s) ${r.attempts.map((a) => a.attempt).join(', ')} run again on the same method version (rerun ${r.n}); no round spent (${r.rounds} of ${r.allowedRounds} used).`,
+      ...r.attempts.map((a) => `  ${a.attempt}: ${run(a)}; its new record supersedes ${a.replaces}, kept as history`),
+      ...(r.withdrawn !== null ? [`The interpreter step ${r.withdrawn}, queued on the earlier records, is withdrawn: a new one is queued once the new records are in.`] : []),
+      `The exploration is in its ${r.phase} phase. mp pm next lists the runs.`,
+    ];
+  }
+  const r = c.result;
+  return [
+    `Exploration ${x} of ${m}: the method is amended on the user's words ${w} (amendment ${r.n}). Version ${r.version} is in force, passed by the user's judgment ${r.judgment} (no review); it replaces ${r.previous}. No round spent (${r.rounds} of ${r.allowedRounds} used).`,
+    ...r.added.map((a) => `  added ${a.attempt}: ${run(a)}`),
+    ...r.replaced.map((a) => `  replaced ${a.attempt}: ${a.withdrawn !== null ? `the waiting run of its earlier card (step ${a.withdrawn}) is withdrawn; ` : ''}${run(a)}${a.replaces !== null ? `; its new record supersedes ${a.replaces}, kept as history` : ''}`),
+    ...(r.unchanged.length > 0 ? [`  unchanged: ${r.unchanged.join(', ')} (their records keep counting)`] : []),
+    ...(r.withdrawn !== null ? [`The interpreter step ${r.withdrawn}, queued on the earlier records, is withdrawn: a new one is queued once every attempt of the amended method has its record.`] : []),
+    ...(r.answers !== null && r.answers !== r.repair ? [`Repair ${r.answers} is answered by this amendment: the round it added is taken back, and no card shows it as an open question.`] : []),
+    `The exploration is in its ${r.phase} phase. mp pm next lists the runs.`,
+  ];
+}
+
+/** The one line an older command prints (4.1.3, E-5): the `mp pm repair` form it is an older name of. */
+function olderName(name: string, m: string, x: string, w: string, form: string): string {
+  return `mp pm ${name} is an older name, kept for one release: use mp pm repair ${m} --about ${x} --words ${w} --kind <kind> --text "<the user's reason>" ${form}.`;
+}
+
+/** The repair an older command records (4.1.3, E-5): the kind the PM passes (default new-question), the user's words as the reason. */
+function olderRepair(p: { readonly ctx: ProcessContext }, args: ParsedArgs, words: string): { readonly kind: RepairKind; readonly text: string } {
+  const kind = flagStr(args, 'kind') ?? 'new-question';
+  if (!(REPAIR_KINDS as readonly string[]).includes(kind)) throw usage(`--kind is one of ${REPAIR_KINDS.join(', ')}`);
+  return { kind: kind as RepairKind, text: wordsText(p.ctx, words) };
+}
 
 const constraint: Command = {
   group: 'pm',
   name: ['constraint'],
   summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope',
-  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>]\n       mp pm constraint withdraw <constraint> --words W-<n>',
+  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>]   (a pattern is "**", an exact path, or "<folder>/**")\n       mp pm constraint withdraw <constraint> --words W-<n>',
   flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string' },
   async run(c, args) {
     const p = P(c);
@@ -561,7 +656,15 @@ const constraint: Command = {
     // the words the constraint came from (optional, as `withdraw` needs them): recorded with it
     const w = wordsArg(p.ctx, args, false);
     const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(missionScope !== null ? { missionScope } : {}), ...(w !== null ? { words: w } : {}), scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
-    return ok(`Constraint ${id} (${kind}) recorded as ${r.version}${w !== null ? ` on ${w}` : ''}.`, { mission: m, constraint: id, version: r.version, words: w });
+    // 4.1.3 (#36): what the scope reaches now; nothing is a warning, never a refusal
+    const reach = `${kind === 'object' ? `${r.reach.objects} current object version${r.reach.objects === 1 ? '' : 's'} and ` : ''}${r.reach.tasks.length} task${r.reach.tasks.length === 1 ? '' : 's'} of the plans in effect${r.reach.tasks.length > 0 ? ` (${r.reach.tasks.slice(0, 10).join(', ')}${r.reach.tasks.length > 10 ? ', ...' : ''})` : ''}`;
+    const none = r.reach.objects === 0 && r.reach.tasks.length === 0;
+    const lines = [
+      `Constraint ${id} (${kind}) recorded as ${r.version}${w !== null ? ` on ${w}` : ''}${r.scopeChanged ? ' (the same text: the version is kept and its scope is changed)' : ''}.`,
+      `Its scope matches ${reach} now.`,
+      ...(none ? ['Warning: it matches nothing now. It reaches the cards of tasks and objects its scope covers as they appear; check the paths and task types if you expected a match.'] : []),
+    ];
+    return ok(lines.join('\n'), { mission: m, constraint: id, version: r.version, words: w, scopeChanged: r.scopeChanged, reach: r.reach });
   },
 };
 
@@ -618,6 +721,8 @@ const plan: Command = {
     } catch (e) {
       const name = (e as { name?: string }).name;
       if (name === 'LedgerError' || name === 'ProcessError') throw e;
+      // 4.1.3 (#23): explorations waiting for each other: a named refusal that lists the cycle
+      if ((e as { code?: string }).code === 'AFTER_CYCLE') throw refused('AFTER_CYCLE', `${(e as Error).message}. Nothing was recorded`);
       // the plan does not validate: say where, and where its format is
       const issues = name === 'ZodError' ? ((e as { issues?: Array<{ path: Array<string | number>; message: string }> }).issues ?? []).map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ') : (e as Error).message;
       throw refused('BAD_PLAN', `the PM plan does not validate: ${issues}. Its format, prefilled for this mission: mp pm plan template ${m}`);
@@ -629,14 +734,40 @@ const plan: Command = {
   },
 };
 
+const waive: Command = {
+  group: 'pm',
+  name: ['waive'],
+  summary: "E-2: waive a mission's plan reviews (the feasibility review and Calibrator ②) on the user's words or an authorization in force, for the whole mission or one detailed plan version; the plan then takes effect after the mechanical checks, labelled so. --withdraw gives later plans their reviews again",
+  usage: 'mp pm waive <mission> plan-reviews [--plan <dplan.<mission>.<n>.<k>>] (--words W-<n> | --authority <item-id>) [--reason "<text>"]\n       mp pm waive <mission> plan-reviews --withdraw (--words W-<n> | --authority <item-id>)',
+  flags: { plan: 'string', words: 'string', authority: 'string', reason: 'string', withdraw: 'boolean' },
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const check = positional(args, 1, 'the check to waive (plan-reviews)');
+    const w = wordsArg(p.ctx, args, false);
+    const authority = flagStr(args, 'authority');
+    if (w === null && authority === null) throw refused('NO_DECISION', 'a waiver needs who decided it: --words W-<n> (the user\'s words) or --authority <item-id> (an authorization item in force that leaves this to the PM); nothing was recorded');
+    if (w !== null && authority !== null) throw usage('give --words or --authority, not both');
+    const withdraw = flagBool(args, 'withdraw');
+    const r = await pmWaive(p.ctx, { mission: m, check, plan: flagStr(args, 'plan'), words: w, authority, reason: flagStr(args, 'reason'), withdraw, request: c.op });
+    const who = r.by === 'words' ? `on ${r.ref}` : `under authorization ${r.ref}`;
+    const head = !r.recorded
+      ? `Nothing to withdraw for mission ${m}.`
+      : r.action === 'withdraw'
+        ? `The plan-review waivers of mission ${m} are withdrawn ${who}: plans not in effect yet get their feasibility review and Calibrator ② again. A plan in effect stays in effect.`
+        : `Plan reviews waived ${who} for ${r.plan !== null ? `detailed plan ${r.plan}` : `every plan of mission ${m} not in effect yet`}: ${r.plan !== null ? 'it takes' : 'each takes'} effect after the mechanical checks and the order ruling, without the feasibility review and Calibrator ②, labelled "took effect without its reviews, ${who}". No other check is waived.`;
+    return ok([head, ...r.notes].join('\n'), r);
+  },
+};
+
 const OPTIONS = DECISION_OPTIONS.filter((o) => o !== 'ask-user');
 
 const answer: Command = {
   group: 'pm',
   name: ['answer'],
   summary: 'the user\'s decision on an escalation waiting for them; carried out like a Secretary decision (WI-24)',
-  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --words W-<n> [--instructions "<text>"] [--extra <n>]`,
-  flags: { option: 'string', words: 'string', instructions: 'string', extra: 'string' },
+  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)`,
+  flags: { option: 'string', words: 'string', instructions: 'string', extra: 'string', findings: 'string' },
   async run(c, args) {
     const p = P(c);
     const m = missionArg(args, 0);
@@ -648,7 +779,8 @@ const answer: Command = {
     const n = extra === null ? undefined : Number(extra);
     if (n !== undefined && (!Number.isSafeInteger(n) || n < 1)) throw usage('--extra is a positive integer');
     const ins = flagStr(args, 'instructions');
-    await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}) });
+    const findings = (flagStr(args, 'findings') ?? '').split(',').map((f) => f.trim()).filter((f) => f !== '');
+    await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
     return ok(`The user's answer to ${esc} recorded (${option}, ${w}); mp carries it out. Next: mp pm next`, { mission: m, escalation: esc, option, words: w });
   },
 };
@@ -841,6 +973,79 @@ const reopenExploration: Command = {
     const w = wordsArg(p.ctx, args, false);
     const r = await pmReopenExploration(p.ctx, { mission: m, exploration: x, words: w });
     return ok(r.requested ? `Exploration ${x} of ${m} is reopened under environment ${short(r.environment)} (if its executions ran in an older one): mp pm next lists the reruns.` : `Exploration ${x} of ${m} was already reopened under this environment: nothing new.`, { mission: m, exploration: x, ...r });
+  },
+};
+
+const resnapshotExploration: Command = {
+  group: 'pm',
+  name: ['resnapshot-exploration'],
+  summary: 'older name of mp pm repair --resnapshot, kept for one release: a started exploration reads the target branch as it is now (code that landed after it began): its next cards name the new snapshot; nothing runs again by itself, and evidence recorded before still counts, marked "older environment"',
+  usage: 'mp pm resnapshot-exploration <mission> <exploration> --words W-<n> [--kind <repair kind>]   (older name of mp pm repair --resnapshot)',
+  flags: { words: 'string', kind: 'string' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const x = positional(args, 1, 'exploration');
+    const w = wordsArg(p.ctx, args, true)!;
+    const r = await pmResnapshotExploration(p.ctx, { mission: m, exploration: x, words: w, repair: olderRepair(p, args, w) });
+    return ok([olderName('resnapshot-exploration', m, x, w, '--resnapshot'), ...(r.repair !== null ? [`Repair recorded: ${r.repair}, answered by this snapshot.`] : []), ...changedLines(m, x, w, { form: 'resnapshot', result: r })].join('\n'), { mission: m, exploration: x, ...r });
+  },
+};
+
+const rerunAttempt: Command = {
+  group: 'pm',
+  name: ['rerun-attempt'],
+  summary:
+    "older name of mp pm repair --rerun, kept for one release: a research exploration's registered attempt failed for a cause outside the method (a time limit since raised, say): run it again on the same method version, a fresh blind run of its registered card, without a round; its new record supersedes the earlier one, kept as history",
+  usage: 'mp pm rerun-attempt <mission> <exploration> <attempt-id>[,<attempt-id>...] --words W-<n> [--reason "<text>"] [--kind <repair kind>]   (older name of mp pm repair --rerun)',
+  flags: { words: 'string', reason: 'string', kind: 'string' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const x = positional(args, 1, 'exploration');
+    const attempts = attemptIds(positional(args, 2, 'attempt-id[,attempt-id...]'));
+    const w = wordsArg(p.ctx, args, true)!;
+    const reason = flagStr(args, 'reason');
+    const r = await pmRerunAttempt(p.ctx, { mission: m, exploration: x, attempts, words: w, reason, repair: olderRepair(p, args, w) });
+    return ok([olderName('rerun-attempt', m, x, w, `--rerun ${attempts.join(',')}`), ...(r.repair !== null ? [`Repair recorded: ${r.repair}, answered by this rerun.`] : []), ...changedLines(m, x, w, { form: 'rerun', result: r })].join('\n'), { mission: m, exploration: x, ...r });
+  },
+};
+
+const amendAttempts: Command = {
+  group: 'pm',
+  name: ['amend-attempts'],
+  summary:
+    "older name of mp pm repair --attempts, kept for one release: the user decided something about a research exploration's method in force (a scale, a cap, a search extended to more of the domain): on their words, add or replace registered attempts without a round and without review; a new method version is in force, and new or replaced attempts run at once (a replaced attempt's earlier record is superseded, kept as history)",
+  usage: 'mp pm amend-attempts <mission> <exploration> --words W-<n> --file <attempts.json> [--answers R-<n>] [--reason "<text>"] [--kind <repair kind>]   (older name of mp pm repair --attempts)\n       (<attempts.json>: a JSON array of attempts in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)',
+  flags: { words: 'string', file: 'string', answers: 'string', reason: 'string', kind: 'string' },
+  identity: (a) => ({
+    positionals: a.positionals,
+    flags: a.flags,
+    attempts: (() => {
+      try {
+        return sha256(readFileSync(String(a.flags['file'] ?? ''), 'utf8'));
+      } catch {
+        return null;
+      }
+    })(),
+  }),
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const x = positional(args, 1, 'exploration');
+    const file = flagStr(args, 'file');
+    if (file === null) throw usage('--file <attempts.json>: a JSON array of attempts in the schema of a method\'s registered attempts (a new id is added, a registered id replaces that attempt)');
+    const attempts = attemptsFile(file);
+    const answers = flagStr(args, 'answers');
+    if (answers !== null && !/^R-[1-9][0-9]*$/.test(answers)) throw usage(`--answers names a repair R-<n>, not ${JSON.stringify(answers)}`);
+    const w = wordsArg(p.ctx, args, true)!;
+    const reason = flagStr(args, 'reason');
+    // a repair of its own unless it answers one recorded before (4.1.3, E-5)
+    const r = await pmAmendAttempts(p.ctx, { mission: m, exploration: x, attempts, words: w, reason, answers, ...(answers === null ? { repair: olderRepair(p, args, w) } : {}) });
+    return ok([olderName('amend-attempts', m, x, w, `--attempts ${file}`), ...(r.repair !== null ? [`Repair recorded: ${r.repair}, answered by this amendment.`] : []), ...changedLines(m, x, w, { form: 'attempts', result: r })].join('\n'), { mission: m, exploration: x, ...r });
   },
 };
 
@@ -1102,12 +1307,16 @@ export const PM_COMMANDS: readonly Command[] = [
   repair,
   constraint,
   plan,
+  waive,
   answer,
   grant,
   legalize,
   deliver,
   fullRun,
   reopenExploration,
+  resnapshotExploration,
+  rerunAttempt,
+  amendAttempts,
   land,
   withdrawDeliveryCmd,
   detachDuplicate,

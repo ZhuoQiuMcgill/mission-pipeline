@@ -90,6 +90,7 @@ function environmentParts(v: unknown): void {
   if (digests !== undefined && (!isObj(digests) || !Object.entries(digests).every(([cmd, h]) => Object.hasOwn(versions, cmd) && typeof h === 'string' && HEX64.test(h)))) {
     fail('env.snapshot', 'parts.digests maps each version command to the sha256 of its whole output');
   }
+  if (v.shell !== undefined && (typeof v.shell !== 'string' || v.shell.length === 0 || v.shell.length > 512)) fail('env.snapshot', 'parts.shell is a path of 1 to 512 characters');
 }
 
 /** Validate one base record's shape. Throws RecordInvalid. */

@@ -15,7 +15,25 @@
 //     timing field), the per-test results when the runner prints TAP lines (`test:<name>`).
 // The run summary leaf `missions/<m>/runs/<run>.md` holds the commands, the environment identity,
 // the exit codes, the per-test results, the output's hash and the last lines of a failing
-// command; the full output is not kept (U-13).
+// command; the full output is not kept (U-13). 4.1.3 (#37): a rerun (`mp seat <id> rerun`) keeps the
+// last lines of its output whether it passes or fails, within FULL_RUN_TAIL: a method may ask its
+// executor to record what a passing command printed. Verification runs keep only a failing tail.
+//
+// Shell (config.json `shell`, 4.1.3 #27): every declared command runs with the project's shell when
+// it sets one (an absolute path), else with the platform's; an experiment executor's reruns take
+// `experimentShell` first. The shell is part of the environment identity when set.
+//
+// Cleanup (config.json `cleanupCommands`): after a run's commands, also when one fails, times out
+// or throws, `mp` runs the project's cleanup commands in the checkout root, then removes the
+// checkout. They release what the commands made outside it (a container network, a built image),
+// which removing the folder does not. Best effort: a failing one is a note in the summary leaf,
+// never evidence, and changes no result and no reuse.
+//
+// Time limits (config.json): each command gets `commandTimeoutMs`, except the reruns of an
+// exploration's experiment executor (`mp seat <id> rerun` on a constructor-experiment card: the
+// declaration marks them `experiment` and `rerun`), which get `experimentCommandTimeoutMs` (default
+// `commandTimeoutMs`): an experiment may need a day where a hung test should end in minutes. Such a
+// rerun is a sampling run: it takes no run lock and holds no write lock of the memory while it executes.
 //
 // Reuse (§6.5): a declared run is reused for the same candidate, command, working directory and
 // environment identity (reusableMethodRun's key); a sampling run never is: each one executes and gets
@@ -32,7 +50,7 @@
 // operating system releases the lock when its holder exits however it exits, so a killed holder
 // blocks nothing: the next call executes in a checkout of its own. Sampling runs take no lock.
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -65,21 +83,137 @@ export interface CommandOutcome {
   readonly durationMs: number;
 }
 
-/** Runs one command line in `cwd`. */
-export type CommandRunner = (req: { readonly command: string; readonly cwd: string; readonly timeoutMs: number }) => CommandOutcome;
+/** One command line to run in `cwd`, with its time limit and, when the project sets one, its shell. */
+export interface CommandRequest {
+  readonly command: string;
+  readonly cwd: string;
+  readonly timeoutMs: number;
+  readonly shell?: string;
+}
+
+/** Runs one command line in `cwd` (synchronously, or with a promise: a detached run's worker waits for its command without blocking, groupShellRunner). */
+export type CommandRunner = (req: CommandRequest) => CommandOutcome | Promise<CommandOutcome>;
 
 /**
  * The platform's shell (§9: verification commands are declared per project and run with the
  * platform's shell), in an environment without the variables that would point git at another
  * repository than the checkout's own.
  */
-export const shellRunner: CommandRunner = ({ command, cwd, timeoutMs }) => {
+export const shellRunner = ({ command, cwd, timeoutMs, shell }: CommandRequest): CommandOutcome => {
   const t0 = performance.now();
-  const r = spawnSync(command, { cwd, shell: true, env: withoutRepositoryLocators(process.env), timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync(command, { cwd, shell: shell ?? true, env: withoutRepositoryLocators(process.env), timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const output = Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)]);
   const timedOut = r.error !== undefined && (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
   return { exitCode: r.status, signal: r.signal ?? null, error: r.error !== undefined && !timedOut ? r.error.message : null, timedOut, output, durationMs: Math.round(performance.now() - t0) };
 };
+
+/** The most output a command may print (stdout and stderr): as spawnSync's maxBuffer in shellRunner. */
+const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
+
+/** How long a command's process group gets after SIGTERM before SIGKILL (groupShellRunner). */
+export const GROUP_KILL_GRACE_MS = 10_000;
+
+/** Send `signal` to the process group `pid` leads (POSIX), or end its process tree (Windows); never throws. */
+export function signalGroup(pid: number, signal: NodeJS.Signals): void {
+  if (process.platform === 'win32') {
+    // no process groups: the whole tree, forced (a console process takes no polite request)
+    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch (e) {
+    // not a group leader (a worker started in the foreground): the process itself
+    if ((e as NodeJS.ErrnoException).code === 'ESRCH') {
+      try {
+        process.kill(pid, signal);
+      } catch {
+        /* gone already */
+      }
+    }
+  }
+}
+
+/** Whether any process of the group `pid` leads is still there (POSIX; Windows has no groups: taskkill /T ended the tree). */
+export function groupAlive(pid: number): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** How often a group that was told to end is looked at until it has exited. */
+const GROUP_POLL_MS = 50;
+
+/**
+ * The platform's shell as shellRunner, without blocking (4.1.3, #30: a detached run's worker): the
+ * command runs in a process group of its own, so on its time limit, or when `stopping` fires (the
+ * worker was told to stop), SIGTERM goes to the whole group and SIGKILL after `graceMs`: no child it
+ * started (a container client, a background job) outlives it. Once told to end, the run answers only
+ * after the whole group has exited, not only the shell: a child that ignores SIGTERM and holds none of
+ * the shell's output still gets the SIGKILL. Output, exit and time limit are read as shellRunner reads
+ * them, so the evidence is the same as a foreground run's.
+ */
+export function groupShellRunner(o: { readonly stopping?: AbortSignal; readonly graceMs?: number } = {}): CommandRunner {
+  const graceMs = o.graceMs ?? GROUP_KILL_GRACE_MS;
+  return ({ command, cwd, timeoutMs, shell }) =>
+    new Promise<CommandOutcome>((resolve) => {
+      const t0 = performance.now();
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      let size = 0;
+      let timedOut = false;
+      let error: string | null = null;
+      let killTimer: NodeJS.Timeout | null = null;
+      const child = spawn(command, { cwd, shell: shell ?? true, env: withoutRepositoryLocators(process.env), detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const terminate = (): void => {
+        if (child.pid === undefined || killTimer !== null) return;
+        signalGroup(child.pid, 'SIGTERM');
+        killTimer = setTimeout(() => signalGroup(child.pid!, 'SIGKILL'), graceMs);
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, timeoutMs);
+      const onStop = (): void => terminate();
+      if (o.stopping?.aborted === true) onStop();
+      o.stopping?.addEventListener('abort', onStop);
+      const collect = (into: Buffer[]) => (b: Buffer): void => {
+        size += b.length;
+        if (size > MAX_OUTPUT_BYTES) {
+          error ??= `the output went over ${MAX_OUTPUT_BYTES} bytes; the command was stopped`;
+          terminate();
+        } else into.push(b);
+      };
+      child.stdout?.on('data', collect(stdout));
+      child.stderr?.on('data', collect(stderr));
+      child.on('error', (e) => {
+        error ??= e.message;
+      });
+      child.on('close', (code, signal) => {
+        clearTimeout(timer);
+        o.stopping?.removeEventListener('abort', onStop);
+        const done = (): void => {
+          if (killTimer !== null) clearTimeout(killTimer);
+          resolve({ exitCode: code, signal: signal ?? null, error: timedOut ? null : error, timedOut, output: Buffer.concat([...stdout, ...stderr]), durationMs: Math.round(performance.now() - t0) });
+        };
+        // told to end: the SIGKILL timer stays armed until no process of the group is left (one that
+        // ignores SIGTERM ends at the grace's end); a run that ended by itself answers at once
+        if (killTimer === null || child.pid === undefined) return done();
+        const pid = child.pid;
+        // a bound: a process the kernel cannot end (in uninterruptible sleep) never holds the run for good
+        const until = performance.now() + graceMs + GROUP_KILL_GRACE_MS;
+        const look = (): void => {
+          if (!groupAlive(pid) || performance.now() > until) return done();
+          setTimeout(look, GROUP_POLL_MS);
+        };
+        look();
+      });
+    });
+}
 
 /**
  * The evidence field naming a run's working directory, normalized and relative to the checkout
@@ -101,6 +235,24 @@ export function normalizeCwd(cwd: string | undefined | null): string {
 /** The working directory a recorded run ran in ("." when it recorded none). */
 export function runCwd(fields: Readonly<Record<string, string>>): string {
   return Object.hasOwn(fields, CWD_FIELD) ? fields[CWD_FIELD]! : '.';
+}
+
+/**
+ * The time limit of each command of a run (see the top of this file): an experiment executor's
+ * rerun (`experiment` and `rerun` declared: `mp seat <id> rerun` on a constructor-experiment card)
+ * gets `experimentCommandTimeoutMs`; every other run, `commandTimeoutMs`.
+ */
+export function commandTimeoutFor(ctx: Pick<ProcessContext, 'commandTimeoutMs' | 'experimentCommandTimeoutMs'>, declaration: Pick<RunDeclaration, 'experiment' | 'rerun'>): number {
+  return declaration.experiment === true && declaration.rerun === true ? ctx.experimentCommandTimeoutMs : ctx.commandTimeoutMs;
+}
+
+/**
+ * The shell of each command of a run: an experiment executor's rerun (as commandTimeoutFor)
+ * gets `experimentShell` when the project sets one; every run, the project's `shell` when it sets
+ * one (4.1.3, #27); else (undefined) the platform's shell.
+ */
+export function commandShellFor(ctx: Pick<ProcessContext, 'experimentShell' | 'shell'>, declaration: Pick<RunDeclaration, 'experiment' | 'rerun'>): string | undefined {
+  return (declaration.experiment === true && declaration.rerun === true ? ctx.experimentShell : undefined) ?? ctx.shell;
 }
 
 /** One command as a card declares it. `sampled` / `network`: the card's marks (§6.5). */
@@ -139,10 +291,17 @@ export interface TailLimit {
   readonly bytes: number;
 }
 
-/** A local run (a task's verification, a rerun): the last 40 lines of a failing command. */
+/** A local run (a task's verification): the last 40 lines of a failing command. */
 export const LOCAL_TAIL: TailLimit = { lines: 40, bytes: 1024 * 1024 };
 /** A full run (4.1.2, D-6): the last 400 lines of each failing command, at most 64 KiB, so a failure can be traced to its task. */
 export const FULL_RUN_TAIL: TailLimit = { lines: 400, bytes: 64 * 1024 };
+/**
+ * A rerun (`mp seat <id> rerun`, 4.1.3 #37): the last lines of its output, passing or failing, as a
+ * full run keeps a failing one's (400 lines, 64 KiB): enough for the status lines a method asks its
+ * executor to record, bounded so that a day-long run's output never fills the disk. Reruns are seat
+ * calls, not the common path: verification runs keep only a failing tail.
+ */
+export const RERUN_TAIL: TailLimit = FULL_RUN_TAIL;
 
 /** The last lines of an output, within `limit` (whole characters: a cut never splits one). */
 export function tail(output: Buffer, limit: TailLimit = LOCAL_TAIL): string {
@@ -160,6 +319,50 @@ export function tail(output: Buffer, limit: TailLimit = LOCAL_TAIL): string {
 /** A declared command as a shell command line: a string as it is, an argv joined with each word quoted when it needs it. */
 export function commandLine(command: string | readonly string[]): string {
   return typeof command === 'string' ? command : command.map((a) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(a) ? a : JSON.stringify(a))).join(' ');
+}
+
+// ---------------------------------------------------------------- cleanup
+
+/** A cleanup command as config.json declares it (`cleanupCommands`): it runs in the checkout root. */
+export interface CleanupCommand {
+  readonly id: string;
+  readonly command: string | readonly string[];
+}
+
+/**
+ * The longest a cleanup command may take (or `commandTimeoutMs`, when that is shorter). It runs
+ * before the run is recorded and under its run locks, so a hung cleanup must not hold them for a
+ * whole command timeout; releasing resources takes seconds, and this leaves room for a slow one.
+ */
+export const CLEANUP_TIMEOUT_MS = 5 * 60_000;
+
+/** A cleanup command that failed, as the run summary leaf notes it. */
+interface CleanupFailure {
+  readonly id: string;
+  readonly command: string;
+  readonly why: string;
+  readonly tail: string;
+}
+
+/**
+ * Run the project's cleanup commands in a run's checkout root, in order (executeRuns, before it
+ * removes the checkout). Never throws: a failing or throwing command is returned as a failure and
+ * the later ones still run.
+ */
+async function runCleanup(ctx: ProcessContext, dir: string, runner: CommandRunner = ctx.runner): Promise<CleanupFailure[]> {
+  const failures: CleanupFailure[] = [];
+  // the project's shell (4.1.3, #27): a cleanup command is a declared command too
+  const shell = ctx.shell;
+  for (const c of ctx.cleanupCommands) {
+    const command = commandLine(c.command);
+    try {
+      const out = await runner({ command, cwd: dir, timeoutMs: Math.min(ctx.commandTimeoutMs, CLEANUP_TIMEOUT_MS), ...(shell === undefined ? {} : { shell }) });
+      if (out.timedOut || out.error !== null || out.exitCode !== 0) failures.push({ id: c.id, command, why: out.timedOut ? 'timeout' : out.error ?? out.signal ?? `exit ${out.exitCode}`, tail: tail(out.output) });
+    } catch (e) {
+      failures.push({ id: c.id, command, why: e instanceof Error ? e.message : String(e), tail: '' });
+    }
+  }
+  return failures;
 }
 
 // ---------------------------------------------------------------- run locks
@@ -215,7 +418,7 @@ export interface RecordedRun {
   readonly passed: boolean;
   readonly summary: string;
   readonly fields: Readonly<Record<string, string>>;
-  /** The last lines of a failing command (not kept in the memory; the summary leaf has them). */
+  /** The last lines of a failing command, or of any rerun's (4.1.3, #37); the summary leaf has them, and a rerun's 'run' event names them. */
   readonly tail: string;
   /** Reused from an earlier declared run (§6.5), possibly re-executed only as setup. */
   readonly reused: boolean;
@@ -228,7 +431,8 @@ export function newRunId(prefix = 'run'): string {
   return `${prefix}-${Date.now().toString(36)}${randomBytes(5).toString('hex')}`;
 }
 
-function summaryOf(fields: Readonly<Record<string, string>>): string {
+/** A recorded run's one-line summary: status, exit, duration, tests (as `mp seat <id> rerun` prints it). */
+export function summaryOf(fields: Readonly<Record<string, string>>): string {
   const tests = Number(fields['tests'] ?? '0');
   const failed = Number(fields['testsFailed'] ?? '0');
   return `${fields['status']}; exit ${fields['exit']}; ${fields['durationMs']} ms${tests > 0 ? `; ${tests - failed} of ${tests} tests passed` : ''}`;
@@ -248,8 +452,8 @@ function fieldsOf(o: CommandOutcome, extra: Record<string, string>): Record<stri
   return fields;
 }
 
-/** The run summary leaf (§5.3): commands, environment identity, exit codes, per-test results, output hash, last lines of a failing command. */
-function summaryLeaf(o: { readonly run: string; readonly mission: string; readonly commit: string; readonly purpose: string; readonly runClass: RunClass; readonly environment: { readonly identity: string; readonly parts: unknown }; readonly runs: readonly RecordedRun[] }): string {
+/** The run summary leaf (§5.3): commands, environment identity, exit codes, per-test results, output hash, last lines of a failing command; a failed cleanup command, as a note. */
+function summaryLeaf(o: { readonly run: string; readonly mission: string; readonly commit: string; readonly purpose: string; readonly runClass: RunClass; readonly environment: { readonly identity: string; readonly parts: unknown }; readonly runs: readonly RecordedRun[]; readonly cleanup: readonly CleanupFailure[] }): string {
   const lines = [
     `# Run ${o.run}`,
     '',
@@ -264,13 +468,26 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
   for (const r of o.runs) {
     lines.push(`## ${r.command.id}: \`${r.command.command}\` (in ${runCwd(r.fields)})`, '');
     if (r.setupFailure !== undefined) lines.push(`- Note: ${r.setupFailure}`);
-    lines.push(`- Evidence: ${r.evidence}${r.reused ? ' (reused; execution only as setup)' : ''}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (the output itself is not kept)`);
+    lines.push(`- Evidence: ${r.evidence}${r.reused ? ' (reused; execution only as setup)' : ''}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (${r.tail !== '' ? 'its last lines are below; ' : ''}the whole output is not kept)`);
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
-    if ((!r.passed || r.setupFailure !== undefined) && r.tail !== '') lines.push('', 'Last lines of the output:', '', '```', r.tail, '```');
+    // a failing command's last lines, a failing setup's, and a rerun's whether it passed or failed (4.1.3)
+    if (r.tail !== '') lines.push('', 'Last lines of the output:', '', fence(r.tail), r.tail, fence(r.tail));
+    lines.push('');
+  }
+  if (o.cleanup.length > 0) lines.push('## Cleanup', '');
+  for (const f of o.cleanup) {
+    lines.push(`- Note: cleanup command ${f.id} (\`${f.command}\`) failed (${f.why}); the results above are unchanged.`);
+    if (f.tail !== '') lines.push('', 'Last lines of the output:', '', fence(f.tail), f.tail, fence(f.tail));
     lines.push('');
   }
   return lines.join('\n');
+}
+
+/** A Markdown fence longer than any run of backticks in `text` (a command may print "```"). */
+function fence(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+  return '`'.repeat(Math.max(3, longest + 1));
 }
 
 export function runLeaf(mission: string, run: string): string {
@@ -308,8 +525,18 @@ export async function runOnCommit(
     readonly op?: string;
     /** How much of a failing command's output is kept (default LOCAL_TAIL; a full run: FULL_RUN_TAIL). */
     readonly tail?: TailLimit;
+    /** Keep the tail of a passing command too (4.1.3, #37: reruns). */
+    readonly keepPassingTail?: boolean;
     /** A run id prefix for an execution (default "run", "rerun" for a rerun). */
     readonly runPrefix?: string;
+    /** The run id of the execution, chosen before (a detached run's worker recorded it as running); default a new one. */
+    readonly run?: string;
+    /** Runs the commands instead of the context's runner (a detached run's worker: groupShellRunner). */
+    readonly runner?: CommandRunner;
+    /** Runs the cleanup commands (default: `runner`, else the context's runner). */
+    readonly cleanupRunner?: CommandRunner;
+    /** Retry the recording write this many times when the memory is busy or the write ran over its budget (a detached run's worker: its result must not be lost to a moment of load). */
+    readonly recordRetries?: number;
   },
 ): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
   const env = ctx.environment();
@@ -344,12 +571,16 @@ async function executeRuns(
   classOf: (c: DeclaredCommand) => RunClass,
   reusable: readonly (RecordedRun | null)[],
 ): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
-  const run = newRunId(req.runPrefix ?? (req.declaration.rerun === true ? 'rerun' : 'run'));
+  const run = req.run ?? newRunId(req.runPrefix ?? (req.declaration.rerun === true ? 'rerun' : 'run'));
+  const runner = req.runner ?? ctx.runner;
   const dir = runCheckoutDir(ctx.memory.paths, run);
   const executed: RecordedRun[] = [];
   const records: EvidenceRecord[] = [];
   const staged = new Map<string, RecordedRun>();
   const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
+  let cleanup: readonly CleanupFailure[] = [];
+  const timeoutMs = commandTimeoutFor(ctx, req.declaration);
+  const shell = commandShellFor(ctx, req.declaration);
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
   await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
   try {
@@ -357,7 +588,7 @@ async function executeRuns(
       const rel = normalizeCwd(c.cwd);
       const cwd = rel === '.' ? dir : join(dir, ...rel.split('/'));
       mkdirSync(cwd, { recursive: true });
-      const out = ctx.runner({ command: c.command, cwd, timeoutMs: ctx.commandTimeoutMs });
+      const out = await runner({ command: c.command, cwd, timeoutMs, ...(shell === undefined ? {} : { shell }) });
       const runClass = classOf(c);
       const key = canonicalJson({ command: c.command, cwd: rel });
       const prior = reusable[i] ?? (runClass === 'declared' ? staged.get(key) : undefined);
@@ -374,20 +605,31 @@ async function executeRuns(
       validateRecord(rec);
       records.push(rec);
       const passed = fields['status'] === 'completed' && fields['exit'] === '0';
-      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false };
+      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed && req.keepPassingTail !== true ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false };
       executed.push(recorded);
       if (runClass === 'declared') staged.set(key, recorded);
     }
   } finally {
+    // the project's cleanup, also after a failing or throwing command: what its commands made
+    // outside the checkout outlives the folder (runCleanup never throws)
+    cleanup = await runCleanup(ctx, dir, req.cleanupRunner ?? runner);
     removeCheckout(ctx.gitCtx, dir);
   }
-  const text = summaryLeaf({ run, mission: req.mission, commit: req.commit, purpose: req.purpose, runClass: records[0]?.runClass ?? 'other', environment: env, runs: executed });
+  const text = summaryLeaf({ run, mission: req.mission, commit: req.commit, purpose: req.purpose, runClass: records[0]?.runClass ?? 'other', environment: env, runs: executed, cleanup });
   const leaf = runLeaf(req.mission, run);
-  const result = ctx.memory.write({ op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
+  const record = () => ctx.memory.write({ op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
     if (records.length > 0) appendRecords(tx, records as BaseRecord[]);
     tx.leaves.writeDocument(leaf, text);
     return req.also?.(tx, executed, run, records);
   });
-  return { run, runs: executed, reused: false, leaf, result };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return { run, runs: executed, reused: false, leaf, result: record() };
+    } catch (e) {
+      // the op id makes a retry safe: a write that did commit returns its recorded answer
+      if (attempt >= (req.recordRetries ?? 0) || !(e instanceof LedgerError) || (e.code !== 'BUSY' && e.code !== 'OVER_BUDGET')) throw e;
+      await new Promise((r) => setTimeout(r, 1_000 + Math.floor(Math.random() * 2_000)));
+    }
+  }
 }
 

@@ -6,7 +6,7 @@ You implement one task: the goal on your card, inside the card's write paths, in
 Your card (`mp seat <id> card`); *required* marks a required input.
 - The goal; the acceptance standards *(required)*; the requirement items they rest on *(required)*.
 - The interfaces to implement and to call, with their definitions *(required)*.
-- The project constraints that apply to the task *(required)*; the relevant decisions, verbatim; a few lines of duties.
+- The project constraints that apply to the task *(required)*: an instruction is labelled "Instruction (follow it; not a proof input)": follow it; the relevant decisions, verbatim; a few lines of duties.
 - Your worktree `.mission-pipeline/worktrees/<dispatch>/` and the write paths in it.
 - Files to read first; the interpreter (the runtime to build and run with); the verification commands `mp` will run (the project's local tests for this task); the exclusive resources leased to you, if any.
 - On a reopened attempt: the issue your task's work must fix, and who reopened it (an integration task's review, or a repair). Your accepted product stays recorded until this attempt is accepted.
@@ -29,6 +29,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 ## Your commands
 - `mp seat <id> card`: your card.
 - `mp seat <id> read <material> [--page <n>]`: one page of a material; it reports a missing or edited material instead of serving it.
+- On a blind-experiment card also: `mp seat <id> rerun <command> [--detach]` and `mp seat <id> wait <run>`.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 - Run the hand-back from the project root, not from inside your worktree: `mp` removes the worktree once the hand-back is recorded, and a shell that sits in it fails its next command.
 
@@ -45,7 +46,9 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 ## On a blind-experiment card
 You carry out one evidence run exactly as the card's steps say and record what happened. You do not know, and must not guess, what anyone expects the result to be.
 - You receive: the steps *(required)*, the data, the quantities to record *(required; empty only when there are assertions)*, the assertions, the evidence id, the declared commands, the interpreter, materials.
-- Run each command the steps declare with `mp seat <id> rerun <command>`, so that `mp` records it as a run of this experiment; cite it as `run:<run id>`. Write files only under the card's write paths, if any: everything you write is scratch, never a product.
-- Hand back: one entry per step (done: yes / no / partly, with a note); one per quantity (the value, or "not obtained: <why>", with its source); one per assertion (holds / does not hold / not checked, with its basis); your observations. Every value and answer cites the record it rests on: `run:<run id>` or `file:<path>[:<line>]`.
+- Run each command the steps declare with `mp seat <id> rerun <command>`, so that `mp` records it as a run of this experiment; cite it as `run:<run id>`. Each rerun prints its result and the last lines of its output (up to 400 lines, passing or failing), kept in the run's record. Write files only under the card's write paths, if any: everything you write is scratch, never a product.
+- A run that may outlast your harness's limit on one command: `mp seat <id> rerun <command> --detach` starts it in the background and prints its run id at once. Then `mp seat <id> wait <run>` waits up to 50 minutes (`--seconds <n>` for another limit) and prints the result, or says the run is still running. Wait in slices: when a wait ends and the run is still running, start the next wait at once. Never end your turn to ask whether to keep waiting.
+- A card with a section "Runs already made for this step": an earlier dispatch of this step had `mp` run these. Record from their results and do not run them again; wait for one still running with `mp seat <id> wait <run>`; run a stopped or lost one again only if you need its result.
+- Hand back: one entry per step (done: yes / no / partly, with a note); one per quantity (the value, or "not obtained: <why>", with its source); one per assertion (holds / does not hold / not checked, with its basis); your observations. Every value and answer cites the record it rests on: `run:<run id>`, `file:<path>[:<line>]`, or a `data:` pointer for a file outside the repository, in the form your card gives (`mp` checks its sha256 and size at hand-back).
 - Never change the steps, skip one silently, or "fix" what you measure; never interpret the result. If a step cannot be done, say so in its note and go on with the next if you can.
-- Upstream: `mp`, on behalf of the exploration that asked for the evidence. Downstream: the exploration's author and attacker, who read your record.
+- Upstream: `mp`, on behalf of the exploration that asked for the evidence. Downstream: the exploration's author, attacker and interpreter, who read your record and your report.

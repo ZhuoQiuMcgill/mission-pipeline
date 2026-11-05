@@ -87,10 +87,8 @@ describe('research exploration', () => {
     assert.ok(ic2.current !== null);
     await hand(w, 'researcher-interpreter', interpretation(ic2, 'not-standing', [{ finding: ic2.openFindings[0]?.id as string, action: 'revise', note: 'C1 marked not standing' }]));
     await w.advance();
+    // 4.1.3 (E-3): the re-check round converges (no closing attacker)
     await hand(w, 'crititor', attack([], recheckAll(cardOf<CrititorCard>(w, 'crititor'), 'yes')));
-    await w.advance();
-    assert.equal(cardOf<CrititorCard>(w, 'crititor').fresh, true);
-    await hand(w, 'crititor', attack());
     const r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged');
     const h = (await explorationHandoffs(w.ledger, M))[0]?.handoff;

@@ -10,7 +10,20 @@
 //                           (`mp pm full-run`); never by a delivery or a hand-back; optional, with no default
 //   closingChecks           the 4.1.1 key, read as a deprecated alias of `fullSuite` when that is
 //                           absent (fullSuiteOf, src/common/fullSuite.ts); `mp config` says which
-//   commandTimeoutMs        per declared command
+//   cleanupCommands         run in each run's checkout root after the run's commands, before `mp`
+//                           removes the checkout: they release what the project's commands made
+//                           outside it (containers' networks, images); best effort, never evidence;
+//                           default none
+//   commandTimeoutMs        per declared command (at most 24 hours)
+//   experimentCommandTimeoutMs
+//                           per declared command an exploration's experiment executor reruns
+//                           (`mp seat <id> rerun` on a constructor-experiment card), so that a long
+//                           experiment can run to its end while every other command keeps the
+//                           shorter limit; at most 7 days; absent: commandTimeoutMs
+//   shell                   (4.1.3) the shell, an absolute path, of every declared command (local
+//                           tests, reruns, renewals, full runs, cleanup); part of the environment
+//                           identity when set; absent: the platform's shell (/bin/sh, cmd.exe)
+//   experimentShell         the shell of an exploration's experiment reruns; absent: `shell`
 //   environment             { versionCommands }: what the environment identity covers (§6.5)
 //   exclusiveResources      resources tasks may lease (a database, a device); informational here
 //   fillers                 per seat, a filler hint "<harness>/<model>" shown by `mp pm next`
@@ -37,6 +50,9 @@ const SuiteCommandSchema = z.object({ id: CommandId, command: CommandLine, cwd: 
 const IDENT_TEXT = /^([^<>\r\n]*[^<>\s][^<>\r\n]*?)\s*<([^<>\s]+)>$/;
 const IdentText = z.string().max(400).regex(IDENT_TEXT, 'a commit identity "Name <email>"');
 
+/** The longest `experimentCommandTimeoutMs` a project may declare: 7 days. */
+export const MAX_EXPERIMENT_COMMAND_TIMEOUT_MS = 7 * 24 * 3_600_000;
+
 /** The seats a filler hint can name (role pages under roles/). */
 export const SEATS: readonly string[] = ['pm', 'calibrator', 'architect', 'secretary', 'constructor', 'reviewer', 'researcher', 'crititor', 'stabilizer', 'auditor'];
 
@@ -48,13 +64,56 @@ export const ConfigSchema = z
     // optional with no default, so that the alias works: fullSuiteOf(config) reads fullSuite, else closingChecks
     fullSuite: z.array(SuiteCommandSchema).max(100).optional(),
     closingChecks: z.array(Command).max(100).optional(),
+    cleanupCommands: z.array(Command).max(100).default([]),
     commandTimeoutMs: z.number().int().min(1_000).max(24 * 3_600_000).default(30 * 60_000),
+    // optional with no default: absent, it is commandTimeoutMs (experimentCommandTimeoutOf)
+    experimentCommandTimeoutMs: z.number().int().min(1_000).max(MAX_EXPERIMENT_COMMAND_TIMEOUT_MS).optional(),
+    // optional: the shell (an absolute path) of an exploration's experiment reruns; absent, `shell`
+    experimentShell: z.string().min(1).max(400).regex(/^\//, 'an absolute path').optional(),
+    // optional (4.1.3, #27): the shell (an absolute path) of every declared command; absent, the platform's shell
+    shell: z.string().min(1).max(400).regex(/^(\/|[A-Za-z]:[\\/])/, 'an absolute path').optional(),
     environment: z.object({ versionCommands: z.array(z.string().min(1).max(1000)).max(50).default([]) }).strict().default({ versionCommands: [] }),
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
     fillers: z.record(z.string(), z.string().min(1).max(400).nullable()).default({}),
     commit: z.object({ author: IdentText.optional(), committer: IdentText.optional() }).strict().optional(),
+    // DEPRECATED in 4.1.3 (E-2: a project setting is not a waiver; `mp pm waive` records the user's words): missions (or
+    // single detailed plan versions) whose plans take effect after the mechanical checks and the order ruling, without
+    // the feasibility review and Calibrator ②, labelled "waived by config; no words on record". Still read so missions in
+    // the middle of their re-plans go on; a withdrawal on the record (`mp pm waive --withdraw`) overrides it. Default none
+    planReviewsWaived: z.array(z.string().min(1).max(200)).max(200).optional(),
+    // missions whose tasks start on their dependencies' verified hand-backs, while those are still in review (a project
+    // setting: it removes no check; the dependent's acceptance waits for the dependency's; never an integration task)
+    startOnHandback: z.array(z.string().min(1).max(200)).max(200).optional(),
   })
   .strict();
+
+/**
+ * The time limit of each declared command an exploration's experiment executor reruns
+ * (`mp seat <id> rerun` on a constructor-experiment card): `experimentCommandTimeoutMs`, else
+ * `commandTimeoutMs`.
+ */
+export function experimentCommandTimeoutOf(c: Pick<ProjectConfig, 'commandTimeoutMs' | 'experimentCommandTimeoutMs'>): number {
+  return c.experimentCommandTimeoutMs ?? c.commandTimeoutMs;
+}
+
+/** The platform's shell, as `mp config` names it: what Node's `shell: true` runs. */
+export function platformShell(): string {
+  return process.platform === 'win32' ? (process.env['ComSpec'] ?? 'cmd.exe') : '/bin/sh';
+}
+
+/**
+ * The shell in effect per run class (4.1.3, #27; process/runs.ts commandShellFor): every declared
+ * command takes `shell`, else the platform's; an experiment executor's reruns take `experimentShell` first.
+ */
+export function shellsInEffect(c: Pick<ProjectConfig, 'shell' | 'experimentShell'>): { readonly declared: string; readonly declaredFrom: 'shell' | 'platform'; readonly experimentReruns: string; readonly experimentFrom: 'experimentShell' | 'shell' | 'platform' } {
+  const declared = c.shell ?? platformShell();
+  return {
+    declared,
+    declaredFrom: c.shell !== undefined ? 'shell' : 'platform',
+    experimentReruns: c.experimentShell ?? declared,
+    experimentFrom: c.experimentShell !== undefined ? 'experimentShell' : c.shell !== undefined ? 'shell' : 'platform',
+  };
+}
 
 /** The default identity of the commits `mp` writes (process/context.ts DEFAULT_IDENT). */
 export const DEFAULT_COMMIT_IDENT = 'Mission Pipeline <mp@localhost>';
@@ -111,6 +170,7 @@ export function defaultConfig(o: { readonly targetBranch: string; readonly versi
     targetBranch: o.targetBranch,
     verificationCommands: [],
     fullSuite: [],
+    cleanupCommands: [],
     commandTimeoutMs: 30 * 60_000,
     environment: { versionCommands: [...o.versionCommands] },
     exclusiveResources: [],

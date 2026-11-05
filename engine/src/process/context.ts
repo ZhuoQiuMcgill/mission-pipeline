@@ -15,7 +15,7 @@ import { collectCandidate, ensureWorkspace, releaseWorkspace, removeWorkspace, t
 import type { FlowPorts, FlowSchedulerPort } from '../flow/ports.ts';
 import { gitActions } from './actions.ts';
 import { memoryFlowPorts } from './ports.ts';
-import { shellRunner, type CommandRunner } from './runs.ts';
+import { shellRunner, type CleanupCommand, type CommandRunner } from './runs.ts';
 
 /** A Constructor dispatch's worktree (§3.1, §5.4): A4's workspace functions, or a test's. */
 export interface WorkspaceOps {
@@ -27,7 +27,14 @@ export interface WorkspaceOps {
 }
 
 /** The program actions the flows need beyond the memory (snapshot, product, rebind, verify, findSymbol, history): actions.ts gitActions. */
-export type GitActions = Pick<FlowSchedulerPort, 'startHolds' | 'composition' | 'snapshot' | 'product' | 'rebind' | 'verify' | 'findSymbol' | 'history'>;
+export type GitActions = Pick<FlowSchedulerPort, 'startHolds' | 'composition' | 'snapshot' | 'product' | 'rebind' | 'verify' | 'findSymbol' | 'history'> & {
+  /**
+   * The target branch's head, read at once (null: it cannot be read): an exploration's snapshot
+   * as it would be taken now (it lays no products over the base), read before a dispatch's write
+   * (explorationSnapshot.ts). Actions without it (a test's) never take one again at a dispatch.
+   */
+  readonly targetHead?: () => string | null;
+};
 
 export interface ProcessOptions {
   /** How git runs (default: plain `git` from PATH). */
@@ -51,12 +58,27 @@ export interface ProcessOptions {
   readonly targetBranch?: string;
   /** Per declared command (default 30 minutes). */
   readonly commandTimeoutMs?: number;
+  /**
+   * Per declared command an exploration's experiment executor reruns (`mp seat <id> rerun` on a
+   * constructor-experiment card; config.json `experimentCommandTimeoutMs`). Default: commandTimeoutMs.
+   */
+  readonly experimentCommandTimeoutMs?: number;
+  /** The shell of the commands an experiment executor reruns (config.json `experimentShell`); default: the project's shell. */
+  readonly experimentShell?: string;
+  /** The shell of every declared command (config.json `shell`, 4.1.3); default: the platform's shell. */
+  readonly shell?: string;
   /** The project's full test suite (config.json `fullSuite`, or its alias `closingChecks`: fullSuiteOf); default none. */
   readonly fullSuite?: readonly SuiteCommand[];
   /** Tests without a repository: the files of a snapshot commit that hand-back pointers are checked against (null: not checked). Default: git's (seat.ts commitFiles). */
   readonly snapshotFiles?: (commit: string) => SnapshotFiles | null;
   /** The project's local test commands (config.json `verificationCommands`), which the flows read with the full suite (4.1.2). Default: none. */
   readonly localCommands?: readonly SuiteCommand[];
+  /** Run in each run's checkout after its commands, before it is removed (config.json `cleanupCommands`). Default: none. */
+  readonly cleanupCommands?: readonly CleanupCommand[];
+  /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config.json `planReviewsWaived`). Default: none. */
+  readonly planReviewsWaived?: readonly string[];
+  /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). Default: none. */
+  readonly startOnHandback?: readonly string[];
 }
 
 export interface ProcessContext {
@@ -67,6 +89,12 @@ export interface ProcessContext {
   readonly runner: CommandRunner;
   readonly targetBranch: string;
   readonly commandTimeoutMs: number;
+  /** The time limit of an experiment executor's reruns (runs.ts commandTimeoutFor); commandTimeoutMs when the project sets none. */
+  readonly experimentCommandTimeoutMs: number;
+  /** The shell of an experiment executor's reruns (runs.ts commandShellFor); undefined: `shell`. */
+  readonly experimentShell?: string;
+  /** The shell of every declared command (runs.ts commandShellFor, config.json `shell`); undefined: the platform's shell. */
+  readonly shell?: string;
   /** The project's full test suite (4.1.2: integration Reviewer full-run, mp pm full-run); empty when none is configured. */
   readonly fullSuite: readonly SuiteCommand[];
   /** The PM's filler for this process's `mp pm` writes (information only). */
@@ -82,6 +110,12 @@ export interface ProcessContext {
   readonly gitCtx: GitContext;
   /** The project's local test commands (config.json `verificationCommands`); the flows read them with `fullSuite` (ports(): FlowPorts.project). */
   readonly localCommands: readonly SuiteCommand[];
+  /** The project's cleanup of a run's checkout (config.json `cleanupCommands`; runs.ts executeRuns); empty when none is configured. */
+  readonly cleanupCommands: readonly CleanupCommand[];
+  /** Missions whose detailed plans skip the feasibility review and Calibrator ② (config.json `planReviewsWaived`). */
+  readonly planReviewsWaived: readonly string[];
+  /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). */
+  readonly startOnHandback: readonly string[];
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -118,12 +152,18 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     runner: o.runner ?? shellRunner,
     targetBranch: o.targetBranch ?? 'main',
     commandTimeoutMs: o.commandTimeoutMs ?? 30 * 60_000,
+    experimentCommandTimeoutMs: o.experimentCommandTimeoutMs ?? o.commandTimeoutMs ?? 30 * 60_000,
+    ...(o.experimentShell === undefined ? {} : { experimentShell: o.experimentShell }),
+    ...(o.shell === undefined ? {} : { shell: o.shell }),
     fullSuite: o.fullSuite ?? [],
     filler: o.filler ?? null,
     snapshotFiles: o.snapshotFiles ?? null,
     handover: null,
     gitCtx: { memory, git },
     localCommands: o.localCommands ?? [],
+    planReviewsWaived: o.planReviewsWaived ?? [],
+    startOnHandback: o.startOnHandback ?? [],
+    cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);
     },

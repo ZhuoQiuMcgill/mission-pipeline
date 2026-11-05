@@ -403,8 +403,6 @@ describe('P3 item 6: repairs (D-9, D-10)', () => {
     await hand(w, 'researcher-author', submit('design v1'));
     await w.advance();
     await hand(w, 'crititor', attack());
-    await w.advance();
-    await hand(w, 'crititor', attack());
     let r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged');
     const rep = await recordRepair(w.ports, { mission: 'M1' as MissionId, words: 'W-1', kind: 'new-question', text: 'survive a restart of the scheduler', about: { kind: 'exploration', id: w.x } });
@@ -415,8 +413,6 @@ describe('P3 item 6: repairs (D-9, D-10)', () => {
     await hand(w, 'researcher-author', submit('design v2: restarts recover from the memory'));
     await w.advance();
     assert.equal(cardOf<{ repairs?: Array<{ id: string }> }>(w, 'crititor').repairs?.[0]?.id, rep.id, 'the attacker sees the added question too');
-    await hand(w, 'crititor', attack());
-    await w.advance();
     await hand(w, 'crititor', attack());
     r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged', 'exit: the reopened round converges again (never stuck)');
@@ -561,6 +557,24 @@ describe('P3 review S3: the integration rule and amendments', () => {
     assert.equal((await planInEffect(flowCtx(ports, M)))?.eff.dplan, 'dplan.m1.2.1');
     assert.ok(!tasksOf(ports).includes('con.m1.impl3.2'), 'the carried task keeps its card: no restart');
     await assertSettledAndDone(ports);
+  });
+});
+
+describe('Repairs and reused interfaces: an amendment looks up only the reused interfaces its added tasks use', () => {
+  it('a reused interface whose file accepted work renamed fails the plan\'s own check, not an amendment whose added tasks do not use it', async () => {
+    const base = detailedPlan(M);
+    const stale = { name: 'Conventions', file: 'docs/conventions_v01.md', location: 'section 2', provenance: { planElements: ['e1'] } };
+    const hasSymbol = async (file: string): Promise<boolean> => file !== 'docs/conventions_v01.md';
+    const tasks = base.tasks.map((t) => (t.id === 'impl' ? { ...t, calls: ['Conventions'] } : t));
+    const plan = { ...base, reusedInterfaces: [stale], tasks };
+    const own = await mechanicalCheck({ pmPlan: pmPlan(M), plan, unsettled: new Set(), hasSymbol });
+    assert.deepEqual(own.failures, ['interfaces: reused interface Conventions is not found in docs/conventions_v01.md of the snapshot']);
+    const fix = { ...(tasks.find((t) => t.id === 'impl') as DetailedTask), id: 'fix', goal: 'Fix the quoting', writeScope: ['src/parser/fix/**'], dependsOn: ['iface'], calls: [] };
+    const amended = await mechanicalCheck({ pmPlan: pmPlan(M), plan: { ...plan, tasks: [...tasks, fix] }, unsettled: new Set(), hasSymbol, amendment: { added: new Set(['fix']) } });
+    assert.equal(amended.ok, true, JSON.stringify(amended.failures));
+    const uses = { ...fix, calls: ['Conventions'] };
+    const usedByAdded = await mechanicalCheck({ pmPlan: pmPlan(M), plan: { ...plan, tasks: [...tasks, uses] }, unsettled: new Set(), hasSymbol, amendment: { added: new Set(['fix']) } });
+    assert.deepEqual(usedByAdded.failures, ['interfaces: reused interface Conventions is not found in docs/conventions_v01.md of the snapshot']);
   });
 });
 

@@ -80,7 +80,7 @@ async function settledWhileCal2Waits(p: ProcessProject, m: string, type: 'struct
       : kind === 'crititor'
         ? { findings: [], rechecks: [], settled: [], reply: 'assessment' }
         : { findings: card.findings.map((f: { id: string }) => ({ finding: f.id, verdict: 'in-scope', severity: 'general', reason: 'judged', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } };
-  for (const kind of ['researcher-author', 'crititor', 'stabilizer', 'crititor', 'stabilizer']) {
+  for (const kind of ['researcher-author', 'crititor', 'stabilizer']) {
     const task = (await explorationState(p.ctx.ports(), m as MissionId, X)).tasks;
     const queued = [...task.values()].map((q) => q.task).filter((t) => p.ctx.memory.read((db) => db.stmt("SELECT 1 FROM tasks WHERE task = ? AND state = 'queued'").get(t) !== undefined));
     assert.equal(queued.length, 1, `one queued exploration step for ${kind}: ${JSON.stringify(queued)}`);

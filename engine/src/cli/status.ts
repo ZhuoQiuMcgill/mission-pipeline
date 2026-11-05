@@ -7,6 +7,7 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
+import { attemptRecorded, olderSnapshotEvidence, type AttemptsAmendedBody, type XState } from '../flow/exploration/machine.ts';
 import { PLAN_LINE } from '../flow/plandoc.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
@@ -15,6 +16,7 @@ import { age, clip, filler, section, short, wiText } from './render.ts';
 import { buildGraph, resolveNodes, show, type Graph, type GNode } from './tree.ts';
 import { entryLines, resolveSubtasks, type Layer1Entry, type Resolved } from './layers.ts';
 import { describeScope } from './stopDetect.ts';
+import { dispatchDataLines, explorationDataLines, showEvidence } from './evidence.ts';
 
 /** The cursor of "since the maintainer last asked" (§3.2 item 7). */
 export const ASKED_CURSOR = 'asked';
@@ -188,7 +190,7 @@ export function markAsked(ctx: ProcessContext, head: number): boolean {
 
 // ---------------------------------------------------------------- mp read show <kind> <id>
 
-export const SHOW_KINDS: readonly string[] = ['mission', 'words', 'requirement', 'plan', 'object', 'task', 'dispatch', 'judgment', 'run', 'commit', 'delivery', 'landing', 'escalation', 'decision', 'exploration', 'stop', 'notice'];
+export const SHOW_KINDS: readonly string[] = ['mission', 'words', 'requirement', 'plan', 'object', 'task', 'dispatch', 'judgment', 'run', 'evidence', 'commit', 'delivery', 'landing', 'escalation', 'decision', 'exploration', 'stop', 'notice'];
 
 export interface ShowResult {
   readonly text: string;
@@ -221,9 +223,10 @@ function nodeBlock(ctx: ProcessContext, g: Graph, n: GNode): { lines: string[]; 
   return { lines, json: { node: s, ...l } };
 }
 
-/** Layers 1-2 for one item. */
-export async function showItem(p: Project, kind: string, id: string): Promise<ShowResult | null> {
+/** Layers 1-2 for one item. `checkData` (kinds evidence and dispatch): hash its data outside the commit again, read-only. */
+export async function showItem(p: Project, kind: string, id: string, o: { readonly checkData?: boolean } = {}): Promise<ShowResult | null> {
   const ctx = p.ctx;
+  if (kind === 'evidence') return showEvidence(p, id, o);
   if (kind === 'notice') {
     const n = ctx.memory.read((db) => listNotices(db, ctx.memory.data, { includeAcknowledged: true })).find((x) => x.id === id);
     if (n === undefined) return null;
@@ -289,8 +292,20 @@ export async function showItem(p: Project, kind: string, id: string): Promise<Sh
     });
     if (reads.length > 0) extra.push(`  material pages read: ${reads.join(', ')}`);
     extraJson['reads'] = reads;
+    // 4.1.3: the data outside the commit its hand-back cites, as checked at hand-back (--check-data: again, read-only)
+    const dd = await dispatchDataLines(p, d, o);
+    extra.push(...dd.lines);
+    if (dd.data.length > 0) extraJson['data'] = dd.data;
+    if (dd.checked !== null) extraJson['checked'] = dd.checked;
   }
   return { text: [...blocks.flatMap((b) => b.lines), ...extra].join('\n'), json: { items: blocks.map((b) => b.json), ...extraJson } };
+}
+
+/** One amendment of an exploration's method on the user's words (`mp pm amend-attempts`), as the reads show it. */
+export function amendmentLine(b: AttemptsAmendedBody, s?: XState): string {
+  const replaced = b.replaced.map((a) => `${a}${b.replaces[a] !== undefined ? ` (superseding ${b.replaces[a]})` : ''}${s !== undefined && !attemptRecorded(s, a) ? ' [its new record not in yet]' : ''}`);
+  const added = b.added.map((a) => `${a}${s !== undefined && !attemptRecorded(s, a) ? ' [its record not in yet]' : ''}`);
+  return `attempts amended by ${b.words} (amendment ${b.n}): added ${added.length > 0 ? added.join(', ') : 'none'}, replaced ${replaced.length > 0 ? replaced.join(', ') : 'none'}; method ${b.version} in force (the user's judgment ${b.judgment}, no review)${b.reason !== null ? `; reason: ${clip(b.reason, 160)}` : ''}${b.answers !== null ? `; answers repair ${b.answers}` : ''}`;
 }
 
 /** `mp read show exploration <id>` (decision 5): findings, dispositions, Stabilizer verdicts per round. */
@@ -309,22 +324,54 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
     if (def !== null) out.push(`  question: ${clip(String((def as unknown as Record<string, unknown>)['question'] ?? ''), 200)}`, `  the user's goal: ${clip(String((def as unknown as Record<string, unknown>)['goal'] ?? ''), 200)}`);
     out.push(`  rounds: ${s.rounds} attacked; phase ${s.phase}; version: ${s.version?.id ?? 'none yet'} (${s.versions.length} version(s))`);
     if (s.drift !== null) out.push(`  awaiting a ruling (WI-33): round ${s.drift.round} drifting — ${clip(s.drift.reason, 160)}`);
+    // registered attempts the PM had run again (mp pm rerun-attempt): each new record supersedes the earlier one
+    const reruns = [...s.attemptReruns].filter(([, r]) => r.amendment === undefined && r.method === undefined);
+    // 4.1.3 (#31): a method a repair sent back to its author; attempts its new version changed run under their new cards
+    if (s.reentry !== null) out.push(`  method back with its author (repair ${s.reentry.repair}): runs in flight finish; the records of attempts its new version leaves unchanged keep counting`);
+    const changed = [...s.attemptReruns].filter(([, r]) => r.method !== undefined);
+    if (changed.length > 0) out.push(`  attempts changed by a later method version: ${changed.map(([a, r]) => `${a} (in ${r.method}${r.replaces !== null ? `, superseding ${r.replaces}` : ''}${attemptRecorded(s, a) ? '' : '; its new record not in yet'})`).join(', ')}`);
+    if (reruns.length > 0) out.push(`  attempts run again: ${reruns.map(([a, r]) => `${a} (rerun ${r.n}${r.replaces !== null ? `, superseding ${r.replaces}` : ''}${attemptRecorded(s, a) ? '' : '; its new record not in yet'})`).join(', ')}`);
+    // the user's amendments of the method in force (mp pm amend-attempts): no round, no review
+    for (const b of s.amendments) out.push(`  ${amendmentLine(b, s)}`);
     // the current settle (one per opening; a rerun after an environment change reopens it), then the history
     const lastSettle = s.settles.at(-1);
     if (s.settled !== null) out.push(`  settled: ${s.settled.body.outcome} (${s.settled.body.stop})${s.settled.body.artifact !== null ? ` on ${s.settled.body.artifact}` : ''}${s.settles.length > 1 ? ` (settle ${s.settled.n} of ${s.settles.length})` : ''}`);
     else if (lastSettle !== undefined) out.push(`  not settled now: reopened after an environment change; settled earlier: ${lastSettle.body.outcome} (${lastSettle.body.stop})${lastSettle.body.artifact !== null ? ` on ${lastSettle.body.artifact}` : ''}`);
+    // a snapshot taken again: what the seats read now, and the evidence recorded under an older one (it still counts)
+    const older = [...s.evidence.keys()].filter((id) => olderSnapshotEvidence(s, id));
+    const last = s.resnapshots.at(-1);
+    if (last !== undefined) out.push(`  snapshot: ${short(s.defined.snapshot.commit)}, taken again ${s.resnapshots.length} time(s), last ${last.by === 'pm' ? "on the PM's word" : 'before its first step'}${older.length > 0 ? `; evidence from an older snapshot, still counting (${OLDER_ENVIRONMENT}): ${older.join(', ')}` : ''}`);
     const rounds = new Map<number, typeof s.findings extends Map<string, infer F> ? F[] : never>();
     for (const f of s.findings.values()) rounds.set(f.round, [...(rounds.get(f.round) ?? []), f]);
+    // 4.1.3: the data outside the commit its evidence cites, labelled with the check made at hand-back
+    const dataOut = explorationDataLines(p, s);
     for (const [r, fs] of [...rounds.entries()].sort((a, b) => a[0] - b[0])) {
       const st = s.stabilizations.find((z) => z.round === r);
-      out.push(`  round ${r}${st !== undefined ? ` — Stabilizer (${st.task}): ${st.drift.verdict}, version ${st.verdict}${st.drift.reason ? ` (${clip(st.drift.reason, 120)})` : ''}` : ' — not stabilized yet'}:`);
+      out.push(`  round ${r}${st !== undefined ? ` — Stabilizer (${st.task}): ${st.drift.verdict}, version ${st.verdict}${st.revision !== undefined ? `, the author's revision ${st.revision.version} passed on its answers` : ''}${st.drift.reason ? ` (${clip(st.drift.reason, 120)})` : ''}` : ' — not stabilized yet'}:`);
       for (const f of fs) {
         out.push(
-          `    ${f.id} [${f.severity}${f.judgedSeverity !== null && f.judgedSeverity !== f.severity ? ` → ${f.judgedSeverity}` : ''}] ${clip(f.title, 100)} — ${f.status}; disposition: ${f.disposition?.action ?? 'none yet'}; Stabilizer: ${f.scope ?? 'not judged yet'}${f.question !== null ? `; question: ${clip(f.question, 100)}` : ''}`,
+          `    ${f.id} [${f.severity}${f.judgedSeverity !== null && f.judgedSeverity !== f.severity ? ` → ${f.judgedSeverity}` : ''}] ${clip(f.title, 100)} — ${f.status}${f.answered !== null ? ` (answered: the Stabilizer of round ${f.answered} judged the author's ${f.disposition?.action === 'rebut' ? 'rebuttal' : 'revision'} resolves it, no re-check)` : ''}; disposition: ${f.disposition?.action ?? 'none yet'}; Stabilizer: ${f.scope ?? 'not judged yet'}${f.question !== null ? `; question: ${clip(f.question, 100)}` : ''}`,
         );
       }
     }
-    json.push({ mission, exploration: x, turn: s.turn, rounds: s.rounds, version: s.version, stopped: s.stopped, settled: s.settled, settles: s.settles, drift: s.drift, findings: [...s.findings.values()], stabilizations: s.stabilizations, evidence: [...s.evidence.values()] });
+    json.push({
+      mission,
+      exploration: x,
+      turn: s.turn,
+      rounds: s.rounds,
+      version: s.version,
+      stopped: s.stopped,
+      settled: s.settled,
+      settles: s.settles,
+      drift: s.drift,
+      findings: [...s.findings.values()],
+      stabilizations: s.stabilizations,
+      evidence: [...s.evidence.values()].map((e) => (older.includes(e.id) ? { ...e, environment: OLDER_ENVIRONMENT } : e)),
+      ...(s.amendments.length > 0 ? { method: s.method?.version ?? null, amendments: s.amendments.map((b) => ({ n: b.n, previous: b.previous, version: b.version, judgment: b.judgment, words: b.words, reason: b.reason, added: b.added, replaced: b.replaced, replaces: b.replaces, withdrawn: b.withdrawn, answers: b.answers })) } : {}),
+      ...(last !== undefined ? { snapshot: s.defined.snapshot, resnapshots: s.resnapshots } : {}),
+      ...(dataOut.lines.length > 0 ? { evidenceData: dataOut.json } : {}),
+    });
+    out.push(...dataOut.lines);
   }
   if (json.length === 0) return null;
   return { text: out.join('\n'), json };

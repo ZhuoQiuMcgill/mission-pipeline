@@ -24,7 +24,7 @@ import { recoverLandings, type LandingResult } from '../git/land.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import { pmAction, recordPmAction, type Filler, type Memory } from '../memory/index.ts';
 import { openProcess, type ProcessContext, type ProcessOptions } from '../process/index.ts';
-import { commitIdentities, defaultConfig, readConfig, type ProjectConfig } from './config.ts';
+import { commitIdentities, defaultConfig, experimentCommandTimeoutOf, readConfig, type ProjectConfig } from './config.ts';
 import { CliError, EXIT, errorMessage, wi41 } from './errors.ts';
 
 export interface CliIo {
@@ -140,8 +140,9 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   // the identity of the commits mp writes: config `commit` (4.1.2); a test's process options still win
   const ids = commitIdentities(config);
   // the project's commands, read once from the config into the context (4.1.2): its full suite
-  // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
+  // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there.
+  // Its cleanup commands run after each run's commands, before the run's checkout is removed (runs.ts)
+  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), ...(config.experimentShell === undefined ? {} : { experimentShell: config.experimentShell }), ...(config.shell === undefined ? {} : { shell: config.shell }), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, planReviewsWaived: config.planReviewsWaived ?? [], startOnHandback: config.startOnHandback ?? [], filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {
