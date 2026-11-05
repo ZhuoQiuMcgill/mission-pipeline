@@ -68,7 +68,7 @@ describe('exploration evidence', () => {
     const negated = (await w.ledger.records(['judgment'])).map((x) => x.record).filter((x) => x.target === j?.target && x.verdict === 'fail');
     assert.equal(j?.revokes, negated.at(-1)?.judgment, 'it revokes the last negative judgment on the same version (the Stabilizer\'s, 4.1 §6.3)');
     assert.deepEqual(negated.map((x) => [x.review, x.executor]), [['crititor', 'stabilizer']]);
-    await hand(w, 'crititor', attack());
+    // 4.1.3 (E-3): the re-check round converges (no closing attacker)
     const r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged');
     assert.equal((await w.evaluator.labels([c.target as string])).labels[c.target as string], 'proven');

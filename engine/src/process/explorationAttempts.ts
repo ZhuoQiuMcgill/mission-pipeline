@@ -22,6 +22,13 @@
 // (a record it had is superseded, kept as history; a run of its earlier card still waiting in the
 // queue is withdrawn), and records of unchanged attempts keep counting. A repair about the
 // exploration the amendment answers (`--answers`) no longer adds its round.
+//
+// 4.1.3 (E-5): both are change forms of the one repair entry, `mp pm repair --about <x> --attempts
+// <file>` and `--rerun <ids>`: the repair item and the change are one write, the change answers the
+// repair (it reads as answered, and adds no round). The older commands keep their names for one
+// release and record a repair the same way. The refusals that protect the record keep their codes
+// (DISPATCH_IN_FLIGHT: a run a seat holds; INTERPRETATION_SUBMITTED); every other is NOT_ALLOWED,
+// with its reason and its exit.
 
 import { canonicalJson } from '../common/hash.ts';
 import type { ContentHash, JudgmentId, MissionId, ObjectVersionId } from '../common/ids.ts';
@@ -42,7 +49,8 @@ import {
   type XEvent,
   type XState,
 } from '../flow/exploration/machine.ts';
-import { explorationLine } from '../flow/plandoc.ts';
+import { explorationLine, REPAIRS_LINE, type RepairKind } from '../flow/plandoc.ts';
+import { changeFormRepair } from '../flow/repair.ts';
 import type { DataStore } from '../memory/data.ts';
 import { appendRecords, dequeueTask, factById, flowEvents, wordsEntry, type Db, type FlowEventRow } from '../memory/index.ts';
 import { RegisteredAttempt, registerProblems, researchMethodDocument, type RegisteredAttemptT, type ResearchMethodDoc } from '../seat/cards/researcher.ts';
@@ -77,17 +85,18 @@ interface RerunPlan {
 function plan(db: Db, data: DataStore, mission: string, x: string, named: readonly string[], s: XState): RerunPlan {
   if (s.defined === null || s.def === null) throw new ProcessError('NOT_ALLOWED', `mission ${mission} has no exploration ${x}`);
   if (s.settled !== null) {
-    throw new ProcessError('EXPLORATION_SETTLED', `exploration ${x} of ${mission} is settled (${s.settled.body.outcome}): its result was handed on. After an environment change, mp pm reopen-exploration ${mission} ${x} runs its evidence again; to explore again, give the exploration a new id in the PM plan`);
+    throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} is settled (${s.settled.body.outcome}): its result was handed on. After an environment change, mp pm reopen-exploration ${mission} ${x} runs its evidence again; to explore again, give the exploration a new id in the PM plan`);
   }
-  if (s.stopped !== null) throw new ProcessError('EXPLORATION_STOPPED', `exploration ${x} of ${mission} is stopped (${s.stopped.reason}) and waits for the decision layer (mp pm next): run this again once it goes on`);
-  if (!s.def.research) throw new ProcessError('ATTEMPT_NOT_REGISTERED', `exploration ${x} of ${mission} is not a research exploration: it registers no attempts`);
-  if (s.method === null) throw new ProcessError('ATTEMPT_NOT_REGISTERED', `exploration ${x} of ${mission} has no method in effect yet (its method is still being attacked): no attempt is registered`);
+  if (s.stopped !== null) throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} is stopped (${s.stopped.reason}) and waits for the decision layer (mp pm next): run this again once it goes on`);
+  if (!s.def.research) throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} is not a research exploration: it registers no attempts`);
+  if (s.method === null) throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} has no method in effect yet (its method is still being attacked): no attempt is registered`);
+  if (s.reentry !== null) throw new ProcessError('NOT_ALLOWED', `the method of exploration ${x} of ${mission} is back with its author (repair ${s.reentry.repair}): its new version decides which attempts run. Run this again once it passes`);
   if (s.phase === 'reasoning') {
     throw new ProcessError('INTERPRETATION_SUBMITTED', `exploration ${x} of ${mission} has an interpretation (${s.version?.id ?? '?'}) of the attempts' records already: a rerun applies only before the interpretation is submitted. Ask the user how to go on (a new exploration id in the PM plan explores again)`);
   }
   const registered = s.method.attempts.map((a) => a.id);
   const unknown = named.filter((a) => !registered.includes(a));
-  if (unknown.length > 0) throw new ProcessError('ATTEMPT_NOT_REGISTERED', `the method in effect of exploration ${x} (${s.method.version}) registers ${registered.join(', ')}; not ${unknown.join(', ')}`);
+  if (unknown.length > 0) throw new ProcessError('NOT_ALLOWED', `the method in effect of exploration ${x} (${s.method.version}) registers ${registered.join(', ')}; not ${unknown.join(', ')}`);
   const attempts = registered.filter((a) => named.includes(a));
   const pending = pendingTasks(s);
   const replaces: Record<string, string> = {};
@@ -96,10 +105,12 @@ function plan(db: Db, data: DataStore, mission: string, x: string, named: readon
     const st = run === undefined ? null : taskStatus(db, data, run.task);
     const where = run === undefined ? '' : `step ${run.task}, ${st?.state === 'running' ? `in flight (${st.note ?? 'dispatched'})` : st?.state === 'queued' ? 'queued' : `handed back, not taken into account yet (${st?.state ?? 'unknown'})`}`;
     const rec = attemptEvidence(s, a);
-    if (rec === null) throw new ProcessError('ATTEMPT_NO_EVIDENCE', `attempt ${a} of exploration ${x} has no record yet${where !== '' ? ` (its run: ${where})` : ''}: there is nothing to run again; it runs as registered`);
-    if (run !== undefined) throw new ProcessError('ATTEMPT_QUEUED', `attempt ${a} of exploration ${x} has a run of it already (${where}): its record is the one that counts; run this again only once it is in`);
+    // a run a seat holds (in flight, or handed back and not taken into account yet) protects its record
+    if (run !== undefined && st?.state !== 'queued') throw new ProcessError('DISPATCH_IN_FLIGHT', `attempt ${a} of exploration ${x} has a run a seat holds (${where}): its record is the one that counts; run this again once it is in`);
+    if (rec === null) throw new ProcessError('NOT_ALLOWED', `attempt ${a} of exploration ${x} has no record yet${where !== '' ? ` (its run: ${where})` : ''}: there is nothing to run again; it runs as registered`);
+    if (run !== undefined) throw new ProcessError('NOT_ALLOWED', `attempt ${a} of exploration ${x} has a run of it already (${where}): its record is the one that counts; run this again only once it is in`);
     const again = s.attemptReruns.get(a);
-    if (again !== undefined && !attemptRecorded(s, a)) throw new ProcessError('ATTEMPT_QUEUED', `attempt ${a} of exploration ${x} is already to run again (${again.amendment !== undefined ? `under the card the user's amendment ${again.amendment} set` : `rerun ${again.n}`}): the next mp pm next queues its run`);
+    if (again !== undefined && !attemptRecorded(s, a)) throw new ProcessError('NOT_ALLOWED', `attempt ${a} of exploration ${x} is already to run again (${again.amendment !== undefined ? `under the card the user's amendment ${again.amendment} set` : `rerun ${again.n}`}): the next mp pm next queues its run`);
     replaces[a] = rec;
   }
   // an interpreter step queued on the earlier records is withdrawn; one at work, or handed back, is not
@@ -117,15 +128,35 @@ function plan(db: Db, data: DataStore, mission: string, x: string, named: readon
     if (st?.state === 'done' || st?.state === 'waiting-evidence') {
       throw new ProcessError('INTERPRETATION_SUBMITTED', `the interpreter of exploration ${x} handed back (step ${q.task}): its interpretation is submitted, and a rerun applies only before that. Ask the user how to go on (a new exploration id in the PM plan explores again)`);
     }
-    throw new ProcessError('NOT_READY', `the interpreter step ${q.task} of exploration ${x} is ${st?.state ?? 'unknown'}${st?.note ? ` (${st.note})` : ''}: run mp pm next first, then this again`);
+    throw new ProcessError('NOT_ALLOWED', `the interpreter step ${q.task} of exploration ${x} is ${st?.state ?? 'unknown'}${st?.note ? ` (${st.note})` : ''}: run mp pm next first, then this again`);
   }
   return { attempts, replaces, withdraw };
+}
+
+/** The repair a change form records in its own write (4.1.3, E-5): the PM's kind and the user's reason. */
+export interface ChangeRepair {
+  readonly kind: RepairKind;
+  readonly text: string;
+}
+
+/** The repair event a change form appends in its write, and its id: after the repairs recorded so far. */
+function repairEvent(tx: Db, data: DataStore, mission: MissionId, x: string, words: string, r: ChangeRepair): { readonly id: string; readonly record: BaseRecord } {
+  const n = rows(tx, { mission, line: REPAIRS_LINE }).filter((e) => e.event === 'repair').length;
+  let body;
+  try {
+    body = changeFormRepair(n, { words, kind: r.kind, text: r.text, exploration: x });
+  } catch (e) {
+    throw new ProcessError('NOT_ALLOWED', (e as Error).message);
+  }
+  return { id: body.id, record: { kind: 'flow.event', mission, line: REPAIRS_LINE, event: 'repair', key: body.id, body: data.put(canonicalJson(body)) as ContentHash } };
 }
 
 /** What `mp pm rerun-attempt` did. */
 export interface AttemptsRerun {
   /** Its number on the exploration (1 for the first). */
   readonly n: number;
+  /** 4.1.3: the repair it recorded and answers, or null. */
+  readonly repair: string | null;
   /** The attempts run again, in the register's order, with the record each supersedes and the step of its new run (null: not queued yet). */
   readonly attempts: ReadonlyArray<{ readonly attempt: string; readonly replaces: string; readonly step: string | null; readonly evidence: string | null }>;
   /** The interpreter step withdrawn (it was queued on the earlier records), or null. */
@@ -146,7 +177,10 @@ export interface AttemptsRerun {
  * written): NOT_ALLOWED, EXPLORATION_SETTLED, EXPLORATION_STOPPED, ATTEMPT_NOT_REGISTERED,
  * ATTEMPT_NO_EVIDENCE, ATTEMPT_QUEUED, INTERPRETATION_SUBMITTED, DISPATCH_IN_FLIGHT.
  */
-export async function pmRerunAttempt(ctx: ProcessContext, req: { readonly mission: string; readonly exploration: string; readonly attempts: readonly string[]; readonly words: string; readonly reason?: string | null }): Promise<AttemptsRerun> {
+export async function pmRerunAttempt(
+  ctx: ProcessContext,
+  req: { readonly mission: string; readonly exploration: string; readonly attempts: readonly string[]; readonly words: string; readonly reason?: string | null; readonly repair?: ChangeRepair | null; readonly command?: 'repair' },
+): Promise<AttemptsRerun> {
   const mission = req.mission as MissionId;
   const x = req.exploration;
   const named = [...new Set(req.attempts.map((a) => a.trim()).filter((a) => a !== ''))];
@@ -159,16 +193,18 @@ export async function pmRerunAttempt(ctx: ProcessContext, req: { readonly missio
   const first = ctx.memory.read((db) => plan(db, data, req.mission, x, named, before));
   const n = ctx.memory.read((db) => rows(db, { mission, line: explorationLine(x) }).filter((e) => e.event === ATTEMPT_RERUN).length) + 1;
   const written = ctx.memory.write(
-    { op: `rerun-attempt:${req.mission}:${x}:${n}`, payload: { mission: req.mission, exploration: x, n, attempts: first.attempts, words: req.words, reason }, command: 'rerun-attempt', filler: ctx.filler },
+    { op: `rerun-attempt:${req.mission}:${x}:${n}`, payload: { mission: req.mission, exploration: x, n, attempts: first.attempts, words: req.words, reason }, command: req.command === 'repair' ? 'repair' : 'rerun-attempt', filler: ctx.filler },
     (tx) => {
       const events0 = eventsOf(tx, tx.data, mission, x);
       if (events0.filter((e) => e.event === ATTEMPT_RERUN).length + 1 !== n) throw new ProcessError('NOT_READY', `another rerun of exploration ${x}'s attempts was recorded meanwhile: run this again`);
       const s = fold(events0);
       const p = plan(tx, tx.data, req.mission, x, named, s);
-      const body: AttemptRerunBody = { n, attempts: p.attempts, replaces: p.replaces, words: req.words, reason, withdrawn: p.withdraw, by: 'pm' };
+      // 4.1.3 (E-5): the repair this change answers, recorded in the same write
+      const repair = req.repair !== undefined && req.repair !== null ? repairEvent(tx, tx.data, mission, x, req.words, req.repair) : null;
+      const body: AttemptRerunBody = { n, attempts: p.attempts, replaces: p.replaces, words: req.words, reason, withdrawn: p.withdraw, by: 'pm', ...(repair !== null ? { answers: repair.id } : {}) };
       const line = explorationLine(x);
       const put = (b: unknown): ContentHash => tx.data.put(canonicalJson(b)) as ContentHash;
-      const events = [{ kind: 'flow.event' as const, mission, line, event: ATTEMPT_RERUN, key: String(n), body: put(body) }];
+      const events: BaseRecord[] = [...(repair !== null ? [repair.record] : []), { kind: 'flow.event' as const, mission, line, event: ATTEMPT_RERUN, key: String(n), body: put(body) }];
       if (p.withdraw !== null) {
         const q = s.tasks.get(p.withdraw)!;
         const c: ConsumedBody = { kind: 'withdrawn', task: p.withdraw, role: q.role, reason: `attempt(s) ${p.attempts.join(', ')} run again (mp pm rerun-attempt ${n}): the interpretation waits for their new records` };
@@ -176,7 +212,7 @@ export async function pmRerunAttempt(ctx: ProcessContext, req: { readonly missio
       }
       appendRecords(tx, events);
       if (p.withdraw !== null) dequeueTask(tx, { task: p.withdraw, reason: 'cancelled' });
-      return p;
+      return { ...p, repair: repair?.id ?? null };
     },
   );
   await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm rerun-attempt ${req.mission} ${x} ${written.attempts.join(',')}` });
@@ -184,6 +220,7 @@ export async function pmRerunAttempt(ctx: ProcessContext, req: { readonly missio
   const since = after.attemptReruns;
   return {
     n,
+    repair: written.repair,
     attempts: written.attempts.map((a) => {
       const run = [...after.tasks.values()].find((q) => q.evidence?.attempt === a && q.evidence.requester === null && q.evidence.k > (since.get(a)?.since ?? 0));
       return { attempt: a, replaces: written.replaces[a]!, step: run?.task ?? null, evidence: run?.evidence?.id ?? null };
@@ -199,8 +236,8 @@ export async function pmRerunAttempt(ctx: ProcessContext, req: { readonly missio
 
 /** The file's attempts, each checked as the author's registration checks them (the register's schema and rules); unknown fields are refused, not dropped. */
 function fileAttempts(raw: unknown): RegisteredAttemptT[] {
-  if (!Array.isArray(raw)) throw new ProcessError('ATTEMPTS_INVALID', "the attempts file is a JSON array of attempt objects, in the schema of a method's registered attempts (id, kind, purpose, steps, data, measure, assertions, commands)");
-  if (raw.length === 0) throw new ProcessError('ATTEMPTS_INVALID', 'the attempts file names no attempt: add or replace at least one');
+  if (!Array.isArray(raw)) throw new ProcessError('NOT_ALLOWED', "the attempts file is a JSON array of attempt objects, in the schema of a method's registered attempts (id, kind, purpose, steps, data, measure, assertions, commands)");
+  if (raw.length === 0) throw new ProcessError('NOT_ALLOWED', 'the attempts file names no attempt: add or replace at least one');
   const known = new Set(Object.keys(RegisteredAttempt.shape));
   const out: RegisteredAttemptT[] = [];
   const problems: string[] = [];
@@ -215,7 +252,7 @@ function fileAttempts(raw: unknown): RegisteredAttemptT[] {
     out.push(r.data);
   });
   if (problems.length === 0) problems.push(...registerProblems(out));
-  if (problems.length > 0) throw new ProcessError('ATTEMPTS_INVALID', `the attempts do not validate as the author's register would: ${problems.join('; ')}`);
+  if (problems.length > 0) throw new ProcessError('NOT_ALLOWED', `the attempts do not validate as the author's register would: ${problems.join('; ')}`);
   return out;
 }
 
@@ -230,45 +267,48 @@ interface AmendPlan {
   readonly runs: Readonly<Record<string, string>>;
   readonly interpreter: string | null;
   readonly answers: string | null;
+  /** 4.1.3: author steps queued for the repair it answers (its re-entry not started), withdrawn. */
+  readonly authors: readonly string[];
 }
 
 /** The refusals the exploration's state decides (nothing is written), else what the amendment writes. */
-function amendPlan(db: Db, data: DataStore, mission: string, x: string, file: readonly RegisteredAttemptT[], answers: string | null, s: XState): AmendPlan {
+function amendPlan(db: Db, data: DataStore, mission: string, x: string, file: readonly RegisteredAttemptT[], answers: string | null, s: XState, later = false): AmendPlan {
   if (s.defined === null || s.def === null) throw new ProcessError('NOT_ALLOWED', `mission ${mission} has no exploration ${x}`);
   if (s.settled !== null) {
-    throw new ProcessError('EXPLORATION_SETTLED', `exploration ${x} of ${mission} is settled (${s.settled.body.outcome}): its result was handed on. To explore again with the user's decision, give the exploration a new id in the PM plan`);
+    throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} is settled (${s.settled.body.outcome}): its result was handed on. To explore again with the user's decision, give the exploration a new id in the PM plan`);
   }
-  if (s.stopped !== null) throw new ProcessError('EXPLORATION_STOPPED', `exploration ${x} of ${mission} is stopped (${s.stopped.reason}) and waits for the decision layer (mp pm next): run this again once it goes on`);
-  if (s.abandoned !== null) throw new ProcessError('EXPLORATION_STOPPED', `a step of exploration ${x} of ${mission} was given up (${s.abandoned.task}): the decision layer decides first (mp pm next); run this again once it goes on`);
-  if (!s.def.research) throw new ProcessError('NO_METHOD', `exploration ${x} of ${mission} is not a research exploration: it has no method and registers no attempts`);
-  if (s.method === null) throw new ProcessError('NO_METHOD', `exploration ${x} of ${mission} has no method in force yet (its method is still being attacked): the user's decision reaches the author with a repair (mp pm repair --about ${x})`);
+  if (s.stopped !== null) throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} is stopped (${s.stopped.reason}) and waits for the decision layer (mp pm next): run this again once it goes on`);
+  if (s.abandoned !== null) throw new ProcessError('NOT_ALLOWED', `a step of exploration ${x} of ${mission} was given up (${s.abandoned.task}): the decision layer decides first (mp pm next); run this again once it goes on`);
+  if (!s.def.research) throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} is not a research exploration: it has no method and registers no attempts`);
+  if (s.method === null) throw new ProcessError('NOT_ALLOWED', `exploration ${x} of ${mission} has no method in force yet (its method is still being attacked): the user's decision reaches the author with a repair (mp pm repair --about ${x})`);
+  // the method back with its author (4.1.3, #31): only the repair that sent it back may be answered, before the author starts
+  if (s.reentry !== null && answers !== s.reentry.repair && (answers === null || s.repairs.some((r) => r.id === answers))) {
+    throw new ProcessError('NOT_ALLOWED', `the method of exploration ${x} of ${mission} is back with its author (repair ${s.reentry.repair}): its new version replaces the one in force. Apply the user's decision as another repair, or answer ${s.reentry.repair} with it before the author starts (--answers ${s.reentry.repair})`);
+  }
   if (s.phase === 'reasoning') {
     throw new ProcessError('INTERPRETATION_SUBMITTED', `exploration ${x} of ${mission} has an interpretation (${s.version?.id ?? '?'}) of the attempts' records already: the method is amended only before that. Ask the user how to go on (a repair, or a new exploration id in the PM plan)`);
   }
-  // an interpreter that ran (or was dispatched) read the records: the method is no longer amended
+  // an interpretation submitted rests on the records: the method is no longer amended
   for (const q of s.tasks.values()) {
     if (q.role !== 'interpreter') continue;
-    const c = s.consumed.get(q.task);
-    if (c === undefined || c.kind === 'withdrawn') continue;
-    if (c.kind === 'interpretation') throw new ProcessError('INTERPRETATION_SUBMITTED', `the interpreter of exploration ${x} handed back (step ${q.task}): its interpretation is submitted, and the method is amended only before that`);
-    throw new ProcessError('INTERPRETER_DISPATCHED', `an interpreter of exploration ${x} was dispatched (step ${q.task}, ${c.kind}): it read the attempts' records, and the method is amended only before any interpreter is dispatched`);
+    if (s.consumed.get(q.task)?.kind === 'interpretation') throw new ProcessError('INTERPRETATION_SUBMITTED', `the interpreter of exploration ${x} handed back (step ${q.task}): its interpretation is submitted, and the method is amended only before that`);
   }
+  // a queued interpreter step is withdrawn (one released before left no record); one a seat holds protects the record
   let interpreter: string | null = null;
   for (const q of pendingTasks(s)) {
     if (q.role !== 'interpreter') continue;
     const st = taskStatus(db, data, q.task);
-    if (st?.state === 'queued' && st.dispatches.length === 0) {
+    if (st?.state === 'queued') {
       interpreter = q.task;
       continue;
     }
-    if (st?.state === 'queued') throw new ProcessError('INTERPRETER_DISPATCHED', `the interpreter step ${q.task} of exploration ${x} was dispatched before (${st.note ?? 'released'}): it read the attempts' records, and the method is amended only before any interpreter is dispatched`);
     if (st?.state === 'running') {
-      throw new ProcessError('DISPATCH_IN_FLIGHT', `the interpreter of exploration ${x} is at work on the records (step ${q.task}, ${st.note ?? 'dispatched'}): the method is amended only before any interpreter is dispatched`);
+      throw new ProcessError('DISPATCH_IN_FLIGHT', `the interpreter of exploration ${x} is at work on the records (step ${q.task}, ${st.note ?? 'dispatched'}): wait for its hand-back, or release it (mp pm release <dispatch> --ended) and run this again`);
     }
     if (st?.state === 'done' || st?.state === 'waiting-evidence') {
       throw new ProcessError('INTERPRETATION_SUBMITTED', `the interpreter of exploration ${x} handed back (step ${q.task}): its interpretation is submitted, and the method is amended only before that`);
     }
-    throw new ProcessError('INTERPRETER_DISPATCHED', `the interpreter step ${q.task} of exploration ${x} is ${st?.state ?? 'unknown'}${st?.note ? ` (${st.note})` : ''}: it was dispatched, and the method is amended only before any interpreter is dispatched`);
+    throw new ProcessError('NOT_ALLOWED', `the interpreter step ${q.task} of exploration ${x} is ${st?.state ?? 'unknown'}${st?.note ? ` (${st.note})` : ''}: run mp pm next first, then this again`);
   }
   // the file's attempts: new ids are added; a registered id whose object differs replaces that attempt
   const registered = new Map(s.method.attempts.map((a) => [a.id, a]));
@@ -278,7 +318,7 @@ function amendPlan(db: Db, data: DataStore, mission: string, x: string, file: re
   const added = register.filter((a) => !registered.has(a.id)).map((a) => a.id);
   const replaced = register.filter((a) => registered.has(a.id) && byId.has(a.id) && !unchanged.includes(a.id)).map((a) => a.id);
   if (added.length === 0 && replaced.length === 0) {
-    throw new ProcessError('NOTHING_AMENDED', `every attempt in the file equals its registered one in the method in force (${s.method.version}): ${unchanged.join(', ')}. Nothing is amended`);
+    throw new ProcessError('NOT_ALLOWED', `every attempt in the file equals its registered one in the method in force (${s.method.version}): ${unchanged.join(', ')}. Nothing is amended`);
   }
   // a replaced attempt's run of its earlier card: still waiting in the queue, it is withdrawn; one a seat has, refused
   const pending = pendingTasks(s);
@@ -293,29 +333,36 @@ function amendPlan(db: Db, data: DataStore, mission: string, x: string, file: re
         continue;
       }
       const where = st?.state === 'running' ? `in flight (${st.note ?? 'dispatched'})` : `handed back, not taken into account yet (${st?.state ?? 'unknown'}): run mp pm next first`;
-      throw new ProcessError('ATTEMPT_QUEUED', `attempt ${a} of exploration ${x} has a run of its registered card ${where} (step ${q.task}): it is replaced only once that run's record is in, or its dispatch released`);
+      throw new ProcessError('DISPATCH_IN_FLIGHT', `attempt ${a} of exploration ${x} has a run of its registered card ${where} (step ${q.task}): it is replaced only once that run's record is in, or its dispatch released`);
     }
     const rec = attemptEvidence(s, a);
     if (rec !== null) replaces[a] = rec;
   }
   let answered: string | null = null;
+  const authors: string[] = [];
   if (answers !== null) {
     const open = s.repairs.filter((r) => !s.answeredRepairs.has(r.id)).map((r) => r.id);
-    if (!s.repairs.some((r) => r.id === answers)) throw new ProcessError('REPAIR_NOT_OPEN', `no repair ${answers} is about exploration ${x}${open.length > 0 ? ` (open: ${open.join(', ')})` : ''}`);
+    if (!s.repairs.some((r) => r.id === answers)) throw new ProcessError('NOT_ALLOWED', `no repair ${answers} is about exploration ${x}${open.length > 0 ? ` (open: ${open.join(', ')})` : ''}`);
     const by = s.answeredRepairs.get(answers);
-    if (by !== undefined) throw new ProcessError('REPAIR_NOT_OPEN', `repair ${answers} is answered already, by the user's amendment ${by} of exploration ${x}`);
-    // its round started: an author step queued after the repair was dispatched
+    if (by !== undefined) throw new ProcessError('NOT_ALLOWED', `repair ${answers} is answered already, by the user's amendment ${by} of exploration ${x}`);
+    // its round started: an author step queued after the repair was dispatched; one only queued is withdrawn
     const since = s.repairSince.get(answers) ?? 0;
     for (const q of s.tasks.values()) {
       if (q.role !== 'author' || q.n <= since || s.consumed.get(q.task)?.kind === 'withdrawn') continue;
       const st = taskStatus(db, data, q.task);
       if (s.consumed.has(q.task) || st === null || st.state !== 'queued' || st.dispatches.length > 0) {
-        throw new ProcessError('REPAIR_STARTED', `the round repair ${answers} added has started: the author step ${q.task} was dispatched for it. The amendment can still be applied without --answers`);
+        throw new ProcessError(
+          'NOT_ALLOWED',
+          later
+            ? `the method of exploration ${x} is back with its author for repair ${answers}, and the author step ${q.task} was dispatched: its new version replaces the one in force. Record the user's decision as a repair with no change form: the author answers it`
+            : `the round repair ${answers} added has started: the author step ${q.task} was dispatched for it. Apply the user's decision without --answers (it records a repair of its own)`,
+        );
       }
+      authors.push(q.task);
     }
     answered = answers;
   }
-  return { register, added, replaced, unchanged, replaces, runs, interpreter, answers: answered };
+  return { register, added, replaced, unchanged, replaces, runs, interpreter, answers: answered, authors };
 }
 
 /** The section the amendment adds to the method's text: the user's words, the reason, what it added and replaced. */
@@ -348,6 +395,8 @@ export interface AttemptsAmended {
   readonly withdrawn: string | null;
   /** The repair it answers (its added round taken back), or null. */
   readonly answers: string | null;
+  /** 4.1.3: the repair it recorded in its own write (and answers), or null. */
+  readonly repair: string | null;
   /** The exploration's phase now ("attempts" until every attempt of the amended method has its record). */
   readonly phase: string;
   /** The round budget: no round spent; one an answered repair added is taken back. */
@@ -366,7 +415,7 @@ export interface AttemptsAmended {
  */
 export async function pmAmendAttempts(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly exploration: string; readonly attempts: unknown; readonly words: string; readonly reason?: string | null; readonly answers?: string | null },
+  req: { readonly mission: string; readonly exploration: string; readonly attempts: unknown; readonly words: string; readonly reason?: string | null; readonly answers?: string | null; readonly repair?: ChangeRepair | null; readonly command?: 'repair' },
 ): Promise<AttemptsAmended> {
   const mission = req.mission as MissionId;
   const x = req.exploration;
@@ -376,16 +425,20 @@ export async function pmAmendAttempts(
   const file = fileAttempts(req.attempts);
   const data = ctx.memory.data;
   const before = ctx.memory.read((db) => fold(eventsOf(db, data, mission, x)));
+  // 4.1.3 (E-1): a change form after a repair sent the method back to its author, who has not started:
+  // the user's later, more specific decision answers that repair (the same take-back as --answers)
+  const later = (s: XState): boolean => answers === null && req.repair !== undefined && req.repair !== null && s.reentry !== null;
+  const answering = (s: XState): string | null => (later(s) ? s.reentry!.repair : answers);
   // the state's refusals first; the write checks them again
-  ctx.memory.read((db) => amendPlan(db, data, req.mission, x, file, answers, before));
+  ctx.memory.read((db) => amendPlan(db, data, req.mission, x, file, answering(before), before, later(before)));
   const n = ctx.memory.read((db) => rows(db, { mission, line: explorationLine(x) }).filter((e) => e.event === ATTEMPTS_AMENDED).length) + 1;
   const written = ctx.memory.write(
-    { op: `amend-attempts:${req.mission}:${x}:${n}`, payload: { mission: req.mission, exploration: x, n, attempts: file, words: req.words, reason, answers }, command: 'amend-attempts', filler: ctx.filler },
+    { op: `amend-attempts:${req.mission}:${x}:${n}`, payload: { mission: req.mission, exploration: x, n, attempts: file, words: req.words, reason, answers }, command: req.command === 'repair' ? 'repair' : 'amend-attempts', filler: ctx.filler },
     (tx) => {
       const events0 = eventsOf(tx, tx.data, mission, x);
       if (events0.filter((e) => e.event === ATTEMPTS_AMENDED).length + 1 !== n) throw new ProcessError('NOT_READY', `another amendment of exploration ${x}'s method was recorded meanwhile: run this again`);
       const s = fold(events0);
-      const p = amendPlan(tx, tx.data, req.mission, x, file, answers, s);
+      const p = amendPlan(tx, tx.data, req.mission, x, file, answering(s), s, later(s));
       const method = s.method!;
       const def = s.def!;
       // the previous version's document, its object version and the pass that decides its position
@@ -422,7 +475,10 @@ export async function pmAmendAttempts(
         extends: null,
       };
       validateRecord(judgment);
-      const withdrawn = [...p.replaced.flatMap((a) => (p.runs[a] !== undefined ? [p.runs[a]!] : [])), ...(p.interpreter !== null ? [p.interpreter] : [])];
+      const withdrawn = [...p.replaced.flatMap((a) => (p.runs[a] !== undefined ? [p.runs[a]!] : [])), ...(p.interpreter !== null ? [p.interpreter] : []), ...p.authors];
+      // 4.1.3 (E-5): the repair this change answers, recorded in the same write (unless it answers one
+      // recorded before on the PM's --answers; a later decision answering an earlier repair records its own too)
+      const repair = (p.answers === null || later(s)) && req.repair !== undefined && req.repair !== null ? repairEvent(tx, tx.data, mission, x, req.words, req.repair) : null;
       const body: AttemptsAmendedBody = {
         n,
         previous: method.version,
@@ -436,21 +492,22 @@ export async function pmAmendAttempts(
         withdrawn,
         words: req.words,
         reason,
-        answers: p.answers,
+        answers: p.answers ?? repair?.id ?? null,
         by: 'pm',
+        ...(p.answers !== null && repair !== null ? { repair: repair.id } : {}),
       };
       const line = explorationLine(x);
       const put = (b: unknown): ContentHash => tx.data.put(canonicalJson(b)) as ContentHash;
-      const records: BaseRecord[] = [obj, judgment, { kind: 'flow.event', mission, line, event: ATTEMPTS_AMENDED, key: String(n), body: put(body) }];
+      const records: BaseRecord[] = [...(repair !== null ? [repair.record] : []), obj, judgment, { kind: 'flow.event', mission, line, event: ATTEMPTS_AMENDED, key: String(n), body: put(body) }];
       for (const t of withdrawn) {
         const q = s.tasks.get(t)!;
-        const why = q.role === 'interpreter' ? 'the interpretation waits for the records of the amended method' : `attempt ${q.evidence?.attempt ?? '?'} runs under its new card`;
+        const why = q.role === 'interpreter' ? 'the interpretation waits for the records of the amended method' : q.role === 'author' ? `it answers repair ${p.answers ?? ''}: the method stays in force, amended, and goes back to its attempts` : `attempt ${q.evidence?.attempt ?? '?'} runs under its new card`;
         const c: ConsumedBody = { kind: 'withdrawn', task: t, role: q.role, reason: `the method amended on the user's words ${req.words} (mp pm amend-attempts ${n}): ${why}` };
         records.push({ kind: 'flow.event', mission, line, event: 'consumed', key: t, body: put(c) });
       }
       appendRecords(tx, records);
       for (const t of withdrawn) dequeueTask(tx, { task: t, reason: 'cancelled' });
-      return { p, version, judgment: judgment.judgment, previous: method.version, since: s.evidenceSeq };
+      return { p, version, judgment: judgment.judgment, previous: method.version, since: s.evidenceSeq, repair: repair?.id ?? null };
     },
   );
   await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm amend-attempts ${req.mission} ${x} --words ${req.words}` });
@@ -469,7 +526,8 @@ export async function pmAmendAttempts(
     replaced: p.replaced.map((a) => ({ attempt: a, replaces: p.replaces[a] ?? null, withdrawn: p.runs[a] ?? null, ...runOf(a) })),
     unchanged: p.unchanged,
     withdrawn: p.interpreter,
-    answers: p.answers,
+    answers: p.answers ?? written.repair,
+    repair: written.repair,
     phase: after.phase,
     rounds: after.rounds,
     allowedRounds: allowedRounds(after),

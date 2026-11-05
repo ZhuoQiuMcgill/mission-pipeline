@@ -74,7 +74,12 @@ import { recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemT
 import { submitPmBatch } from '../flow/planning.ts';
 import { recordRepair } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
-import { answerEscalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
+import { answerEscalation, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
+import { flowCtx, missionClosed } from '../flow/context.ts';
+import { explorationState } from '../flow/exploration/flow.ts';
+import { pendingTasks } from '../flow/exploration/machine.ts';
+import { pmAmendAttempts, pmRerunAttempt, type AttemptsAmended, type AttemptsRerun } from './explorationAttempts.ts';
+import { pmResnapshotExploration, type Resnapshotted } from './explorationSnapshot.ts';
 import { RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, type ReviewNeededBody } from '../flow/plandoc.ts';
 import { scopesOverlap } from '../flow/mechanical.ts';
 import { legalizationState, requestLegalization, startLegalization, type LegalizationRequest } from '../flow/audit/index.ts';
@@ -89,7 +94,7 @@ import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
-import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
+import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, taskStatus, type TaskSpecDoc } from './ports.ts';
 import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { fullRunLine, heldByClose } from './close.ts';
 import { fullRunStatus } from './fullRuns.ts';
@@ -767,13 +772,32 @@ export async function pmRequirement(
   return { version };
 }
 
+/** A change form of `mp pm repair` (4.1.3, E-5): the user's decision about an exploration's method, applied directly. */
+export type RepairChange =
+  | { readonly form: 'attempts'; readonly attempts: unknown }
+  | { readonly form: 'rerun'; readonly attempts: readonly string[] }
+  | { readonly form: 'resnapshot' };
+
+/** What a change form did: the result of the change it applied. */
+export type RepairChanged =
+  | { readonly form: 'attempts'; readonly result: AttemptsAmended }
+  | { readonly form: 'rerun'; readonly result: AttemptsRerun }
+  | { readonly form: 'resnapshot'; readonly result: Resnapshotted };
+
 /**
- * `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<reason>" [--about <task|exploration>]`
- * (4.1.2, D-9, D-10): the user tried the product and found a problem. The reason must occur verbatim in
- * the words entry (the requirement items' check); the PM chooses the kind. About an exploration it
- * reopens it for one more round; otherwise an Architect repair step amends the plan in effect.
+ * `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<reason>" [--about <task|exploration>]
+ * [--attempts <file.json> | --rerun <attempt-id>[,...] | --resnapshot]` (4.1.2, D-9, D-10; 4.1.3, E-5): the user
+ * tried the product and found a problem. The reason must occur verbatim in the words entry (the
+ * requirement items' check); the PM chooses the kind. About an exploration it reopens it for one more
+ * round, the author's turn at once (in the attempts phase the method goes back to its author); with a
+ * change form the user's decision about its method is applied directly instead, with the mechanical
+ * checks only, and answers the repair in the same write. Otherwise an Architect repair step amends the
+ * plan in effect.
  */
-export async function pmRepair(ctx: ProcessContext, req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null }> {
+export async function pmRepair(
+  ctx: ProcessContext,
+  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null },
+): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged }> {
   ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
   const mission = req.mission as MissionId;
   let about: { kind: 'task' | 'exploration'; id: string } | null = null;
@@ -781,9 +805,38 @@ export async function pmRepair(ctx: ProcessContext, req: { readonly mission: str
     const isExploration = ctx.memory.read((db) => flowEvents(db, { mission, line: `exploration:${req.about}`, event: 'defined', limit: 1 }).length > 0);
     about = { kind: isExploration ? 'exploration' : 'task', id: req.about };
   }
+  if (req.change !== undefined) {
+    // a change form: the user's decision about an exploration's method, applied directly (no round)
+    if (about?.kind !== 'exploration') throw new LedgerError('BAD_REQUEST', `a change form (--attempts, --rerun, --resnapshot) is about an exploration: --about names one${about !== null ? ` (${about.id} is not an exploration of ${req.mission})` : ''}`);
+    if (await missionClosed(flowCtx(ctx.ports(), mission))) throw new LedgerError('BAD_REQUEST', `mission ${req.mission} is closed: a repair is recorded before the mission is closed`);
+    const repair = { kind: req.kind, text: req.text };
+    const base = { mission: req.mission, exploration: about.id, words: req.words, repair, command: 'repair' as const };
+    const changed: RepairChanged =
+      req.change.form === 'attempts'
+        ? { form: 'attempts', result: await pmAmendAttempts(ctx, { ...base, attempts: req.change.attempts, reason: req.reason ?? req.text }) }
+        : req.change.form === 'rerun'
+          ? { form: 'rerun', result: await pmRerunAttempt(ctx, { ...base, attempts: req.change.attempts, reason: req.reason ?? req.text }) }
+          : { form: 'resnapshot', result: await pmResnapshotExploration(ctx, base) };
+    return { repair: changed.result.repair ?? '', repeated: false, about, changed };
+  }
+  // about an exploration in its attempts phase (4.1.3, #31): the method goes back to its author at once.
+  // An interpreter step only queued is withdrawn in the repair's write; one a seat holds protects the record.
+  const withdraw: Array<{ task: string; role: 'interpreter' }> = [];
+  if (about?.kind === 'exploration') {
+    const s = await explorationState(ctx.ports(), mission, about.id);
+    if ((s.phase === 'attempts' || s.phase === 'interpret') && s.method !== null && s.stopped === null) {
+      for (const q of pendingTasks(s)) {
+        if (q.role !== 'interpreter') continue;
+        const st = ctx.memory.read((db) => taskStatus(db, ctx.memory.data, q.task));
+        if (st?.state === 'queued') withdraw.push({ task: q.task, role: 'interpreter' });
+        else if (st?.state === 'done' || st?.state === 'waiting-evidence') throw new ProcessError('INTERPRETATION_SUBMITTED', `the interpreter of exploration ${about.id} handed back (step ${q.task}): run mp pm next, then this again (the repair then goes to the interpretation's rounds)`);
+        else throw new ProcessError('DISPATCH_IN_FLIGHT', `the interpreter of exploration ${about.id} is at work (step ${q.task}, ${st?.note ?? st?.state ?? 'dispatched'}): wait for its hand-back (the repair then goes to the interpretation's rounds), or release it and run this again (the method then goes back to its author)`);
+      }
+    }
+  }
   let r: { readonly id: string; readonly repeated: boolean };
   try {
-    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about });
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}) });
   } catch (e) {
     if (e instanceof LedgerError || e instanceof ProcessError) throw e;
     throw new LedgerError('BAD_REQUEST', (e as Error).message);
@@ -831,9 +884,21 @@ export async function pmPlan(
   return out;
 }
 
-/** `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n]`: the user's decision. */
-export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly instructions?: string; readonly grantExtra?: number }): Promise<void> {
+/**
+ * `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n] [--findings F,...]`:
+ * the user's decision. 4.1.3 (#39): a grant on an exploration may name the findings it is for.
+ */
+export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<void> {
   const text = wordsText(ctx, req.words);
+  const findings = [...new Set((req.findings ?? []).map((f) => f.trim()).filter((f) => f !== ''))];
+  if (findings.length > 0) {
+    if (req.option !== 'grant') throw new LedgerError('BAD_REQUEST', '--findings goes with --option grant (the findings the granted round is for)');
+    const line = (await escalation(flowCtx(ctx.ports(), req.mission as MissionId), req.escalation))?.subject ?? null;
+    if (line === null || !line.startsWith('exploration:')) throw new LedgerError('BAD_REQUEST', `--findings names findings of an exploration; escalation ${req.escalation} is not about one`);
+    const s = await explorationState(ctx.ports(), req.mission as MissionId, line.slice('exploration:'.length));
+    const unknown = findings.filter((f) => !s.findings.has(f));
+    if (unknown.length > 0) throw new LedgerError('BAD_REQUEST', `${line.slice('exploration:'.length)} has no finding ${unknown.join(', ')} (mp read show exploration lists its findings)`);
+  }
   await answerEscalation(ctx.ports(), {
     mission: req.mission as MissionId,
     escalation: req.escalation,
@@ -841,6 +906,7 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
     words: `${text} (${req.words})`,
     ...(req.instructions !== undefined ? { instructions: req.instructions } : {}),
     ...(req.grantExtra !== undefined ? { grantExtra: req.grantExtra } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
   });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm answer' });
 }

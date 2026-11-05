@@ -65,6 +65,8 @@ export interface DecisionBody {
   readonly reason: string;
   readonly instructions: string;
   readonly grantExtra: number;
+  /** 4.1.3 (#39): a grant on an exploration: the findings the granted round is for (absent: none named). */
+  readonly findings?: readonly string[];
   readonly notice: string;
   readonly mayMatter: boolean;
   readonly inputs?: readonly { line: string; version: string; type: string }[];
@@ -230,6 +232,7 @@ export async function secretaryStep(ctx: FlowCtx): Promise<void> {
       reason: r.reason,
       instructions: r.instructions,
       grantExtra: r.grantExtra,
+      ...(r.findings !== undefined && r.findings.length > 0 ? { findings: [...r.findings] } : {}),
       notice: r.notice,
       mayMatter: r.mayMatter,
       ...(dispatched?.card.contextItems !== undefined ? { inputs: dispatched.card.contextItems } : {}),
@@ -525,7 +528,7 @@ export async function openEscalations(ctx: FlowCtx, subject: string): Promise<Es
  */
 export async function answerEscalation(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly escalation: string; readonly option: DecisionOption; readonly instructions?: string; readonly grantExtra?: number; readonly words: string },
+  req: { readonly mission: MissionId; readonly escalation: string; readonly option: DecisionOption; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[]; readonly words: string },
 ): Promise<void> {
   const ctx = flowCtx(ports, req.mission);
   const esc = await escalation(ctx, req.escalation);
@@ -545,6 +548,7 @@ export async function answerEscalation(
     reason: req.words,
     instructions: req.instructions ?? '',
     grantExtra: req.grantExtra ?? 0,
+    ...(req.findings !== undefined && req.findings.length > 0 ? { findings: [...req.findings] } : {}),
     notice: '',
     mayMatter: false,
   };

@@ -101,8 +101,8 @@ const assertExits = (p: ProcessProject, m: string, tag: string): Promise<XState>
 
 /**
  * A mission whose exploration X1 (structure decision D1) rests on an experiment (`node probe.js`):
- * the author's rebuttal cites the run, the re-check confirms it, the closing attacker passes; it
- * converges after 3 rounds and settles. `waiting`: a deliverable e1 waits for X1, and the decision
+ * the author's rebuttal cites the run, the re-check confirms it; it converges after 2 rounds (4.1.3,
+ * E-3: no closing round) and settles. `waiting`: a deliverable e1 waits for X1, and the decision
  * layer plans it after X1 stood (the Architect, Calibrator ②: effective).
  */
 async function convergedOnExperiment(p: ProcessProject, m: string, o: { rounds: number; waiting?: boolean; type?: 'structure' | 'direction' }): Promise<{ readonly evidence: string; readonly words: string; readonly plan: (round: number, change?: Record<string, unknown>) => Record<string, unknown> }> {
@@ -343,7 +343,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
 
   it('c1: the re-check refutes and the rounds run out: the Secretary grants more rounds, then accepts the risk: settled', async () => {
     const p = fresh();
-    await convergedOnExperiment(p, 'm3', { rounds: 3 });
+    await convergedOnExperiment(p, 'm3', { rounds: 2 });
     await moveAndRecheck(p, 'm3', 'no');
     const s1 = await refutedToBudget(p, 'm3', 2);
     const stop1 = `xp.m3.${X}.stop${s1.stopped!.n}`;
@@ -372,7 +372,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
 
   it('c2: the re-check refutes and the rounds run out: the Secretary gives it up: settled as no conclusion, the decision layer hears it', async () => {
     const p = fresh();
-    await convergedOnExperiment(p, 'm4', { rounds: 3, waiting: true });
+    await convergedOnExperiment(p, 'm4', { rounds: 2, waiting: true });
     await moveAndRecheck(p, 'm4', 'no');
     await refutedToBudget(p, 'm4', 2);
     await step(p.ctx, 'secretary', SECRETARY('abandon'));
@@ -420,7 +420,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
 
   it('e: the rerun execution is given up (its dispatches released until exhausted): a failed record, the re-check goes on, the stop escalates, abandoned: settled', async () => {
     const p = fresh();
-    await convergedOnExperiment(p, 'm6', { rounds: 3 });
+    await convergedOnExperiment(p, 'm6', { rounds: 2 });
     await moveTo(p, 'm6', ENV_B);
     await assertExits(p, 'm6', 'reopened');
     for (let i = 0; i < 6; i++) {
@@ -518,7 +518,7 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
 
   it('g2: reopened, the re-check refutes and the rounds run out; a PM plan raises the budget instead of the Secretary deciding: the stop escalation is superseded, the rounds go on, it settles', async () => {
     const p = fresh();
-    const { words, plan } = await convergedOnExperiment(p, 'm11', { rounds: 3 });
+    const { words, plan } = await convergedOnExperiment(p, 'm11', { rounds: 2 });
     await moveAndRecheck(p, 'm11', 'no');
     const stopped = await refutedToBudget(p, 'm11', 2);
     const stopEsc = `xp.m11.${X}.stop${stopped.stopped!.n}`;

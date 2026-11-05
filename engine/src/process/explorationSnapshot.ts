@@ -12,11 +12,16 @@
 //     still counts, and every read of the exploration labels it "older environment".
 // Every dispatch of an exploration's step hands its card over with the snapshot in force
 // (cards.ts cardAtClaim): a card queued before a resnapshot reads the new one.
+// 4.1.3 (E-5): the PM's route is a change form of the one repair entry, `mp pm repair --about <x>
+// --resnapshot`: the repair and the snapshot are one write, and the snapshot answers the repair. The
+// older command keeps its name for one release and records a repair the same way. Its refusals are
+// NOT_ALLOWED with the reason, but a run a seat holds (DISPATCH_IN_FLIGHT).
 
 import { canonicalJson } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import type { BaseRecord } from '../common/records.ts';
-import { cardAtClaim } from '../flow/exploration/cards.ts';
+import { cardAtClaim, stabilizerCardAtHandBack } from '../flow/exploration/cards.ts';
+import type { StabilizerCard } from '../seat/cards/stabilizer.ts';
 import { xid } from '../flow/exploration/definition.ts';
 import { resnapshotEntries } from '../flow/exploration/flow.ts';
 import { fold, olderSnapshotEvidence, pendingTasks, type XEvent, type XState } from '../flow/exploration/machine.ts';
@@ -24,6 +29,9 @@ import { explorationLine } from '../flow/plandoc.ts';
 import type { FlowEventInput } from '../flow/ports.ts';
 import type { DataStore } from '../memory/data.ts';
 import { appendRecords, flowEvents, listDispatches, type Db, type FlowEventRow, type WriteTx } from '../memory/index.ts';
+import { REPAIRS_LINE } from '../flow/plandoc.ts';
+import { changeFormRepair } from '../flow/repair.ts';
+import type { ChangeRepair } from './explorationAttempts.ts';
 import { advance } from './advance.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
@@ -95,6 +103,18 @@ export function claimExplorationStep(tx: WriteTx, spec: TaskSpecDoc, head: strin
   return card === spec.card ? spec : { ...spec, card };
 }
 
+/**
+ * #25 (E-3): the card an exploration step's hand-back is recorded against (seat.ts, before its write):
+ * a Stabilizer's judges the direction questions as the record holds them at the hand-back, so a ruling
+ * recorded while it ran counts (cards.ts stabilizerCardAtHandBack). Any other card is returned as it is.
+ */
+export function explorationCardAtHandBack<C extends { readonly seat: string }>(db: Db, data: DataStore, mission: MissionId, lineage: string, card: C): C {
+  if (card.seat !== 'stabilizer') return card;
+  const x = explorationOf(db, mission, lineage);
+  if (x === null) return card;
+  return stabilizerCardAtHandBack(fold(eventsOf(db, data, mission, x)), card as unknown as StabilizerCard) as unknown as C;
+}
+
 /** What `mp pm resnapshot-exploration` did. */
 export interface Resnapshotted {
   /** The commit the seats read from now on, and the one it replaces. */
@@ -104,13 +124,15 @@ export interface Resnapshotted {
   readonly n: number;
   /** The evidence recorded before: it still counts, and every read labels it "older environment". */
   readonly olderEvidence: readonly string[];
+  /** 4.1.3: the repair it recorded and answers, or null. */
+  readonly repair: string | null;
 }
 
 /** The refusals of `mp pm resnapshot-exploration` that the exploration's state decides (nothing is written). */
 function refuse(db: Db, data: DataStore, mission: string, x: string, s: XState): void {
   if (s.settled !== null) {
     throw new ProcessError(
-      'EXPLORATION_SETTLED',
+      'NOT_ALLOWED',
       `exploration ${x} of ${mission} is settled (${s.settled.body.outcome}): its result was handed on, on the snapshot it settled on. After an environment change, mp pm reopen-exploration ${mission} ${x} re-checks it; to explore again on the code as it is now, give the exploration a new id in the PM plan`,
     );
   }
@@ -133,7 +155,7 @@ function refuse(db: Db, data: DataStore, mission: string, x: string, s: XState):
  * (NOT_ALLOWED), settled (EXPLORATION_SETTLED), the branch at its snapshot (SNAPSHOT_CURRENT), a
  * dispatch in flight or a hand-back not taken into account (DISPATCH_IN_FLIGHT).
  */
-export async function pmResnapshotExploration(ctx: ProcessContext, req: { readonly mission: string; readonly exploration: string; readonly words?: string | null }): Promise<Resnapshotted> {
+export async function pmResnapshotExploration(ctx: ProcessContext, req: { readonly mission: string; readonly exploration: string; readonly words?: string | null; readonly repair?: ChangeRepair | null; readonly command?: 'repair' }): Promise<Resnapshotted> {
   const mission = req.mission as MissionId;
   const x = req.exploration;
   const data = ctx.memory.data;
@@ -144,16 +166,28 @@ export async function pmResnapshotExploration(ctx: ProcessContext, req: { readon
   const snap = await ctx.actions().snapshot({ mission, purpose: `exploration-${x}` });
   const n = before.resnapshots.length + 1;
   const r = ctx.memory.write(
-    { op: `resnapshot-exploration:${req.mission}:${x}:${n}:${snap.commit}`, payload: { mission: req.mission, exploration: x, n, commit: snap.commit, words: req.words ?? null }, command: 'resnapshot-exploration', filler: ctx.filler },
+    { op: `resnapshot-exploration:${req.mission}:${x}:${n}:${snap.commit}`, payload: { mission: req.mission, exploration: x, n, commit: snap.commit, words: req.words ?? null }, command: req.command === 'repair' ? 'repair' : 'resnapshot-exploration', filler: ctx.filler },
     (tx) => {
       const events = eventsOf(tx, tx.data, mission, x);
       const s = fold(events);
       refuse(tx, tx.data, req.mission, x, s);
-      const e = resnapshotEntries(s, { path: snap.path, commit: snap.commit }, (d) => tx.data.put(d), { by: 'pm', words: req.words ?? null });
-      if (e === null) throw new ProcessError('SNAPSHOT_CURRENT', `the target branch is at ${snap.commit}, the snapshot exploration ${x} of ${req.mission} reads already: nothing to take again`);
+      // 4.1.3 (E-5): the repair this change answers, recorded in the same write
+      let repair: { readonly id: string; readonly record: BaseRecord } | null = null;
+      if (req.repair !== undefined && req.repair !== null && req.words !== undefined && req.words !== null) {
+        let body;
+        try {
+          body = changeFormRepair(rows(tx, { mission, line: REPAIRS_LINE, event: 'repair' }).length, { words: req.words, kind: req.repair.kind, text: req.repair.text, exploration: x });
+        } catch (err) {
+          throw new ProcessError('NOT_ALLOWED', (err as Error).message);
+        }
+        repair = { id: body.id, record: { kind: 'flow.event', mission, line: REPAIRS_LINE, event: 'repair', key: body.id, body: tx.data.put(canonicalJson(body)) as ContentHash } };
+      }
+      const e = resnapshotEntries(s, { path: snap.path, commit: snap.commit }, (d) => tx.data.put(d), { by: 'pm', words: req.words ?? null, answers: repair?.id ?? null });
+      if (e === null) throw new ProcessError('NOT_ALLOWED', `the target branch is at ${snap.commit}, the snapshot exploration ${x} of ${req.mission} reads already: nothing to take again`);
+      if (repair !== null) appendRecords(tx, [repair.record]);
       record(tx, e);
       const after = fold([...events, { event: e.event.event, key: e.event.key, body: e.body }]);
-      return { snapshot: e.body.snapshot.commit, previous: e.body.previous.commit, n: e.body.n, olderEvidence: [...after.evidence.keys()].filter((id) => olderSnapshotEvidence(after, id)).sort() };
+      return { snapshot: e.body.snapshot.commit, previous: e.body.previous.commit, n: e.body.n, olderEvidence: [...after.evidence.keys()].filter((id) => olderSnapshotEvidence(after, id)).sort(), repair: repair?.id ?? null };
     },
   );
   await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm resnapshot-exploration ${req.mission} ${x}` });

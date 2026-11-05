@@ -165,7 +165,15 @@ function evidenceItems(s: XState, m: Materials, onlyExtra = false, mustRead: Rea
 }
 
 function rulings(s: XState): string[] {
-  return s.rulings.filter((r) => r.decision !== 'extend' && r.decision !== 'retry' && r.text.trim() !== '').map((r) => `(${r.decision}${r.findings.length > 0 ? ` on ${r.findings.join(', ')}` : ''}, by ${r.by}) ${r.text}`);
+  return s.rulings.flatMap((r) => {
+    if (r.decision === 'retry') return [];
+    // a grant shows on the cards only with the decision's instructions or the findings it is for (4.1.3, #38, #39)
+    if (r.decision === 'extend') {
+      if (r.instructions === undefined && r.findings.length === 0) return [];
+      return [`(grant of ${r.extraRounds} round(s)${r.findings.length > 0 ? ` for ${r.findings.join(', ')}` : ''}, by ${r.by}) ${r.instructions ?? r.text}`];
+    }
+    return r.text.trim() !== '' ? [`(${r.decision}${r.findings.length > 0 ? ` on ${r.findings.join(', ')}` : ''}, by ${r.by}) ${r.text}`] : [];
+  });
 }
 
 /** What a version of this phase relies on: a research interpretation, its method version (review r1 #2). */
@@ -306,7 +314,7 @@ export function attackerCard(s: XState, n: number, task: string, content: FlowCo
   baseMaterials(s, m);
   const all = [...s.findings.values()];
   const mine = phaseFindings(s);
-  // the closing attacker gets a fresh view: only what is still to be checked, not the history
+  // a fresh attacker (after a redefinition) gets a fresh view: only what is still to be checked, not the history
   const shown = fresh ? mine.filter((f) => f.status !== 'resolved') : mine;
   return {
     ...common(s, task, 'Attack the version adversarially and re-check every finding marked awaiting-recheck.', resume, true, [], m),
@@ -475,6 +483,29 @@ export function stabilizerCard(s: XState, n: number, task: string, content: Flow
     requiredEvidence: [...st.evidence],
     pendingDirection: pendingDirectionOf(s, round),
   };
+}
+
+/**
+ * #25 (E-3): a Stabilizer's card as its hand-back is judged (the position's verdict and the pass on
+ * the author's revision): the direction questions and the standing of the findings it lists as the
+ * record holds them at the hand-back, not as they were when the card was built, so a ruling recorded
+ * while the Stabilizer ran counts. Everything else is the card it was given; returned as it is when
+ * nothing changed.
+ */
+export function stabilizerCardAtHandBack(s: XState, card: StabilizerCard): StabilizerCard {
+  const round = new Set(card.findings.map((f) => f.id));
+  const now = (f: PriorFindingT): PriorFindingT => {
+    const x = s.findings.get(f.id);
+    if (x === undefined) return f;
+    const disposition = x.disposition === null ? null : { action: x.disposition.action, note: x.disposition.note, evidence: x.disposition.evidence, question: x.disposition.question };
+    if (x.status === f.status && x.ruling === f.ruling && JSON.stringify(disposition) === JSON.stringify(f.disposition)) return f;
+    return { ...f, status: x.status, disposition, ruling: x.ruling };
+  };
+  const findings = card.findings.map(now);
+  const earlier = card.earlier.map(now);
+  const pendingDirection = pendingDirectionOf(s, round);
+  const same = findings.every((f, i) => f === card.findings[i]) && earlier.every((f, i) => f === card.earlier[i]) && JSON.stringify(pendingDirection) === JSON.stringify(card.pendingDirection ?? []);
+  return same ? card : { ...card, findings, earlier, pendingDirection };
 }
 
 /** The direction questions waiting for a ruling apart from this round's findings (code review r1 #2). */

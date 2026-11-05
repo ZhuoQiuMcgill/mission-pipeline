@@ -117,16 +117,19 @@ export interface RepairEntry {
   readonly about: string | null;
   /** Where it stands: decided (amended and/or reopened), architect (its Architect step is under way), exploration (one more round), answered (by the user's amendment of the exploration's method), waiting. */
   readonly state?: string;
-  /** answered: the amendment that answered it, in words ("amendment <n> of exploration <id> (W-<n>)"). */
+  /** answered: the change that answered it, in words ("amendment <n> of exploration <id> (W-<n>)"; 4.1.3: also "rerun <n>", "snapshot <n>"). */
   readonly answeredBy?: string;
   /** The tasks it added to the plan in effect, and the tasks it reopened. */
   readonly added?: readonly string[];
   readonly reopened?: readonly string[];
 }
 
+/** A change that answered a repair about an exploration (4.1.3, E-5), as the close snapshot names it. */
+const CHANGE_WORDS: Readonly<Record<'attempts-amended' | 'attempt-rerun' | 'resnapshotted', string>> = { 'attempts-amended': 'amendment', 'attempt-rerun': 'rerun', resnapshotted: 'snapshot' };
+
 /** The mission's repairs for the closing snapshot, read through the flow's resolver (repairsOf). */
 async function closingRepairs(ctx: ProcessContext, mission: MissionId): Promise<RepairEntry[]> {
-  return (await repairsOf(flowCtx(ctx.ports(), mission))).map((r) => ({ repair: r.id, kind: r.kind, text: r.text, words: r.words, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state: r.state, added: [...r.added], reopened: [...r.reopened], ...(r.answeredBy !== undefined ? { answeredBy: `amendment ${r.answeredBy.amendment} of exploration ${r.answeredBy.exploration} (${r.answeredBy.words})` } : {}) }));
+  return (await repairsOf(flowCtx(ctx.ports(), mission))).map((r) => ({ repair: r.id, kind: r.kind, text: r.text, words: r.words, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state: r.state, added: [...r.added], reopened: [...r.reopened], ...(r.answeredBy !== undefined ? { answeredBy: `${CHANGE_WORDS[r.answeredBy.change]} ${r.answeredBy.n} of exploration ${r.answeredBy.exploration} (${r.answeredBy.words})` } : {}) }));
 }
 
 /** What the close reads before its write (git, and resolvers on the context): the delivered tree's full-run status, the repairs. */

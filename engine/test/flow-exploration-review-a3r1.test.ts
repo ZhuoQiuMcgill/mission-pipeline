@@ -1,7 +1,8 @@
 // Regression tests for the code review r1 of package A3, exploration findings (gpt-6.1-sol; repros
 // in engine/scratch/review41-repro.ts):
-//   #1 every attack round is stabilized (pass rounds, rounds without findings, the closing round);
-//      convergence, no progress and the repeated fatal class are decided after stabilization
+//   #1 every attack round is stabilized (pass rounds, rounds without findings); convergence, no
+//      progress and the repeated fatal class are decided after stabilization (4.1.3, E-3: by the one
+//      rule, with no closing round)
 //   #2 a direction question (an author's question, an escalated finding of any severity, a
 //      Stabilizer direction finding, a drift) is pending until its recorded ruling, and gates
 //      convergence, acceptance and the research method's pass
@@ -24,7 +25,7 @@ async function stabilize(w: World, judged: (c: StabilizerCard) => ReturnType<typ
 }
 
 describe('review r1 #1: every attack round is stabilized', () => {
-  test('the reviewer\'s repro: a pass round and the closing round each wait for their Stabilizer before converging', async () => {
+  test('the reviewer\'s repro: a pass round waits for its Stabilizer before converging (4.1.3: no closing round)', async () => {
     const w = await world();
     w.autoStabilize = false;
     await w.advance();
@@ -38,28 +39,19 @@ describe('review r1 #1: every attack round is stabilized', () => {
     assert.equal((await w.evaluator.labels([s.version!.id])).labels[s.version!.id] === 'proven', false, 'the attacker\'s pass is pending, never proven by itself');
     const c1 = await stabilize(w);
     assert.equal(c1.findings.length, 1, 'the general finding is judged too');
-    assert.equal(cardOf<CrititorCard>(w, 'crititor').fresh, true, 'now the closing attacker');
-    await hand(w, 'crititor', attack());
-    s = await explorationState(w, M, w.x);
-    await w.advance();
-    s = await explorationState(w, M, w.x);
-    assert.equal(s.stopped, null, 'the reviewer\'s repro converged here with no stabilization');
-    const c2 = await stabilize(w);
-    assert.deepEqual(c2.findings, [], 'a round without findings is stabilized: its drift is judged');
     s = await explorationState(w, M, w.x);
     assert.equal(s.stopped?.reason, 'converged');
-    assert.equal(s.stabilizations.length, 2);
+    assert.equal(s.stabilizations.length, 1);
+    assert.equal(w.scheduler.queued('crititor').length, 0, 'no closing attacker');
     assert.equal((await w.evaluator.labels([s.version!.id])).labels[s.version!.id], 'proven');
   });
 
-  test('a drifting closing round does not converge: it waits for the ruling', async () => {
+  test('a drifting round does not converge: it waits for the ruling', async () => {
     const w = await world();
     w.autoStabilize = false;
     await w.advance();
     await hand(w, 'researcher-author', submit('v1'));
     await w.advance();
-    await hand(w, 'crititor', attack());
-    await stabilize(w);
     await hand(w, 'crititor', attack());
     await stabilize(w, (c) => stabilizeAll(c, 'in-scope', { drifting: true }));
     const s = await explorationState(w, M, w.x);
@@ -103,9 +95,9 @@ describe('review r1 #2: a pending direction question gates convergence and accep
     await w.advance();
     s = await explorationState(w, M, w.x);
     assert.deepEqual(s.pendingQuestions, []);
-    assert.equal(cardOf<CrititorCard>(w, 'crititor').fresh, true);
-    await hand(w, 'crititor', attack());
-    s = await explorationState(w, M, w.x);
+    // 4.1.3 (E-3): the round that waited is judged again with the ruling (one new Stabilizer), no attack round
+    assert.equal(w.scheduler.queued('crititor').length, 0);
+    await hand(w, 'stabilizer', stabilizeAll(cardOf<StabilizerCard>(w, 'stabilizer')));
     await w.advance();
     s = await explorationState(w, M, w.x);
     assert.equal(s.stopped?.reason, 'converged');
@@ -139,7 +131,7 @@ describe('review r1 #2: a pending direction question gates convergence and accep
     await w.advance();
     s = await explorationState(w, M, w.x);
     assert.equal(s.findings.get(general)?.status, 'resolved');
-    assert.equal(s.turn, 'attacker');
+    assert.equal(s.turn, 'stabilizer', '4.1.3 (E-3): the round that waited is judged again with the ruling');
   });
 
   test('a research method does not pass while a direction question waits', async () => {
@@ -156,7 +148,8 @@ describe('review r1 #2: a pending direction question gates convergence and accep
     assert.equal(w.scheduler.queued('constructor-experiment').length, 0);
     await recordExplorationRuling(w, M, w.x, { id: 'A1', decision: 'answer', findings: [], answers: author.task, text: 'Yes.', extraRounds: 0, by: 'secretary' });
     await w.advance();
-    await hand(w, 'crititor', attack());
+    // 4.1.3 (E-3): one new Stabilizer judges the round with the ruling; its pass lets the method pass
+    await hand(w, 'stabilizer', stabilizeAll(cardOf<StabilizerCard>(w, 'stabilizer')));
     await w.advance();
     s = await explorationState(w, M, w.x);
     assert.equal(s.phase, 'attempts');
@@ -193,8 +186,6 @@ describe('review r1 #3: an experiment\'s evidence is bound to the environment of
     await hand(w, 'researcher-author', submit('', [{ finding: a.openFindings[0]!.id, action: 'rebut', note: 'the experiment', evidence: 'xpe.M1.E1.1' }]));
     await w.advance();
     await hand(w, 'crititor', attack([], recheckAll(cardOf<CrititorCard>(w, 'crititor'), 'yes', ['xpe.M1.E1.1'])));
-    await w.advance();
-    await hand(w, 'crititor', attack());
     await pump();
     let s = await explorationState(w, M, w.x);
     assert.equal(s.stopped?.reason, 'converged');
@@ -303,7 +294,7 @@ describe('review r2 #1: only the drift\'s own ruling clears the drift', () => {
 });
 
 describe('review r2 #4: a round passes only on a recorded pass', () => {
-  test('method phase: the question is ruled before the queued Stabilizer is dispatched; its "undecided" queues one new Stabilizer for the same round, whose pass lets the method pass', async () => {
+  test('method phase: the question is ruled before the queued Stabilizer hands back: judged with the ruling at its hand-back (4.1.3, #25), its pass lets the method pass, no second Stabilizer', async () => {
     const { secretary } = await import('../src/flow/scripted.ts');
     const w = await world({ product: 'answer', research: true, question: 'Does it hold?' });
     w.autoStabilize = false;
@@ -320,26 +311,19 @@ describe('review r2 #4: a round passes only on a recorded pass', () => {
     let s = await explorationState(w, M, w.x);
     assert.deepEqual(s.pendingQuestions, []);
     const rounds = s.rounds;
-    // the Stabilizer judges from its card: undecided
+    // the Stabilizer's card listed the question; its hand-back is judged with the ruling recorded since
     assert.deepEqual(await w.scheduler.run(st.task, { handBack: stabilizeAll(st.card as unknown as StabilizerCard) }), []);
+    const j = (await w.ledger.records(['judgment'])).map((x) => x.record).filter((x) => x.executor === 'stabilizer');
+    assert.deepEqual(j.map((x) => x.verdict), ['pass'], 'a recorded pass, not undecided');
     await w.advance();
     s = await explorationState(w, M, w.x);
-    assert.equal(s.phase, 'method', 'not passed on an undecided judgment (the reviewer\'s repro went to attempts)');
-    assert.equal(s.method, null);
     assert.equal(s.rounds, rounds, 'not a new round');
-    const again = only(w, 'stabilizer');
-    assert.notEqual(again.task, st.task);
-    const c2 = again.card as unknown as StabilizerCard;
-    assert.equal(c2.round, (st.card as unknown as StabilizerCard).round, 'the same round');
-    assert.deepEqual(c2.pendingDirection ?? [], [], 'a current card');
-    assert.deepEqual(await w.scheduler.run(again.task, { handBack: stabilizeAll(c2) }), []);
-    await w.advance();
-    s = await explorationState(w, M, w.x);
+    assert.equal(w.scheduler.queued('stabilizer').length, 0, 'no second Stabilizer');
     assert.equal(s.phase, 'attempts');
     assert.equal((await w.evaluator.labels([s.method!.version])).labels[s.method!.version], 'proven', 'the method passed on a recorded pass');
   });
 
-  test('closing round: an escalation ruled before the queued Stabilizer is dispatched; the new Stabilizer\'s pass converges', async () => {
+  test('a re-check round: an escalation ruled before the queued Stabilizer hands back: judged with the ruling (4.1.3, #25), it converges', async () => {
     const { secretary } = await import('../src/flow/scripted.ts');
     const { recheckAll } = await import('./flow-exploration-fixtures.ts');
     const w = await world();
@@ -347,10 +331,6 @@ describe('review r2 #4: a round passes only on a recorded pass', () => {
     await w.advance();
     await hand(w, 'researcher-author', submit('v1'));
     await w.advance();
-    await hand(w, 'crititor', attack());
-    await stabilize(w);
-    // the closing attacker finds something; it continues as the attacker (8.2)
-    assert.equal(cardOf<CrititorCard>(w, 'crititor').fresh, true);
     await hand(w, 'crititor', attack([finding('serious', 'gets stuck', 'a wait without timeout'), finding('general', 'naming', 'the user named it')]));
     await w.advance();
     const a = cardOf<AuthorCard>(w, 'researcher-author');
@@ -361,7 +341,7 @@ describe('review r2 #4: a round passes only on a recorded pass', () => {
       { finding: general, action: 'escalate', note: 'the user named it', question: 'May we rename it?' },
     ]));
     await stabilize(w);
-    // the closing session re-checks: the round would pass, but the escalation is pending when its Stabilizer is queued
+    // the re-check: the round would pass, but the escalation is pending when its Stabilizer is queued
     await hand(w, 'crititor', attack([], recheckAll(cardOf<CrititorCard>(w, 'crititor'), 'yes')));
     await pumpStep(w);
     const st = only(w, 'stabilizer');
@@ -371,14 +351,9 @@ describe('review r2 #4: a round passes only on a recorded pass', () => {
     await pumpStep(w);
     assert.deepEqual(await w.scheduler.run(st.task, { handBack: stabilizeAll(st.card as unknown as StabilizerCard) }), []);
     await w.advance();
-    let s = await explorationState(w, M, w.x);
-    assert.equal(s.stopped, null, 'not converged on an undecided judgment');
-    const again = only(w, 'stabilizer');
-    assert.deepEqual((again.card as unknown as StabilizerCard).pendingDirection ?? [], []);
-    assert.deepEqual(await w.scheduler.run(again.task, { handBack: stabilizeAll(again.card as unknown as StabilizerCard) }), []);
-    await w.advance();
-    s = await explorationState(w, M, w.x);
+    const s = await explorationState(w, M, w.x);
     assert.equal(s.stopped?.reason, 'converged');
+    assert.equal(w.scheduler.queued('stabilizer').length, 0, 'no second Stabilizer');
     assert.equal((await w.evaluator.labels([s.version!.id])).labels[s.version!.id], 'proven');
   });
 });
@@ -397,8 +372,6 @@ describe('review r2 #5: one evidence resolver', () => {
     await hand(w, 'constructor-experiment', blind(cardOf(w, 'constructor-experiment')));
     await w.advance();
     await hand(w, 'researcher-interpreter', { answer: 'holds', conclusions: [{ id: 'C1', text: 'holds', cites: ['A1', 'xpe.M1.E1.1'], standing: 'standing', key: true }], message: 'measured', dispositions: [] });
-    await w.advance();
-    await hand(w, 'crititor', attack());
     await w.advance();
     await hand(w, 'crititor', attack());
     await pumpStep(w);
@@ -430,14 +403,13 @@ describe('review r2 #5: one evidence resolver', () => {
 // ---------------------------------------------------------------- final review F1: a goal redefinition and the closing round
 
 describe('final review F1: a round is pinned to the definition version its attacker card was built under', () => {
+  /** The first round's attacker, queued (4.1.3: the round a redefinition overtakes is any round; there is no closing one). */
   async function toClosing(w: World) {
     await w.advance();
     await hand(w, 'researcher-author', submit('a design that only addresses the original goal'));
     await w.advance();
-    await hand(w, 'crititor', attack());
-    await w.advance();
     const closing = only(w, 'crititor');
-    assert.equal((closing.card as unknown as CrititorCard).fresh, true);
+    assert.equal((closing.card as unknown as CrititorCard).fresh, false);
     return closing;
   }
   async function redefine(w: World): Promise<void> {
@@ -445,7 +417,7 @@ describe('final review F1: a round is pinned to the definition version its attac
     const original = (await explorationState(w, M, w.x)).def!;
     assert.equal(await redefineExploration(w, { ...original, goal: 'also satisfy the NEW goal' }), true);
   }
-  /** After the stale closing round: a fresh attacker under the new goal, then its Stabilizer: only then converged and proven. */
+  /** After the stale round: a fresh attacker under the new goal, then its Stabilizer: only then converged and proven. */
   async function finishUnderNewGoal(w: World, target: string): Promise<void> {
     let s = await explorationState(w, M, w.x);
     assert.equal(s.stopped, null, 'a round of the old definition never converges');
@@ -468,7 +440,7 @@ describe('final review F1: a round is pinned to the definition version its attac
     assert.equal((await w.evaluator.labels([target])).labels[target], 'proven');
   }
 
-  test('the reviewer\'s repro: redefined while the closing attacker is queued; its Stabilizer binds the old version; no convergence until the new attacker and Stabilizer pass', async () => {
+  test('the reviewer\'s repro: redefined while the round\'s attacker is queued; its Stabilizer binds the old version; no convergence until the new attacker and Stabilizer pass', async () => {
     const w = await world({ rounds: 6 });
     const closing = await toClosing(w);
     const target = (closing.card as unknown as CrititorCard).target!;
@@ -485,7 +457,7 @@ describe('final review F1: a round is pinned to the definition version its attac
     await finishUnderNewGoal(w, target);
   });
 
-  test('redefined while the closing attacker is in flight', async () => {
+  test('redefined while the round\'s attacker is in flight', async () => {
     const w = await world({ rounds: 6 });
     const closing = await toClosing(w);
     const target = (closing.card as unknown as CrititorCard).target!;
@@ -500,7 +472,7 @@ describe('final review F1: a round is pinned to the definition version its attac
     await finishUnderNewGoal(w, target);
   });
 
-  test('redefined while the closing round\'s Stabilizer is queued', async () => {
+  test('redefined while the round\'s Stabilizer is queued', async () => {
     const w = await world({ rounds: 6 });
     const closing = await toClosing(w);
     const target = (closing.card as unknown as CrititorCard).target!;
@@ -514,8 +486,8 @@ describe('final review F1: a round is pinned to the definition version its attac
     await finishUnderNewGoal(w, target);
   });
 
-  test('no round left after the stale closing round: the budget stop goes to the Secretary (WI-08)', async () => {
-    const w = await world({ rounds: 2 });
+  test('no round left after the stale round: the budget stop goes to the Secretary (WI-08)', async () => {
+    const w = await world({ rounds: 1 });
     await toClosing(w);
     await redefine(w);
     w.autoStabilize = false;

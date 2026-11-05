@@ -60,6 +60,7 @@ import { isFullSuiteCommand } from '../common/fullSuite.ts';
 import type { ReviewerCard } from '../seat/card.ts';
 import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/common.ts';
 import { handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
+import { explorationCardAtHandBack } from './explorationSnapshot.ts';
 import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
 import { productObjectId, verificationStopped } from './actions.ts';
@@ -423,7 +424,9 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
     const r = fields as ReviewerResult;
     return [judgmentRecord(card, r, data.putList(citedEvidence(card, r, runs))), ...findingRecords(card, r, content, v.info.dispatch)];
   }
-  return handBackRecords(v.card, fields, { launch: v.info.dispatch, runs, content });
+  // #25 (E-3): a Stabilizer's position is judged with the direction questions as they stand at its hand-back
+  const card = v.card.seat === 'stabilizer' ? ctx.memory.read((db) => explorationCardAtHandBack(db, data, v.info.mission as MissionId, v.spec.lineage, v.card)) : v.card;
+  return handBackRecords(card, fields, { launch: v.info.dispatch, runs, content });
 }
 
 /** The flow event that records why a Secretary dispatch was taken back at its hand-back (its escalation was already decided or closed). */

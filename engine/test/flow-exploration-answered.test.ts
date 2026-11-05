@@ -194,19 +194,16 @@ describe('refused "answered" judgments', () => {
     const refused = await w.scheduler.run(t.task, { handBack: outOfScope });
     assert.ok(refused.some((p) => p.includes(`findings[${rev}]`) && p.includes('only an in-scope finding')), refused.join('; '));
     // the revised one is answerable; the escalated one still waits for its ruling, so the round does not
-    // pass on the revision (no direction question may be pending): the attacker's next round comes, as before
+    // pass on the revision (no direction question may be pending). 4.1.3 (E-3): nothing but the ruling is
+    // left, so the round waits for it (no attack round on the answered revision); once ruled, one new
+    // Stabilizer judges the round again
     assert.deepEqual(await w.scheduler.run(t.task, { handBack: answer(card, [rev]) }), []);
     await w.advance();
     const s = await explorationState(w, M, w.x);
     assert.deepEqual([s.findings.get(esc)?.status, s.findings.get(rev)?.status, s.findings.get(rev)?.answered], ['awaiting-ruling', 'resolved', 1]);
     assert.equal(s.stopped, null);
-    assert.deepEqual(
-      cardOf<CrititorCard>(w, 'crititor').priorFindings.map((f) => [f.id, f.status, f.answered ?? null]),
-      [
-        [esc, 'awaiting-ruling', null],
-        [rev, 'resolved', 1],
-      ],
-    );
+    assert.equal(s.turn, 'await-ruling');
+    assert.equal(w.scheduler.queued('crititor').length, 0);
     assert.ok((await w.ledger.records(['judgment'])).every((j) => !j.record.judgment.endsWith('.revision')), 'no pass while a direction question waits');
   });
 

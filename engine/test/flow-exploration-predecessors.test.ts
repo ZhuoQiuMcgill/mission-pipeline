@@ -115,10 +115,9 @@ describe('an exploration planned after others', () => {
     assert.throws(() => pmDispatch(w.ctx, bt.task, { filledBy: 'test-harness/scripted' }), (e: unknown) => e instanceof ProcessError && e.code === 'NOT_READY' && /waits for A/.test(e.message));
     assert.deepEqual(after((bt.card as unknown as AuthorCard).materials), [], 'nothing of A yet');
 
-    // A converges: its author's version, the attack, the closing attacker
+    // A converges: its author's version, the attack and its Stabilizer (4.1.3: no closing attacker)
     await w.hand('A', 'researcher-author', submit('design A v1'));
     assert.ok(readSteps(w.ctx).held.some((h) => h.step === bt.task), 'still held while A runs');
-    await w.hand('A', 'crititor', attack());
     await w.hand('A', 'crititor', attack());
     const s = await w.settled('A');
     assert.equal(s?.outcome, 'conclusion');
@@ -152,7 +151,6 @@ describe('an exploration planned after others', () => {
     const w = await planned([explore('elA', 'A'), explore('elB', 'B', ['elA'])]);
     await w.step();
     await w.hand('A', 'researcher-author', submit('design A v1'));
-    await w.hand('A', 'crititor', attack());
     await w.hand('A', 'crititor', attack());
     assert.equal((await w.settled('A'))?.outcome, 'conclusion');
 
@@ -196,7 +194,6 @@ describe('an exploration planned after others', () => {
     const w = await planned([explore('elA', 'A'), explore('elB', 'B', ['elA'], 6, true)]);
     await w.step();
     await w.hand('A', 'researcher-author', submit('design A v1'));
-    await w.hand('A', 'crititor', attack());
     await w.hand('A', 'crititor', attack());
     assert.equal((await w.settled('A'))?.outcome, 'conclusion');
     const attempt: RegisteredAttemptT = { id: 'T1', kind: 'experiment', purpose: 'does it hold', steps: ['run probe.sh'], data: '', measure: ['count'], assertions: [] };

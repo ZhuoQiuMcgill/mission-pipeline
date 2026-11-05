@@ -318,7 +318,11 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
     out.push(`  rounds: ${s.rounds} attacked; phase ${s.phase}; version: ${s.version?.id ?? 'none yet'} (${s.versions.length} version(s))`);
     if (s.drift !== null) out.push(`  awaiting a ruling (WI-33): round ${s.drift.round} drifting — ${clip(s.drift.reason, 160)}`);
     // registered attempts the PM had run again (mp pm rerun-attempt): each new record supersedes the earlier one
-    const reruns = [...s.attemptReruns].filter(([, r]) => r.amendment === undefined);
+    const reruns = [...s.attemptReruns].filter(([, r]) => r.amendment === undefined && r.method === undefined);
+    // 4.1.3 (#31): a method a repair sent back to its author; attempts its new version changed run under their new cards
+    if (s.reentry !== null) out.push(`  method back with its author (repair ${s.reentry.repair}): runs in flight finish; the records of attempts its new version leaves unchanged keep counting`);
+    const changed = [...s.attemptReruns].filter(([, r]) => r.method !== undefined);
+    if (changed.length > 0) out.push(`  attempts changed by a later method version: ${changed.map(([a, r]) => `${a} (in ${r.method}${r.replaces !== null ? `, superseding ${r.replaces}` : ''}${attemptRecorded(s, a) ? '' : '; its new record not in yet'})`).join(', ')}`);
     if (reruns.length > 0) out.push(`  attempts run again: ${reruns.map(([a, r]) => `${a} (rerun ${r.n}${r.replaces !== null ? `, superseding ${r.replaces}` : ''}${attemptRecorded(s, a) ? '' : '; its new record not in yet'})`).join(', ')}`);
     // the user's amendments of the method in force (mp pm amend-attempts): no round, no review
     for (const b of s.amendments) out.push(`  ${amendmentLine(b, s)}`);
