@@ -415,14 +415,18 @@ async function acceptJudgment(ctx: FlowCtx, s: XState, id: string, by: Decider |
   const latest = s.version;
   const base = s.stabilizations.at(-1)?.judgment;
   if (by === null || latest === null || base === undefined) return null;
-  if (lastPass(s, latest.id) !== null && !s.negations.has(latest.id)) return null;
+  // a pass that does not prove the version (a round judged under a definition the exploration has since
+  // replaced) does not stand: the decision's own judgment passes it on the current definition (sol final review r1)
+  const stale = lastPass(s, latest.id) !== null && !s.negations.has(latest.id) && (await ctx.ports.evaluator.labels([latest.id])).labels[latest.id] !== 'proven';
+  if (lastPass(s, latest.id) !== null && !s.negations.has(latest.id) && !stale) return null;
   const position = (await escalation(ctx, id))?.position ?? null;
   if (position?.target === latest.id) return null;
   const suffix = position !== null ? 'latest' : undefined;
   const from = await ctx.ports.ledger.judgment(base);
   if (from === null || (await ctx.ports.ledger.judgment(rulingJudgmentId(id, by, suffix))) !== null) return null;
+  const inputs = stale && s.defined !== null ? { ...from, bases: ctx.ports.ledger.content.putList([s.defined.basisVersion]) } : from;
   // the one writer of a decider's ruling (flow/secretary.ts deciderJudgment): the same id, executor and fields as a task's
-  return deciderJudgment({ escalation: id, by, ...(suffix !== undefined ? { suffix } : {}), target: latest.id, review: from.review, inputs: from, revokes: s.negations.get(latest.id) ?? null });
+  return deciderJudgment({ escalation: id, by, ...(suffix !== undefined ? { suffix } : {}), target: latest.id, review: from.review, inputs, revokes: s.negations.get(latest.id) ?? null });
 }
 
 /**

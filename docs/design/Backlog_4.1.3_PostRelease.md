@@ -32,8 +32,8 @@ the CHANGELOG. The open items of the 4.1.2 backlog stay open unless 4.1.3 says o
 
 - A repair while the interpreter is at work is refused (`DISPATCH_IN_FLIGHT`). WI line: wait for its
   hand-back, or release it, then record the repair.
-- While the method is back with its author, `--rerun` and `--resnapshot` are refused until the
-  author's version passes, and `--attempts` needs `--answers R-<n>` (PM.md). WI line: pass `--answers`
+- While the method is back with its author, `--rerun` is refused until the author's version passes,
+  and `--attempts` needs `--answers R-<n>` (PM.md). WI line: pass `--answers`
   only if the change settles that repair.
 - A Stabilizer that judges a round drifting again after each ruling costs a Secretary decision each
   time. WI line (WI-33): after a second ruling on the same drift, ask the user.

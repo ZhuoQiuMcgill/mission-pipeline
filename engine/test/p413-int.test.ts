@@ -377,7 +377,7 @@ describe('INT 6: a plan that took effect waived routes its explorations as any p
 
 // ---------------------------------------------------------------- 5
 
-describe('INT 5: one writer of a decider\'s ruling (P1 accept-risk on a task, P2 accept on an exploration)', () => {
+describe('INT 5: one writer of a decider\'s ruling (accept-risk on a task, and a ruling at an exploration\'s budget stop)', () => {
   test('the user\'s rulings on both sides: the same id form, executor and fields; a decision the program recorded has no decider', async () => {
     // P1: accept-risk on a task's needs-decision, on the user's words
     const t = await delivery('fast');
@@ -386,20 +386,22 @@ describe('INT 5: one writer of a decider\'s ruling (P1 accept-risk on a task, P2
     const tw = say(t.ports, 'Accept the parser as it is.');
     await answerEscalation(t.ports, { mission: TM, escalation: te, option: 'accept-risk', words: `Accept the parser as it is. (${tw})` });
     await drive(t.engine, t.ports.scheduler, happyScript(TM));
-    // P2: the budget step's plain accept on an exploration, on the user's words
+    // P2: the budget step's ruling on an exploration, on the user's words (accept-risk: the serious finding stays
+    // unresolved on the revision; plain accept writes through the same helper, but only on a version no pass
+    // stands on, which 4.1.3 leaves to records an older engine wrote)
     const x = await explorationMission({ rounds: 1 });
     let attacked = false;
     await drive(x.engine, x.ports.scheduler, withKinds({
       'architect-decompose': planAround([]),
       'researcher-author': (q) => ({ handBack: submit(attacked ? 'v2' : 'v1', attacked ? reviseAll(q.card as unknown as AuthorCard) : []) }),
       crititor: () => ((attacked = true), { handBack: attack([finding('serious', 'internal contradiction', 'two rules')]) }),
-      stabilizer: (q) => ({ handBack: stabilizeAll(q.card as unknown as StabilizerCard, 'in-scope', { severity: 'general' }) }),
+      stabilizer: (q) => ({ handBack: stabilizeAll(q.card as unknown as StabilizerCard) }),
       secretary: (q) => ({ handBack: secretary(q.card as unknown as SecretaryCard, 'ask-user') }),
     }));
     const xe = (await eventsOf<{ id: string; source: string; options: string[] }>(x.ports, 'secretary', 'escalation')).find((e) => e.body.source === 'exploration-budget')!.body;
-    assert.ok(xe.options.includes('accept'), xe.options.join(', '));
+    assert.ok(xe.options.includes('accept-risk'), xe.options.join(', '));
     const xw = say(x.ports, 'That design is fine as it is.');
-    await answerEscalation(x.ports, { mission: TM, escalation: xe.id, option: 'accept', words: `That design is fine as it is. (${xw})` });
+    await answerEscalation(x.ports, { mission: TM, escalation: xe.id, option: 'accept-risk', words: `That design is fine as it is. (${xw})` });
     await drive(x.engine, x.ports.scheduler, withKinds({ 'architect-decompose': planAround([]) }));
     const ruling = async (ports: Ports, id: string): Promise<JudgmentRecord> => (await ports.ledger.judgment(id)) as JudgmentRecord;
     const a = await ruling(t.ports, rulingJudgmentId(te, 'user'));
@@ -408,7 +410,7 @@ describe('INT 5: one writer of a decider\'s ruling (P1 accept-risk on a task, P2
     assert.deepEqual([a.executor, a.verdict, b.executor, b.verdict], ['user', 'pass', 'user', 'pass']);
     assert.deepEqual(Object.keys(a).sort(), Object.keys(b).sort(), 'the same fields');
     assert.deepEqual([a.issues, a.superseded, a.extends, b.issues, b.superseded, b.extends], [[], [], null, [], [], null]);
-    assert.equal((await explorationState({ ledger: x.ports.ledger }, TM, X)).stopped?.reason, 'converged');
+    assert.equal((await explorationState({ ledger: x.ports.ledger }, TM, X)).rulings.at(-1)?.decision, 'accept-risk');
     assert.deepEqual([deciderOf('user'), deciderOf('secretary'), deciderOf('program')], ['user', 'secretary', null], 'no judgment in the program\'s name');
   });
 });

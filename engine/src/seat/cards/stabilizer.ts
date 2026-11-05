@@ -146,13 +146,17 @@ export function stabilizedVerdict(card: Pick<StabilizerCard, 'findings' | 'earli
 }
 
 /**
- * The pass the Stabilizer's `answered` verdicts make on the author's revision (4.1 §6.3): when the
- * current version is not the one the round attacked, at least one finding is answered, and on that
- * version nothing in scope, fatal or serious, is left unresolved and no direction question waits.
- * Null otherwise (the attacker's next round judges the revision, as before).
+ * The pass the Stabilizer's position makes on the author's revision (4.1 §6.3; 4.1.3, E-3): when the
+ * current version is not the one the round attacked, it is the author's answer to this round's
+ * findings (a disposition on at least one), and on that version nothing in scope, fatal or serious, is
+ * left unresolved and no direction question waits: whether the Stabilizer answered a finding or judged
+ * it general or out of scope (sol final review r1: a downgraded finding no longer costs an attack
+ * round). Null otherwise (the attacker's next round judges the revision). A hand-back's recorded
+ * judgments stand as recorded (flow.ts): one written before 4.1.3 keeps its revision pass or its lack.
  */
 export function stabilizedRevision(card: Pick<StabilizerCard, 'findings' | 'earlier' | 'pendingDirection' | 'target' | 'currentVersion' | 'binding'>, r: StabilizerResult): { readonly version: string; readonly judgment: string } | null {
-  if (card.currentVersion.version === card.target || !r.findings.some((x) => x.answered === true && card.findings.some((f) => f.id === x.finding && answerable(f)))) return null;
+  if (card.currentVersion.version === card.target) return null;
+  if (!card.findings.some((f) => f.disposition !== null)) return null;
   if (verdictOn(card, r, true) !== 'pass') return null;
   return { version: card.currentVersion.version, judgment: revisionJudgment(card.binding.judgment) };
 }
@@ -245,7 +249,7 @@ export function renderStabilizerCard(c: StabilizerCard): string {
     (c.findings.length > 0
       ? renderPriorFindings("This round's findings with the author's dispositions (judge every one)", c.findings) +
         (c.findings.some((f) => answerable(f))
-          ? `When the author's revision${c.currentVersion.version !== c.target ? ` (in version ${c.currentVersion.version})` : ''} or rebuttal answers an in-scope finding, say so with \`answered\`: it is resolved without another attack round, and a round left with nothing unresolved passes.\n\n`
+          ? `When the author's revision${c.currentVersion.version !== c.target ? ` (in version ${c.currentVersion.version})` : ''} or rebuttal answers an in-scope finding, say so with \`answered\`: it is resolved without another attack round. A round left with nothing in scope fatal or serious unresolved passes${c.currentVersion.version !== c.target ? ` on version ${c.currentVersion.version}` : ''}, whether you answered its findings or judged them general or out of scope.\n\n`
           : '')
       : "## This round's findings\nThe attacker raised none this round: judge the round itself (on track or drifting).\n\n") +
     list('Direction questions still waiting for their ruling (the position stays pending until they are ruled)', c.pendingDirection ?? []) +

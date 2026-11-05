@@ -1222,8 +1222,10 @@ function stabilize(s: Mutable, c: Extract<ConsumedBody, { kind: 'stabilized' }>)
   const prevFailed = new Set(s.fatalFailed.length >= 2 ? s.fatalFailed[s.fatalFailed.length - 2] : []);
   const fatalRepeat = [...failed].filter((k) => prevFailed.has(k));
   // the next turn, by the one rule (E-3). The version the Stabilizer's judgment passed: the one the
-  // round attacked, or the author's revision when its answers resolve the findings (4.1 §6.3)
-  const rv = c.revision !== undefined && answered.length > 0 && s.version?.id === c.revision.version ? c.revision : null;
+  // round attacked, or the author's revision when nothing in scope fatal or serious is left on it, the
+  // findings answered or judged general or out of scope (4.1 §6.3; 4.1.3 sol final review r1: the
+  // pass is recorded at hand-back, stabilizedRevision; one recorded before 4.1.3 always came with an answer)
+  const rv = c.revision !== undefined && s.version?.id === c.revision.version ? c.revision : null;
   // answers about the author's revision whose pass on it was left pending (a direction question on the
   // card, ruled since): the round is about the revision, and a new Stabilizer passes it (#25)
   const pendingRevision = rv === null && answered.length > 0 && c.verdict !== 'pass' && s.version !== null && s.version.id !== st.target;

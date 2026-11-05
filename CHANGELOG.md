@@ -87,7 +87,10 @@ before you upgrade a project with work in flight.
   execution, `answered: true`. The finding is then resolved at once, without a re-check, and `mp read
   show exploration`, the hand-off and later cards say it was resolved by the Stabilizer's judgment.
   When the author's revision made a new version, the hand-back also records a pass on it (judgment
-  `<judgment>.revision`), so the version the exploration settles on is proven. A later attacker may
+  `<judgment>.revision`), so the version the exploration settles on is proven. 4.1.3 records that pass
+  whenever nothing in scope fatal or serious is left on the revision, also when the Stabilizer judged
+  the round's findings general or out of scope rather than answered them. Before, such a round cost
+  another attack round, or stopped as budget-exhausted at the budget's last. A later attacker may
   still re-check an answered finding, and "no" reopens it. On a card rebuilt at hand-back, an answer
   counts only while its finding can still be answered: a ruling that settled or redirected it first
   wins. Escalated, out-of-scope and direction findings cannot be answered (the hand-back is refused).

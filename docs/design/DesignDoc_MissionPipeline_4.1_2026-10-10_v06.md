@@ -820,6 +820,8 @@ The maintainer's rulings E-1 to E-5 (`DesignDoc_UserAuthority_2026-11-05_v01.md`
 
 The budget is not part of the rule: it is checked only when another round would start. No closing attacker is called in any more. At the Stabilizer's hand-back, the card its verdict is computed from is rebuilt from the ledger at that moment (the direction questions and the finding states); the flow takes the verdict and the `.revision` pass from those recorded judgments.
 
+**The pass on the author's revision.** When the author revised the round's findings and nothing in scope fatal or serious is left on the revision, the Stabilizer's hand-back records a pass on it (`<judgment>.revision`), whether the Stabilizer answered the findings or judged them general or out of scope (sol final review r1). The round then converges on the revision, with no attack round on it. A pass recorded before 4.1.3 stands as recorded; one came only with an answer. When plain `accept` settles on a version whose pass does not prove it (a round judged under a definition the exploration has since replaced), the decision's own judgment passes it on the current definition.
+
 `answered` (the field's change, kept inside the rule): the Stabilizer may resolve an in-scope finding the author revised or rebutted, without a re-check; a later attacker may still re-check and reopen it. An answered finding whose revision was left pending by a direction question is judged on that revision. On a card rebuilt at hand-back, an answer counts only while the finding is still answerable. Replay compatibility: an older engine's budget stop on a round the rule would now end, followed by a grant, converges at once.
 
 ### P.6 Grants with instructions and findings, and `accept`

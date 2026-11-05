@@ -462,13 +462,41 @@ describe('f: a grant buys what it is for', () => {
 });
 
 describe('g: plain "accept" when nothing is unresolved (E-1)', () => {
-  test('the Stabilizer judged the last round\'s findings general: nothing fatal or serious unresolved, the revision not attacked; the budget step offers accept; accepted, it converges by the decision with no risk list', async () => {
+  for (const how of [{ verdict: 'in-scope', severity: 'general' }, { verdict: 'out-of-scope' }] as const) {
+    test(`the Stabilizer judged the last round's finding ${how.verdict === 'in-scope' ? 'general' : 'out of scope'} on the author's revision: nothing fatal or serious is left on it, so the round converges on the revision by the Stabilizer's pass, with no attack round and no budget stop (sol final review r1)`, async () => {
+      const w = await planned(1);
+      await w.step();
+      await w.hand1('researcher-author', submit('v1'));
+      await w.hand1('crititor', attack([finding('serious', 'gets stuck', 'waits forever')]));
+      await w.hand1('researcher-author', submit('v2', reviseAll(w.one('researcher-author').card as unknown as AuthorCard)));
+      await w.hand1('stabilizer', stabilizeAll(w.one('stabilizer').card as unknown as StabilizerCard, how.verdict, how.verdict === 'in-scope' ? { severity: how.severity } : {}));
+      const s = await state(w, 'X1');
+      assert.equal(s.stopped?.reason, 'converged');
+      assert.deepEqual(await w.escalations(), [], 'no budget stop');
+      assert.equal(w.scheduler.queued('crititor').length, 0, 'no attack round on the revision');
+      const v2 = s.version!.id;
+      assert.deepEqual((await w.settled()).map((x) => [x.outcome, x.stop, x.artifact]), [['conclusion', 'converged', v2]]);
+      // the Stabilizer's position passes the revision, recorded at its hand-back (no judgment in the program's name)
+      const j = (await w.ledger.records(['judgment'])).map((x) => x.record).find((r) => r.target === v2);
+      assert.deepEqual([j?.executor, j?.verdict, j?.review], ['stabilizer', 'pass', 'crititor']);
+      assert.match(j?.judgment ?? '', /\.revision$/);
+      assert.equal((await w.evaluator.labels([v2])).labels[v2], 'proven');
+    });
+  }
+
+  test('a round judged under an older definition at the budget\'s last: only a general finding is open, nothing fatal or serious unresolved; the budget step offers accept; accepted, it converges by the decision with no risk list', async () => {
     const w = await planned(1);
     await w.step();
     await w.hand1('researcher-author', submit('v1'));
-    await w.hand1('crititor', attack([finding('serious', 'gets stuck', 'waits forever')]));
-    await w.hand1('researcher-author', submit('v2', reviseAll(w.one('researcher-author').card as unknown as AuthorCard)));
-    await w.hand1('stabilizer', stabilizeAll(w.one('stabilizer').card as unknown as StabilizerCard, 'in-scope', { severity: 'general' }));
+    // the definition changes while the round's attacker is at work: its round is judged under the older
+    // one, and a fresh attacker under the current one has no round left
+    const t = w.one('crititor');
+    w.scheduler.dispatchOf(t.task);
+    const def = (await state(w, 'X1')).def!;
+    await redefineExploration(w, { ...def, goal: `${def.goal}, and every rule has its source` });
+    assert.deepEqual(await w.scheduler.run(t.task, { handBack: attack([finding('general', 'gets stuck', 'a qualification without its source')]) }), []);
+    await w.step();
+    await w.hand1('stabilizer', stabilizeAll(w.one('stabilizer').card as unknown as StabilizerCard));
     assert.equal((await state(w, 'X1')).stopped?.reason, 'budget-exhausted');
     const esc = (await w.escalations())[0]!;
     assert.deepEqual(esc.options, ['accept', 'grant', 'replan', 'abandon', 'ask-user'], 'accept replaces accept-risk; nothing to send back with no round left');
@@ -478,24 +506,25 @@ describe('g: plain "accept" when nothing is unresolved (E-1)', () => {
     assert.equal(s.stopped?.reason, 'converged');
     assert.equal(s.rulings.at(-1)?.decision, 'accept');
     const settled = await w.settled();
-    assert.deepEqual(settled.map((b) => [b.outcome, b.stop, b.artifact]), [['conclusion', 'converged', s.version!.id]]);
+    assert.deepEqual(settled.map((x) => [x.outcome, x.stop, x.artifact]), [['conclusion', 'converged', s.version!.id]]);
     assert.match(settled[0]!.summary, /accepted by the decision \(user\)/);
     const h = (await explorationHandoffs(w.ledger, M)).at(-1)!.handoff;
     assert.deepEqual(h.residualRisks, []);
     assert.equal(h.accepted?.by, 'user');
     assert.match(w.ledger.notices.find((n) => n.category === 'exploration-converged')?.trigger ?? '', /accepted the latest version/);
-    // the revision no round attacked is passed by the user's own judgment, written with the decision: it stands, and planning plans from it
-    const v2 = s.version!.id;
-    const j = (await w.ledger.records(['judgment'])).map((c) => c.record).find((r) => r.target === v2);
-    assert.deepEqual([j?.judgment, j?.executor, j?.verdict, j?.review], [`j.user.${esc.id}`, 'user', 'pass', 'crititor']);
+    // the Stabilizer's pass was judged under the older definition: the user's own judgment passes the version on the
+    // current one, written with the decision; it stands, and planning plans from it
+    const v = s.version!.id;
+    const j = (await w.ledger.records(['judgment'])).map((x) => x.record).find((r) => r.target === v && r.executor === 'user');
+    assert.deepEqual([j?.judgment, j?.verdict, j?.review], [`j.user.${esc.id}`, 'pass', 'crititor']);
     assert.equal(h.accepted?.judgment, `j.user.${esc.id}`);
-    assert.equal((await w.evaluator.labels([v2])).labels[v2], 'proven');
-    assert.equal((await settledArtifactProven(w.ports, M, 'X1')).proven, true, 'the decision layer plans from it (planning.ts explorationState)');
     const applied = (await w.ledger.events<{ what: { judgment?: string } }>({ mission: M, line: SECRETARY_LINE, event: 'applied' })).find((e) => e.key === esc.id);
     assert.equal(applied?.body.what.judgment, `j.user.${esc.id}`, 'the record says the decision passed it');
+    assert.equal((await w.evaluator.labels([v])).labels[v], 'proven');
+    assert.equal((await settledArtifactProven(w.ports, M, 'X1')).proven, true, 'the decision layer plans from it (planning.ts explorationState)');
   });
 
-  test('a research method stopped with nothing unresolved: accept passes the method to its attempts', async () => {
+  test('a research method whose finding the Stabilizer judged general on the author\'s revision passes to its attempts by the Stabilizer\'s pass, with no budget stop (sol final review r1)', async () => {
     const w = await world({ product: 'answer', research: true, question: 'Does the lock hold?', decision: { type: 'structure', text: 'which lock' }, rounds: 1 });
     w.autoStabilize = false;
     await w.advance();
@@ -505,9 +534,7 @@ describe('g: plain "accept" when nothing is unresolved (E-1)', () => {
     await w.advance();
     await hand(w, 'researcher-author', submit('method v2', reviseAll(cardOf<AuthorCard>(w, 'researcher-author')), { attempts: [{ id: 'A1', kind: 'reading', purpose: 'p', steps: ['read', 'compare'], data: '', measure: ['m'], assertions: [] }] }));
     await stabilize(w, (c) => stabilizeAll(c, 'in-scope', { severity: 'general' }));
-    assert.equal((await w.advance()).stopped?.reason, 'budget-exhausted');
-    await recordExplorationRuling(w, M, w.x, { id: 'acc', decision: 'accept', findings: [], text: 'the method is fine', extraRounds: 0, by: 'user' });
-    await w.advance();
+    assert.equal((await w.advance()).stopped, null, 'no budget stop');
     const s = await state(w);
     assert.equal(s.stopped, null);
     assert.equal(s.phase, 'attempts');
