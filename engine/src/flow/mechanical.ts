@@ -26,7 +26,7 @@
 // rules apply to the added tasks (the plan in effect passed them when it took effect), and rule 4
 // leaves the added tasks out (the PM's full run at the end checks them, D-7).
 
-import { elementsOf, planIdProblems, type DetailedPlanDoc, type DetailedTask, type PmPlanDoc } from './plandoc.ts';
+import { afterOf, elementsOf, planIdProblems, type DetailedPlanDoc, type DetailedTask, type PmPlanDoc } from './plandoc.ts';
 import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
 
 /** The mechanical checks in words (the Architect's card renders this list; mechanicalCheck applies it). */
@@ -104,8 +104,13 @@ export interface MechanicalInputs {
   readonly hasSymbol: (file: string, symbol: string) => Promise<boolean>;
   /** The project's full suite (config `fullSuite`, COMMON's alias): no task declares one of its commands (the integration Reviewer's full-run runs it). */
   readonly fullSuite?: readonly SuiteCommand[];
-  /** A repair's amendment (D-10): the ids of the tasks it adds to the plan in effect (`plan` holds both). */
-  readonly amendment?: { readonly added: ReadonlySet<string> };
+  /**
+   * A repair's amendment (D-10): the ids of the tasks it adds to the plan in effect (`plan` holds both),
+   * and (4.1.3) the tasks whose card it changes, each with its card before the change (`plan` holds the
+   * new card). The per-task rules apply to both; a changed task's reused interfaces are looked up only
+   * where the change added their use (#40: the snapshot moved on with accepted work).
+   */
+  readonly amendment?: { readonly added: ReadonlySet<string>; readonly changed?: ReadonlyMap<string, DetailedTask> };
   /**
    * Tasks earlier repairs added (plandoc.ts amendedTaskIds): the integration rule (rule 4) is
    * evaluated on the plan's own tasks only, so these, and the amendment's own added tasks, are
@@ -135,10 +140,15 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
   const failures: string[] = planIdProblems(plan).map((p) => `ids: ${p}`);
   const orderChanges: string[] = [];
   const elements = new Map(pmPlan.elements.map((e) => [e.id, e]));
-  const waiting = (id: string): boolean => (elements.get(id)?.after ?? []).some((x) => i.unsettled.has(x)) || (elements.get(id)?.kind === 'exploration' && i.unsettled.has(elements.get(id)?.exploration?.id ?? ''));
+  // `after` names explorations by element id or by exploration id (4.1.3, #22: afterOf resolves both)
+  const waiting = (id: string): boolean => {
+    const el = elements.get(id);
+    if (el === undefined) return false;
+    return afterOf(pmPlan, el).explorations.some((x) => i.unsettled.has(x)) || (el.kind === 'exploration' && i.unsettled.has(el.exploration?.id ?? ''));
+  };
 
-  // a repair's amendment: the per-task rules apply to the tasks it adds (the plan in effect passed them)
-  const checked = (t: DetailedTask): boolean => i.amendment === undefined || i.amendment.added.has(t.id);
+  // a repair's amendment: the per-task rules apply to the tasks it adds and to the cards it changes (the plan in effect passed the rest)
+  const checked = (t: DetailedTask): boolean => i.amendment === undefined || i.amendment.added.has(t.id) || (i.amendment.changed?.has(t.id) ?? false);
 
   // 6, 7. every task writes something (integration and experiments excepted); no task declares the full suite
   for (const t of plan.tasks) {
@@ -210,7 +220,13 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
   // a repair's amendment looks up only the reused interfaces its added tasks use: the snapshot has moved on
   // with accepted work since the plan in effect named its own (a file renamed to its next version, say), and
   // an amendment may change no existing task to follow it
-  const usedByChecked = (name: string): boolean => plan.tasks.some((t) => checked(t) && (t.calls.includes(name) || t.implements.includes(name)));
+  // (a changed card: only the uses its change added)
+  const uses = (t: DetailedTask, name: string): boolean => t.calls.includes(name) || t.implements.includes(name);
+  const usedByChecked = (name: string): boolean => plan.tasks.some((t) => {
+    if (!checked(t) || !uses(t, name)) return false;
+    const before = i.amendment?.changed?.get(t.id);
+    return before === undefined || !uses(before, name);
+  });
   for (const [name, r] of reused) {
     if (i.amendment !== undefined && !usedByChecked(name)) continue;
     if (!(await i.hasSymbol(r.file, name))) failures.push(`interfaces: reused interface ${name} is not found in ${r.file} of the snapshot`);

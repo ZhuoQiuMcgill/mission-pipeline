@@ -140,6 +140,9 @@ test('T1c: pinned starts use the public production resolvers and preserve the fu
     startRisks: [],
     olderEnvironment: [],
     repairs: [],
+    // 4.1.3: the plans that took effect without their reviews, the outputs accepted with their risks
+    planReviews: [],
+    acceptedWithRisk: [],
     fullRun: null,
     labelsRecomputing: false,
     risks: [],

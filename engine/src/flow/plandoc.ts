@@ -82,6 +82,70 @@ export const PmPlanDoc = z.object({
 });
 export type PmPlanDoc = z.infer<typeof PmPlanDoc>;
 
+/** What one element's `after` names (4.1.3, #22): explorations, by exploration id; other elements, by element id; entries that name nothing. */
+export interface AfterOf {
+  /** The explorations it waits for (an entry naming an exploration element, or an exploration by its id); never its own. */
+  readonly explorations: readonly string[];
+  /** The other elements it names that are not explorations (they hold nothing: only explorations are waited for). */
+  readonly elements: readonly string[];
+  /** Entries that name no element and no exploration of the plan. */
+  readonly unknown: readonly string[];
+}
+
+/**
+ * The one resolver of a PM plan element's `after` (4.1.3, #22): each entry is an element id (what the
+ * plan template shows) or an exploration id, resolved through the plan to what it names. Every reader
+ * of `after` uses it: the decision layer (what to decompose, the Architect's card), the mechanical
+ * checks, the explorations' predecessors and their hold.
+ */
+export function afterOf(doc: Pick<PmPlanDoc, 'elements'>, el: Pick<PmPlanElement, 'id' | 'after' | 'exploration'>): AfterOf {
+  const explorations: string[] = [];
+  const elements: string[] = [];
+  const unknown: string[] = [];
+  const own = el.exploration?.id;
+  for (const a of el.after) {
+    // an exploration element by its element id, else an exploration by its own id (PR #21's order), else another element
+    const x = (doc.elements.find((e) => e.id === a && e.exploration !== undefined) ?? doc.elements.find((e) => e.exploration?.id === a))?.exploration?.id;
+    if (x !== undefined) {
+      if (x !== own && !explorations.includes(x)) explorations.push(x);
+      continue;
+    }
+    const other = doc.elements.find((e) => e.id === a);
+    if (other === undefined) {
+      if (!unknown.includes(a)) unknown.push(a);
+    } else if (other.id !== el.id && !elements.includes(other.id)) elements.push(other.id);
+  }
+  return { explorations, elements, unknown };
+}
+
+/**
+ * A cycle over `after` (4.1.3, #23): explorations that wait for each other, so none of them ever
+ * starts. Only waits count (an element waits for explorations only). The cycle as "element
+ * (exploration)" names in order, its first one repeated at the end; null when there is none.
+ */
+export function afterCycle(doc: Pick<PmPlanDoc, 'elements'>): string[] | null {
+  const byX = new Map(doc.elements.flatMap((e) => (e.exploration !== undefined ? [[e.exploration.id, e] as const] : [])));
+  const state = new Map<string, 'visiting' | 'done'>();
+  const name = (x: string): string => `${byX.get(x)?.id ?? x} (${x})`;
+  const visit = (x: string, path: string[]): string[] | null => {
+    if (state.get(x) === 'done') return null;
+    if (state.get(x) === 'visiting') return [...path.slice(path.indexOf(x)), x];
+    state.set(x, 'visiting');
+    const el = byX.get(x);
+    for (const p of el === undefined ? [] : afterOf(doc, el).explorations) {
+      const c = visit(p, [...path, x]);
+      if (c !== null) return c;
+    }
+    state.set(x, 'done');
+    return null;
+  };
+  for (const x of byX.keys()) {
+    const c = visit(x, []);
+    if (c !== null) return c.map(name);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- the detailed plan (3.4)
 
 /**
@@ -185,21 +249,41 @@ export interface AmendmentEntry {
   readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string }>;
   /** The Architect repair task whose hand-back it is. */
   readonly arch: string;
+  /**
+   * 4.1.3 (#35): the changed cards of tasks of the plan in effect that had no accepted product (same
+   * id, a new goal, standards, scope or commands). Each such task starts a new attempt under its new
+   * card. Absent: none (every amendment before 4.1.3).
+   */
+  readonly changed?: readonly DetailedTask[];
 }
 
-/** The detailed plan with the amendments recorded on it, in order (an id the plan already has is never replaced). */
+/**
+ * The detailed plan with the amendments recorded on it, in order: the tasks they add (an id the plan
+ * already has is never replaced by an added task) and the cards they change (4.1.3: a task with no
+ * accepted product, replaced by id; a later change replaces an earlier one).
+ */
 export function amendedPlan(plan: DetailedPlanDoc, amendments: readonly AmendmentEntry[] | undefined): DetailedPlanDoc {
   if (amendments === undefined || amendments.length === 0) return plan;
   const ids = new Set(plan.tasks.map((t) => t.id));
-  const added: DetailedTask[] = [];
+  let tasks: DetailedTask[] = [...plan.tasks];
   for (const a of amendments) {
     for (const t of a.tasks) {
       if (ids.has(t.id)) continue;
       ids.add(t.id);
-      added.push(DetailedTask.parse(t));
+      tasks.push(DetailedTask.parse(t));
+    }
+    for (const c of a.changed ?? []) {
+      if (!ids.has(c.id)) continue;
+      const card = DetailedTask.parse(c);
+      tasks = tasks.map((t) => (t.id === card.id ? card : t));
     }
   }
-  return { ...plan, tasks: [...plan.tasks, ...added] };
+  return { ...plan, tasks };
+}
+
+/** The repair whose amendment changed a task's card last (4.1.3), or null. */
+export function cardChangedBy(amendments: readonly AmendmentEntry[] | undefined, task: string): string | null {
+  return (amendments ?? []).filter((a) => (a.changed ?? []).some((t) => t.id === task)).at(-1)?.repair ?? null;
 }
 
 /**
@@ -316,6 +400,8 @@ export interface RepairDecidedBody {
   readonly add: readonly string[];
   /** The tasks it reopens, each at the attempt it was accepted at when the repair was decided. */
   readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string }>;
+  /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
+  readonly changed?: readonly string[];
 }
 /** A repair as a card shows it (every card of the work it caused). */
 export interface RepairRef {

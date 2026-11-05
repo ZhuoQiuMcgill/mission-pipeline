@@ -12,7 +12,7 @@
 import { canonicalJson } from '../../common/hash.ts';
 import type { MissionId } from '../../common/ids.ts';
 import { materialPageCount, type MaterialRef } from '../../seat/cards/common.ts';
-import { PLAN_LINE, PM_PLAN_EFFECTIVE, PmPlanDoc, explorationLine, type PmPlanEffectiveBody } from '../plandoc.ts';
+import { PLAN_LINE, PM_PLAN_EFFECTIVE, PmPlanDoc, afterOf, explorationLine, type PmPlanEffectiveBody } from '../plandoc.ts';
 import type { FlowLedgerPort } from '../ports.ts';
 import { fold, type XEvent, type XState } from './machine.ts';
 
@@ -44,21 +44,17 @@ export function effectivePlans(events: Iterable<PlanEvent>, text: (hash: string)
 
 /**
  * The explorations exploration `x` is planned after: the "after" of its element in the last
- * effective PM plan that defines it (the plan its definition is read from, step.ts). An entry names
- * an element of that plan that is an exploration, or an exploration of it by its id; other entries
- * (a deliverable...) are not explorations and are left out. Null when no plan defines it.
+ * effective PM plan that defines it (the plan its definition is read from, step.ts), resolved by
+ * plandoc.ts afterOf (an element that is an exploration, or an exploration by its id; other entries,
+ * a deliverable..., are not explorations and are left out). Null when no plan defines it.
  */
 export function plannedAfter(plans: ReadonlyArray<{ readonly body: PmPlanEffectiveBody; readonly doc: PmPlanDoc }>, x: string): PlannedAfter | null {
   let out: PlannedAfter | null = null;
   for (const { body, doc } of plans) {
     const el = doc.elements.find((e) => e.exploration?.id === x);
     if (el === undefined || !body.explorations.includes(x)) continue;
-    const explorations: string[] = [];
-    for (const a of el.after) {
-      const p = (doc.elements.find((e) => e.id === a && e.exploration !== undefined) ?? doc.elements.find((e) => e.exploration?.id === a))?.exploration?.id;
-      if (p !== undefined && p !== x && !explorations.includes(p)) explorations.push(p);
-    }
-    out = { plan: body.plan, element: el.id, explorations };
+    // the plan's one resolver of `after` (4.1.3, #22): element ids and exploration ids alike
+    out = { plan: body.plan, element: el.id, explorations: [...afterOf(doc, el).explorations] };
   }
   return out;
 }

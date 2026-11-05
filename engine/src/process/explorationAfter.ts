@@ -9,7 +9,7 @@
 import type { MissionId } from '../common/ids.ts';
 import { xid } from '../flow/exploration/definition.ts';
 import { effectivePlans, foldExploration, plannedAfter } from '../flow/exploration/predecessors.ts';
-import { PLAN_LINE, PM_PLAN_EFFECTIVE, explorationLine } from '../flow/plandoc.ts';
+import { PLAN_LINE, PM_PLAN_EFFECTIVE, afterCycle, explorationLine } from '../flow/plandoc.ts';
 import type { DataStore } from '../memory/data.ts';
 import { flowEvents, listDispatches, type Db, type FlowEventRow } from '../memory/index.ts';
 import type { TaskSpecDoc } from './ports.ts';
@@ -54,7 +54,8 @@ export function heldByPredecessors(db: Db, data: DataStore, spec: TaskSpecDoc): 
   const s = foldExploration(read(db, data, { mission, line: explorationLine(x) }));
   // a step of it was dispatched already (a released one too): it goes on
   if ([...s.tasks.keys()].some((t) => listDispatches(db, { task: t, limit: 1 }).length > 0)) return null;
-  const after = plannedAfter(effectivePlans(read(db, data, { mission, line: PLAN_LINE, event: PM_PLAN_EFFECTIVE }), (h) => data.text(h)), x);
+  const plans = effectivePlans(read(db, data, { mission, line: PLAN_LINE, event: PM_PLAN_EFFECTIVE }), (h) => data.text(h));
+  const after = plannedAfter(plans, x);
   if (after === null) return null;
   const waiting: string[] = [];
   for (const p of after.explorations) {
@@ -62,5 +63,9 @@ export function heldByPredecessors(db: Db, data: DataStore, spec: TaskSpecDoc): 
     if (ps.settled === null) waiting.push(`${p} (${ps.defined === null ? 'not defined yet' : ps.settles.length > 0 ? 'reopened' : 'not settled'})`);
   }
   if (waiting.length === 0) return null;
-  return `exploration ${x} waits for ${waiting.join(', ')} to settle: element ${after.element} of PM plan ${after.plan} places it after ${after.explorations.join(', ')}; it starts once they have, and its card then carries what they handed on`;
+  // 4.1.3 (#23): a cycle over "after" (a plan recorded before such plans were refused) never ends: said, with the exit
+  const doc = plans.find((p) => p.body.plan === after.plan)?.doc;
+  const cycle = doc === undefined ? null : afterCycle(doc);
+  const inCycle = cycle !== null && cycle.some((c) => c.endsWith(`(${x})`));
+  return `exploration ${x} waits for ${waiting.join(', ')} to settle: element ${after.element} of PM plan ${after.plan} places it after ${after.explorations.join(', ')}; ${inCycle ? `they wait for each other (${cycle!.join(' → ')}), so none starts: submit a PM plan without one of these "after" entries` : 'it starts once they have, and its card then carries what they handed on'}`;
 }

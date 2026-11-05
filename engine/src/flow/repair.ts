@@ -29,7 +29,7 @@ import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flo
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
 import { PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedTaskIds, explorationLine, repairRef, taskLine, type AmendmentEntry, type DetailedPlanDoc, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
-import { explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, type EffectiveBody } from './planning.ts';
+import { explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { acceptedProduct, lineAcceptance, pathOwners } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints } from './requirements.ts';
@@ -60,6 +60,8 @@ export interface RepairState extends RepairBody {
   readonly state: 'exploration' | 'answered' | 'architect' | 'decided' | 'waiting';
   readonly added: readonly string[];
   readonly reopened: readonly string[];
+  /** 4.1.3: the tasks whose card it changed (absent: none). */
+  readonly changed?: readonly string[];
   /** The plan it amended (decided), or works on. */
   readonly dplan: string | null;
   /** answered: the amendment that answered it (its number on the exploration, and the user's words it rests on). */
@@ -83,6 +85,7 @@ export async function repairsOf(ctx: FlowCtx, mission: string = ctx.mission): Pr
       state,
       added: d?.add ?? [],
       reopened: d?.reopen.map((x) => x.task) ?? [],
+      ...((d?.changed ?? []).length > 0 ? { changed: [...d!.changed!] } : {}),
       dplan: d?.dplan ?? a?.dplan ?? null,
       ...(amended !== undefined && r.about !== null ? { answeredBy: { exploration: r.about.id, amendment: amended.n, words: amended.words } } : {}),
     });
@@ -182,7 +185,8 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   }
   const result = view.result as ArchitectRepairResult;
   const added = result.add;
-  // the mechanical checks only (D-10): the plan in effect plus the added tasks
+  const change = result.change ?? [];
+  // the mechanical checks only (D-10): the plan in effect with the changed cards (4.1.3), plus the added tasks
   let mc = (await eventOf<MechanicalResult>(ctx, REPAIRS_LINE, 'mechanical-check', task))?.body ?? null;
   if (mc === null) {
     const doc = await pmPlanDoc(ctx, eff.pmPlan);
@@ -190,13 +194,14 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
     const ex = await explorationState(ctx, doc);
     if (ex.recomputing) return;
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
+    const before = new Map(change.flatMap((c) => { const t = plan.tasks.find((x) => x.id === c.id); return t === undefined ? [] : [[c.id, t] as const]; }));
     mc = await mechanicalCheck({
       pmPlan: doc,
-      plan: { ...plan, tasks: [...plan.tasks, ...added] },
+      plan: { ...plan, tasks: [...plan.tasks.map((t) => change.find((c) => c.id === t.id) ?? t), ...added] },
       unsettled: ex.unsettled,
       hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }),
       fullSuite: ctx.ports.project?.fullSuite ?? [],
-      amendment: { added: new Set(added.map((t) => t.id)) },
+      amendment: { added: new Set(added.map((t) => t.id)), ...(before.size > 0 ? { changed: before } : {}) },
       // the tasks earlier repairs added stay outside the integration rule (S3)
       amended: amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)),
     });
@@ -264,17 +269,29 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     else reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product });
   }
   const added: readonly DetailedTask[] = result.add;
-  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen };
+  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now (one accepted meanwhile keeps its card, said)
+  const changed: DetailedTask[] = [];
+  for (const c of result.change ?? []) {
+    if ((await acceptedProduct(ctx, c.id)) !== null || !plan.tasks.some((t) => t.id === c.id)) skipped.push(c.id);
+    else changed.push(c);
+  }
+  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}) };
   const events = [ev(ctx, REPAIRS_LINE, 'decided', r.id, body)];
   const records: BaseRecord[] = [];
-  if (added.length > 0) {
-    const entry: AmendmentEntry = { repair: r.id, tasks: added, reopen: reopen.map((x) => ({ task: x.task, issue: x.issue })), arch: task };
+  if (added.length > 0 || changed.length > 0) {
+    const entry: AmendmentEntry = { repair: r.id, tasks: added, reopen: reopen.map((x) => ({ task: x.task, issue: x.issue })), arch: task, ...(changed.length > 0 ? { changed } : {}) };
     const n = (eff.amendments ?? []).length + 1;
     const amended: EffectiveBody = { ...eff, tasks: [...eff.tasks, ...added.map((t) => t.id)], amendments: [...(eff.amendments ?? []), entry] };
     events.push(ev(ctx, PLAN_LINE, 'effective', `${eff.dplan}#a${n}`, amended));
-    // the added tasks' standards become basis lines, as a plan's do when it takes effect
+    // a re-plan a changed task waits for is answered by the change (#35): it is not routed to the Architect any more
+    const changedIds = new Set(changed.map((t) => t.id));
+    const answered = new Set((await eventsOf(ctx, PLAN_LINE, REPLAN_ANSWERED)).map((e) => e.key));
+    for (const q of await eventsOf<{ task: string }>(ctx, PLAN_LINE, 'replan-request')) {
+      if (changedIds.has(q.body.task) && !answered.has(q.key)) events.push(ev(ctx, PLAN_LINE, REPLAN_ANSWERED, q.key, { escalation: q.key, task: q.body.task, repair: r.id }));
+    }
+    // the added tasks' standards, and the changed cards', become basis lines, as a plan's do when it takes effect
     const ix = await basisIndex(ctx);
-    for (const t of added) {
+    for (const t of [...added, ...changed]) {
       for (const s of t.standards) {
         const line = standardLine(ctx.mission, t.id, s.id);
         const version = nextBasisVersion(ix, line, shortHash(s.text));
@@ -287,9 +304,9 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     category: 'repair-decided',
     wi: null,
     key: r.id,
-    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${skipped.length > 0 ? `; ${skipped.join(', ')} ${skipped.length === 1 ? 'is' : 'are'} not accepted any more and ${skipped.length === 1 ? 'was' : 'were'} left out` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
-    defaultAction: 'the work goes on: the added tasks run like any task of the plan, each reopened task gets a new attempt with the repair on its card; nothing else is re-reviewed (D-10)',
-    detail: { repair: r.id, dplan: eff.dplan, added: added.map((t) => t.id), reopen, skipped, orderChanges: mc.orderChanges },
+    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.map((t) => t.id).join(', ')}` : ''}${skipped.length > 0 ? `; ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} left out (no longer accepted to reopen, or accepted meanwhile so its card stays)` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
+    defaultAction: `the work goes on: the added tasks run like any task of the plan, each reopened task gets a new attempt with the repair on its card${changed.length > 0 ? ', each changed task starts a new attempt under its new card and carries its earlier work on' : ''}; nothing else is re-reviewed (D-10)`,
+    detail: { repair: r.id, dplan: eff.dplan, added: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), skipped, orderChanges: mc.orderChanges },
   });
 }
 
@@ -312,7 +329,7 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
   const owners = (await pathOwners(ctx, about)).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
   const card: ArchitectRepairCard = {
     ...cardBase(ctx, task, {
-      duties: `Turn repair ${r.id} into the least work that fixes it: reopen the tasks whose accepted work causes it, and add tasks only for work no existing task owns. Change no existing task. Only the program's mechanical checks follow (no Calibrator, no feasibility review).`,
+      duties: `Turn repair ${r.id} into the least work that fixes it: reopen the tasks whose accepted work causes it, change the card of a task with no accepted product when the repair is about its card, and add tasks only for work no existing task owns. A task with an accepted product keeps its card. Only the program's mechanical checks follow (no Calibrator, no feasibility review).`,
       constraints: planningConstraints(await currentConstraints(ctx), ctx.mission),
     }),
     repairs: [repairRef(r)],

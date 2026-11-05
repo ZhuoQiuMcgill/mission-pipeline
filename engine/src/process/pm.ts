@@ -94,7 +94,9 @@ import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, type TaskSpecDoc } from './ports.ts';
 import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { fullRunLine, heldByClose } from './close.ts';
-import { fullRunStatus } from './fullRuns.ts';
+import { authorizationInForce, fullRunStatus } from './fullRuns.ts';
+import { CONFIG_KEY, REVIEWS_WAIVER, WAIVABLE_CHECKS, waiversInForce, type ReviewsWaiverBody } from '../flow/waivers.ts';
+import { PLAN_LINE } from '../flow/plandoc.ts';
 import { dispatchOver, sweepTmp, SWEEP_BUDGET_MS } from './housekeeping.ts';
 import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/scope.ts';
 import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
@@ -841,6 +843,86 @@ export async function pmRepair(ctx: ProcessContext, req: { readonly mission: str
   }
   await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm repair ${r.id}` });
   return { repair: r.id, repeated: r.repeated, about };
+}
+
+export interface WaiveRequest {
+  readonly mission: string;
+  /** The check waived: only "plan-reviews" (the feasibility review and Calibrator ②) in 4.1.3. */
+  readonly check: string;
+  /** One detailed plan version (dplan.<mission>.<n>.<k>); absent: every plan of the mission not in effect yet. */
+  readonly plan?: string | null;
+  /** The user's words entry (W-<n>) the waiver rests on, or */
+  readonly words?: string | null;
+  /** an authorization item in force that leaves this to the PM (D-8). */
+  readonly authority?: string | null;
+  readonly reason?: string | null;
+  /** Withdraw the waivers in force: later plans get their reviews again (a plan in effect stays in effect). */
+  readonly withdraw?: boolean;
+  /** The caller's request id (the CLI's --op): a retry of the same request records once. */
+  readonly request?: string | null;
+}
+
+export interface Waived {
+  readonly mission: string;
+  readonly check: string;
+  readonly action: 'waive' | 'withdraw';
+  /** False when nothing changed (a withdrawal with no waiver in force). */
+  readonly recorded: boolean;
+  /** The waiver's number on the record (key "plan-reviews#<n>"). */
+  readonly n: number | null;
+  readonly plan: string | null;
+  readonly by: 'words' | 'authority';
+  readonly ref: string;
+  /** What the PM should know (stable mode, the deprecated config key). */
+  readonly notes: readonly string[];
+}
+
+/**
+ * `mp pm waive <mission> plan-reviews [--plan <dplan>] (--words W-<n> | --authority <item>) [--reason "<text>"]`
+ * and `--withdraw` (4.1.3, E-2): a process check waived on the user's words, on the record. The waiver
+ * cites the words entry or an authorization item in force (the full run's check, reused); its scope is
+ * the mission or one detailed plan version not in effect yet. Planning reads it (flow/waivers.ts
+ * planReviewsWaiver): the plan takes effect after the mechanical checks and the order ruling, labelled
+ * "this plan took effect without its reviews, on W-n". A withdrawal gives later plans their reviews again
+ * (and stops the deprecated config key from waiving them); a plan in effect stays in effect.
+ */
+export async function pmWaive(ctx: ProcessContext, req: WaiveRequest): Promise<Waived> {
+  if (!(WAIVABLE_CHECKS as readonly string[]).includes(req.check)) throw new ProcessError('NOT_ALLOWED', `"${req.check}" is not a check a waiver can name: in this version only plan-reviews (the feasibility review and Calibrator ②) is waivable; nothing was recorded`);
+  const mission = req.mission as MissionId;
+  const words = req.words ?? null;
+  const authority = req.authority ?? null;
+  if ((words === null) === (authority === null)) throw new ProcessError('NOT_ALLOWED', 'a waiver rests on the user\'s words (--words W-<n>) or on an authorization item in force (--authority <item>), one of them: the record shows who decided; nothing was recorded');
+  if (words !== null) wordsText(ctx, words);
+  const ref = words ?? (await authorizationInForce(ctx, req.mission, authority!, 'nothing was recorded'));
+  const by: Waived['by'] = words !== null ? 'words' : 'authority';
+  const events = await ctx.ports().ledger.events({ mission, line: PLAN_LINE });
+  const plan = req.plan ?? null;
+  const notes: string[] = [];
+  const config = ctx.planReviewsWaived.includes(req.mission) || ctx.planReviewsWaived.some((x) => x.startsWith(`dplan.${req.mission}.`));
+  if (req.withdraw === true) {
+    if (plan !== null) throw new ProcessError('NOT_ALLOWED', 'a withdrawal withdraws every plan-reviews waiver of the mission in force: give no --plan');
+    if (waiversInForce(events).length === 0 && !config) return { mission: req.mission, check: req.check, action: 'withdraw', recorded: false, n: null, plan: null, by, ref, notes: [`No waiver of the plan reviews is in force for mission ${req.mission}: nothing changed.`] };
+    if (config) notes.push(`The config key ${CONFIG_KEY} also names mission ${req.mission} (or one of its plans): the withdrawal on the record overrides it from now on. Remove the key from config.json.`);
+  } else {
+    if (plan !== null) {
+      const prefix = `dplan.${req.mission}.`;
+      if (!plan.startsWith(prefix) || !/^[0-9]+\.[0-9]+$/.test(plan.slice(prefix.length))) throw new ProcessError('NOT_ALLOWED', `--plan names a detailed plan version of mission ${req.mission} (dplan.${req.mission}.<n>.<k>), not ${plan}; nothing was recorded`);
+      if (events.some((e) => e.event === 'effective' && e.key === plan)) throw new ProcessError('NOT_ALLOWED', `detailed plan ${plan} is in effect already: a waiver covers plans not in effect yet (that one stays in effect as it is); nothing was recorded`);
+    }
+    const mode = (events.filter((e) => e.event === 'pm-batch').at(-1)?.body as { mode?: string } | undefined)?.mode;
+    if (mode === 'stable') notes.push(`Mission ${req.mission} is in stable mode: its tasks start on the waived plan as the waiver settles it, and their products read "not fully proven" (the plan has no review to prove it).`);
+  }
+  const body: Omit<ReviewsWaiverBody, 'n'> = { check: 'plan-reviews', action: req.withdraw === true ? 'withdraw' : 'waive', dplan: plan, by, ref, reason: req.reason !== undefined && req.reason !== null && req.reason.trim() !== '' ? req.reason.trim().slice(0, 2000) : null };
+  const prior = events.filter((e) => e.event === REVIEWS_WAIVER).length;
+  const op = req.request !== undefined && req.request !== null && req.request !== '' ? `waive:${req.mission}:req:${req.request}` : `waive:${req.mission}:${prior + 1}:${sha256(canonicalJson(body)).slice(0, 16)}`;
+  const n = pmWrite(ctx, 'waive', op, { mission: req.mission, ...body }, (tx) => {
+    const k = flowEvents(tx, { mission, line: PLAN_LINE, event: REVIEWS_WAIVER, limit: 10_000 }).length + 1;
+    const full: ReviewsWaiverBody = { ...body, n: k };
+    appendRecords(tx, [{ kind: 'flow.event', mission, line: PLAN_LINE, event: REVIEWS_WAIVER, key: `plan-reviews#${k}`, body: tx.data.put(canonicalJson(full)) as ContentHash }]);
+    return k;
+  });
+  await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm waive ${req.mission} ${req.check}${req.withdraw === true ? ' --withdraw' : ''}` });
+  return { mission: req.mission, check: req.check, action: body.action, recorded: true, n, plan, by, ref, notes };
 }
 
 /** `mp pm requirement withdraw <mission> <item> --reason ...`. */

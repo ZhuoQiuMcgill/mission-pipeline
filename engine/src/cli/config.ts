@@ -76,10 +76,13 @@ export const ConfigSchema = z
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
     fillers: z.record(z.string(), z.string().min(1).max(400).nullable()).default({}),
     commit: z.object({ author: IdentText.optional(), committer: IdentText.optional() }).strict().optional(),
-    // missions (or single detailed plan versions) whose plans take effect after the mechanical checks and the order ruling, without
-    // the feasibility review and Calibrator ② (the user's words waived them); default none
+    // DEPRECATED in 4.1.3 (E-2: a project setting is not a waiver; `mp pm waive` records the user's words): missions (or
+    // single detailed plan versions) whose plans take effect after the mechanical checks and the order ruling, without
+    // the feasibility review and Calibrator ②, labelled "waived by config; no words on record". Still read so missions in
+    // the middle of their re-plans go on; a withdrawal on the record (`mp pm waive --withdraw`) overrides it. Default none
     planReviewsWaived: z.array(z.string().min(1).max(200)).max(200).optional(),
-    // missions whose tasks start on their dependencies' verified hand-backs, while those are still in review
+    // missions whose tasks start on their dependencies' verified hand-backs, while those are still in review (a project
+    // setting: it removes no check; the dependent's acceptance waits for the dependency's; never an integration task)
     startOnHandback: z.array(z.string().min(1).max(200)).max(200).optional(),
   })
   .strict();

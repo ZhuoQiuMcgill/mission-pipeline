@@ -76,6 +76,9 @@ const config: Command = {
       ...section('Environment identity: version commands', cfg.environment.versionCommands, 'none (operating system and architecture only)'),
       ...section('Exclusive resources', cfg.exclusiveResources, 'none'),
       ...section('Filler hints', Object.entries(cfg.fillers).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`), 'none'),
+      // 4.1.3 (E-2): a project setting is not a waiver; the key still waives (labelled so) so running missions go on
+      ...((cfg.planReviewsWaived ?? []).length > 0 ? [`Warning: planReviewsWaived is deprecated (a project setting is not a waiver). It still waives the plan reviews of ${cfg.planReviewsWaived!.join(', ')}, labelled "waived by config; no words on record". Record the user's words instead: mp pm waive <mission> plan-reviews --words W-<n> (--plan <dplan> for one plan version), then remove the key.`] : []),
+      ...section('Tasks that start on their dependencies\' verified hand-backs while those are in review: startOnHandback (fast mode; never an integration task; the acceptance still waits)', cfg.startOnHandback ?? [], 'none'),
       `Command timeout: ${Math.round(cfg.commandTimeoutMs / 1000)} s`,
       `Experiment command timeout (an exploration's experiment reruns): ${Math.round(experimentCommandTimeoutOf(cfg) / 1000)} s${cfg.experimentCommandTimeoutMs === undefined ? ' (experimentCommandTimeoutMs not set: the command timeout)' : ''}`,
       // 4.1.3 (#27): the shell in effect per run class
