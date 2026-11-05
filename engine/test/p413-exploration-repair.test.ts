@@ -252,15 +252,26 @@ describe('c: #31, a repair with no change form gives the author the turn at once
     assert.equal((await repairsOf(flowCtx(w.ports, M)))[0]?.state, 'answered');
   });
 
-  test('a later change form answers the repair that sent the method back, before its author starts: one write, both repairs answered, the author step withdrawn', async () => {
+  test('a change form while the method is back with its author answers that repair only when the PM names it: refused without --answers (both exits named, R-1 stays open); with --answers R-1 one write answers both', async () => {
     const { w, words } = await attemptsPhase();
-    await pmRepair(w.ports.ctx, { mission: M, words, kind: 'new-question', text: REASON, about: w.x });
+    // R-1 asks the author for a new algorithm; R-2 only adds an attempt: two decisions the program never links
+    const algo = say(w, 'Use a lock-free algorithm instead of the file lock.');
+    await pmRepair(w.ports.ctx, { mission: M, words: algo, kind: 'new-question', text: 'Use a lock-free algorithm instead of the file lock.', about: w.x });
     const author = only(w, 'researcher-author');
-    const r = await pmRepair(w.ports.ctx, { mission: M, words, kind: 'new-question', text: 'the filesystem documentation too', about: w.x, change: { form: 'attempts', attempts: [A3] } });
+    await assert.rejects(
+      pmRepair(w.ports.ctx, { mission: M, words, kind: 'new-question', text: 'the filesystem documentation too', about: w.x, change: { form: 'attempts', attempts: [A3] } }),
+      (e: { code?: string; message?: string }) => e.code === 'NOT_ALLOWED' && /back with its author for repair R-1.*if this change settles R-1, pass --answers R-1; otherwise apply the change once the author's version passes/.test(e.message ?? ''),
+    );
+    let s = await state(w);
+    assert.deepEqual([s.phase, s.reentry?.repair, s.consumed.has(author.task)], ['method', 'R-1', false], 'the author keeps the turn');
+    assert.deepEqual((await repairsOf(flowCtx(w.ports, M))).map((x) => [x.id, x.state]), [['R-1', 'exploration']], 'R-1 stays open; nothing more was written');
+    assert.equal(only(w, 'researcher-author').task, author.task);
+    // the PM names it: the change settles R-1 too
+    const r = await pmRepair(w.ports.ctx, { mission: M, words, kind: 'new-question', text: 'the filesystem documentation too', about: w.x, change: { form: 'attempts', attempts: [A3], answers: 'R-1' } });
     assert.equal(r.repair, 'R-2');
     const result = r.changed?.form === 'attempts' ? r.changed.result : null;
     assert.deepEqual([result?.answers, result?.repair], ['R-1', 'R-2']);
-    const s = await state(w);
+    s = await state(w);
     assert.deepEqual([s.phase, s.reentry, s.consumed.get(author.task)?.kind, s.rerunRounds], ['attempts', null, 'withdrawn', 0]);
     assert.equal(s.amendments.at(-1)?.repair, 'R-2');
     assert.ok(readingOf(w, 'A3'), 'the added attempt runs at once');
@@ -366,7 +377,7 @@ describe('d: the older commands', () => {
     assert.match(rerun.out.split('\n')[0] ?? '', /^mp pm rerun-attempt is an older name, kept for one release: use mp pm repair m1 --about X1 .* --rerun R1\.$/);
     assert.match(rerun.out, /Repair recorded: R-2, answered by this rerun\./);
     const help = await cli(p.dir, ['help', 'pm', 'repair']);
-    assert.match(help.out, /--attempts <attempts\.json> \| --rerun <attempt-id>/);
+    assert.match(help.out, /--attempts <attempts\.json> \[--answers R-<n>\] \| --rerun <attempt-id>/);
     assert.match((await cli(p.dir, ['help', 'pm', 'rerun-attempt'])).out, /older name of mp pm repair --rerun/);
     assert.deepEqual((await repairsOf(flowCtx(ctx.ports(), m))).map((r) => [r.id, r.kind, r.state, r.answeredBy?.change]), [
       ['R-1', 'new-question', 'answered', 'attempts-amended'],

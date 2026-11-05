@@ -402,7 +402,7 @@ export interface EvidenceRequestDoc {
  */
 export function checkedData(s: XState): RecordedData[] {
   const out = new Map<string, RecordedData>();
-  for (const c of s.consumed.values()) for (const d of (c as { readonly data?: readonly RecordedData[] }).data ?? []) if (!out.has(d.pointer)) out.set(d.pointer, d);
+  for (const c of s.consumed.values()) for (const d of ('data' in c ? (c.data ?? []) : [])) if (!out.has(d.pointer)) out.set(d.pointer, d);
   return [...out.values()];
 }
 

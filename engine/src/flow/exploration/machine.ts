@@ -93,6 +93,7 @@ import type { ExplorationDefinition } from './definition.ts';
 import type { ExplorationSettledBody, RepairRef } from '../plandoc.ts';
 import { isBlocking, type Severity } from '../../seat/cards/crititor.ts';
 import type { RegisteredAttemptT } from '../../seat/cards/researcher.ts';
+import type { RecordedData } from '../../seat/cards/experiment.ts';
 
 // ---------------------------------------------------------------- event bodies
 
@@ -291,6 +292,8 @@ export type ConsumedBody =
       readonly directionQuestions: readonly string[];
       readonly attempts: readonly RegisteredAttemptT[];
       readonly result: string | null;
+      /** 4.1.3 (E-4): the data outside the commit its hand-back cited, as checked at the hand-back (flow.ts consumption). */
+      readonly data?: readonly RecordedData[];
     }
   | {
       readonly kind: 'interpretation';
@@ -302,6 +305,8 @@ export type ConsumedBody =
       readonly message: string;
       readonly dispositions: readonly Disposition[];
       readonly result: string | null;
+      /** 4.1.3 (E-4): as the author's. */
+      readonly data?: readonly RecordedData[];
     }
   | {
       readonly kind: 'attack';
@@ -317,8 +322,10 @@ export type ConsumedBody =
       readonly result: string | null;
       /** The evidence the round's judgment requires (the Stabilizer's judgment binds the same). */
       readonly evidence?: readonly string[];
+      /** 4.1.3 (E-4): as the author's. */
+      readonly data?: readonly RecordedData[];
     }
-  | { readonly kind: 'discuss-reply'; readonly task: string; readonly reply: string; readonly result: string | null }
+  | { readonly kind: 'discuss-reply'; readonly task: string; readonly reply: string; readonly result: string | null; readonly data?: readonly RecordedData[] }
   | {
       readonly kind: 'stabilized';
       readonly task: string;
@@ -352,6 +359,8 @@ export type ConsumedBody =
       readonly attempt: string | null;
       /** The program generated the record (8.2: a failed or unrun attempt). */
       readonly auto: boolean;
+      /** 4.1.3 (E-4): as the author's (a blind run's data pointers, checked at its hand-back). */
+      readonly data?: readonly RecordedData[];
     }
   | { readonly kind: 'abandoned'; readonly task: string; readonly role: Role; readonly reason: string }
   /** A queued step taken back before it ran (`mp pm rerun-attempt`: an interpreter queued on records that are superseded; `mp pm amend-attempts`: also a waiting run of a replaced attempt's earlier card). */

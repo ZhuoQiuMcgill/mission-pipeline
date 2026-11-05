@@ -17,7 +17,7 @@ import { secretaryInputs, secretaryRoundInputs } from '../seat/cards/dynamic.ts'
 // used) asks the user (WI-08).
 
 import type { JudgmentId, MissionId, ObjectVersionId } from '../common/ids.ts';
-import type { BaseRecord, JudgmentRecord, ListRef } from '../common/records.ts';
+import type { BaseRecord, JudgmentRecord } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import type { CardBinding } from '../seat/cards/common.ts';
 import type { DecisionOption, EscalationSource, SecretaryCard, SecretaryResult } from '../seat/cards/secretary.ts';
@@ -141,7 +141,7 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
   let position: SecretaryCard['position'] = null;
   if (e.position) {
     const neg = await judgmentRecordOf(ctx, e.position.revokes);
-    if (neg !== null) position = { target: e.position.target, review: e.position.review, revokes: e.position.revokes, binding: rulingBinding(neg, `j.sec.${e.id}`) };
+    if (neg !== null) position = { target: e.position.target, review: e.position.review, revokes: e.position.revokes, binding: rulingBinding(neg, rulingJudgmentId(e.id, 'secretary')) };
   }
   return {
     ...cardBase(ctx, e.task, {
@@ -416,11 +416,12 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
   const records: BaseRecord[] = [];
   let ruling: string | null = null;
   const accepting = (o: unknown): boolean => o === 'accept' || o === 'accept-risk';
-  if (esc !== null && d !== null && esc.position && accepting(what['option']) && accepting(d.option)) {
+  const by = d === null ? null : deciderOf(d.by);
+  if (esc !== null && by !== null && esc.position && accepting(what['option']) && accepting(d!.option)) {
     const neg = await judgmentRecordOf(ctx, esc.position.revokes);
-    const jid = `j.${d.by === 'user' ? 'user' : 'sec'}.${esc.id}`;
+    const jid = rulingJudgmentId(esc.id, by);
     if (neg !== null && (await judgmentRecordOf(ctx, jid)) === null) {
-      records.push(rulingRecord(neg, esc.position, jid, d.by === 'user' ? 'user' : 'secretary'));
+      records.push(deciderJudgment({ escalation: esc.id, by, target: esc.position.target, review: esc.position.review, inputs: neg, revokes: neg.judgment }));
       ruling = jid;
     }
   }
@@ -491,23 +492,45 @@ export function closing(ctx: FlowCtx, ids: readonly string[], why: string): Carr
   };
 }
 
-/** The ruling judgment on a negated position (8.1, 5.2): a pass with the negation's contract inputs, revoking it. */
-function rulingRecord(neg: JudgmentRecord, position: NonNullable<EscalationSpec['position']>, judgment: string, executor: string): JudgmentRecord {
-  const b = rulingBinding(neg, judgment);
+/**
+ * Who decided an escalation, as a ruling judgment names it (4.1.3, E-1): the user or the Secretary. A
+ * decision the program recorded (`by: "program"`: the Secretary could not decide, and the question goes
+ * to the user) has no decider, and no judgment is ever written in the program's name.
+ */
+export type Decider = 'user' | 'secretary';
+
+export function deciderOf(by: DecisionBody['by']): Decider | null {
+  return by === 'user' || by === 'secretary' ? by : null;
+}
+
+/** The id of a decider's ruling on an escalation: j.user.<id> or j.sec.<id>; `suffix` names a second one of the same decision. */
+export function rulingJudgmentId(escalation: string, by: Decider, suffix?: string): string {
+  return `j.${by === 'user' ? 'user' : 'sec'}.${escalation}${suffix !== undefined ? `.${suffix}` : ''}`;
+}
+
+/**
+ * The one writer of a decider's ruling judgment (4.1.3, E-1), for tasks and explorations alike: a pass on
+ * `target` at the review position `review`, executor "user" or "secretary", id rulingJudgmentId. Its
+ * contract inputs (evidence, bases, constraints, relies-on, evidence use) are those of `inputs`: the
+ * negation it overrules (carryOut), or the position's latest judgment it stands beside (an exploration's
+ * plain "accept", exploration/step.ts). `revokes`: the negation it revokes, or null.
+ */
+export function deciderJudgment(o: { readonly escalation: string; readonly by: Decider; readonly suffix?: string; readonly target: string; readonly review: string; readonly inputs: JudgmentRecord; readonly revokes: string | null }): JudgmentRecord {
+  const b = o.inputs;
   const rec: JudgmentRecord = {
     kind: 'judgment',
-    judgment: b.judgment as JudgmentId,
-    review: position.review,
-    executor,
-    target: position.target as ObjectVersionId,
+    judgment: rulingJudgmentId(o.escalation, o.by, o.suffix) as JudgmentId,
+    review: o.review,
+    executor: o.by,
+    target: o.target as ObjectVersionId,
     verdict: 'pass',
-    evidence: b.evidence as ListRef,
-    bases: b.bases as ListRef,
-    constraints: b.constraints as ListRef,
-    reliesOn: b.reliesOn as ListRef,
+    evidence: b.evidence,
+    bases: b.bases,
+    constraints: b.constraints,
+    reliesOn: b.reliesOn,
     issues: [],
-    revokes: neg.judgment,
-    evidenceUse: b.evidenceUse,
+    revokes: o.revokes as JudgmentId | null,
+    evidenceUse: { fields: [...b.evidenceUse.fields], statisticalOrExternal: b.evidenceUse.statisticalOrExternal },
     superseded: [],
     extends: null,
   };
@@ -585,7 +608,7 @@ async function alreadyApplied(ctx: FlowCtx, esc: EscalationBody, what: unknown):
 
 /** The ruling judgment on a position, made by the Secretary's launch or the user's answer (null: none). */
 export async function rulingOf(ctx: FlowCtx, id: string): Promise<string | null> {
-  for (const j of [`j.sec.${id}`, `j.user.${id}`]) if ((await judgmentRecordOf(ctx, j)) !== null) return j;
+  for (const j of [rulingJudgmentId(id, 'secretary'), rulingJudgmentId(id, 'user')]) if ((await judgmentRecordOf(ctx, j)) !== null) return j;
   return null;
 }
 

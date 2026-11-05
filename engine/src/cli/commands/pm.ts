@@ -543,10 +543,11 @@ const repair: Command = {
     "a problem the user found trying the product, as a repair (D-10): the user's reason verbatim from their words, the kind you choose; the Architect amends the plan in effect under the mechanical checks only. About an exploration: the author gets the turn at once (in the attempts phase the method goes back to its author); with a change form the user's decision about its method takes effect directly, with no round and no review (E-5)",
   usage:
     'mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user\'s reason, verbatim from W-n>" [--about <task-id|exploration-id>]\n' +
-    '       [--attempts <attempts.json> | --rerun <attempt-id>[,<attempt-id>...] | --resnapshot]   (change forms, about an exploration)\n' +
+    '       [--attempts <attempts.json> [--answers R-<n>] | --rerun <attempt-id>[,<attempt-id>...] | --resnapshot]   (change forms, about an exploration)\n' +
     '       --attempts: add or replace registered attempts (a JSON array in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)\n' +
+    '       --answers R-<n>: with --attempts, this change also settles that earlier repair (its author turn is taken back); without it, a change while the method is back with its author is refused\n' +
     '       --rerun: run registered attempts again on the same method version; --resnapshot: the exploration reads the target branch as it is now',
-  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', rerun: 'string', resnapshot: 'boolean' },
+  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean' },
   identity: (a) => ({
     positionals: a.positionals,
     flags: a.flags,
@@ -573,7 +574,10 @@ const repair: Command = {
     const forms = [file !== null, rerun !== null, flagBool(args, 'resnapshot')].filter((x) => x).length;
     if (forms > 1) throw usage('one change form at a time: --attempts, --rerun or --resnapshot');
     if (forms > 0 && about === null) throw usage('a change form is about an exploration: --about <exploration-id>');
-    const change: RepairChange | undefined = file !== null ? { form: 'attempts', attempts: attemptsFile(file) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
+    const answers = flagStr(args, 'answers');
+    if (answers !== null && file === null) throw usage('--answers goes with --attempts: the change that settles an earlier repair about the exploration');
+    if (answers !== null && !/^R-[1-9][0-9]*$/.test(answers)) throw usage(`--answers names a repair R-<n>, not ${JSON.stringify(answers)}`);
+    const change: RepairChange | undefined = file !== null ? { form: 'attempts', attempts: attemptsFile(file), ...(answers !== null ? { answers } : {}) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
     const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}) });
     if (r.changed !== undefined) {
       const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...changedLines(m, about!, words, r.changed)];
@@ -975,7 +979,7 @@ const reopenExploration: Command = {
 const resnapshotExploration: Command = {
   group: 'pm',
   name: ['resnapshot-exploration'],
-  summary: 'a started exploration reads the target branch as it is now (code that landed after it began): its next cards name the new snapshot; nothing runs again by itself, and evidence recorded before still counts, marked "older environment"',
+  summary: 'older name of mp pm repair --resnapshot, kept for one release: a started exploration reads the target branch as it is now (code that landed after it began): its next cards name the new snapshot; nothing runs again by itself, and evidence recorded before still counts, marked "older environment"',
   usage: 'mp pm resnapshot-exploration <mission> <exploration> --words W-<n> [--kind <repair kind>]   (older name of mp pm repair --resnapshot)',
   flags: { words: 'string', kind: 'string' },
   decides: true,
@@ -993,7 +997,7 @@ const rerunAttempt: Command = {
   group: 'pm',
   name: ['rerun-attempt'],
   summary:
-    "a research exploration's registered attempt failed for a cause outside the method (a time limit since raised, say): run it again on the same method version, a fresh blind run of its registered card, without a round; its new record supersedes the earlier one, kept as history",
+    "older name of mp pm repair --rerun, kept for one release: a research exploration's registered attempt failed for a cause outside the method (a time limit since raised, say): run it again on the same method version, a fresh blind run of its registered card, without a round; its new record supersedes the earlier one, kept as history",
   usage: 'mp pm rerun-attempt <mission> <exploration> <attempt-id>[,<attempt-id>...] --words W-<n> [--reason "<text>"] [--kind <repair kind>]   (older name of mp pm repair --rerun)',
   flags: { words: 'string', reason: 'string', kind: 'string' },
   decides: true,
@@ -1013,7 +1017,7 @@ const amendAttempts: Command = {
   group: 'pm',
   name: ['amend-attempts'],
   summary:
-    "the user decided something about a research exploration's method in force (a scale, a cap, a search extended to more of the domain): on their words, add or replace registered attempts without a round and without review; a new method version is in force, and new or replaced attempts run at once (a replaced attempt's earlier record is superseded, kept as history)",
+    "older name of mp pm repair --attempts, kept for one release: the user decided something about a research exploration's method in force (a scale, a cap, a search extended to more of the domain): on their words, add or replace registered attempts without a round and without review; a new method version is in force, and new or replaced attempts run at once (a replaced attempt's earlier record is superseded, kept as history)",
   usage: 'mp pm amend-attempts <mission> <exploration> --words W-<n> --file <attempts.json> [--answers R-<n>] [--reason "<text>"] [--kind <repair kind>]   (older name of mp pm repair --attempts)\n       (<attempts.json>: a JSON array of attempts in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)',
   flags: { words: 'string', file: 'string', answers: 'string', reason: 'string', kind: 'string' },
   identity: (a) => ({

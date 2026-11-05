@@ -120,21 +120,35 @@ export interface StepRun {
   readonly at: number | null;
   /** Stopped or lost: why. */
   readonly why: string | null;
+  /** Finished: its "run" event as recorded (what a hand-back may cite: ports.ts dispatchRuns), and that event's revision. */
+  readonly ran: RunEventBody | null;
+  readonly revision: number | null;
 }
 
 function body<B>(data: { text(h: string): string }, h: string): B {
   return JSON.parse(data.text(h)) as B;
 }
 
+/** Every event of one kind on a dispatch line, page by page (no cap: a run `wait` shows is always one a hand-back may cite). */
+function lineEvents(db: Db, q: { readonly mission: MissionId; readonly line: string; readonly event: string }): Array<{ readonly revision: number; readonly key: string; readonly body: string }> {
+  const out: Array<{ revision: number; key: string; body: string }> = [];
+  for (let after = 0; ; ) {
+    const page = flowEvents(db, { ...q, after, limit: 10_000 });
+    out.push(...page.map((e) => ({ revision: Number(e.revision), key: e.key, body: e.body })));
+    if (page.length < 10_000) return out;
+    after = Number(page.at(-1)!.revision);
+  }
+}
+
 /** The runs one dispatch had `mp` run or start (its line's "run" and "detached" events), in order. */
 export function dispatchStepRuns(db: Db, data: { text(h: string): string }, d: Pick<DispatchInfo, 'mission' | 'dispatch'>, o: { readonly detachedOnly?: boolean } = {}): StepRun[] {
   const line = DISPATCH_LINE(d.dispatch);
   const mission = d.mission as MissionId;
-  const ran = flowEvents(db, { mission, line, event: 'run', limit: 10_000 }).map((e) => body<RunEventBody>(data, e.body));
-  const ends = new Map(flowEvents(db, { mission, line, event: DETACHED_END_EVENT, limit: 10_000 }).map((e) => [e.key, body<DetachedEndBody>(data, e.body)]));
-  const started = flowEvents(db, { mission, line, event: DETACHED_EVENT, limit: 10_000 }).map((e) => body<DetachedBody>(data, e.body));
-  const byEvidence = new Map(ran.map((r) => [r.run, r]));
-  const finished = (r: RunEventBody, detached: DetachedBody | null): StepRun => {
+  const ran = lineEvents(db, { mission, line, event: 'run' }).map((e) => ({ revision: e.revision, b: body<RunEventBody>(data, e.body) }));
+  const ends = new Map(lineEvents(db, { mission, line, event: DETACHED_END_EVENT }).map((e) => [e.key, body<DetachedEndBody>(data, e.body)]));
+  const started = lineEvents(db, { mission, line, event: DETACHED_EVENT }).map((e) => body<DetachedBody>(data, e.body));
+  const byEvidence = new Map(ran.map((r) => [r.b.run, r]));
+  const finished = ({ b: r, revision }: { readonly b: RunEventBody; readonly revision: number }, detached: DetachedBody | null): StepRun => {
     const rec = factById(db, 'evidence', r.run as EvidenceId)?.record as EvidenceRecord | undefined;
     const fields = rec?.fields ?? {};
     const runId = detached?.run ?? fields['run'] ?? r.run;
@@ -152,6 +166,8 @@ export function dispatchStepRuns(db: Db, data: { text(h: string): string }, d: P
       leaf: fields['run'] !== undefined ? runLeaf(d.mission, fields['run']) : null,
       at: r.at ?? null,
       why: null,
+      ran: r,
+      revision,
     };
   };
   const out: StepRun[] = [];
@@ -164,9 +180,9 @@ export function dispatchStepRuns(db: Db, data: { text(h: string): string }, d: P
       continue;
     }
     const end = ends.get(b.run);
-    out.push({ run: b.run, evidence: b.evidence, command: b.command, dispatch: d.dispatch, state: end?.outcome ?? 'running', detached: b, passed: null, summary: null, exit: null, tail: '', leaf: null, at: end?.at ?? null, why: end?.why ?? null });
+    out.push({ run: b.run, evidence: b.evidence, command: b.command, dispatch: d.dispatch, state: end?.outcome ?? 'running', detached: b, passed: null, summary: null, exit: null, tail: '', leaf: null, at: end?.at ?? null, why: end?.why ?? null, ran: null, revision: null });
   }
-  if (o.detachedOnly !== true) for (const r of ran) if (!seen.has(r.run)) out.push(finished(r, null));
+  if (o.detachedOnly !== true) for (const r of ran) if (!seen.has(r.b.run)) out.push(finished(r, null));
   return out;
 }
 
@@ -179,6 +195,25 @@ export function stepRuns(db: Db, data: { text(h: string): string }, d: Pick<Disp
   return [...earlierDispatches(db, d).flatMap((x) => dispatchStepRuns(db, data, x)), ...dispatchStepRuns(db, data, d)];
 }
 
+/**
+ * The detached runs a step's dispatches started that are still running (4.1.3): any dispatch of the
+ * step, a released one too (its run goes on for the step). Read with dispatchStepRuns, the one resolver.
+ * The repair entry counts each as a run a seat holds (explorationAttempts.ts).
+ */
+export function runningStepRuns(db: Db, data: { text(h: string): string }, d: Pick<DispatchInfo, 'mission' | 'task'>): StepRun[] {
+  return listDispatches(db, { task: d.task, limit: 1000 })
+    .filter((x) => x.mission === d.mission)
+    .flatMap((x) => dispatchStepRuns(db, data, x, { detachedOnly: true }))
+    .filter((r) => r.state === 'running');
+}
+
+/** Before a check that reads them: each running detached run of these steps whose worker is gone is recorded as lost (noticeLost). */
+export function noticeLostRuns(ctx: ProcessContext, mission: MissionId, tasks: readonly string[]): void {
+  if (tasks.length === 0) return;
+  const data = ctx.memory.data;
+  const runs = ctx.memory.read((db) => tasks.flatMap((task) => runningStepRuns(db, data, { mission, task })));
+  for (const r of runs) noticeLost(ctx, r);
+}
 
 /** At most this many carried runs are listed on a card (the rest are named by count). */
 const CARRIED_MAX = 50;

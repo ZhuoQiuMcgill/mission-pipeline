@@ -347,8 +347,17 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
   // 4.1.3 (E-4): the data the hand-back cites, as checked at it, travels with what the flow took in;
   // the cards built from the state label each pointer with it (cards.ts checkedData)
   const data = st.handBack?.data;
-  const cites = body !== null && (body.kind === 'author' || body.kind === 'interpretation' || body.kind === 'attack' || body.kind === 'discuss-reply' || body.kind === 'evidence');
-  return !cites || data === undefined || data.length === 0 ? body : ({ ...body, data } as unknown as ConsumedBody);
+  if (body === null || data === undefined || data.length === 0) return body;
+  switch (body.kind) {
+    case 'author':
+    case 'interpretation':
+    case 'attack':
+    case 'discuss-reply':
+    case 'evidence':
+      return { ...body, data };
+    default:
+      return body;
+  }
 }
 
 function consumedBody(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTaskStatus): ConsumedBody | null {

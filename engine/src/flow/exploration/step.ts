@@ -39,15 +39,14 @@
 // is the one recorded since the last reopening; every reader here and in the decision layer uses it.
 
 import { canonicalJson, sha256 } from '../../common/hash.ts';
-import type { JudgmentId, MissionId, ObjectVersionId } from '../../common/ids.ts';
+import type { MissionId } from '../../common/ids.ts';
 import type { JudgmentRecord } from '../../common/records.ts';
-import { validateRecord } from '../../common/validate.ts';
 import { idPart, missionClosed, safeId, type FlowCtx } from '../context.ts';
 import { registerFlowStep } from '../engine.ts';
 import { EXPLORATION_SETTLED, PLAN_LINE, PM_PLAN_EFFECTIVE, PmPlanDoc, explorationLine, type ExplorationSettledBody, type PmPlanEffectiveBody } from '../plandoc.ts';
 import { handleFailure } from '../failures.ts';
 import type { FlowEventInput, FlowTaskStatus } from '../ports.ts';
-import { cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, openEscalations, raiseEscalation, type Carry } from '../secretary.ts';
+import { cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, decisionFor, deciderJudgment, deciderOf, escalateToUser, escalation, isApplied, openEscalations, raiseEscalation, rulingJudgmentId, type Carry, type Decider } from '../secretary.ts';
 import type { DecisionOption } from '../../seat/cards/secretary.ts';
 import { explorationDefinition, xid, type ExplorationDefinition } from './definition.ts';
 import { advanceExploration, buildHandoff, defineExploration, explorationState, explorationStateAfter, recordExplorationRerun, redefineExploration, rulingEvent, type ExplorationHandoff } from './flow.ts';
@@ -412,19 +411,18 @@ async function carryDecision(
  * it already, the escalation's own ruling passes it (carryOut), or there is no judgment to take the
  * inputs from.
  */
-async function acceptJudgment(ctx: FlowCtx, s: XState, id: string, by: 'user' | 'secretary'): Promise<JudgmentRecord | null> {
+async function acceptJudgment(ctx: FlowCtx, s: XState, id: string, by: Decider | null): Promise<JudgmentRecord | null> {
   const latest = s.version;
   const base = s.stabilizations.at(-1)?.judgment;
-  if (latest === null || base === undefined) return null;
+  if (by === null || latest === null || base === undefined) return null;
   if (lastPass(s, latest.id) !== null && !s.negations.has(latest.id)) return null;
   const position = (await escalation(ctx, id))?.position ?? null;
   if (position?.target === latest.id) return null;
-  const jid = `j.${by === 'user' ? 'user' : 'sec'}.${id}${position !== null ? '.latest' : ''}`;
+  const suffix = position !== null ? 'latest' : undefined;
   const from = await ctx.ports.ledger.judgment(base);
-  if (from === null || (await ctx.ports.ledger.judgment(jid)) !== null) return null;
-  const rec: JudgmentRecord = { ...from, judgment: jid as JudgmentId, executor: by, target: latest.id as ObjectVersionId, verdict: 'pass', issues: [], revokes: (s.negations.get(latest.id) ?? null) as JudgmentId | null, superseded: [], extends: null };
-  validateRecord(rec);
-  return rec;
+  if (from === null || (await ctx.ports.ledger.judgment(rulingJudgmentId(id, by, suffix))) !== null) return null;
+  // the one writer of a decider's ruling (flow/secretary.ts deciderJudgment): the same id, executor and fields as a task's
+  return deciderJudgment({ escalation: id, by, ...(suffix !== undefined ? { suffix } : {}), target: latest.id, review: from.review, inputs: from, revokes: s.negations.get(latest.id) ?? null });
 }
 
 /**
@@ -648,7 +646,7 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
         case 'accept':
           // 4.1.3 (E-1, #46): nothing fatal or serious unresolved: the decision accepts the latest
           // version; the machine ends the round as converged by it and settles it like any convergence
-          const j = await acceptJudgment(ctx, s, id, by);
+          const j = await acceptJudgment(ctx, s, id, deciderOf(d.by));
           await carryDecision(ctx, x, id, d.option, [{ id, decision: 'accept', findings: [], text: d.reason, extraRounds: 0, by, ...(j !== null ? { judgment: j.judgment } : {}) }], undefined, j);
           break;
         case 'accept-risk':

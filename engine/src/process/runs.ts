@@ -134,12 +134,28 @@ export function signalGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+/** Whether any process of the group `pid` leads is still there (POSIX; Windows has no groups: taskkill /T ended the tree). */
+export function groupAlive(pid: number): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** How often a group that was told to end is looked at until it has exited. */
+const GROUP_POLL_MS = 50;
+
 /**
  * The platform's shell as shellRunner, without blocking (4.1.3, #30: a detached run's worker): the
  * command runs in a process group of its own, so on its time limit, or when `stopping` fires (the
  * worker was told to stop), SIGTERM goes to the whole group and SIGKILL after `graceMs`: no child it
- * started (a container client, a background job) outlives it. Output, exit and time limit are read as
- * shellRunner reads them, so the evidence is the same as a foreground run's.
+ * started (a container client, a background job) outlives it. Once told to end, the run answers only
+ * after the whole group has exited, not only the shell: a child that ignores SIGTERM and holds none of
+ * the shell's output still gets the SIGKILL. Output, exit and time limit are read as shellRunner reads
+ * them, so the evidence is the same as a foreground run's.
  */
 export function groupShellRunner(o: { readonly stopping?: AbortSignal; readonly graceMs?: number } = {}): CommandRunner {
   const graceMs = o.graceMs ?? GROUP_KILL_GRACE_MS;
@@ -179,9 +195,22 @@ export function groupShellRunner(o: { readonly stopping?: AbortSignal; readonly 
       });
       child.on('close', (code, signal) => {
         clearTimeout(timer);
-        if (killTimer !== null) clearTimeout(killTimer);
         o.stopping?.removeEventListener('abort', onStop);
-        resolve({ exitCode: code, signal: signal ?? null, error: timedOut ? null : error, timedOut, output: Buffer.concat([...stdout, ...stderr]), durationMs: Math.round(performance.now() - t0) });
+        const done = (): void => {
+          if (killTimer !== null) clearTimeout(killTimer);
+          resolve({ exitCode: code, signal: signal ?? null, error: timedOut ? null : error, timedOut, output: Buffer.concat([...stdout, ...stderr]), durationMs: Math.round(performance.now() - t0) });
+        };
+        // told to end: the SIGKILL timer stays armed until no process of the group is left (one that
+        // ignores SIGTERM ends at the grace's end); a run that ended by itself answers at once
+        if (killTimer === null || child.pid === undefined) return done();
+        const pid = child.pid;
+        // a bound: a process the kernel cannot end (in uninterruptible sleep) never holds the run for good
+        const until = performance.now() + graceMs + GROUP_KILL_GRACE_MS;
+        const look = (): void => {
+          if (!groupAlive(pid) || performance.now() > until) return done();
+          setTimeout(look, GROUP_POLL_MS);
+        };
+        look();
       });
     });
 }

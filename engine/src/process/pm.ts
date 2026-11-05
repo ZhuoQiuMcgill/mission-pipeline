@@ -826,7 +826,8 @@ export async function pmRequirement(
 
 /** A change form of `mp pm repair` (4.1.3, E-5): the user's decision about an exploration's method, applied directly. */
 export type RepairChange =
-  | { readonly form: 'attempts'; readonly attempts: unknown }
+  /** `answers`: an earlier repair about the exploration this change settles, named by the PM (4.1.3: never linked by the program). */
+  | { readonly form: 'attempts'; readonly attempts: unknown; readonly answers?: string | null }
   | { readonly form: 'rerun'; readonly attempts: readonly string[] }
   | { readonly form: 'resnapshot' };
 
@@ -838,7 +839,7 @@ export type RepairChanged =
 
 /**
  * `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<reason>" [--about <task|exploration>]
- * [--attempts <file.json> | --rerun <attempt-id>[,...] | --resnapshot]` (4.1.2, D-9, D-10; 4.1.3, E-5): the user
+ * [--attempts <file.json> [--answers R-<n>] | --rerun <attempt-id>[,...] | --resnapshot]` (4.1.2, D-9, D-10; 4.1.3, E-5): the user
  * tried the product and found a problem. The reason must occur verbatim in the words entry (the
  * requirement items' check); the PM chooses the kind. About an exploration it reopens it for one more
  * round, the author's turn at once (in the attempts phase the method goes back to its author); with a
@@ -865,7 +866,7 @@ export async function pmRepair(
     const base = { mission: req.mission, exploration: about.id, words: req.words, repair, command: 'repair' as const };
     const changed: RepairChanged =
       req.change.form === 'attempts'
-        ? { form: 'attempts', result: await pmAmendAttempts(ctx, { ...base, attempts: req.change.attempts, reason: req.reason ?? req.text }) }
+        ? { form: 'attempts', result: await pmAmendAttempts(ctx, { ...base, attempts: req.change.attempts, reason: req.reason ?? req.text, answers: req.change.answers ?? null }) }
         : req.change.form === 'rerun'
           ? { form: 'rerun', result: await pmRerunAttempt(ctx, { ...base, attempts: req.change.attempts, reason: req.reason ?? req.text }) }
           : { form: 'resnapshot', result: await pmResnapshotExploration(ctx, base) };

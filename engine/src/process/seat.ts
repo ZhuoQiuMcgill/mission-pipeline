@@ -876,6 +876,16 @@ function requestedExecutor(ctx: ProcessContext, v: DispatchView, req: { readonly
   return s.def === null ? 'experiment' : requestExecutor(req, s.def);
 }
 
+/**
+ * The commands an attempt register declares, each attempt's checked as a request's are (4.1.3, E-4): the
+ * author's register at its hand-back, and the user's attempts through the repair entry (`mp pm repair
+ * --attempts`, the older `mp pm amend-attempts`), so a run the rerun would refuse is refused when it is
+ * registered.
+ */
+export function registerCommandProblems(ctx: Pick<ProcessContext, 'fullSuite'>, attempts: ReadonlyArray<{ readonly id: string; readonly kind: 'experiment' | 'reading'; readonly commands?: ReadonlyArray<{ readonly id: string; readonly command: string; readonly cwd?: string }> }>): string[] {
+  return attempts.flatMap((a) => evidenceCommandProblems(ctx, `attempts[${a.id}].commands`, a.commands ?? [], a.kind));
+}
+
 /** A research author's attempt register (4.1.3): the commands each attempt declares, checked as a request's are. */
 function attemptCommandProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
   if (v.card.seat !== 'researcher-author' || v.card['registerAttempts'] !== true) return [];
@@ -883,7 +893,7 @@ function attemptCommandProblems(ctx: ProcessContext, v: DispatchView, fields: un
   if (!r.success) return [];
   const attempts = (r.data as { step: string; attempts: ReadonlyArray<{ id: string; kind: 'experiment' | 'reading'; commands?: ReadonlyArray<{ id: string; command: string; cwd?: string }> }> });
   if (attempts.step !== 'submit') return [];
-  return attempts.attempts.flatMap((a) => evidenceCommandProblems(ctx, `attempts[${a.id}].commands`, a.commands ?? [], a.kind));
+  return registerCommandProblems(ctx, attempts.attempts);
 }
 
 /** The core of seatRequestEvidence (tests call it with the content directly). */

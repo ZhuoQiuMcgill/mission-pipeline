@@ -65,7 +65,7 @@ import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, p
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
-import { cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, escalateToUser, markApplied, openEscalations, raiseEscalation, type DecisionBody, type EscalationBody } from './secretary.ts';
+import { cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 
 interface SpecBody {
@@ -601,7 +601,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
 
   // decisions on this task's escalations
   for (const e of await openEscalations(ctx, `task:${t.id}`)) {
-    const blocking = await applyTaskDecision(ctx, eff, plan, t, line, e);
+    const blocking = await applyTaskDecision(ctx, eff, plan, t, line, e, kept.waived);
     line = await readLine(ctx, t.id);
     if (blocking) return;
   }
@@ -660,42 +660,9 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const depIds = await taskDependencies(ctx, plan, t);
   // an integration attempt whose start lacks its dependencies' current work starts again on a fresh start (#41)
   if (t.kind === 'integration' && (await integrationRestart(ctx, eff, t, line, k, depIds)) === 'restarted') return;
-  // an integration review reopened dependencies (D-6): this attempt waits until each is accepted again (one
-  // given up is told to the PM), and builds on their new work too (a dependency reached only through another
-  // one is laid over it: no cascade)
-  const reopened = await reopenedProducts(ctx, plan, t, line);
-  if (reopened === null) return;
   // gate: dependencies accepted; stable mode: proven
-  const deps: string[] = [];
-  // config `startOnHandback` (a project setting: it removes no check, E-2): a dependency still in review counts
-  // with its current attempt's verified hand-back; the dependent's own acceptance still waits for the
-  // dependency's (earlyStart, at its pass). Never for an integration task: it judges the tree that is delivered (#41)
-  const early = t.kind !== 'integration' && (ctx.ports.project?.startOnHandback?.includes(ctx.mission) ?? false);
-  for (const d of depIds) {
-    let p = await acceptedProduct(ctx, d);
-    if (p === null && early) p = verifiedHandBack(await readLine(ctx, d))?.object ?? null;
-    if (p === null) {
-      await dependencyGivenUp(ctx, t, d);
-      return;
-    }
-    deps.push(p);
-  }
-  for (const p of reopened) if (!deps.includes(p)) deps.push(p);
-  if (eff.mode === 'stable') {
-    const labels = await ctx.ports.evaluator.labels([eff.dplan, ...deps]);
-    // 4.1.3 (E-2): a plan that took effect without its reviews (on the user's words, an authorization, or the
-    // config key) is not proven, and never will be: the gate reads it as settled by that waiver, and a
-    // dependency whose review passed but whose proof lacks only such a plan as usable. The labels stay as
-    // they are: the plan unproven, the products "not fully proven"
-    const usable = async (x: string): Promise<boolean> => {
-      const l = labels.labels[x];
-      if (l === 'proven') return true;
-      if (x === eff.dplan) return kept.waived.has(x);
-      if (l !== 'not-fully-proven' || kept.waived.size === 0) return false;
-      return ((await objectRecord(ctx, x))?.reviews.find((r) => r.review === 'reviewer')?.reliesOn ?? []).some((o) => kept.waived.has(o));
-    };
-    for (const x of [eff.dplan, ...deps]) if (!(await usable(x))) return;
-  }
+  const deps = await dependencyGate(ctx, eff, plan, t, line, depIds, kept.waived);
+  if (deps === null) return;
 
   // the Constructor
   const con = conTask(ctx.mission, t.id, k);
@@ -1097,6 +1064,53 @@ async function rebuildOnAccepted(ctx: FlowCtx, t: DetailedTask, k: number, e: { 
 }
 
 /**
+ * The dependency gate of a task's attempt: the products it builds on, or null while it waits (the one
+ * gate: the pass reads it before the Constructor, and a decision that accepts the attempt reads it too,
+ * so it never accepts ahead of the gate, 4.1.3). Each dependency's current accepted product
+ * (acceptedProduct: a dependency reopened since is not accepted now), or with config `startOnHandback`
+ * its current attempt's verified hand-back; the products of the dependencies an integration review
+ * reopened, accepted again; stable mode: proven, a waived plan read as settled by its waiver.
+ */
+async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, depIds: readonly string[], waived: ReadonlySet<string>): Promise<string[] | null> {
+  // an integration review reopened dependencies (D-6): this attempt waits until each is accepted again (one
+  // given up is told to the PM), and builds on their new work too (a dependency reached only through another
+  // one is laid over it: no cascade)
+  const reopened = await reopenedProducts(ctx, plan, t, line);
+  if (reopened === null) return null;
+  const deps: string[] = [];
+  // config `startOnHandback` (a project setting: it removes no check, E-2): a dependency still in review counts
+  // with its current attempt's verified hand-back; the dependent's own acceptance still waits for the
+  // dependency's (earlyStart, at its pass). Never for an integration task: it judges the tree that is delivered (#41)
+  const early = t.kind !== 'integration' && (ctx.ports.project?.startOnHandback?.includes(ctx.mission) ?? false);
+  for (const d of depIds) {
+    let p = await acceptedProduct(ctx, d);
+    if (p === null && early) p = verifiedHandBack(await readLine(ctx, d))?.object ?? null;
+    if (p === null) {
+      await dependencyGivenUp(ctx, t, d);
+      return null;
+    }
+    deps.push(p);
+  }
+  for (const p of reopened) if (!deps.includes(p)) deps.push(p);
+  if (eff.mode === 'stable') {
+    const labels = await ctx.ports.evaluator.labels([eff.dplan, ...deps]);
+    // 4.1.3 (E-2): a plan that took effect without its reviews (on the user's words, an authorization, or the
+    // config key) is not proven, and never will be: the gate reads it as settled by that waiver, and a
+    // dependency whose review passed but whose proof lacks only such a plan as usable. The labels stay as
+    // they are: the plan unproven, the products "not fully proven"
+    const usable = async (x: string): Promise<boolean> => {
+      const l = labels.labels[x];
+      if (l === 'proven') return true;
+      if (x === eff.dplan) return waived.has(x);
+      if (l !== 'not-fully-proven' || waived.size === 0) return false;
+      return ((await objectRecord(ctx, x))?.reviews.find((r) => r.review === 'reviewer')?.reliesOn ?? []).some((o) => waived.has(o));
+    };
+    for (const x of [eff.dplan, ...deps]) if (!(await usable(x))) return null;
+  }
+  return deps;
+}
+
+/**
  * Whether attempt k can be accepted with its risk (4.1.3, #35, E-1): it is not accepted, its product's
  * hand-back is verified (the program's runs recorded, all passed), and its last Reviewer judged that
  * product without a pass. The product and that judgment: the review position a ruling would overrule.
@@ -1120,36 +1134,42 @@ async function riskAcceptable(ctx: FlowCtx, t: DetailedTask, k: number): Promise
  * overrules the Reviewer's position, flow/secretary.ts carryOut) is written in the same write, and the
  * acceptance names it. No review judgment is written in the Reviewer's place.
  */
-async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, k: number, e: EscalationBody, d: DecisionBody): Promise<void> {
-  const risk = await riskAcceptable(ctx, t, k);
-  if (risk === null) {
+async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, k: number, e: EscalationBody, d: DecisionBody, waived: ReadonlySet<string>): Promise<void> {
+  const moot = async (why = 'that attempt has no verified product to accept any more'): Promise<void> => {
     // the attempt moved since the escalation was raised (a re-plan, another decision): nothing is accepted
     await notify(ctx, {
       category: 'accept-risk-moot',
       wi: null,
       key: e.id,
-      trigger: `the decision on ${e.id} accepts attempt ${k} of task ${t.id} with its risks, but that attempt has no verified product to accept any more`,
+      trigger: `the decision on ${e.id} accepts attempt ${k} of task ${t.id} with its risks, but ${why}`,
       defaultAction: `nothing is accepted; the decision is closed. Task ${t.id} goes on from where it is now`,
       detail: { task: t.id, attempt: k, escalation: e.id },
     });
     await markApplied(ctx, e.id, { option: 'accept-risk', moot: true });
-    return;
-  }
+  };
+  const risk = await riskAcceptable(ctx, t, k);
+  if (risk === null) return moot();
   // the decision accepts the product as it is, never ahead of the dependency gate a Reviewer's pass goes through:
-  // an integration's start must hold its dependencies' current work (#41), and work that started on a dependency's
-  // hand-back in review (startOnHandback) is accepted once that version is (sol review r1). Meanwhile the decision
-  // stays recorded, not carried out; a start that went stale closes it with the attempt (nextAttemptOf)
+  // each dependency accepted now (one reopened since waits to be accepted again, sol review P1 r2), stable
+  // mode's proof (dependencyGate); an integration's start must hold its dependencies' current work (#41), and
+  // work that started on a dependency's hand-back in review (startOnHandback) is accepted once that version is
+  // (sol review r1). Meanwhile the decision stays recorded, not carried out; a start that went stale closes it
+  // with the attempt (nextAttemptOf)
   const depIds = await taskDependencies(ctx, plan, t);
   const line = await readLine(ctx, t.id);
-  if (t.kind === 'integration') {
-    if ((await integrationRestart(ctx, eff, t, line, k, depIds)) === 'restarted') return;
-  } else {
+  if (t.kind === 'integration' && (await integrationRestart(ctx, eff, t, line, k, depIds)) === 'restarted') return;
+  if ((await dependencyGate(ctx, eff, plan, t, line, depIds, waived)) === null) return;
+  if (t.kind !== 'integration') {
     const early = await earlyStart(ctx, t, line, k, depIds);
     if (early === 'wait') return;
     if (early !== null) return rebuildOnAccepted(ctx, t, k, early);
   }
-  const words = d.by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
-  const ruling = `j.${d.by === 'user' ? 'user' : 'sec'}.${e.id}`;
+  // only the user or the Secretary accepts with a risk: nothing is accepted in the program's name
+  const by = deciderOf(d.by);
+  if (by === null) return moot('no user or Secretary decided it');
+  const words = by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
+  // the decider's ruling, written by carryOut in this write (flow/secretary.ts deciderJudgment): the same id here
+  const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : 'the Secretary'} on ${e.id}: ${x}`);
   await commitCarrying(
     ctx,
@@ -1773,7 +1793,7 @@ async function reworkHandover(ctx: FlowCtx, t: DetailedTask, k: number): Promise
  * Carry out a decision on one of this task's escalations (rework exhausted, reviewer needs a
  * decision, constructor questions). Returns whether the task must wait.
  */
-async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, e: EscalationBody): Promise<boolean> {
+async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, e: EscalationBody, waived: ReadonlySet<string>): Promise<boolean> {
   const lineName = taskLine(t.id);
   const lineage = taskLineage(ctx.mission, t.id);
   const facts = (e.facts ?? {}) as { attempt?: number; loop?: string; issues?: string[] };
@@ -1812,7 +1832,7 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       await requestReplan(ctx, eff, t, e.id, d);
       return true;
     case 'accept-risk':
-      await acceptWithRisk(ctx, eff, plan, t, k, e, d);
+      await acceptWithRisk(ctx, eff, plan, t, k, e, d, waived);
       return true;
     case 'abandon':
       await abandon(ctx, t, line.k, e.id, d.reason);

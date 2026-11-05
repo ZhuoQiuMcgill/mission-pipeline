@@ -151,9 +151,9 @@ function refuse(db: Db, data: DataStore, mission: string, x: string, s: XState):
  * `mp pm resnapshot-exploration <mission> <exploration> --words W-<n>`: the PM's word that a started,
  * unsettled exploration reads the target branch as it is now (code that landed after it began). Its
  * cards from now on name the new snapshot; nothing runs again by itself, and evidence recorded before
- * still counts, labelled "older environment". Refused (named, nothing written): not defined
- * (NOT_ALLOWED), settled (EXPLORATION_SETTLED), the branch at its snapshot (SNAPSHOT_CURRENT), a
- * dispatch in flight or a hand-back not taken into account (DISPATCH_IN_FLIGHT).
+ * still counts, labelled "older environment". Refused, nothing written: a dispatch in flight or a
+ * hand-back not taken into account (DISPATCH_IN_FLIGHT); not defined, settled, or the branch at its
+ * snapshot (NOT_ALLOWED with the reason; 4.1.3: the field's other codes merged).
  */
 export async function pmResnapshotExploration(ctx: ProcessContext, req: { readonly mission: string; readonly exploration: string; readonly words?: string | null; readonly repair?: ChangeRepair | null; readonly command?: 'repair' }): Promise<Resnapshotted> {
   const mission = req.mission as MissionId;
