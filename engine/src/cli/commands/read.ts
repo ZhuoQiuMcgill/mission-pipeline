@@ -52,13 +52,15 @@ const showCmd: Command = {
   group: 'read',
   name: ['show'],
   summary: 'layers 1-2: one item with its state, checks, links and leaf paths',
-  usage: `mp read show <kind> <id>   (kinds: ${SHOW_KINDS.join(', ')})`,
-  flags: {},
+  usage: `mp read show <kind> <id>   (kinds: ${SHOW_KINDS.join(', ')})\n       mp read show evidence|dispatch <id> --check-data   (hash the data outside the commit it cites again: unchanged, changed or missing; writes nothing)`,
+  flags: { 'check-data': 'boolean' },
   async run(c, args) {
     const kind = positional(args, 0, 'kind');
     if (!SHOW_KINDS.includes(kind)) throw usage(`the kind is one of ${SHOW_KINDS.join(', ')}`);
     const id = positional(args, 1, 'id');
-    const r = await showItem(P(c), kind, id);
+    const checkData = flagBool(args, 'check-data');
+    if (checkData && kind !== 'evidence' && kind !== 'dispatch') throw usage('--check-data goes with mp read show evidence <id> or mp read show dispatch <id>');
+    const r = await showItem(P(c), kind, id, { checkData });
     if (r === null) throw refused('NOT_FOUND', `no ${kind} ${id} in this memory`);
     return ok(r.text, r.json);
   },

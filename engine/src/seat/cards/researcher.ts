@@ -36,7 +36,7 @@ import {
   type PriorFindingT,
 } from './crititor.ts';
 import { Command, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
-import { BlindResultShape, blindEvidenceRecord, blindFields, blindProblems, renderBlind, type BlindResult } from './experiment.ts';
+import { BlindResultShape, DATA_POINTER_LINE, blindDataTexts, blindEvidenceRecord, blindFields, blindProblems, dataTextProblems, renderBlind, type BlindResult, type DataChecks, type DataText } from './experiment.ts';
 import { registerSeatCard, type CardRecordContext, type SeatCardEntry } from './registry.ts';
 
 const CurrentVersion = z.object({ version: z.string().min(1), content: z.string().regex(/^[0-9a-f]{64}$/), material: z.string().min(1) });
@@ -50,7 +50,7 @@ export const RegisteredAttempt = z.object({
   data: z.string(),
   measure: z.array(z.string().min(1)),
   assertions: z.array(z.string().min(1)),
-  commands: z.array(Command).optional().describe('experiment: the commands the steps run (the executor runs each with mp seat <id> rerun <command-id>).'),
+  commands: z.array(Command).optional().describe('experiment: the commands the steps run (the executor runs each with mp seat <id> rerun <command-id>). Each id once; cwd is "." or a path relative to the repository root (or left out): an absolute path goes in the command text.'),
 });
 export type RegisteredAttemptT = z.infer<typeof RegisteredAttempt>;
 
@@ -183,6 +183,16 @@ function authorProblems(card: AuthorCard, r: AuthorResult, put: (doc: string) =>
   return out;
 }
 
+/** 4.1.3: the texts of an author's hand-back that may cite data outside the commit (checked at hand-back; never a pointer field). */
+export function authorDataTexts(r: AuthorResult): DataText[] {
+  return [
+    { where: 'message', text: r.message },
+    { where: 'artifact', text: r.artifact },
+    ...r.dispositions.map((d) => ({ where: `dispositions[${d.finding}]`, text: d.note })),
+    ...r.attempts.flatMap((a) => [{ where: `attempts[${a.id}].data`, text: a.data }, ...a.steps.map((x, i) => ({ where: `attempts[${a.id}].steps[${i + 1}]`, text: x }))]),
+  ];
+}
+
 function authorRecords(card: AuthorCard, r: AuthorResult, ctx: CardRecordContext): BaseRecord[] {
   const doc = authorVersionDocument(card, r);
   if (doc === null) return [];
@@ -209,6 +219,7 @@ export function renderAuthorCard(c: AuthorCard): string {
     `## Round ${c.round + 1} of at most ${c.budgetRounds}\n` +
     (c.current !== null ? `Current version: ${c.current.version} (full text: material ${c.current.material}).\n\n` : 'No version yet: discuss the framing, ask for evidence, or submit the first version.\n\n') +
     (c.registerAttempts ? '## Research method\nSubmit the method with its attempt register (attempts): every experiment or reading the answer will rest on, with steps, data, quantities and assertions for a blind executor.\n\n' : '') +
+    `${DATA_POINTER_LINE}\n\n` +
     renderPriorFindings('Open findings (dispose of every one when you submit)', c.openFindings) +
     renderPriorFindings('Other findings (context)', c.otherFindings) +
     renderEvidence(c.evidence) +
@@ -226,7 +237,8 @@ export const authorEntry: SeatCardEntry<AuthorCard, AuthorResult> = {
   resultSchema: AuthorResultSchema,
   toolProfile: 'read-evidence',
   render: renderAuthorCard,
-  problems: (c, r) => authorProblems(c, r, contentHashOf),
+  problems: (c, r, ctx) => [...authorProblems(c, r, contentHashOf), ...dataTextProblems(authorDataTexts(r), ctx.data)],
+  dataTexts: authorDataTexts,
   records: authorRecords,
 };
 
@@ -252,8 +264,8 @@ export function renderReaderCard(c: ReaderCard): string {
   );
 }
 
-function readerProblems(card: ReaderCard, r: BlindResult, snapshot?: import('../results.ts').SnapshotFiles): string[] {
-  const out = blindProblems(card, r, snapshot);
+function readerProblems(card: ReaderCard, r: BlindResult, snapshot?: import('../results.ts').SnapshotFiles, data?: DataChecks): string[] {
+  const out = blindProblems(card, r, snapshot, data);
   if (card.measure.length === 0 && card.assertions.length === 0) out.push('card: a reading records at least one quantity or checks one assertion');
   return out;
 }
@@ -266,8 +278,10 @@ export const readerEntry: SeatCardEntry<ReaderCard, BlindResult> = {
   resultSchema: z.object(BlindResultShape),
   toolProfile: 'read-web',
   render: renderReaderCard,
-  problems: (c, r, ctx) => readerProblems(c, r, ctx.snapshot),
-  // url:<address> pointers are checked against the card's addresses at hand-back, never fetched by mp (decision 12)
+  problems: (c, r, ctx) => readerProblems(c, r, ctx.snapshot, ctx.data),
+  dataTexts: blindDataTexts,
+  // url:<address> pointers are checked against the card's addresses at hand-back, never fetched by mp (decision 12);
+  // data:<path> pointers against the file, before the write (4.1.3)
   records: (c, r, ctx) => [blindEvidenceRecord(c, r, 'reading', ctx)],
 };
 
@@ -284,7 +298,7 @@ export const InterpreterCardSchema = z.object({
   method: z.object({ version: z.string().min(1), material: z.string().min(1) }),
   /** Required: the attempt register with each attempt's record (8.2). */
   attempts: z
-    .array(z.object({ id: z.string().min(1), kind: z.enum(['experiment', 'reading']), purpose: z.string(), evidence: z.string().nullable(), status: z.enum(['completed', 'unverified', 'failed', 'not-run']), summary: z.string(), material: z.string().nullable() }))
+    .array(z.object({ id: z.string().min(1), kind: z.enum(['experiment', 'reading']), purpose: z.string(), evidence: z.string().nullable(), status: z.enum(['completed', 'unverified', 'failed', 'not-run']), summary: z.string(), material: z.string().nullable(), /** 4.1.3: the executor's own report of the run. */ executorReport: z.string().optional() }))
     .min(1),
   /** Evidence executions outside the register (asked for during the rounds). */
   evidence: z.array(EvidenceItem),
@@ -346,6 +360,16 @@ function interpreterProblems(card: InterpreterCard, r: InterpreterResult, put: (
   return out;
 }
 
+/** 4.1.3: the texts of an interpreter's hand-back that may cite data outside the commit (checked at hand-back). */
+export function interpreterDataTexts(r: InterpreterResult): DataText[] {
+  return [
+    { where: 'answer', text: r.answer },
+    ...r.conclusions.map((c) => ({ where: `conclusions[${c.id}]`, text: c.text })),
+    { where: 'message', text: r.message },
+    ...r.dispositions.map((d) => ({ where: `dispositions[${d.finding}]`, text: d.note })),
+  ];
+}
+
 function interpreterRecords(card: InterpreterCard, r: InterpreterResult, ctx: CardRecordContext): BaseRecord[] {
   const content = ctx.content.put(interpretationDocument(card, r));
   if (card.current !== null && content === card.current.content) return [];
@@ -360,7 +384,7 @@ export function renderInterpreterCard(c: InterpreterCard): string {
     `## Method\nVersion ${c.method.version} (full text: material ${c.method.material}).\n\n` +
     list(
       'Attempt register and records (cite every one)',
-      c.attempts.map((a) => `[${a.id}] ${a.kind}, ${a.status}${a.evidence !== null ? ` (evidence:${a.evidence})` : ''}: ${a.purpose} — ${a.summary}${a.material !== null ? ` (record: material ${a.material})` : ''}`),
+      c.attempts.map((a) => `[${a.id}] ${a.kind}, ${a.status}${a.evidence !== null ? ` (evidence:${a.evidence})` : ''}: ${a.purpose} — ${a.summary}${a.material !== null ? ` (record: material ${a.material})` : ''}${a.executorReport !== undefined ? ` (the executor's report: material ${a.executorReport})` : ''}`),
     ) +
     renderEvidence(c.evidence) +
     `## Round ${c.round + 1} of at most ${c.budgetRounds}\n` +
@@ -380,7 +404,8 @@ export const interpreterEntry: SeatCardEntry<InterpreterCard, InterpreterResult>
   resultSchema: InterpreterResultSchema,
   toolProfile: 'read',
   render: renderInterpreterCard,
-  problems: (c, r) => interpreterProblems(c, r, contentHashOf),
+  problems: (c, r, ctx) => [...interpreterProblems(c, r, contentHashOf), ...dataTextProblems(interpreterDataTexts(r), ctx.data)],
+  dataTexts: interpreterDataTexts,
   records: interpreterRecords,
 };
 

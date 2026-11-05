@@ -16,6 +16,7 @@ import { age, clip, filler, section, short, wiText } from './render.ts';
 import { buildGraph, resolveNodes, show, type Graph, type GNode } from './tree.ts';
 import { entryLines, resolveSubtasks, type Layer1Entry, type Resolved } from './layers.ts';
 import { describeScope } from './stopDetect.ts';
+import { dispatchDataLines, explorationDataLines, showEvidence } from './evidence.ts';
 
 /** The cursor of "since the maintainer last asked" (§3.2 item 7). */
 export const ASKED_CURSOR = 'asked';
@@ -189,7 +190,7 @@ export function markAsked(ctx: ProcessContext, head: number): boolean {
 
 // ---------------------------------------------------------------- mp read show <kind> <id>
 
-export const SHOW_KINDS: readonly string[] = ['mission', 'words', 'requirement', 'plan', 'object', 'task', 'dispatch', 'judgment', 'run', 'commit', 'delivery', 'landing', 'escalation', 'decision', 'exploration', 'stop', 'notice'];
+export const SHOW_KINDS: readonly string[] = ['mission', 'words', 'requirement', 'plan', 'object', 'task', 'dispatch', 'judgment', 'run', 'evidence', 'commit', 'delivery', 'landing', 'escalation', 'decision', 'exploration', 'stop', 'notice'];
 
 export interface ShowResult {
   readonly text: string;
@@ -222,9 +223,10 @@ function nodeBlock(ctx: ProcessContext, g: Graph, n: GNode): { lines: string[]; 
   return { lines, json: { node: s, ...l } };
 }
 
-/** Layers 1-2 for one item. */
-export async function showItem(p: Project, kind: string, id: string): Promise<ShowResult | null> {
+/** Layers 1-2 for one item. `checkData` (kinds evidence and dispatch): hash its data outside the commit again, read-only. */
+export async function showItem(p: Project, kind: string, id: string, o: { readonly checkData?: boolean } = {}): Promise<ShowResult | null> {
   const ctx = p.ctx;
+  if (kind === 'evidence') return showEvidence(p, id, o);
   if (kind === 'notice') {
     const n = ctx.memory.read((db) => listNotices(db, ctx.memory.data, { includeAcknowledged: true })).find((x) => x.id === id);
     if (n === undefined) return null;
@@ -290,6 +292,11 @@ export async function showItem(p: Project, kind: string, id: string): Promise<Sh
     });
     if (reads.length > 0) extra.push(`  material pages read: ${reads.join(', ')}`);
     extraJson['reads'] = reads;
+    // 4.1.3: the data outside the commit its hand-back cites, as checked at hand-back (--check-data: again, read-only)
+    const dd = await dispatchDataLines(p, d, o);
+    extra.push(...dd.lines);
+    if (dd.data.length > 0) extraJson['data'] = dd.data;
+    if (dd.checked !== null) extraJson['checked'] = dd.checked;
   }
   return { text: [...blocks.flatMap((b) => b.lines), ...extra].join('\n'), json: { items: blocks.map((b) => b.json), ...extraJson } };
 }
@@ -332,6 +339,8 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
     if (last !== undefined) out.push(`  snapshot: ${short(s.defined.snapshot.commit)}, taken again ${s.resnapshots.length} time(s), last ${last.by === 'pm' ? "on the PM's word" : 'before its first step'}${older.length > 0 ? `; evidence from an older snapshot, still counting (${OLDER_ENVIRONMENT}): ${older.join(', ')}` : ''}`);
     const rounds = new Map<number, typeof s.findings extends Map<string, infer F> ? F[] : never>();
     for (const f of s.findings.values()) rounds.set(f.round, [...(rounds.get(f.round) ?? []), f]);
+    // 4.1.3: the data outside the commit its evidence cites, labelled with the check made at hand-back
+    const dataOut = explorationDataLines(p, s);
     for (const [r, fs] of [...rounds.entries()].sort((a, b) => a[0] - b[0])) {
       const st = s.stabilizations.find((z) => z.round === r);
       out.push(`  round ${r}${st !== undefined ? ` — Stabilizer (${st.task}): ${st.drift.verdict}, version ${st.verdict}${st.revision !== undefined ? `, the author's revision ${st.revision.version} passed on its answers` : ''}${st.drift.reason ? ` (${clip(st.drift.reason, 120)})` : ''}` : ' — not stabilized yet'}:`);
@@ -356,7 +365,9 @@ async function showExploration(p: Project, raw: string): Promise<ShowResult | nu
       evidence: [...s.evidence.values()].map((e) => (older.includes(e.id) ? { ...e, environment: OLDER_ENVIRONMENT } : e)),
       ...(s.amendments.length > 0 ? { method: s.method?.version ?? null, amendments: s.amendments.map((b) => ({ n: b.n, previous: b.previous, version: b.version, judgment: b.judgment, words: b.words, reason: b.reason, added: b.added, replaced: b.replaced, replaces: b.replaces, withdrawn: b.withdrawn, answers: b.answers })) } : {}),
       ...(last !== undefined ? { snapshot: s.defined.snapshot, resnapshots: s.resnapshots } : {}),
+      ...(dataOut.lines.length > 0 ? { evidenceData: dataOut.json } : {}),
     });
+    out.push(...dataOut.lines);
   }
   if (json.length === 0) return null;
   return { text: out.join('\n'), json };

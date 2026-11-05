@@ -29,6 +29,7 @@ import type { IssueId, JudgmentId, ModuleId, ObjectVersionId } from '../../commo
 import type { BaseRecord, IssueRecord, JudgmentRecord, ListRef } from '../../common/records.ts';
 import { validateRecord } from '../../common/validate.ts';
 import { Binding, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
+import { DATA_POINTER_FORM, dataTextProblems, type DataText } from './experiment.ts';
 import { registerSeatCard, type CardRecordContext, type SeatCardEntry } from './registry.ts';
 
 // ---------------------------------------------------------------- shared exploration pieces
@@ -99,6 +100,8 @@ export const EvidenceItem = z.object({
   material: z.string().nullable(),
   /** Research explorations: the registered attempt it records. */
   attempt: z.string().nullable(),
+  /** 4.1.3: the material holding the executor's own report of the run, when it wrote one. */
+  executorReport: z.string().optional(),
 });
 export type EvidenceItemT = z.infer<typeof EvidenceItem>;
 
@@ -156,7 +159,7 @@ export function renderPriorFindings(title: string, findings: readonly PriorFindi
 export function renderEvidence(items: readonly EvidenceItemT[]): string {
   return list(
     'Evidence executions of this exploration (cite as evidence:<id>)',
-    items.map((e) => `[${e.id}] ${e.status}${e.attempt !== null ? ` (attempt ${e.attempt})` : ''}: ${e.summary}${e.material !== null ? ` (record: material ${e.material})` : ''}`),
+    items.map((e) => `[${e.id}] ${e.status}${e.attempt !== null ? ` (attempt ${e.attempt})` : ''}: ${e.summary}${e.material !== null ? ` (record: material ${e.material})` : ''}${e.executorReport !== undefined ? ` (the executor's report: material ${e.executorReport})` : ''}`),
   );
 }
 
@@ -209,7 +212,7 @@ const NewFinding = z.object({
   severity: z.enum(SEVERITIES),
   class: z.string().min(1).describe('One entry of the attack scope, or a short name of another kind of hole.'),
   title: z.string().min(1).describe('One line.'),
-  basis: z.string().min(1).describe('Why this is a real problem: the passage, the counterexample, evidence:<id> or file:<path>:<line>.'),
+  basis: z.string().min(1).describe(`Why this is a real problem: the passage, the counterexample, evidence:<id>, file:<path>:<line>, or ${DATA_POINTER_FORM} for a file outside the repository.`),
   consequence: z.string().min(1).describe('What goes wrong if it stays.'),
   direction: z.string().min(1).describe('Which way a fix should go.'),
   evidence: z.array(z.string()).describe('Evidence ids of this exploration supporting the finding (may be empty).'),
@@ -304,6 +307,11 @@ function crititorProblems(card: CrititorCard, r: CrititorResult): string[] {
     for (const e of f.evidence) if (!evidenceIds.has(e)) out.push(`findings[${i}]: evidence "${e}" is not an evidence execution on the card`);
   });
   return out;
+}
+
+/** 4.1.3: the texts of an attacker's hand-back that may cite data outside the commit (checked at hand-back). */
+export function crititorDataTexts(r: CrititorResult): DataText[] {
+  return [...r.findings.map((f, i) => ({ where: `findings[${i}].basis`, text: f.basis })), ...r.rechecks.map((x) => ({ where: `rechecks[${x.finding}]`, text: x.reason })), { where: 'reply', text: r.reply }];
 }
 
 // ---------------------------------------------------------------- records
@@ -411,7 +419,8 @@ export const crititorEntry: SeatCardEntry<CrititorCard, CrititorResult> = {
   resultSchema: CrititorResultSchema,
   toolProfile: 'read-evidence',
   render: renderCrititorCard,
-  problems: (c, r) => crititorProblems(c, r),
+  problems: (c, r, ctx) => [...crititorProblems(c, r), ...dataTextProblems(crititorDataTexts(r), ctx.data)],
+  dataTexts: crititorDataTexts,
   records: crititorRecords,
 };
 

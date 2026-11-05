@@ -91,6 +91,9 @@ export function readTaskSpec(db: Db & { readonly data?: unknown }, data: { text(
  * asked for evidence the request and the notes. `seat`: the hash of what the seat handed in, so
  * the same hand-back again is recognised (§5.3: one per dispatch).
  */
+// 4.1.3: the data pointers a hand-back cites, as checked (a type only)
+type RecordedData = import('../seat/cards/experiment.ts').RecordedData;
+
 export interface HandbackDoc {
   readonly format: 'mp41.handback.v1';
   readonly kind: 'handed-back' | 'needs-evidence';
@@ -104,6 +107,12 @@ export interface HandbackDoc {
   readonly runs: AcceptedHandBack['runs'];
   /** 5.2 part 5: the continuation judgment it carried was refused: the task goes to a full review. */
   readonly fullReview?: string;
+  /**
+   * 4.1.3 (E-4): the data outside the commit its texts cite, as the program checked it before the
+   * write (path, line, sha256, size, check kind, sample, label), for every seat that may cite it
+   * (seat/cards/experiment.ts recordedData; a blind run's evidence record keeps the same list).
+   */
+  readonly data?: readonly RecordedData[];
 }
 
 /** The flow line the dispatch table's own bookkeeping is on (tasks given up outside the queue, dispatch reads and runs). */
@@ -369,6 +378,7 @@ function acceptedOf(d: DispatchInfo, doc: HandbackDoc): AcceptedHandBack {
     report: d.reportLeaf,
     runs: doc.runs,
     records: doc.records,
+    ...(doc.data !== undefined && doc.data.length > 0 ? { data: doc.data } : {}),
   };
 }
 

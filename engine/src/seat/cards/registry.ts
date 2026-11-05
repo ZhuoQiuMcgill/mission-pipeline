@@ -22,6 +22,8 @@
 import type { z } from 'zod';
 import type { BaseRecord, ListRef } from '../../common/records.ts';
 import type { SnapshotFiles } from '../results.ts';
+// types only (erased): the card modules import this registry at load
+import type { DataChecks, DataText } from './experiment.ts';
 import { zodProblems } from './common.ts';
 import { roleText } from './roles.ts';
 
@@ -62,6 +64,8 @@ export interface CardResultContext {
   readonly materialsRead?: ReadonlySet<string>;
   /** The runs this dispatch made with `mp seat <id> rerun`, in order (evidence ids, with whether each completed). */
   readonly runs?: ReadonlyArray<{ readonly run: string; readonly completed: boolean }>;
+  /** 4.1.3: the data files the hand-back's data pointers name, checked before the write (by path). */
+  readonly data?: DataChecks;
 }
 
 /** What building the result's records needs. */
@@ -71,6 +75,10 @@ export interface CardRecordContext {
   /** The runs this dispatch made with `mp seat <id> rerun` (blind experiments cite them as run:<id>). */
   readonly runs?: ReadonlyArray<{ readonly run: string; readonly completed: boolean }>;
   readonly content: { put(doc: string): string; putList(items: readonly string[]): ListRef; getList(ref: ListRef): string[] };
+  /** 4.1.3: the data files the hand-back's data pointers name, as checked before the write (by path). */
+  readonly data?: DataChecks;
+  /** 4.1.3: the seat's report (a blind executor's is kept with its evidence record), the leaf it is filed as, and the hand-back's fields as given (a json block of the report that holds them is not report). */
+  readonly report?: { readonly text: string; readonly leaf: string | null; readonly fields?: unknown } | null;
 }
 
 /** One card kind. `C` is the card, `R` the hand-back. */
@@ -88,6 +96,11 @@ export interface SeatCardEntry<C extends { readonly seat: string } = { readonly 
   render(card: C): string;
   problems(card: C, result: R, ctx: CardResultContext): string[];
   records(card: C, result: R, ctx: CardRecordContext): BaseRecord[];
+  /**
+   * 4.1.3: the texts of a hand-back that may cite data outside the commit (`data:` pointers, seat/cards/experiment.ts).
+   * The program checks the files they name before the write and gives the checks to `problems` and `records` as `data`.
+   */
+  dataTexts?(result: R): DataText[];
 }
 
 /** A registered entry: the kind's own fields, plus its role page (loaded when read). */
@@ -134,6 +147,14 @@ export function handBackProblems(card: { readonly seat: string }, raw: unknown, 
   const r = e.resultSchema.safeParse(raw);
   if (!r.success) return zodProblems(r.error);
   return e.problems(card, r.data, ctx);
+}
+
+/** The texts of a hand-back that may cite data outside the commit (none when its shape is wrong: `handBackProblems` says why). */
+export function handBackDataTexts(card: { readonly seat: string }, raw: unknown): DataText[] {
+  const e = seatCardEntry(card.seat);
+  if (e.dataTexts === undefined) return [];
+  const r = e.resultSchema.safeParse(raw);
+  return r.success ? e.dataTexts(r.data) : [];
 }
 
 /** The accepted hand-back's records. */

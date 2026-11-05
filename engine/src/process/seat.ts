@@ -59,14 +59,19 @@ import { EvidenceRequestSchema, isIntegrationCard, rerunCommands, rerunnableComm
 import { isFullSuiteCommand } from '../common/fullSuite.ts';
 import type { ReviewerCard } from '../seat/card.ts';
 import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/common.ts';
-import { handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
+import { handBackDataTexts, handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
+import { dataPaths, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
+import { checkDataFiles } from '../common/dataFile.ts';
 import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
 import { productObjectId, verificationStopped } from './actions.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
-import { runOnCommit, type RecordedRun } from './runs.ts';
+import { normalizeCwd, runOnCommit, type RecordedRun } from './runs.ts';
+import { foldExploration } from '../flow/exploration/predecessors.ts';
+import { requestExecutor } from '../flow/exploration/cards.ts';
+import { explorationLine } from '../flow/plandoc.ts';
 import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
 import { tagScope } from '../delivery/scope.ts';
 import { pathOwners } from '../flow/execution.ts';
@@ -415,7 +420,7 @@ export async function seatHandback(ctx: ProcessContext, dispatch: string, files:
 }
 
 /** The seat's records of an accepted hand-back (the Reviewer's judgment and findings are built here). */
-function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: ReadonlyArray<{ run: string; completed: boolean }>): BaseRecord[] {
+function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: ReadonlyArray<{ run: string; completed: boolean }>, more: { readonly report: string; readonly data?: DataChecks }): BaseRecord[] {
   const data = ctx.memory.data;
   const content = { put: (d: string) => data.put(d), putList: (xs: readonly string[]) => data.putList(xs), getList: (r: { hash: string; count: number }) => data.getList(r as never) };
   if (v.card.seat === 'reviewer') {
@@ -423,7 +428,19 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
     const r = fields as ReviewerResult;
     return [judgmentRecord(card, r, data.putList(citedEvidence(card, r, runs))), ...findingRecords(card, r, content, v.info.dispatch)];
   }
-  return handBackRecords(v.card, fields, { launch: v.info.dispatch, runs, content });
+  // 4.1.3: a blind executor's report is kept with its evidence record; the leaf is the one this hand-back files
+  const report = { text: more.report, leaf: dispatchLeaf(v.info.mission, v.info.dispatch, 'report'), fields };
+  return handBackRecords(v.card, fields, { launch: v.info.dispatch, runs, content, report, ...(more.data !== undefined ? { data: more.data } : {}) });
+}
+
+/**
+ * 4.1.3 (E-4): the data files a hand-back's data pointers name, each checked once, here, before
+ * the write transaction (hashing a large file never runs inside it). Undefined when it cites none:
+ * such a hand-back is checked exactly as before.
+ */
+async function handBackDataChecks(v: DispatchView, fields: unknown): Promise<DataChecks | undefined> {
+  const paths = dataPaths(handBackDataTexts(v.card, fields));
+  return paths.length === 0 ? undefined : await checkDataFiles(paths);
 }
 
 /** The flow event that records why a Secretary dispatch was taken back at its hand-back (its escalation was already decided or closed). */
@@ -482,15 +499,19 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   const runs = ctx.memory.read((db) => dispatchRuns(db, data, v.info));
   let candidate: CandidateInfo | null = null;
   let records: BaseRecord[] = [];
+  let dataChecks: DataChecks | undefined;
+  let dataCited: RecordedData[] = [];
   if (!late) {
     // the role's rules (decision 14: refused hand-backs do not count; the seat fixes them and runs again)
     const reads = ctx.memory.read((db) => dispatchReads(db, v.info));
     const snap = cardSnapshot(v);
     const snapFiles = snap !== null && COMMIT.test(snap) ? (ctx.snapshotFiles !== null ? ctx.snapshotFiles(snap) : commitFiles(ctx, snap)) : null;
+    dataChecks = await handBackDataChecks(v, input.fields);
     const problems = [
       ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not read (mp seat ${dispatch} read <material> --page <n>)`),
-      ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}) }),
+      ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}), ...(dataChecks !== undefined ? { data: dataChecks } : {}) }),
       ...integrationPassProblems(ctx, v, input.fields),
+      ...attemptCommandProblems(ctx, v, input.fields),
     ];
     const unique = [...new Set(problems)];
     if (unique.length > 0) return refuse(ctx, dispatch, 'handback', unique);
@@ -501,7 +522,9 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       if (c.kind !== 'candidate') return refuse(ctx, dispatch, 'handback', collectionProblems(c));
       candidate = { commit: c.commit, base: c.base, changedPaths: [...new Set([...c.added, ...c.modified, ...c.deleted, ...c.modeChanged])].sort(), ignored: c.ignored.paths, ignoredTotal: c.ignored.total };
     }
-    records = recordsOf(ctx, v, input.fields, runs);
+    records = recordsOf(ctx, v, input.fields, runs, { report: input.report, ...(dataChecks !== undefined ? { data: dataChecks } : {}) });
+    // every seat's data pointers, with the check made, kept with the hand-back's records (one parser and renderer for all)
+    if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks);
   }
   const out = ctx.memory.write({ op: `handback:${dispatch}`, payload: { seat: seatHash } }, (tx) => {
     // 5.2 part 5: a continuation judgment is committed only after the labels' check passed for it, carrying
@@ -527,6 +550,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       notes: null,
       runs,
       ...(fullReview !== null ? { fullReview } : {}),
+      ...(dataCited.length > 0 ? { data: dataCited } : {}),
     };
     const r = recordHandback(tx, { dispatch, report: input.report, result: doc, filler: input.filler ?? null });
     if (r.accepted && kept.length > 0) appendRecords(tx, kept);
@@ -645,12 +669,72 @@ export async function seatRequestEvidence(ctx: ProcessContext, dispatch: string,
   return recordEvidenceRequest(ctx, dispatch, { request: req, notes: notesText, ...(files.filler !== undefined ? { filler: files.filler } : {}) });
 }
 
+/**
+ * 4.1.3 (E-4, #43): what the executor's `mp seat <id> rerun` is certain to refuse, or never offers,
+ * for the commands an evidence request or a registered attempt declares, refused when they are
+ * asked for, with the reason, so the seat fixes it in the same dispatch:
+ *   - a working directory the run refuses (normalizeCwd, the run's own normalizer over normalRelDir:
+ *     absolute, leaving the checkout, or inside .git);
+ *   - an id declared twice (the rerun runs the first one only);
+ *   - the project's full suite (never rerun from a card, D-5);
+ *   - commands on a reading (a reader has no rerun: they would never run).
+ */
+export function evidenceCommandProblems(ctx: Pick<ProcessContext, 'fullSuite'>, where: string, commands: ReadonlyArray<{ readonly id: string; readonly command: string; readonly cwd?: string }>, executor: 'experiment' | 'reading'): string[] {
+  const out: string[] = [];
+  if (executor === 'reading' && commands.length > 0) out.push(`${where}: a reading runs no commands (its executor reads sources and has no rerun): ask for an experiment (executor "experiment") to run them, or leave them out`);
+  const seen = new Set<string>();
+  commands.forEach((c, i) => {
+    const at = `${where}[${i}] (${c.id})`;
+    if (seen.has(c.id)) out.push(`${at}: the id "${c.id}" is declared twice: give each command its own id (the executor runs one with mp seat <id> rerun <command-id>)`);
+    seen.add(c.id);
+    try {
+      normalizeCwd(c.cwd);
+    } catch (e) {
+      // the rerun's own reason, without its code
+      const why = e instanceof ProcessError ? (e.message.startsWith(`${e.code}: `) ? e.message.slice(e.code.length + 2) : e.message) : (e as Error).message;
+      out.push(`${at}: ${why}: use "." or a path relative to the repository root, or leave cwd out (an absolute path goes in the command text)`);
+      return;
+    }
+    if (isFullSuiteCommand(ctx.fullSuite, c.command, c.cwd)) out.push(`${at}: "${c.command}" is the project's full suite: it is never rerun from a card (the integration review runs it)`);
+  });
+  return out;
+}
+
+/** The executor an exploration seat's request gets (its own, else the exploration's default), read from the memory. */
+function requestedExecutor(ctx: ProcessContext, v: DispatchView, req: { readonly executor?: 'experiment' | 'reading' }): 'experiment' | 'reading' {
+  if (req.executor !== undefined) return req.executor;
+  const x = (v.card['exploration'] as { id?: unknown } | undefined)?.id;
+  if (typeof x !== 'string') return 'experiment';
+  const data = ctx.memory.data;
+  const q = { mission: v.info.mission as MissionId, line: explorationLine(x) };
+  // the definition in force: its definition events only (the machine's own fold)
+  const rows = ctx.memory.read((db) => [...flowEvents(db, { ...q, event: 'defined' }), ...flowEvents(db, { ...q, event: 'redefined' })]).sort((a, b) => Number(a.revision) - Number(b.revision));
+  const s = foldExploration(rows.map((e) => ({ event: e.event, key: e.key, body: JSON.parse(data.text(e.body)) as unknown })));
+  return s.def === null ? 'experiment' : requestExecutor(req, s.def);
+}
+
+/** A research author's attempt register (4.1.3): the commands each attempt declares, checked as a request's are. */
+function attemptCommandProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
+  if (v.card.seat !== 'researcher-author' || v.card['registerAttempts'] !== true) return [];
+  const r = seatCardEntry(v.card.seat).resultSchema.safeParse(fields);
+  if (!r.success) return [];
+  const attempts = (r.data as { step: string; attempts: ReadonlyArray<{ id: string; kind: 'experiment' | 'reading'; commands?: ReadonlyArray<{ id: string; command: string; cwd?: string }> }> });
+  if (attempts.step !== 'submit') return [];
+  return attempts.attempts.flatMap((a) => evidenceCommandProblems(ctx, `attempts[${a.id}].commands`, a.commands ?? [], a.kind));
+}
+
 /** The core of seatRequestEvidence (tests call it with the content directly). */
 export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: string, input: { readonly request: unknown; readonly notes: string; readonly filler?: Filler | null; readonly advance?: boolean }): Promise<HandBackAnswer> {
   const v = dispatchView(ctx, dispatch);
   const parsed = EvidenceRequestSchema.safeParse(input.request);
   if (!parsed.success) return refuse(ctx, dispatch, 'request-evidence', parsed.error.issues.map((i) => `request.${i.path.join('.')}: ${i.message}`));
   if (parsed.data.measure.length === 0 && parsed.data.assertions.length === 0) return refuse(ctx, dispatch, 'request-evidence', ['request: record at least one quantity or check one assertion']);
+  // 4.1.3 (E-4): what the executor's rerun would refuse later is refused now (a dispatch is not spent on it)
+  const commands = parsed.data.commands ?? [];
+  if (commands.length > 0) {
+    const cp = evidenceCommandProblems(ctx, 'request.commands', commands, requestedExecutor(ctx, v, parsed.data));
+    if (cp.length > 0) return refuse(ctx, dispatch, 'request-evidence', cp);
+  }
   const seatHash = sha256(canonicalJson({ report: input.notes, request: parsed.data }));
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(ctx.memory.data, v.info);

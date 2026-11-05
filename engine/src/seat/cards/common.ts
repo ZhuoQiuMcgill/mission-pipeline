@@ -151,6 +151,12 @@ export const commonCardFields = {
   continuation: Continuation.optional(),
   /** 4.1.2 (D-10): the repairs this work answers: the user's reason verbatim, its kind and words entry. */
   repairs: z.array(z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string().min(1), words: z.string().min(1) })).optional(),
+  /**
+   * 4.1.3 (E-4): the data outside the commit that this work's materials cite (data:<path>…), each
+   * with the check mp made when it was handed back (full, or partial for a file over 2 GiB), as
+   * recorded then. Never on a blind executor's card.
+   */
+  dataChecked: z.array(z.object({ pointer: z.string().min(1), check: z.enum(['full', 'partial']), label: z.string().min(1) })).optional(),
 };
 
 /** "## Title\n- a\n- b" (empty string when there is nothing to list). */
@@ -159,7 +165,7 @@ export function list(title: string, items: readonly string[]): string {
 }
 
 /** The common head of every card body. */
-export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string; kind?: string }[]; decisionQuotes: readonly string[]; seat?: string; authorizations?: readonly { id: string; quote: string; notifyCondition: string | null }[]; continuation?: ContinuationT | undefined; repairs?: readonly { id: string; kind: string; text: string; words: string }[] | undefined }): string {
+export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string; kind?: string }[]; decisionQuotes: readonly string[]; seat?: string; authorizations?: readonly { id: string; quote: string; notifyCondition: string | null }[]; continuation?: ContinuationT | undefined; repairs?: readonly { id: string; kind: string; text: string; words: string }[] | undefined; dataChecked?: readonly { pointer: string; label: string }[] | undefined }): string {
   const k = c.continuation;
   return (
     (c.duties.trim() !== '' ? `## Your duties on this task\n${c.duties.trim()}\n\n` : '') +
@@ -169,7 +175,8 @@ export function renderCommon(c: { duties: string; constraints: readonly { id: st
       : '') +
     list('Project constraints', c.constraints.map((x) => `[${x.id}] ${x.kind === 'instruction' ? 'Instruction (context only; not a proof input): ' : ''}${x.text}`)) +
     list('Relevant decisions (verbatim)', c.decisionQuotes) +
-    (c.seat === 'secretary' ? '' : list('Authorizations currently in force (verbatim)', (c.authorizations ?? []).map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition === null ? '' : ` (tell the user when: ${a.notifyCondition})`}`)))
+    (c.seat === 'secretary' ? '' : list('Authorizations currently in force (verbatim)', (c.authorizations ?? []).map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition === null ? '' : ` (tell the user when: ${a.notifyCondition})`}`))) +
+    list('Data outside the commit cited in the materials (each as mp checked it at hand-back)', (c.dataChecked ?? []).map((d) => `${d.pointer} — ${d.label}`))
   );
 }
 
