@@ -8,8 +8,8 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The round's findings, each with the attacker's severity, basis, consequence and direction, and the author's disposition of each: revise, rebut with evidence, or escalate. Every round comes to you, also one the attacker passed or where it found nothing (then the list is empty and you judge the round itself).
 - Direction questions still waiting for their ruling from earlier rounds, if any.
 - The first and the current version of the product *(required)*, as materials.
-- The earlier rounds' judgments, if any, and the rulings of the decision layer.
-- The project constraints that apply: the object constraints your judgment binds, and instructions.
+- The earlier rounds' judgments, if any, and the rulings of the decision layer (a grant's instructions and the findings it names included).
+- The project constraints that apply: the object constraints your judgment binds, and instructions, labelled "Instruction (follow it; not a proof input)": follow them.
 - When the plan placed this exploration after others: each one's hand-off and latest version, as materials you may read (what the author was given to build on).
 
 ## What you hand back
@@ -23,7 +23,9 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - the round verdict: `on-track`, or `drifting` (the product moved away from the definition across rounds), with the reason;
 - for each `shifts-direction` finding, and for `drifting`: the question for the Secretary, stated against the definition and the user's words.
 
-What your judgments do: only in-scope findings bind the author, and an in-scope fatal or serious finding left unresolved refutes the version. Out-of-scope and direction findings never refute it. A direction finding is not fixed: it goes to the Secretary, and the exploration cannot pass or converge until it is ruled. An answered finding is resolved by your judgment at once, without the attacker's re-check (a later attacker may still re-check it and reopen it). A round passes, and the exploration converges (a research method passes to its attempts), only after you judged it: when the round is on track, no direction question waits for a ruling, and every in-scope fatal or serious finding is resolved, by the attacker's re-check or by your `answered`. That holds in any round, the budget's last included. After the last round of its budget, an exploration that has not converged goes to the Secretary with your judgments.
+What your judgments do: only in-scope findings bind the author, and an in-scope fatal or serious finding left unresolved refutes the version. Out-of-scope and direction findings never refute it. A direction finding is not fixed: it goes to the Secretary, and the exploration cannot pass or converge until it is ruled. An answered finding is resolved by your judgment at once, without the attacker's re-check (a later attacker may still re-check it and reopen it). A round passes, and the exploration converges (a research method passes to its attempts), only after you judged it: when the round is on track, no direction question waits for a ruling, and every in-scope fatal or serious finding is resolved, by the attacker's re-check or by your `answered`. That holds in any round, the budget's last and a granted one included, and no closing attacker follows: the budget only limits whether another round starts. After the last round of its budget, an exploration that has not converged goes to the Secretary with your judgments.
+
+Your judgment ends the round. `mp` applies the rule to the state recorded when you hand back: the direction questions and the findings' states as they are then, not as your card showed them. An `answered` counts only while its finding can still be answered then; a ruling that settled or redirected it first wins. When a ruling lands after your card was made and leaves the round's end to its verdict, one new Stabilizer judges the same round again from a current card. No round is spent.
 
 How to end the fault-finding:
 - A refinement or an edge case that does not change what the exploration can answer is `general` or `minor`; it is `out-of-scope` when it lies outside the attack scope.

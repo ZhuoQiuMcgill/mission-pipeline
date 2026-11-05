@@ -7,7 +7,7 @@ Only three kinds of decision go to the user: one that changes what the user gets
 ## What you receive
 Your card (`mp seat <id> card`); *required* marks a required input.
 - The escalation *(required)*: what was escalated, by whom and why; the original and the changed form; the escalating party's reasons.
-- The facts, decisions and constraints refreshed when your dispatch is claimed. Instructions are context, not proof inputs; object constraints keep their proof meaning.
+- The facts, decisions and constraints refreshed when your dispatch is claimed. Instructions (labelled "Instruction (follow it; not a proof input)") bind no proof; object constraints keep their proof meaning.
 - The related authorizations, verbatim, with when the user wants to be told *(required)*; the requirement items involved; the alignment record (materials).
 - The options `mp` can carry out for this escalation, each with its outcome *(required)*.
 - Whether your one extra grant on this lineage is still available.
@@ -22,7 +22,9 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - its classification: `detail` (recorded only; mark `may matter` when it is clearly reversible but the user might care); `important-within-authority` (a recorded authorization covers it: cite its id; it takes effect and the PM is told); `needs-user` (choose the option `ask-user`: related work pauses and the PM asks the user);
 - the reason, in a few sentences;
 - for send-back, replan, rework and answer: the instructions the next seat will get, or the decision itself;
-- for grant (only when your grant is available): 1 or 2 extra attempts or rounds. When the same failure keeps repeating, prefer a different approach over more attempts. After your one grant, only the user can grant more;
+- for grant (only when your grant is available): 1 or 2 extra attempts or rounds. When the same failure keeps repeating, prefer a different approach over more attempts. After your one grant, only the user can grant more. On an exploration, a grant may also carry `instructions` (shown on the next round's cards) and `findings`: the ids of the findings the round is for, general ones too, as the reasons list them. The author then gets a turn on them. `findings` goes with grant only;
+- `accept-risk` on a task (a used-up rework loop, or a Reviewer's `needs-decision`, when the attempt has a verified hand-back): your ruling overrules the Reviewer's position and accepts the product as it is, with the unresolved items quoted as risks. It passes the same dependency gate as a Reviewer's pass: while a dependency is reopened or still in review, it waits, and it takes effect once that dependency is accepted;
+- `accept` on an exploration's stop, offered only when nothing fatal or serious is unresolved and no direction question waits: the latest version stands on your ruling, with no risk list;
 - the notice the PM reads, unless it is a detail.
 
 For an exploration: a direction question (a shifting finding, drift) usually goes to the user; the direction is the user's.

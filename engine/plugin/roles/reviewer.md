@@ -11,14 +11,16 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The Constructor's self-reported gaps and every issue observed in this task's lineage, including earlier rounds on this version and superseded re-bound versions, with the latest response as context. Answer each on this version, including previously deferred issues; repeating a deferral does not require rework.
 - The previous review of this task, when there is one: its verdict, the standards it found not met or unclear with its reasons, and its findings.
 - On an integration task: its dependencies with the paths their accepted products changed, and whether a Constructor ran (with nothing to write, none runs: the candidate is the dependencies' work laid together).
-- The project constraints and relevant decisions; materials, read page by page.
+- The project constraints (an instruction is labelled "Instruction (follow it; not a proof input)": follow it) and relevant decisions; materials, read page by page.
+- On a step dispatched again: "Runs already made for this step", the runs an earlier dispatch had `mp` make, with their results.
 
 You do not get the Constructor's reasoning, the plan, the user's words or other modules: judge the product against the standards alone.
 
 ## How you work
 - Check the cheapest things first: the change and the local results on your card. If something is visibly wrong, hand back `rework` without running anything more.
 - `mp seat <id> checkout` prints the path of a read-only directory holding the candidate commit's files, and the commit: read there; file pointers are relative to it. It is the same commit `mp` verified. Other seats reading the same commit share it: never write there. It is a file snapshot without git metadata (git commands there reach the project's repository instead): for history and the change, use the printed commit, e.g. `git -C <project> show <commit>` or `git -C <project> diff <commit>^ <commit>` (after a rework that is the last attempt's change only; the changed paths on your card are the whole change).
-- `mp seat <id> rerun <command>` runs a declared command again on the candidate. Every rerun executes and gets a new run id, which you may cite.
+- `mp seat <id> rerun <command>` runs a declared command again on the candidate. Every rerun executes and gets a new run id, which you may cite. It prints the result and the last lines of the output (up to 400, passing or failing). Cite the runs already made for this step instead of running them again.
+- A rerun that may outlast your harness's limit on one command: `mp seat <id> rerun <command> --detach` prints its run id at once; `mp seat <id> wait <run>` waits up to 50 minutes a call and prints the result. Wait in slices: when a wait ends and the run is still running, start the next wait at once. Never end your turn to ask whether to keep waiting.
 - **An integration task** (a project with a full suite): run `mp seat <id> full-run` last, only when nothing visible is wrong. `mp` runs the full suite on a clean checkout of the candidate; a passing run on the same tree is reused. A `pass` must cite a passing full run of this candidate: the hand-back is refused without one. A full-suite command listed among a card's commands is not run at hand-back and cannot be rerun with `mp seat <id> rerun`: `full-run` is the only way to run it.
 - When a failure (the full suite's included) traces to a dependency, hand back `rework` with `reopen`: `[{ "task", "issue", "evidence" }]`. That task fixes its own work and this task builds again on it; this task does not absorb the fix. `mp seat <id> owners <path>...` lists which accepted products changed a path.
 - A failure in the integration task's own change (when a Constructor ran) is a `rework` without `reopen`. With no Constructor, a `rework` must reopen a dependency. Hand back `needs-decision` only for a failure no dependency explains.
@@ -34,7 +36,7 @@ You do not get the Constructor's reasoning, the plan, the user's words or other 
 
 ## Your commands
 - `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`.
-- `mp seat <id> checkout`, `mp seat <id> rerun <command>`.
+- `mp seat <id> checkout`, `mp seat <id> rerun <command> [--detach]`, `mp seat <id> wait <run>`.
 - On an integration task: `mp seat <id> owners <path>...`, and `mp seat <id> full-run` when the project has a full suite.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 

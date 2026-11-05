@@ -1,6 +1,6 @@
 # Mission Pipeline 4.1 design: a neutral project memory, roles and process (v06)
 
-Status: v06 with the 4.1.1 and 4.1.2 amendments. v06 (v05 plus Appendix E, the batch-bound amendment from the code review) was the implementation contract of 4.1.0, after the 3 attack rounds and their Stabilizers (Appendices A–C), the maintainer’s ruling on what the memory holds (U-13, U-14), and a Stabilizer check of v04 (Appendix D). The 4.1.1 amendments come from the review of the field’s PRs #8–#15 and the fixes that followed it: Appendices F (the run lock), G (the run checkout's repository), H (the change a reworked product brings), I (checking the plan in effect again), J (products of kept tasks under a new plan version), K (the previous detailed plan on an Architect revision card), L (products stacked on each other), M (a later attempt on its dependencies' current work) and N (dispatch context and scoped constraint withdrawal) are added, and §3.3, §4.1, §5.3, §6.2, §6.3, §6.5, §6.7 and §12 items 10–12 are changed to match. The maintainer’s rulings on them are U-15 to U-23 (§0). The 4.1.2 amendments come from the maintainer's alignment on execution redundancy (`DesignDoc_ExecutionRedundancy_2026-10-17_v01.md`, rulings D-1 to D-12, recorded here as U-25 to U-36): Appendix O (execution redundancy as built) is added, and §2, §3.1, §5.3, §6.1, §6.2, §6.5, §6.7, Appendices F and G, §11 item 7 and §12 item 10 are changed to match. Under D-12 (details are not the maintainer's), the mechanics the rulings do not fix are the engine author's: items marked “Author's decision under D-12” describe what the code does. They were marked “Proposal, pending ruling” up to 4.1.1.
+Status: v06 with the 4.1.1 and 4.1.2 amendments. v06 (v05 plus Appendix E, the batch-bound amendment from the code review) was the implementation contract of 4.1.0, after the 3 attack rounds and their Stabilizers (Appendices A–C), the maintainer’s ruling on what the memory holds (U-13, U-14), and a Stabilizer check of v04 (Appendix D). The 4.1.1 amendments come from the review of the field’s PRs #8–#15 and the fixes that followed it: Appendices F (the run lock), G (the run checkout's repository), H (the change a reworked product brings), I (checking the plan in effect again), J (products of kept tasks under a new plan version), K (the previous detailed plan on an Architect revision card), L (products stacked on each other), M (a later attempt on its dependencies' current work) and N (dispatch context and scoped constraint withdrawal) are added, and §3.3, §4.1, §5.3, §6.2, §6.3, §6.5, §6.7 and §12 items 10–12 are changed to match. The maintainer’s rulings on them are U-15 to U-23 (§0). The 4.1.2 amendments come from the maintainer's alignment on execution redundancy (`DesignDoc_ExecutionRedundancy_2026-10-17_v01.md`, rulings D-1 to D-12, recorded here as U-25 to U-36): Appendix O (execution redundancy as built) is added, and §2, §3.1, §5.3, §6.1, §6.2, §6.5, §6.7, Appendices F and G, §11 item 7 and §12 item 10 are changed to match. Under D-12 (details are not the maintainer's), the mechanics the rulings do not fix are the engine author's: items marked “Author's decision under D-12” describe what the code does. They were marked “Proposal, pending ruling” up to 4.1.1. The 4.1.3 amendments come from the maintainer's alignment on the user's say (`DesignDoc_UserAuthority_2026-11-05_v01.md`, rulings E-1 to E-5, recorded here as U-37 to U-41): Appendix P (user authority as built) is added, and §3.2, §5.4, §6.1, §6.3, §6.6, §9 and Appendix O.9 are changed to match.
 Replaces the runtime of the 4.0.x design (`DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md`, "v51"). The process and the memory model of v51 carry over where this document says so.
 
 ## 0. Calibration: where each element comes from
@@ -49,6 +49,11 @@ Every element below is tagged:
 | U-34 | 2026-10-17 | Ruled (D-10, `DesignDoc_ExecutionRedundancy_2026-10-17_v01.md`): Repairs go through the Architect and the mechanical checks only, and record their reason: the PM labels the kind, the user's words are the reason. |
 | U-35 | 2026-10-17 | Ruled (D-11, `DesignDoc_ExecutionRedundancy_2026-10-17_v01.md`): Closing is never blocked; it records what is proven, not proven, unfinished and at risk. |
 | U-36 | 2026-10-17 | Ruled (D-12, `DesignDoc_ExecutionRedundancy_2026-10-17_v01.md`): Details are not the user's: the PM, or the engine author in development, decides them with a sensible default, and mentions the choice when it matters. |
+| U-37 | 2026-11-05 | Ruled (E-1, `DesignDoc_UserAuthority_2026-11-05_v01.md`): Raise the user's say and make the process less rigid: where the user has decided, the user's words settle it, carried out and recorded, never sent back through review or refused for form; every stop has an exit the user's words can take (accept, change, run again, drop), and the record says which and why. |
+| U-38 | 2026-11-05 | Ruled (E-2, `DesignDoc_UserAuthority_2026-11-05_v01.md`): A process check is waived only by the user's words or an authorization item in force, on the record and shown wherever the plan's proof is read; the program never waives a check, a project setting is not a waiver, and starting on verified hand-backs stays a setting that removes no check. |
+| U-39 | 2026-11-05 | Ruled (E-3, `DesignDoc_UserAuthority_2026-11-05_v01.md`): An exploration's end is judged by its state, not its round counter (on track, no direction question waiting as recorded at hand-back, every in-scope fatal or serious finding resolved); the budget only limits new rounds; a grant carries instructions and may name findings; plain accept when nothing is unresolved. |
+| U-40 | 2026-11-05 | Ruled (E-4, `DesignDoc_UserAuthority_2026-11-05_v01.md`): Data outside the commit counts as evidence, by absolute path with its sha256 and size, checked at hand-back and labelled; what the method asks a seat to record reaches the seats that read it; a request the program would refuse later is refused at once. |
+| U-41 | 2026-11-05 | Ruled (E-5, `DesignDoc_UserAuthority_2026-11-05_v01.md`): The user's decision about a method takes effect directly through the one repair entry, with only the mechanical checks; records the change does not touch keep counting; a repair that leaves the method to the author gives the author the turn at once; the field's commands stay as older names for one release. |
 
 ## 1. What Mission Pipeline is
 
@@ -119,7 +124,7 @@ The leaves hold the content people and agents read, and only that: the maintaine
 
 **Details are noted, not kept** **[U-13]**: a leaf says what was done and where the detail is, not the detail itself:
 - code: the commit, in git;
-- a verification run: the run summary (commands, environment identity, exit codes, per-test results, the output's hash, the last lines of a failing command); the full output is not kept;
+- a verification run: the run summary (commands, environment identity, exit codes, per-test results, the output's hash, the last lines of a failing command); the full output is not kept. 4.1.3 (Appendix P.9): a seat's rerun also keeps the last 400 lines of a passing command;
 - a seat's conversation: not kept; it belongs to the harness;
 - a card: kept as the seat received it, because what a seat was told is a design-relevant fact.
 
@@ -192,6 +197,7 @@ The card is the seat's birth package **[U-9]**: the one-page role description, t
   - `mp pm release <id> --abandoned`: not confirmed. The step can be dispatched again at once, in a new worktree; the old worktree and the old dispatch's exclusive leases stay held until a later `--ended`, or until the PM decides per the WI.
 - A hand-back from a released dispatch is recorded with its content and marked "after release, not accepted" **[mine; r1 F5]**.
 - A new PM session (any harness, any machine) sees the dispatches in flight with their age, and decides per WI: wait, or release and dispatch again.
+- 4.1.3 (Appendix P.10): a detached rerun runs in a worker process that `mp` itself starts. `mp` checks whether that worker is alive when it reads the run; it still never judges a seat.
 - Continuation is never a harness session: a seat that must continue (v51 §6.2 asynchronous evidence) gets a new card with the previous hand-back, the saved notes it handed back, and the new evidence. Nothing depends on a harness's session id; the card's `resume.sessionId` field is removed (§14).
 
 ## 6. The process
@@ -203,6 +209,7 @@ PM alignment and requirement items, Calibrator ①, Architect decomposition with
 Changes:
 - **The maintainer's words** are recorded by the PM with `mp pm say` (verbatim, for every message; appended as an anchored entry to `words/<date>.md`, with the skeleton recording the entry) before anything else, as the handbook's first rule **[mine]**. A requirement item's quote must appear verbatim in the words entry it names; `mp` refuses it otherwise **[v04 check]**. A harness hook that calls `mp pm say` automatically (Claude Code `UserPromptSubmit`, Codex hooks) is an optional convenience in `mp init`, never required **[mine]**. Replaces v51 §3.1's hook-only capture **[v51]**.
 - **4.1.2 (Appendix O)**: a task may cover several PM plan elements; mechanical rules 6 (every task writes something, except an integration task or an experiment) and 7 (no task, the integration task included, lists a full-suite command among its verification commands: the integration task's Reviewer runs the suite with `mp seat <id> full-run`) are added **[U-27, U-30]**; a repair amends the plan in effect through the Architect and the mechanical checks only **[U-34]**.
+- **4.1.3 (Appendix P)**: the user's words, or an authorization item in force, may waive a mission's plan reviews (the feasibility review and Calibrator ②), labelled wherever the plan's proof is read **[U-38]**; a decision that chose `replan` is routed in the same write or told to the PM **[U-37]**; `after` is resolved in one place and cycles are refused (Author's decision under D-12, Appendix P.12).
 - **Notices to the PM** (v51 §3.9): no background watcher. `mp pm next` and `mp read status` show undelivered notices first; the handbook tells the PM to run `mp pm next` after each hand-back and at session start **[mine]**.
 
 ### 6.2 Execution layer: v51 §4.2–4.3 unchanged except as listed
@@ -226,8 +233,8 @@ The exploration definition, the author (Researcher), the attacker (Crititor), ev
   - **out of scope**: a nitpick outside the attack scope.
 - Only in-scope findings bind the author. A direction-shifting finding is not fixed; it goes to the Secretary **[U-6]**, which applies v51 §3.2 (usually: ask the maintainer).
 - It also judges the round: on track, or drifting (the product moved away from the definition across rounds). Drifting goes to the Secretary **[U-6]**.
-- **Round budget** default 3 attack rounds per exploration, settable in its definition **[mine, after U-6]**. After the last round: converged → acceptance as in v51 §8.2; not converged and the Stabilizer judges the remaining in-scope findings undeviated → to the Secretary with the findings, the dispositions and the Stabilizer's judgments **[U-6]**. The Secretary's options are those of WI-08 unchanged: one extension within its authority, after which it must ask the maintainer **[v51]**.
-- Convergence as v51 §8.2 (no unresolved fatal or serious **in-scope** finding on the same frozen version, including a fresh final attacker **[v51]**), and no direction question pending at the Secretary.
+- **Round budget** default 3 attack rounds per exploration, settable in its definition **[mine, after U-6]**. It only limits whether another round may start; it never turns a resolved exploration into a failed one **[U-39]**. When it is used and the exploration has not converged, and the Stabilizer judges the remaining in-scope findings undeviated → to the Secretary with the findings, the dispositions and the Stabilizer's judgments **[U-6]**. The Secretary's options are those of WI-08: one extension within its authority, after which it must ask the maintainer **[v51]**; a grant carries instructions and may name findings, and plain `accept` is offered when nothing is unresolved **[U-39]** (Appendix P.6).
+- **Convergence (4.1.3, Appendix P.5)**: one rule, judged by the state, in any round, the budget's last or a granted one included: the Stabilizer judged the round on track, no direction question waits for a ruling (read from the record when the Stabilizer hands back), and every in-scope fatal or serious finding is resolved, by an attacker's re-check or by the Stabilizer's `answered` **[U-39]**. No fresh final attacker is called in; a fresh attacker comes only after a redefinition. Up to 4.1.2 convergence followed v51 §8.2, including a fresh final attacker **[v51]**.
 
 **The Stabilizer's place in the memory** **[mine; r1 F6]**. Each round of an exploration goes through these recorded states, in this order:
 
@@ -283,6 +290,7 @@ So a move between machines, or between a WSL and a Windows harness on the same f
 - `mp pm stop "<the words>"` records a stop with a conservative scope (v51 §6.4 scope rules **[v51]**), linked to the maintainer's words entry (W-n) it came from.
 - From that commit on, `mp` refuses, within the scope: new dispatches, hand-backs (recorded as "arrived after the stop, not accepted"), new delivery and landing authorizations **[mine]**. A landing whose git step had already started is checked (§6.7) and reported as "started before the stop" with what actually happened **[v51; r1 F4]**. A retry of an open landing intent is checked against stops exactly like a new landing **[v04 check]**.
 - Seats already running are the harness's processes: the PM stops them through its harness and reports to the maintainer what its harness confirmed **[U-3, U-4]**. `mp` reports "stop recorded; N dispatches were in flight".
+- 4.1.3 (Appendix P.10): a stop also stops the detached reruns in its scope: their workers are signalled and the runs recorded as stopped, with no result.
 - Narrowing and releasing: v51 §6.4 **[v51]**.
 
 ### 6.7 Closing and delivery [v51-U, simplified]
@@ -344,7 +352,7 @@ Layers 0–3 and the read-depth rule of v51 §10.2 are unchanged. Layer 0 loses 
 ## 9. Installation and platforms [mine, v51-U]
 
 - `mp` is a Node package (TypeScript **[v51-U]**, Node ≥ 22.12 with the built-in `node:sqlite`), installed per machine. When it is missing, the PM installs it for the maintainer (v51 §9.6 **[v51-U]**).
-- Linux, Windows and macOS. Paths are stored relative to the project folder. Verification commands are declared per project and run with the platform's shell.
+- Linux, Windows and macOS. Paths are stored relative to the project folder. Verification commands are declared per project and run with the platform's shell, or the one config `shell` names (4.1.3, Appendix P.12).
 - `mp init` in the project: creates `.mission-pipeline/`, copies the role descriptions and handbook, adds the git exclude, optionally adds the pointer line and hook adapters (§4.2, §6.1).
 
 ## 10. Migration
@@ -720,8 +728,8 @@ A **full run** is `mp` executing every `fullSuite` command, in order, on a clean
 
 **[U-33, U-34]** `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<verbatim>" [--about <task|exploration>]`. The PM labels the kind; the text must appear verbatim in the words entry. **Author's decision under D-12:**
 - The repair is recorded on the mission's line `repairs` (event `repair`, id `R-<n>`), only while the mission is open. The same repair again returns the one recorded while it is undecided or its amendment is part of the plan in effect.
-- **About an exploration**: the exploration is reopened for one more round with the repair as an added question; its settled conclusion stays as history.
-- **Otherwise**: an Architect repair step (card `architect-repair`) on the plan in effect. It hands back the tasks to reopen (each with its issue) and the tasks to add (fresh ids; existing tasks keep their cards).
+- **About an exploration**: the exploration is reopened with the repair as an added question; its settled conclusion stays as history. 4.1.3 (Appendix P.7): its author gets the turn at once, in the attempts phase too, and the user's decision about its method takes effect directly through a change form **[U-41]**.
+- **Otherwise**: an Architect repair step (card `architect-repair`) on the plan in effect. It hands back the tasks to reopen (each with its issue) and the tasks to add (fresh ids; existing tasks keep their cards). 4.1.3 (Appendix P.7): it may also change the card of a task with no accepted product.
 - **Mechanical checks only**: the plan in effect plus the added tasks; the per-task rules apply to the added tasks; rule 4 leaves out the tasks any repair added. A failure returns the step (the mechanical-return loop; used up: WI-08 and the Secretary). A plan that took effect meanwhile starts a new attempt, not counted.
 - **The decision is one write**: the `decided` record and, when it adds tasks, the amendment: a new `effective` event of the same detailed plan (key `<dplan>#a<n>`, its body listing the amendments), with the added tasks' standards as basis lines. No new detailed-plan version, no Calibrator, no feasibility review, no re-bind, no Reviewer for existing work. The reopened tasks get their new attempts as in O.8.
 - Every card of the work a repair caused shows it (the user's reason verbatim); one resolver, `repairsOf`, serves the reads and the close.
@@ -754,3 +762,123 @@ A **full run** is `mp` executing every `fullSuite` command, in order, on a clean
 - `mp pm constraint add --words W-<n>` checks and records the words entry.
 
 Cost, before → after (from the part reports): a hand-back's commands run once instead of twice; a delivery or rebuild runs 0 commands instead of the closing checks; an environment change costs one notice instead of every affected group's suite and stalled stable mode; a start snapshot and a delivery write 0 files instead of the whole tree; reading seats keep at most one checkout per commit while held instead of one per dispatch forever; a no-write integration costs 0 Constructor dispatches instead of 1; a failure traced to a task costs its Constructor, its Reviewer and the integration Reviewer instead of a full re-plan; a repair costs one Architect step and the program's check instead of Calibrator ① and a new detailed-plan cycle; the end of a mission costs one words entry and one command instead of three each; a session start runs no `mp` command instead of `mp pm next`.
+
+## Appendix P: user authority as built (4.1.3)
+
+The maintainer's rulings E-1 to E-5 (`DesignDoc_UserAuthority_2026-11-05_v01.md`, U-37 to U-41) apply D-9 to D-12 to explorations and to the process checks themselves. 4.1.3 is built on the field's 4.1.2 branch (nine field pull requests and the commits the field ran without one); its records fold as they are, with no migration. Each item names the ruling it carries out; the mechanics no ruling fixes are **Author's decision under D-12** **[U-36]**. The hard floors of Appendix O stay, and so do the rulings of 2026-10-13: the program writes no judgment in a seat's place, and a judgment the user made, cited by words, is the user's. E-1 adds no questions **[U-36]**.
+
+### P.1 Every stop has an exit the user's words can take
+
+**[U-37]** Where the user has decided, the user's words settle it: `mp` carries the decision out and records it, and does not send it back through review or refuse it for form. **Author's decision under D-12:** the stops on the delivery side and their exits, as audited for 4.1.3:
+
+| Stop | Exits the user's words can take |
+|---|---|
+| a used-up rework loop | grant, replan, `accept-risk` (P.4), abandon |
+| a Reviewer's `needs-decision` | answer, rework, replan, `accept-risk` (P.4) |
+| the same on a re-review or re-bind | answer, rework, replan (the product is accepted already) |
+| a re-plan that waits | routed in the same write when the decision layer is idle; otherwise notice `replan-waits` (WI-08), or a repair that changes the task's card |
+| a dependency given up | notice `dependency-abandoned` (WI-08): a repair that changes a card, or a re-plan |
+| duplicate ids, a seat failure | replan, abandon, a repair that changes a card; restart or grant |
+| a cycle in `after` | refused at submission; in effect, notice `after-cycle` (WI-16) |
+| the plan reviews | accept, accept-risk, send-back; or `mp pm waive` (P.2) |
+| an exploration's stop | grant, `accept` (P.6), accept-risk, send-back, replan, abandon |
+| a repair's mechanical returns used up | grant (it holds no other work; WI line) |
+| close and finish | never refused; finish stops with a named WI, and the same words serve again |
+
+### P.2 The waiver record and its label
+
+**[U-38]** `mp pm waive <mission> plan-reviews [--plan dplan.<mission>.<n>.<k>] (--words W-<n> | --authority <item>) [--reason "…"]`. **Author's decision under D-12:**
+- The record is the event `reviews-waiver` on the plan line (key `plan-reviews#<n>`): the check, the action (`waive` or `withdraw`), the scope (null for every plan of the mission not in effect yet, or one detailed plan version), who decided (`words` or `authority`, with the entry or the item line in force) and the reason. The authority check is the one `mp pm full-run` uses.
+- Only `plan-reviews` is waivable; the command names the check so a later release can add one. A plan already in effect is refused.
+- One resolver, `planReviewsWaiver`, gives the waiver of a plan version. Planning decides with it; the reads, the Architect's card and the close label with it. A plan that takes effect waived records `reviewsWaived {by, ref, reason, skipped}` on its `effective` event, and in the same write its queued review steps are cancelled and its open feasibility and Calibrator ② escalations are closed. A plan in effect no longer goes back through its review gates on each pass.
+- The label: "this plan took effect without its reviews (feasibility, Calibrator ②), on W-<n>", in `mp read show plan`, `mp read why`, the Architect's revision card and the close (a `planReviews` field and a risk line). The plan is not proven and never will be: in stable mode the gate reads a waived plan in effect as settled by its waiver, and a dependency whose proof lacks only such a plan as usable; the labels stay as they are ("not fully proven").
+- `--withdraw` gives later plans their reviews again; a plan in effect stays in effect.
+- The field's config key `planReviewsWaived` (missions or plan versions) is deprecated. It is still read so missions in the middle of their re-plans go on, labelled "waived by config `planReviewsWaived`; no words on record", until a withdrawal is on the record. A plan that took effect under it before 4.1.3, with no Calibrator ② outcome, is derived as waived by the key from the record; no words entry is invented.
+
+### P.3 Starting on verified hand-backs
+
+**[U-38]** Config `startOnHandback` (the field's key) stays a project setting: it saves waiting and removes no check. **Author's decision under D-12:**
+- A task of a listed mission may start on a dependency's current attempt once that has a verified hand-back (its runs recorded and all passed), while the dependency is in review. Never an integration task (it judges what is delivered), and no effect in stable mode (a dependency must be proven).
+- The dependent's acceptance, by a Reviewer's pass or a decision (P.4), waits while the dependency is in review on the version it started on. When that version is sent back, the dependent gets attempt k+1 (reason `program`, not counted) that carries its work onto the dependency's next version (notice `early-start-rebuilt`). A field 4.1.2 attempt reads the same, from its pinned start.
+
+### P.4 `accept-risk` and the dependency gate
+
+**[U-37]** **Author's decision under D-12:**
+- A used-up rework loop and a Reviewer's `needs-decision` offer `accept-risk` when the attempt has a verified hand-back. The escalation carries the Reviewer's position. The decision's ruling, the Secretary's or the user's (`j.sec.<id>` or `j.user.<id>`, one writer for both), overrules that position; the `accepted` event names the decision and quotes the risks; the close lists them (`acceptedWithRisk`). No Reviewer pass is written, and nothing is accepted in the program's name: a decision by the program is closed as moot.
+- **The gate.** One function, `dependencyGate`, is the gate a Reviewer's pass and an accepting decision both go through: each dependency accepted now (one reopened since waits to be accepted again), the products of dependencies an integration review reopened, and stable mode's proof. An integration's start must hold its dependencies' current work, and an early start (P.3) waits for its dependency's acceptance. While the gate holds, the decision stays recorded and is not carried out; it takes effect on the pass after the gate opens. An attempt that moved on meanwhile accepts nothing (notice `accept-risk-moot`).
+- **Integration judges what is delivered.** One resolver, `taskDependencies`, gives an integration task's dependencies: the plan's own plus the tasks repairs added, except integration tasks, tasks that depend on it, and tasks given up. When an attempt's start lacks a dependency's current accepted product, attempt k+1 is written (reason `rebuild`) in one guarded write that closes the old attempt's escalations (notice `integration-restarted`). A step in flight finishes first (`integration-start-stale`), and a pass on the old tree is never accepted.
+- **Re-plans.** `requestReplan` writes the Architect attempt in the same guarded write as the request when the decision layer is idle; otherwise the waiting task sends `replan-waits`. A repair that changes the task's card answers the re-plan (`replan-answered`).
+
+### P.5 One convergence rule, and `answered`
+
+**[U-39]** One rule, `roundEnd`, ends every attack round once its Stabilizer judged it, and again when a ruling it waited for is recorded. It reads the state as it is then, never a card. **Author's decision under D-12:** its outcomes:
+- `author`: an in-scope fatal or serious finding is open, or a repair waits for the author's turn;
+- `attack`: one is unresolved on the version (it waits for the attacker's re-check), the author's revision is not the version the judgment passed, or the round was judged under an older definition (then a fresh attacker under the current one);
+- `await-ruling`: a direction question waits;
+- `rejudge`: nothing stands between the round and its end but its recorded verdict, left pending or failed by a ruling that came after its card: one new Stabilizer judges the same round, and no round is spent;
+- `converged`: on track, nothing waits for a ruling, everything in scope fatal or serious resolved on the version the judgment passed. A research method then passes to its attempts.
+
+The budget is not part of the rule: it is checked only when another round would start. No closing attacker is called in any more. At the Stabilizer's hand-back, the card its verdict is computed from is rebuilt from the ledger at that moment (the direction questions and the finding states); the flow takes the verdict and the `.revision` pass from those recorded judgments.
+
+`answered` (the field's change, kept inside the rule): the Stabilizer may resolve an in-scope finding the author revised or rebutted, without a re-check; a later attacker may still re-check and reopen it. An answered finding whose revision was left pending by a direction question is judged on that revision. On a card rebuilt at hand-back, an answer counts only while the finding is still answerable. Replay compatibility: an older engine's budget stop on a round the rule would now end, followed by a grant, converges at once.
+
+### P.6 Grants with instructions and findings, and `accept`
+
+**[U-39]** **Author's decision under D-12:**
+- An `extend` ruling gets optional `instructions`, and its existing `findings` names the findings the grant is for, general ones included (`mp pm answer --option grant --instructions … --findings …`; the Secretary's hand-back has an optional `findings`, with `grant` only, checked against the exploration's findings). The next round's cards show a grant only when it carries instructions or findings, so older grants change no card. A named finding still open, or awaiting a re-check, gives the author or the interpreter the turn.
+- The budget step offers `accept` when nothing fatal or serious is unresolved and no direction question waits; it then replaces `accept-risk`. It is carried out as a ruling `accept`: the decider's pass is written on the latest version (one writer, as in P.4), the machine converges by the decision (or the method passes to its attempts), and the exploration settles as converged with no risk list. The hand-off, the notice and the summary say it was the decision's.
+
+### P.7 The repair change forms and `--answers`
+
+**[U-41]** `mp pm repair <mission> --about <exploration> … [--attempts <file> [--answers R-<n>] | --rerun <ids> | --resnapshot]`. **Author's decision under D-12:**
+- A change form writes the repair event and its change event (the field's `attempts-amended`, `attempt-rerun` or `resnapshotted`, with `answers` naming the repair) in one write. The repair reads as answered (`repairsOf`, `answeringChange`) and adds no round. Only the mechanical checks apply: the attempts' schema and their commands (P.9), as the author's register is checked.
+- `--answers R-<n>` (with `--attempts`) says the change also settles an earlier repair: its added rounds are taken back and its queued author steps withdrawn. While the method is back with its author for R-<n>, a change form that does not name R-<n> is refused, and the refusal names both exits. Before the author's step is dispatched: pass `--answers R-<n>` if this change is what R-<n> asked for, or apply the change once the author's version passes. After: apply it then, or record the decision as a repair with no change form. The program never links two decisions by itself.
+- A repair with no change form is recorded with `authorTurn` and gives the author the turn at once. In the attempts phase the method goes back to its author (`reentry`); attempt runs no longer hold the turn; a queued interpreter is withdrawn in the repair's write; runs in flight finish. When the author's new version is taken into account, queued runs of the attempts it drops or changes are withdrawn. An attempt whose registered object is unchanged (`canonicalJson`-equal) keeps its records.
+- The field's `mp pm amend-attempts`, `mp pm rerun-attempt` and `mp pm resnapshot-exploration` stay as older names for one release **[U-41]**. Each records a repair too (kind `new-question` unless `--kind`, the words entry as its text; `amend-attempts --answers` records none) and prints one line naming the `mp pm repair` form. Their refusals keep only `DISPATCH_IN_FLIGHT` and `INTERPRETATION_SUBMITTED`; the field's twelve other codes are `NOT_ALLOWED` with the reason.
+- **A task's card.** An Architect repair result gets optional `change: DetailedTask[]`: tasks of the plan in effect with no accepted product, the same id and kind, a different card. The amendment records them (`AmendmentEntry.changed`), and each starts a new attempt under its new spec (with `repair`) that carries its earlier work on. `repairProblems` refuses a change to a task with an accepted product, a kind change and an unchanged card. The reused-interface check of an amendment looks only at the interfaces its added or changed tasks use (the field's #40 fix, extended).
+
+### P.8 `data:` pointers and the check kinds
+
+**[U-40]** A seat may cite a file outside the repository by absolute path with its sha256 and size; `mp` checks it at hand-back, records it with the evidence and labels it "outside the commit". **Author's decision under D-12:**
+- **Grammar** (`DATA_POINTER_FORM`): `data:<absolute path>[:<line>[-<line>]]#sha256=<64 hex>&size=<bytes>`. A line suffix is read only when everything after the last colon is digits, so Windows paths parse; a space in the path is `%20`, a `%` is `%25`. Old `run:`, `url:` and `file:` texts parse exactly as before.
+- **Who may use it:** blind experiments and readers (sources and bases), authors (message, artifact, disposition notes, attempt data and steps), interpreters (answer, conclusions, message, notes) and attackers (basis, re-check reasons, reply), through an optional `dataTexts` hook per card kind. No declared folder is needed.
+- **The check,** before the write transaction (hashing never runs inside it): the path is absolute and a regular readable file (anything else is never opened), the size, and the sha256 by streaming, once per distinct path. A mismatch refuses the hand-back with the expected and actual values; a pointer missing its hash or size is refused too. The seat fixes it in the same dispatch.
+- **Check kinds:** `full` ("outside the commit (sha256 checked at hand-back)"); `partial`, for a file over 2 GiB: its size and the sha256 of its first and last 64 MiB, labelled so, the pointer's own sha256 not checked.
+- **Record:** no new record kind. The evidence record gets `data:<n>` fields (path, line, sha256, size, check kind, the sample hash), and the report document a `data` list with each label. Cards, materials, the continuation text and the hand-off carry the label.
+- **Later check:** `mp read show evidence|dispatch <id> --check-data` says `unchanged`, `changed` or `missing` per file, repeats the check kind, and writes nothing. Changed data does not take the record out of the proof: it says what was read. Running it again is the user's choice (P.7).
+
+### P.9 What the method asks a seat to record reaches its readers
+
+**[U-40]** **Author's decision under D-12:**
+- **The executor's report as material.** `blindEvidenceRecord` keeps a blind executor's report as a data value of its own, cut at 256 KiB on a character boundary with a note of the full size, sha256 and leaf. It is served as a readable material (not must-read) to the attacker, the interpreter and the author (`executorReportMaterial`); a blind executor's card carries none. A blank report, or one that is only the fenced fields, changes nothing. An experiment's evidence record is made at its hand-back, as a reading's is; the flow builds one only for hand-backs recorded before 4.1.3.
+- **Kept rerun tails.** A seat's rerun keeps the last 400 lines (at most 64 KiB, `RERUN_TAIL`) of its output, passing or failing, in the summary leaf and the `run` event, and returns it; verification runs are unchanged.
+- **Requests checked when made.** `evidenceCommandProblems` runs at `request-evidence`; the same checks (`registerCommandProblems`) run on the author's attempt register and on `mp pm repair --attempts`: the working directory (absolute, leaving the checkout, inside `.git`; "." or a relative path or none is accepted, by the rerun's own normalizer), a command id declared twice, the project's full suite, and commands on a reading.
+
+### P.10 Detached runs, `wait` and lost workers
+
+**[U-37]** A long experiment must not depend on the seat waiting for it (no stuck state). **Author's decision under D-12:**
+- `mp seat <id> rerun <command> --detach` spawns `mp seat <id> rerun <command> --worker`, detached in its own session and process group. The worker records the flow event `detached` (dispatch line, key: the run id, with its pid, start time, host and evidence id), answers over IPC, and runs the command through the foreground rerun's own path: the same checkout and owner lock, time limit, shell, cleanup commands and evidence. On a timeout or a stop its command's group gets SIGTERM, then SIGKILL after 10 s, until the whole group is gone. The result write retries 3 times on BUSY or OVER_BUDGET.
+- **States,** from one resolver (`stepRuns`): `run` event → finished; `detached-end` → stopped or lost; otherwise running. A stopped run never records a result (its result write refuses inside that write); a result that arrives after "lost" still counts.
+- **Liveness** (`workerAlive`) is the pid plus its start time: on Linux `/proc/<pid>/stat` field 22 with the boot id, so a restart or a reused pid reads as gone; elsewhere the pid alone. A worker on another host is never judged. `mp pm next` and `mp seat <id> wait` record a run whose worker is gone as lost.
+- `mp seat <id> wait <run> [--seconds <n>]` waits up to 50 minutes by default (below common harness limits on one command) and finds a run of this dispatch or of the step's earlier dispatches. Cards tell the seat to wait in slices and never end its turn to ask whether to keep waiting.
+- `mp pm next` lists runs that ended for dispatches in flight (`detachedRuns`); `mp` never decides whether a seat is alive. A step dispatched again gets a card section "Runs already made for this step" (`carriedRunLines`), and its hand-back may cite them.
+- `mp pm stop` signals each detached run in its scope (only while its pid and start time still match) and records it as stopped (the hard floor: a stop stops).
+- A detached run of a registered attempt holds the attempt: `--rerun` and `--attempts` refuse it with `DISPATCH_IN_FLIGHT` while it runs, after its dispatch was released too, naming the worker pid to signal.
+
+### P.11 Constraint reach
+
+**Author's decision under D-12** (the field's analysis: rules that silently apply to nothing):
+- The matcher reads three pattern forms, `CONSTRAINT_PATTERN_FORMS`: `**`, an exact path, `<folder>/**`. Only `*` and `?` count as wildcards. `mp pm constraint add` refuses any other pattern with `NOT_ALLOWED`, naming the forms and the nearest one, and records nothing. The matcher is not extended with globs. A constraint the field recorded with an unreadable pattern still reads (and matches nothing); re-adding the same id and text changes only its scope.
+- The command returns its reach (`constraintReach`: current object versions through `constraintApplies`, tasks of the plans in effect through `constraintsForTask`) and prints a warning at 0, never a refusal.
+- An instruction with no task types and `**` in its paths reaches tasks with an empty write scope (`constraintsForTask`). Blind executors still get only instructions that name their seat.
+- Cards label an instruction "Instruction (follow it; not a proof input)".
+
+### P.12 Smaller changes
+
+- `after` has one resolver, `afterOf`, for decomposition, the Architect card, the mechanical check and the predecessor materials: element ids and exploration ids both work. `submitPmBatch` refuses a cycle among explorations' `after` entries (`AFTER_CYCLE`); a plan in effect with one gets notice `after-cycle` (WI-16).
+- `mp pm dispatch` waits a random 100–600 ms after `OVER_BUDGET` and claims once more from the queued spec; a second one says nothing was written and a retry is safe. The budget is unchanged.
+- Config `shell` (an absolute path) is the shell of every declared command; `experimentShell` (the field's key) takes precedence for experiment reruns and falls back to `shell`. `shell` is part of the environment identity when set (so a change reads "older environment", by O.4); `experimentShell` is not, and the version commands still run under the platform's shell.
+- The field's `cleanupCommands` and `experimentCommandTimeoutMs` are kept as they are; detached runs use both.
+- `mp` waits for each write of its output to finish before it exits, so output above 64 KiB to a slow pipe is no longer cut off.
+
+Cost, before → after (from the part reports): a waiver saves 2 seat dispatches per plan version, and a plan in effect no longer re-runs its review gates on each pass; a re-plan is routed in the same write (one pass saved); `accept-risk` saves the grant attempts (a Constructor and a Reviewer each); a card change costs one Architect repair dispatch instead of a re-plan's Architect, feasibility and Calibrator ②; a converging exploration phase costs one round and 2 dispatches instead of a round, a closing attacker and two Stabilizers; a ruling costs one Stabilizer instead of a closing attacker and a Stabilizer; a change form costs 0 rounds and 0 dispatches; a repair in the attempts phase reaches the author at once instead of after every obsolete attempt and an interpreter; a bad evidence request costs a refusal instead of an executor dispatch, a refused rerun and a resume; a hand-back with no data pointer reads no file, one with pointers reads each file once before the write; a detached run costs one extra process and two small writes, and a re-dispatched step does not run its commands again.

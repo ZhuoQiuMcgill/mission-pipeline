@@ -13,7 +13,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The materials *(required)*, read page by page. ①: the user's words of the batch, the changed requirement items (old and new), the items that depend on them, the plan's new (and old) full text, the authorizations. ②: the PM plan's full text, the detailed plan's full text (old and new in a continuation), the provenance map, the authorizations.
 - The plan's elements with their claimed provenance, and the focus elements to judge *(required)*; ①: the explorations the plan defines.
 
-You see neither the PM's or the Architect's reasoning nor any progress of the work.
+An instruction among your card's project constraints, if any, is labelled "Instruction (follow it; not a proof input)": follow it. You see neither the PM's or the Architect's reasoning nor any progress of the work.
 
 ## What you hand back
 Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`), with your reasoning per element, and these fields:

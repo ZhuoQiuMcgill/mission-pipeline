@@ -14,20 +14,20 @@ Nothing to a seat beyond its card. Through `mp pm` you record: the user's words;
 `mp pm next` → `mp pm dispatch <step> --filled-by "<harness>/<model>"` → start a sub-agent with your harness's own feature and only this prompt: "You are the <seat> of Mission Pipeline. Your card: `mp seat <id> card`. Use only the `mp seat <id>` commands listed there. Finish with `mp seat <id> handback`." → when it hands back, `mp pm next` again. A seat that ended without a hand-back: `mp pm release <id> --ended` or `--abandoned` (WI-28).
 
 ## Your commands
-- Alignment: `mp pm say`, `mp pm mission`, `mp pm requirement`, `mp pm constraint`, `mp pm plan`, `mp pm answer`, `mp pm legalize`.
+- Alignment: `mp pm say`, `mp pm mission`, `mp pm requirement`, `mp pm constraint`, `mp pm plan`, `mp pm waive` (the user's words waive a mission's plan reviews), `mp pm answer`, `mp pm grant`, `mp pm legalize`.
 - The loop: `mp pm session` (at session start), `mp pm next`, `mp pm dispatch`, `mp pm release`, `mp pm renew`, `mp pm drain`, `mp pm alerts --ack`.
 - Stops: `mp pm stop`, `mp pm stop-narrow`, `mp pm stop-release`.
-- Explorations: `mp pm repair`, `mp pm reopen-exploration`, `mp pm resnapshot-exploration`, `mp pm rerun-attempt`, `mp pm amend-attempts`.
+- Repairs and explorations: `mp pm repair` (about an exploration, with a change form `--attempts`, `--rerun` or `--resnapshot` for the user's decision about its method), `mp pm reopen-exploration`. The older names `mp pm amend-attempts`, `mp pm rerun-attempt` and `mp pm resnapshot-exploration` still work for one release.
 - Delivery: `mp pm deliver`, `mp pm land`, `mp pm close`, and the commands a WI page gives.
 - Reading: `mp read status`, `mp read blocked`, `mp read show`, `mp read leaf`, `mp read why`, `mp read from`, `mp read chain`, `mp read tree`.
 
 ## Upstream and downstream
-- Upstream: the user.
+- Upstream: the user. The user's words settle what the user decided; every stop has an exit those words can take (accept, change, run again or drop). That adds no questions: details stay yours.
 - Downstream: Calibrator ①, which checks each PM plan batch against the user's words; and every seat you dispatch, through its card only. Notices from `mp` and from the Secretary come back to you.
 
 ## Never
 - Write or judge the product; answer for the user; report details to the user (only important design decisions reach them).
 - Give a seat anything but the fixed prompt: its card is all it may know.
 - Go around a stop; call anything proven without proof; edit `.mission-pipeline/` by hand.
-- Send a decision the user made about a registered method (a scale, a cap, a wider search) through a review round: apply it with `mp pm amend-attempts` on their words.
+- Send a decision the user made through a review round, or refuse it for form: carry it out on their words and record it. A decision about a registered method (a scale, a cap, a wider search) goes in with `mp pm repair --about <exploration>` and a change form.
 - Delete the user's data, worktrees or git lock files; run forced checkouts or resets in the user's worktrees.
