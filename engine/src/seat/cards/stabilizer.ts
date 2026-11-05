@@ -123,7 +123,8 @@ export function answerable(f: Pick<PriorFindingT, 'status' | 'disposition' | 'an
  * judgment of the same round gives it again).
  */
 function resolvedOn(f: PriorFindingT, judged: Judged | undefined, revision: boolean): boolean {
-  if (judged?.answered === true) return revision || f.disposition?.action === 'rebut';
+  // an answer counts only while the finding is answerable (a ruling recorded while the Stabilizer ran may have reopened it, #25)
+  if (judged?.answered === true && answerable(f)) return revision || f.disposition?.action === 'rebut';
   return f.status === 'resolved' && f.answered === undefined;
 }
 
@@ -151,7 +152,7 @@ export function stabilizedVerdict(card: Pick<StabilizerCard, 'findings' | 'earli
  * Null otherwise (the attacker's next round judges the revision, as before).
  */
 export function stabilizedRevision(card: Pick<StabilizerCard, 'findings' | 'earlier' | 'pendingDirection' | 'target' | 'currentVersion' | 'binding'>, r: StabilizerResult): { readonly version: string; readonly judgment: string } | null {
-  if (card.currentVersion.version === card.target || !r.findings.some((x) => x.answered === true)) return null;
+  if (card.currentVersion.version === card.target || !r.findings.some((x) => x.answered === true && card.findings.some((f) => f.id === x.finding && answerable(f)))) return null;
   if (verdictOn(card, r, true) !== 'pass') return null;
   return { version: card.currentVersion.version, judgment: revisionJudgment(card.binding.judgment) };
 }
@@ -199,7 +200,7 @@ function stabilizerRecords(card: StabilizerCard, r: StabilizerResult, ctx: CardR
   const b = card.binding;
   const verdict = stabilizedVerdict(card, r);
   // an answered rebuttal: the version's standing rests on its evidence execution too (as on a re-checked one)
-  const answered = card.findings.filter((f) => r.findings.some((x) => x.finding === f.id && x.answered === true));
+  const answered = card.findings.filter((f) => answerable(f) && r.findings.some((x) => x.finding === f.id && x.answered === true));
   const rebuttals = answered.flatMap((f) => (f.disposition?.action === 'rebut' && f.disposition.evidence !== null ? [f.disposition.evidence] : []));
   const required = rebuttals.length > 0 ? [...new Set([...card.requiredEvidence, ...rebuttals])] : card.requiredEvidence;
   const evidence = required.length > 0 ? ctx.content.putList(required) : ((b.evidence ?? EMPTY_LIST) as ListRef);

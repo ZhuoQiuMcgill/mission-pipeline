@@ -131,8 +131,6 @@ async function exploredToCal2(p: ProcessProject, m: string): Promise<void> {
   await step(p.ctx, 'researcher-author', () => submit('v1: an LRU cache'));
   await step(p.ctx, 'crititor', (c) => attack([], c));
   await step(p.ctx, 'stabilizer', (c) => judge(c, 'in-scope', 'general'));
-  await step(p.ctx, 'crititor', (c) => attack([], c));
-  await step(p.ctx, 'stabilizer', (c) => judge(c, 'in-scope', 'general'));
   assert.equal((await explorationState(p.ctx.ports(), m as MissionId, X)).settled?.body.outcome, 'conclusion');
   const dp = addDetailedPlan(m) as { newInterfaces: Array<{ provenance: { planElement: string } }>; modules: Array<{ provenance: { planElement: string } }>; tasks: Array<{ provenance: { planElement: string } }> };
   for (const e of [...dp.newInterfaces, ...dp.modules, ...dp.tasks]) e.provenance.planElement = 'e1';

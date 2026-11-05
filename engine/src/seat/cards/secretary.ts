@@ -79,8 +79,12 @@ export const SecretaryResultShape = {
     .describe('detail: recorded only; important-within-authority: takes effect and the PM is told (cite the authorization); needs-user: related work pauses and the user decides (option "ask-user").'),
   authorization: z.string().nullable().describe('The authorization id you rely on (required for important-within-authority).'),
   reason: z.string().describe('Why, in a few sentences.'),
-  instructions: z.string().describe('For send-back, replan, rework and answer: what exactly must change, or the decision itself. Empty otherwise.'),
+  instructions: z.string().describe('For send-back, replan, rework and answer: what exactly must change, or the decision itself. For "grant" on an exploration (optional): what the next round must do; it is shown on that round\'s cards. Empty otherwise.'),
   grantExtra: z.number().int().min(0).max(2).describe('For "grant": 1 or 2 extra attempts; 0 otherwise.'),
+  findings: z
+    .array(z.string().min(1))
+    .optional()
+    .describe('For "grant" on an exploration (optional): the ids of the findings the granted round is for, general ones too, as the reasons list them. The author gets a turn on them. Omit otherwise.'),
   notice: z.string().describe('What the PM is told (empty only for a detail).'),
   mayMatter: z.boolean().describe('A detail that is clearly reversible but the user might care about: noted as "may matter".'),
 };
@@ -117,6 +121,7 @@ export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: Re
     if (!c.grantAvailable) out.push('option: your grant on this lineage is used; choose another option (ask-user for more attempts)');
     if (r.grantExtra < 1) out.push('grantExtra: give 1 or 2 extra attempts');
   } else if (r.grantExtra !== 0) out.push('grantExtra: only for option "grant"');
+  if (r.option !== 'grant' && (r.findings ?? []).length > 0) out.push('findings: only for option "grant"');
   if ((r.option === 'send-back' || r.option === 'replan' || r.option === 'rework' || r.option === 'answer') && r.instructions.trim() === '') out.push(`instructions: option "${r.option}" needs the instructions`);
   if (r.classification !== 'detail' && r.notice.trim() === '') out.push('notice: write what the PM is told');
   if (r.reason.trim() === '') out.push('reason: say why');

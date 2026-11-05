@@ -36,6 +36,8 @@ export {
   pmRelease,
   pmRenew,
   pmRepair,
+  type RepairChange,
+  type RepairChanged,
   pmRequirement,
   pmSay,
   pmStartLegalization,

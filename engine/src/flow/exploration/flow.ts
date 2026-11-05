@@ -13,9 +13,9 @@ import { canonicalJson, sha256 } from '../../common/hash.ts';
 import { currentConstraints, type ConstraintBody } from '../requirements.ts';
 import { objectConstraints } from '../../seat/cards/inputs.ts';
 import type { MissionId } from '../../common/ids.ts';
-import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord } from '../../common/records.ts';
+import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, JudgmentRecord, PlainBasisVersionRecord } from '../../common/records.ts';
 import { attackOutcome, crititorEvidence, crititorFindingDocument, crititorFindingIds, versionId, type CrititorCard, type CrititorResult } from '../../seat/cards/crititor.ts';
-import { stabilizedRevision, stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
+import { revisionJudgment, stabilizedRevision, stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
 import { blindEvidenceRecord, blindReportDocument, evidenceDataNote, failedEvidenceRecord, type BlindResult, type ExperimentCard } from '../../seat/cards/experiment.ts';
 import {
   authorSubmittedVersion,
@@ -35,6 +35,7 @@ import {
   allowedRounds,
   attemptAmendment,
   attemptEvidence,
+  attemptRun,
   blocks,
   decide,
   effectiveSeverity,
@@ -131,7 +132,7 @@ export function resnapshotEntries(
   s: XState,
   snapshot: { readonly path: string; readonly commit: string },
   put: (doc: string) => string,
-  by: { readonly by: ResnapshotBody['by']; readonly step?: string | null; readonly words?: string | null },
+  by: { readonly by: ResnapshotBody['by']; readonly step?: string | null; readonly words?: string | null; readonly answers?: string | null },
 ): { readonly event: FlowEventInput; readonly record: EnvSnapshotRecord; readonly body: ResnapshotBody } | null {
   const d = s.defined;
   const def = s.def;
@@ -146,6 +147,8 @@ export function resnapshotEntries(
     by: by.by,
     step: by.step ?? null,
     words: by.words ?? null,
+    // 4.1.3: the repair it answers (written only when there is one, so older shapes stay as they were)
+    ...(by.answers !== undefined && by.answers !== null ? { answers: by.answers } : {}),
   };
   return {
     event: { mission: def.mission as MissionId, line: line(def.exploration), event: RESNAPSHOTTED, key: String(n), body },
@@ -237,8 +240,14 @@ export interface AdvanceReport {
 /** Take every step that can be taken now (bounded), then report. */
 export async function advanceExploration(p: ExplorationPorts, mission: MissionId, x: string, maxSteps = 64, onFailed?: FailedTaskHook): Promise<AdvanceReport> {
   let steps = 0;
+  let swept = false;
   for (;;) {
     const s = await load(p, mission, x);
+    if (!swept) {
+      // a step taken back (consumed "withdrawn") that the queue still holds: its cancel was lost after the write
+      swept = true;
+      for (const [task, c] of s.consumed) if (c.kind === 'withdrawn' && (await p.scheduler.status(task))?.state === 'queued') await p.scheduler.cancel(task);
+    }
     if (s.def === null) return report(x, s, steps, 'undefined', 'not defined');
     if (steps >= maxSteps) return report(x, s, steps, 'running', 'step budget of this call used; call again');
     if (await consumeFinished(p, mission, x, s, onFailed)) {
@@ -273,6 +282,28 @@ function cardOf<C>(p: ExplorationPorts, q: QueuedBody): C {
   return JSON.parse(p.ledger.content.get(q.card)) as C;
 }
 
+/**
+ * 4.1.3 (#31): a method its author revises after a repair (machine.ts `reentry`) while runs of its
+ * register wait in the queue: the runs of attempts the author's new version drops or changes are
+ * withdrawn if they are only queued (never dispatched), in the write that takes the version into
+ * account. Runs in flight finish; those of unchanged attempts keep their place.
+ */
+async function withdrawnByRevision(p: ExplorationPorts, s: XState, c: ConsumedBody): Promise<Array<{ readonly q: QueuedBody; readonly body: ConsumedBody }>> {
+  if (c.kind !== 'author' || c.step !== 'submit' || s.reentry === null || s.method === null || s.phase !== 'method') return [];
+  const next = new Map(c.attempts.map((a) => [a.id, canonicalJson(a)]));
+  const out: Array<{ readonly q: QueuedBody; readonly body: ConsumedBody }> = [];
+  for (const q of pendingTasks(s)) {
+    if (!attemptRun(q) || q.evidence?.attempt == null) continue;
+    const was = s.method.attempts.find((a) => a.id === q.evidence!.attempt);
+    if (was !== undefined && next.get(was.id) === canonicalJson(was)) continue;
+    const st = await p.scheduler.status(q.task);
+    if (st === null || st.state !== 'queued' || st.dispatches.length > 0) continue;
+    const how = next.has(q.evidence.attempt) ? 'changes it' : 'drops it';
+    out.push({ q, body: { kind: 'withdrawn', task: q.task, role: q.role, reason: `the author's new method version ${c.version ?? ''} (after repair ${s.reentry.repair}) ${how}: its run was only queued` } });
+  }
+  return out;
+}
+
 /** Take the first finished task into account; true when something was appended. */
 async function consumeFinished(p: ExplorationPorts, mission: MissionId, x: string, s: XState, onFailed?: FailedTaskHook): Promise<boolean> {
   for (const q of pendingTasks(s).sort((a, b) => a.n - b.n)) {
@@ -298,7 +329,9 @@ async function consumeFinished(p: ExplorationPorts, mission: MissionId, x: strin
       records.push(failedEvidenceRecord({ id: q.evidence.id, envLine: (s.defined as DefinedBody).envLine, envSnapshot: (s.defined as DefinedBody).envSnapshot, attempt: q.evidence.attempt }, 'failed', st.note ?? 'given up', q.evidence.executor));
     }
     await notifyConsumption(p, mission, x, s, q, body);
-    await p.ledger.append(xid.op(mission, x, `consume:${q.task}`), { events: [{ mission, line: line(x), event: 'consumed', key: q.task, body }], records });
+    const withdrawn = await withdrawnByRevision(p, s, body);
+    await p.ledger.append(xid.op(mission, x, `consume:${q.task}`), { events: [{ mission, line: line(x), event: 'consumed', key: q.task, body }, ...withdrawn.map((w) => ({ mission, line: line(x), event: 'consumed', key: w.q.task, body: w.body }))], records });
+    for (const w of withdrawn) await p.scheduler.cancel(w.q.task);
     return true;
   }
   return false;
@@ -390,15 +423,21 @@ function consumedBody(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTas
     case 'stabilizer': {
       const card = cardOf<StabilizerCard>(p, q);
       const r = hb.result as StabilizerResult;
-      // the pass its answered findings made on the author's revision (the same rule as its records)
-      const revision = stabilizedRevision(card, r);
+      // #25 (E-3): the position's verdict and the pass on the author's revision as its hand-back
+      // recorded them, judged with the direction questions as they stood then (a ruling that came
+      // while the Stabilizer ran counts: process/explorationSnapshot.ts explorationCardAtHandBack);
+      // a hand-back without them reads its card, as before
+      const recorded = (id: string): JudgmentRecord | undefined => hb.records.find((x): x is JudgmentRecord => x.kind === 'judgment' && x.judgment === id);
+      const own = recorded(card.binding.judgment);
+      const onRevision = recorded(revisionJudgment(card.binding.judgment));
+      const revision = own !== undefined ? (onRevision !== undefined ? { version: onRevision.target as string, judgment: onRevision.judgment as string } : null) : stabilizedRevision(card, r);
       return {
         kind: 'stabilized',
         task: q.task,
         round: card.round,
         target: card.target,
         judgment: card.binding.judgment,
-        verdict: stabilizedVerdict(card, r),
+        verdict: own?.verdict ?? stabilizedVerdict(card, r),
         findings: r.findings.map((f) => ({ finding: f.finding, verdict: f.verdict, severity: f.severity, reason: f.reason, question: f.question.trim() !== '' ? f.question : null, ...(f.answered === true ? { answered: true as const } : {}) })),
         drift: { verdict: r.round.verdict, reason: r.round.reason, question: r.round.question.trim() !== '' ? r.round.question : null },
         result: hb.resultHash,
@@ -516,9 +555,11 @@ async function submitQueued(p: ExplorationPorts, mission: MissionId, x: string, 
   const why =
     amended !== undefined
       ? ` (attempt ${q.evidence?.attempt ?? '?'} ${amended.added.includes(q.evidence?.attempt ?? '') ? 'added' : 'replaced'} by the user's words ${amended.words}${q.evidence?.supersedes !== undefined ? `, superseding ${q.evidence.supersedes}` : ''})`
-      : q.evidence?.supersedes !== undefined
-        ? ` (attempt ${q.evidence.attempt ?? '?'} run again on the PM's word, superseding ${q.evidence.supersedes})`
-        : '';
+      : q.evidence?.method !== undefined
+        ? ` (attempt ${q.evidence.attempt ?? '?'} under its card in method ${q.evidence.method}, after a repair${q.evidence.supersedes !== undefined ? `, superseding ${q.evidence.supersedes}` : ''})`
+        : q.evidence?.supersedes !== undefined
+          ? ` (attempt ${q.evidence.attempt ?? '?'} run again on the PM's word, superseding ${q.evidence.supersedes})`
+          : '';
   const t = { ...taskOf(s, q.task, q.lineage, card), handover: { from, objects, step: `exploration ${x}, round ${q.round + (q.role === 'attacker' ? 1 : 0)}: the ${q.role} turn${q.evidence?.rerunOf !== undefined ? ` (a rerun of ${q.evidence.rerunOf})` : ''}${why}` } };
   if (supersedes !== null) await p.scheduler.supersede(supersedes, t);
   else await p.scheduler.submit(t);
@@ -654,12 +695,13 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       // added or replaced by the user's amendment (`mp pm amend-attempts`): the card the amendment set
       const replaces = s.attemptReruns.get(at.id)?.replaces ?? null;
       const amendment = attemptAmendment(s, at.id);
+      const method = s.attemptReruns.get(at.id)?.method;
       await submitQueued(
         p,
         mission,
         x,
         s,
-        { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: 'attempt', evidence: { id: evidence, k, attempt: at.id, executor: at.kind, requester: null, ...(replaces !== null ? { supersedes: replaces } : {}), ...(amendment !== null ? { amendment } : {}) } },
+        { ...base, task, lineage: xid.evidenceLineage(mission, x, k), role: 'executor', purpose: 'attempt', evidence: { id: evidence, k, attempt: at.id, executor: at.kind, requester: null, ...(replaces !== null ? { supersedes: replaces } : {}), ...(amendment !== null ? { amendment } : {}), ...(method !== undefined ? { method } : {}) } },
         asCard(card),
         null,
       );
@@ -744,6 +786,8 @@ export interface ExplorationHandoff {
   readonly questions: readonly string[];
   /** 4.1.3 (E-4): the data outside the commit its hand-backs cited, each with the check made at hand-back (absent when none). */
   readonly dataChecked?: ReadonlyArray<import('../../seat/cards/experiment.ts').RecordedData>;
+  /** 4.1.3 (E-1): the decision that accepted the conclusion at the budget step (the stop is "converged" by it), when one did. */
+  readonly accepted?: { readonly ruling: string; readonly by: string; readonly text: string; readonly judgment?: string };
   /**
    * Research explorations: whether the key answer does not stand (8.2 "没有结论"), the method version
    * in force, and the user's amendments of the method (`mp pm amend-attempts`), when there were any.
@@ -800,6 +844,7 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
     evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: evidenceSummary(s, e), attempt: e.attempt, ...(e.attempt !== null && supersededAttemptRecord(s, e.id) ? { supersededBy: attemptEvidence(s, e.attempt) ?? '' } : {}) })),
     questions: [...s.questions],
     ...(checkedData(s).length > 0 ? { dataChecked: checkedData(s) } : {}),
+    ...(reason === 'converged' && s.accepted !== null ? { accepted: { ruling: s.accepted.id, by: s.accepted.by, text: s.accepted.text, ...(s.accepted.judgment !== undefined ? { judgment: s.accepted.judgment } : {}) } } : {}),
     research: def.research
       ? {
           noConclusion: s.noConclusion,
@@ -812,12 +857,17 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
 
 const DECIDE = 'the Secretary decides (an escalation on this exploration; WI-08 for the PM): grant more rounds (the Secretary once, then only the user), accept the current version with its open findings as residual risks, send it back with a new direction, re-plan, or give it up';
 
+/** The stop's words when the budget step's plain "accept" ended it (E-1). */
+function acceptedText(r: RulingBody): string {
+  return `the decision (${r.by}) accepted the latest version at the budget step: nothing fatal or serious was unresolved and no direction question waited, so it converged by the decision, with no risk list (E-1)`;
+}
+
 const CONVERGED_ANSWERED = "the last round left no unresolved fatal or serious finding: its Stabilizer judged that the author's revisions or rebuttals answer the findings (answered), so they were resolved without a re-check round (8.2 stop 1, 4.1 §6.3)";
 
 const STOP_TEXT: Readonly<Record<StopReason, { readonly category: string; readonly trigger: string; readonly action: string }>> = {
   converged: {
     category: 'exploration-converged',
-    trigger: 'the latest round on the frozen version, the closing attacker\'s included, left no unresolved fatal or serious finding (8.2 stop 1)',
+    trigger: 'the latest round left no unresolved fatal or serious finding in scope on the version it judged, its Stabilizer judged it on track, and no direction question waits (8.2 stop 1, E-3)',
     action: 'no further round is queued; the product and its disposition table go to acceptance (8.2 acceptance): the decision layer routes it by decision type (3.10)',
   },
   'budget-exhausted': {
@@ -852,14 +902,15 @@ async function stop(p: ExplorationPorts, mission: MissionId, x: string, s: XStat
   const h = buildHandoff(s, reason, wi);
   const handoff = p.ledger.content.put(canonicalJson(h));
   const t = STOP_TEXT[reason];
-  // converged on the Stabilizer's answered findings (4.1 §6.3): said so, not as a closing attacker's pass
+  // converged on the Stabilizer's answered findings (4.1 §6.3), or accepted by the decision (E-1): said so
   const answered = reason === 'converged' && (s.stabilizations.at(-1)?.findings.some((f) => f.answered === true) ?? false);
+  const accepted = reason === 'converged' && s.accepted !== null ? acceptedText(s.accepted) : null;
   await p.ledger.notify({
     category: t.category,
     wi,
     key: `${x}:${n}`,
     mission,
-    trigger: `exploration ${x}: ${answered ? CONVERGED_ANSWERED : t.trigger}; ${s.rounds} of ${allowedRounds(s)} rounds used`,
+    trigger: `exploration ${x}: ${accepted ?? (answered ? CONVERGED_ANSWERED : t.trigger)}; ${s.rounds} of ${allowedRounds(s)} rounds used`,
     defaultAction: t.action,
     detail: { exploration: x, handoff, version: h.version?.id ?? null, unresolvedBlocking: h.unresolvedBlocking, residualRisks: h.residualRisks, acceptance: h.acceptance },
   });

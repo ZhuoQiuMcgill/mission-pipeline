@@ -209,7 +209,7 @@ describe('an exploration reads code landed after it was defined (its snapshot ta
     const queued = (await readyOf(pp.ctx, 'crititor')).step;
     const head = land(pp, 'tools/probe.js', "console.log('probe: ok');\n");
     const r = await pmResnapshotExploration(pp.ctx, { mission: M, exploration: X, words: w });
-    assert.deepEqual(r, { snapshot: head, previous: before.defined!.snapshot.commit, n: 1, olderEvidence: [evidence] });
+    assert.deepEqual(r, { snapshot: head, previous: before.defined!.snapshot.commit, n: 1, olderEvidence: [evidence], repair: null });
     const s = await state(pp);
     assert.equal(s.defined!.snapshot.commit, head);
     assert.deepEqual(s.resnapshots.map((b) => [b.by, b.words, b.step]), [['pm', w, null]]);
@@ -258,7 +258,8 @@ describe('an exploration reads code landed after it was defined (its snapshot ta
       await assert.rejects(pmResnapshotExploration(pp.ctx, { mission: M, exploration: X, words: w }), (e: { code?: string }) => e.code === code);
       assert.equal(resnapshots(pp), 0);
     };
-    await refused('SNAPSHOT_CURRENT');
+    // 4.1.3: NOT_ALLOWED with the reason (a run a seat holds keeps DISPATCH_IN_FLIGHT)
+    await refused('NOT_ALLOWED');
     await assert.rejects(pmResnapshotExploration(pp.ctx, { mission: M, exploration: 'nope', words: w }), (e: { code?: string }) => e.code === 'NOT_ALLOWED');
     // a dispatch in flight: its seat would see the snapshot change under it
     const d = pmDispatch(pp.ctx, (await readyOf(pp.ctx, 'researcher-author')).step);
@@ -275,7 +276,7 @@ describe('an exploration reads code landed after it was defined (its snapshot ta
     await recordExplorationRuling(pp.ctx.ports(), M, X, { id: 'stop-x1', decision: 'stop', findings: [], text: 'the PM stops it', extraRounds: 0, by: 'pm' });
     await pmNext(pp.ctx);
     assert.notEqual((await state(pp)).settled, null);
-    await refused('EXPLORATION_SETTLED');
+    await refused('NOT_ALLOWED');
     await assert.rejects(pmResnapshotExploration(pp.ctx, { mission: M, exploration: X, words: w }), /reopen-exploration .*new id/);
   });
 
@@ -294,7 +295,7 @@ describe('an exploration reads code landed after it was defined (its snapshot ta
     assert.equal(r.code, 0, r.out);
     assert.deepEqual([r.json.result.mission, r.json.result.exploration, r.json.result.snapshot, r.json.result.n, r.json.result.olderEvidence], [M, X, head, 1, []]);
     const again = await cli(pp.dir, ['pm', 'resnapshot-exploration', M, X, '--words', w, '--json']);
-    assert.equal(again.json.error.code, 'SNAPSHOT_CURRENT');
+    assert.equal(again.json.error.code, 'NOT_ALLOWED');
   });
 
   it('f: a ledger without resnapshot events reads and dispatches exactly as before', async () => {

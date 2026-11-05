@@ -124,20 +124,21 @@ describe('mp pm amend-attempts', () => {
     await refused([A3], 'NOT_ALLOWED', { x: 'nope', match: /no exploration nope/ });
     await refused([A3], 'NOT_ALLOWED', { words: 'W-99', match: /no words entry W-99/ });
     // the attempts, checked as the author's register would be
-    await refused({ attempts: [A3] }, 'ATTEMPTS_INVALID', { match: /JSON array/ });
-    await refused([], 'ATTEMPTS_INVALID', { match: /names no attempt/ });
-    await refused([{ ...A3, steps: [] }], 'ATTEMPTS_INVALID', { match: /attempts\[0\]\.steps/ });
-    await refused([{ ...A3, kind: 'survey' }], 'ATTEMPTS_INVALID', { match: /attempts\[0\]\.kind/ });
-    await refused([{ ...A3, assertion: ['typo'] }], 'ATTEMPTS_INVALID', { match: /unknown field\(s\) assertion/ });
-    await refused([A3, { ...A3, purpose: 'again' }], 'ATTEMPTS_INVALID', { match: /id "A3" is registered twice/ });
-    await refused([{ ...A3, measure: [] }], 'ATTEMPTS_INVALID', { match: /record at least one quantity or check one assertion/ });
-    await refused([ATTEMPTS[0], ATTEMPTS[1]], 'NOTHING_AMENDED', { match: /equals its registered one/ });
+    await refused({ attempts: [A3] }, 'NOT_ALLOWED', { match: /JSON array/ });
+    await refused([], 'NOT_ALLOWED', { match: /names no attempt/ });
+    await refused([{ ...A3, steps: [] }], 'NOT_ALLOWED', { match: /attempts\[0\]\.steps/ });
+    await refused([{ ...A3, kind: 'survey' }], 'NOT_ALLOWED', { match: /attempts\[0\]\.kind/ });
+    await refused([{ ...A3, assertion: ['typo'] }], 'NOT_ALLOWED', { match: /unknown field\(s\) assertion/ });
+    await refused([A3, { ...A3, purpose: 'again' }], 'NOT_ALLOWED', { match: /id "A3" is registered twice/ });
+    await refused([{ ...A3, measure: [] }], 'NOT_ALLOWED', { match: /record at least one quantity or check one assertion/ });
+    await refused([ATTEMPTS[0], ATTEMPTS[1]], 'NOT_ALLOWED', { match: /equals its registered one/ });
     // a replaced attempt's run that a seat has: in flight, then handed back and not taken into account yet
     const run = only(w, 'constructor-experiment');
     w.scheduler.dispatchOf(run.task);
-    await refused([A1_UNCAPPED], 'ATTEMPT_QUEUED', { match: /in flight/ });
+    // 4.1.3: a run a seat holds keeps its code; the field's other codes are NOT_ALLOWED with the reason
+    await refused([A1_UNCAPPED], 'DISPATCH_IN_FLIGHT', { match: /in flight/ });
     await handInFlight(w, run.task, run.card as unknown as ExperimentCard, 'no');
-    await refused([A1_UNCAPPED], 'ATTEMPT_QUEUED', { match: /handed back, not taken into account yet/ });
+    await refused([A1_UNCAPPED], 'DISPATCH_IN_FLIGHT', { match: /handed back, not taken into account yet/ });
     await w.advance();
     await hand(w, 'researcher-reader', blind(cardOf<ReaderCard>(w, 'researcher-reader')));
     await w.advance();
@@ -155,29 +156,32 @@ describe('mp pm amend-attempts', () => {
     await recordExplorationRuling({ ledger: w.ledger, scheduler: w.scheduler }, M, w.x, { id: 'stop-it', decision: 'stop', findings: [], text: 'the PM stops it', extraRounds: 0, by: 'pm' });
     await advance(ctx, M);
     assert.notEqual((await state(w)).settled, null);
-    await refused([A3], 'EXPLORATION_SETTLED', { match: /new id in the PM plan/ });
+    await refused([A3], 'NOT_ALLOWED', { match: /new id in the PM plan/ });
   });
 
-  test('a: no method in force, not a research exploration, an interpreter dispatched before, a stopped exploration', async () => {
+  test('a: no method in force, not a research exploration, a stopped exploration; an interpreter dispatched before and released is withdrawn (4.1.3)', async () => {
     const r = await world({ product: 'answer', research: true, question: 'Does the file lock survive a crash?', decision: { type: 'structure', text: 'which lock to use' } });
     await r.advance();
-    await assert.rejects(pmAmendAttempts(r.ports.ctx, { mission: M, exploration: r.x, attempts: [A3], words: say(r, 'add a reading') }), /NO_METHOD: .*no method in force yet/);
+    await assert.rejects(pmAmendAttempts(r.ports.ctx, { mission: M, exploration: r.x, attempts: [A3], words: say(r, 'add a reading') }), /NOT_ALLOWED: .*no method in force yet/);
     const d = await world({ exploration: 'E2' });
     await d.advance();
-    await assert.rejects(pmAmendAttempts(d.ports.ctx, { mission: M, exploration: d.x, attempts: [A3], words: say(d, 'add a reading') }), /NO_METHOD: .*not a research exploration/);
-    // an interpreter dispatched, its dispatch released (the step queued again): it read the records
+    await assert.rejects(pmAmendAttempts(d.ports.ctx, { mission: M, exploration: d.x, attempts: [A3], words: say(d, 'add a reading') }), /NOT_ALLOWED: .*not a research exploration/);
+    // an interpreter dispatched, its dispatch released (the step queued again): it left no record, so it is withdrawn
+    const released = await attemptsPhase();
+    await bothRecorded(released.w);
+    const rt = only(released.w, 'researcher-interpreter');
+    await released.w.scheduler.run(rt.task, { release: 'abandoned' });
+    assert.equal(released.w.scheduler.tasks.get(rt.task)?.state, 'queued');
+    assert.equal((await pmAmendAttempts(released.w.ports.ctx, { mission: M, exploration: released.w.x, attempts: [A3], words: released.words })).withdrawn, rt.task);
+    // given up: stopped, the decision layer decides first
     const { w, words } = await attemptsPhase();
     await bothRecorded(w);
     const it = only(w, 'researcher-interpreter');
-    await w.scheduler.run(it.task, { release: 'abandoned' });
-    assert.equal(w.scheduler.tasks.get(it.task)?.state, 'queued');
-    await assert.rejects(pmAmendAttempts(w.ports.ctx, { mission: M, exploration: w.x, attempts: [A3], words }), /INTERPRETER_DISPATCHED: .*dispatched before/);
-    // given up: stopped, the decision layer decides first
     await w.scheduler.run(it.task, { release: 'ended' });
     assert.equal(await w.scheduler.cancel(it.task), true);
     await w.advance();
     assert.equal((await state(w)).stopped?.reason, 'seat-abandoned');
-    await assert.rejects(pmAmendAttempts(w.ports.ctx, { mission: M, exploration: w.x, attempts: [A3], words }), /EXPLORATION_STOPPED/);
+    await assert.rejects(pmAmendAttempts(w.ports.ctx, { mission: M, exploration: w.x, attempts: [A3], words }), /NOT_ALLOWED: .*stopped \(seat-abandoned\)/);
     assert.equal(amendments(w).length, 0);
   });
 
@@ -202,6 +206,7 @@ describe('mp pm amend-attempts', () => {
       unchanged: [],
       withdrawn: null,
       answers: null,
+      repair: null,
       phase: 'attempts',
       rounds: s0.rounds,
       allowedRounds: allowedRounds(s0),
@@ -253,8 +258,6 @@ describe('mp pm amend-attempts', () => {
     const cc = cardOf<CrititorCard>(w, 'crititor');
     assert.deepEqual(w.ledger.content.getList(cc.binding?.reliesOn as never), [r.version]);
     assert.equal(cc.round, s0.rounds + 1);
-    await hand(w, 'crititor', attack());
-    await w.advance();
     await hand(w, 'crititor', attack());
     const end = await w.advance();
     assert.equal(end.stopped?.reason, 'converged');
@@ -360,18 +363,21 @@ describe('mp pm amend-attempts', () => {
     const rep = await recordRepair(w.ports, { mission: M, words, kind: 'new-question', text: 'Search the whole domain', about: { kind: 'exploration', id: w.x } });
     await w.advance();
     const s1 = await state(w);
-    assert.equal(s1.rerunRounds, 2, 'the repair added its round (and its closing attacker)');
-    assert.equal(s1.phase, 'attempts', 'the author waits for the old attempts: what the amendment answers instead');
-    await assert.rejects(pmAmendAttempts(ctx, { mission: M, exploration: w.x, attempts: [A3], words, answers: 'R-9' }), /REPAIR_NOT_OPEN: no repair R-9 is about exploration E1 \(open: R-1\)/);
+    assert.equal(s1.rerunRounds, 2, 'the repair added its rounds');
+    // 4.1.3 (#31): the method goes back to its author at once; the amendment answers the repair before the author starts
+    assert.deepEqual([s1.phase, s1.turn], ['method', 'author']);
+    const author = only(w, 'researcher-author');
+    await assert.rejects(pmAmendAttempts(ctx, { mission: M, exploration: w.x, attempts: [A3], words, answers: 'R-9' }), /NOT_ALLOWED: no repair R-9 is about exploration E1 \(open: R-1\)/);
     const r = await pmAmendAttempts(ctx, { mission: M, exploration: w.x, attempts: [A3], words, answers: rep.id });
     assert.equal(r.answers, rep.id);
     const s2 = await state(w);
     assert.deepEqual([s2.rerunRounds, allowedRounds(s2)], [0, allowedRounds(s0)], 'its round is taken back');
+    assert.deepEqual([s2.phase, s2.consumed.get(author.task)?.kind], ['attempts', 'withdrawn'], 'the method in force, amended; the author step withdrawn');
     assert.equal(s2.answeredRepairs.get(rep.id), 1);
     assert.equal(amendments(w)[0]?.answers, rep.id);
     const resolved = (await repairsOf(flowCtx(w.ports, M))).find((x) => x.id === rep.id);
-    assert.deepEqual([resolved?.state, resolved?.answeredBy], ['answered', { exploration: w.x, amendment: 1, words }]);
-    await assert.rejects(pmAmendAttempts(ctx, { mission: M, exploration: w.x, attempts: [A2_WIDER], words, answers: rep.id }), /REPAIR_NOT_OPEN: repair R-1 is answered already, by the user's amendment 1/);
+    assert.deepEqual([resolved?.state, resolved?.answeredBy], ['answered', { exploration: w.x, change: 'attempts-amended', n: 1, amendment: 1, words }]);
+    await assert.rejects(pmAmendAttempts(ctx, { mission: M, exploration: w.x, attempts: [A2_WIDER], words, answers: rep.id }), /NOT_ALLOWED: repair R-1 is answered already, by the user's amendment 1/);
     // the cards from now on: no open added question
     await bothRecorded(w);
     await handReading(w, only(w, 'researcher-reader').task);
@@ -398,7 +404,7 @@ describe('mp pm amend-attempts', () => {
     await hand(w, 'crititor', attack([], recheckAll(cardOf<CrititorCard>(w, 'crititor'), 'yes')));
     await w.advance();
     assert.equal((await state(w)).phase, 'attempts');
-    await assert.rejects(pmAmendAttempts(w.ports.ctx, { mission: M, exploration: w.x, attempts: [A3], words, answers: rep.id }), /REPAIR_STARTED: the round repair R-1 added has started: the author step \S+ was dispatched for it/);
+    await assert.rejects(pmAmendAttempts(w.ports.ctx, { mission: M, exploration: w.x, attempts: [A3], words, answers: rep.id }), /NOT_ALLOWED: the round repair R-1 added has started: the author step \S+ was dispatched for it/);
     assert.equal(amendments(w).length, 0);
     // without --answers the user's decision is applied
     assert.equal((await pmAmendAttempts(w.ports.ctx, { mission: M, exploration: w.x, attempts: [A3], words })).answers, null);
@@ -478,7 +484,7 @@ describe('mp pm amend-attempts', () => {
       assert.deepEqual([r.added.map((a) => a.attempt), r.phase], [['R2'], 'attempts']);
       const text = await cli(p.dir, ['pm', 'amend-attempts', m, 'X1', '--words', w2, '--file', file]);
       assert.equal(text.code, 3, 'the same file again changes nothing');
-      assert.match(text.err + text.out, /NOTHING_AMENDED/);
+      assert.match(text.err + text.out, /NOT_ALLOWED\): every attempt in the file equals its registered one/);
       // the reads
       const shown = await cli(p.dir, ['read', 'show', 'exploration', `${m}/X1`]);
       assert.equal(shown.code, 0, shown.err);
@@ -504,8 +510,6 @@ describe('mp pm amend-attempts', () => {
         assert.equal(c.method.version, r.version);
         return interpretation(c);
       });
-      await step(ctx, 'crititor', () => attack());
-      await step(ctx, 'stabilizer', (c: StabilizerCard) => stabilizeAll(c));
       await step(ctx, 'crititor', () => attack());
       await step(ctx, 'stabilizer', (c: StabilizerCard) => stabilizeAll(c));
       assert.equal((await cli(p.dir, ['pm', 'next'])).code, 0);

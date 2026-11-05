@@ -65,8 +65,7 @@ async function exploration(p: ProcessProject, mission: string): Promise<void> {
   await step(ctx, 'researcher-author', (c: AuthorCard) => ({ step: 'submit', message: 'v2', artifact: 'v2: a sized LRU cache', dispositions: c.openFindings.map((f) => ({ finding: f.id, action: 'revise', note: 'sized' })), directionQuestions: [], attempts: [] }));
   await step(ctx, 'stabilizer', (c: StabilizerCard) => ({ findings: c.findings.map((f) => ({ finding: f.id, verdict: 'out-of-scope', severity: 'general', reason: 'outside the scope', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
   await step(ctx, 'crititor', (c: CrititorCard) => ({ findings: [], rechecks: c.priorFindings.filter((f) => f.status === 'awaiting-recheck').map((f) => ({ finding: f.id, resolved: 'yes', reason: 'fixed', evidence: [] })), settled: [], reply: 'ok' }));
-  // every attack round is stabilized; then only the closing attacker is left
-  await step(ctx, 'stabilizer', (c: StabilizerCard) => ({ findings: c.findings.map((f) => ({ finding: f.id, verdict: 'in-scope', severity: 'general', reason: 'checked', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
+  // every attack round is stabilized: the re-check round's Stabilizer is left (its judgment converges it, 4.1.3)
 }
 
 describe('mp read status: layer 0, plus the layer-1 entries of exactly the subtasks that changed since the user last asked', () => {
@@ -87,10 +86,6 @@ describe('mp read status: layer 0, plus the layer-1 entries of exactly the subta
     await step(p.ctx, 'reviewer', (c) => {
       const pass = reviewerPass(c) as { judgments: Array<Record<string, unknown>> };
       return { ...pass, judgments: pass.judgments.map((j) => ({ ...j, met: 'no', reason: 'the check is missing a case' })), verdict: 'rework' };
-    });
-    await step(p.ctx, 'crititor', (c: CrititorCard) => {
-      assert.equal(c.fresh, true, 'the closing attacker');
-      return { findings: [], rechecks: [], settled: [], reply: 'ok' };
     });
     await step(p.ctx, 'stabilizer', () => ({ findings: [], round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
     // --no-mark keeps the cursor: the same changes twice
@@ -641,7 +636,8 @@ describe('review round 3: history is not current state', () => {
 
   it('reopened after a move, the re-check fails and the budget runs out: the machine stop, the conclusion only as history', async () => {
     const p = fresh(PROBE);
-    await convergedOnExperiment(p, 'm2', 3);
+    // converged in its second round (4.1.3: no closing round), the budget's last
+    await convergedOnExperiment(p, 'm2', 2);
     await moveAndRecheck(p, 'm2', 'no');
     for (let i = 0; i < 6; i++) {
       const k = (await pmNext(p.ctx)).ready[0]?.kind;

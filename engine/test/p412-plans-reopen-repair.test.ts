@@ -403,8 +403,6 @@ describe('P3 item 6: repairs (D-9, D-10)', () => {
     await hand(w, 'researcher-author', submit('design v1'));
     await w.advance();
     await hand(w, 'crititor', attack());
-    await w.advance();
-    await hand(w, 'crititor', attack());
     let r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged');
     const rep = await recordRepair(w.ports, { mission: 'M1' as MissionId, words: 'W-1', kind: 'new-question', text: 'survive a restart of the scheduler', about: { kind: 'exploration', id: w.x } });
@@ -415,8 +413,6 @@ describe('P3 item 6: repairs (D-9, D-10)', () => {
     await hand(w, 'researcher-author', submit('design v2: restarts recover from the memory'));
     await w.advance();
     assert.equal(cardOf<{ repairs?: Array<{ id: string }> }>(w, 'crititor').repairs?.[0]?.id, rep.id, 'the attacker sees the added question too');
-    await hand(w, 'crititor', attack());
-    await w.advance();
     await hand(w, 'crititor', attack());
     r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged', 'exit: the reopened round converges again (never stuck)');

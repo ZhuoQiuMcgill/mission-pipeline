@@ -90,18 +90,19 @@ describe('mp pm rerun-attempt', () => {
     };
     await refused(['A1'], 'NOT_ALLOWED', { x: 'nope' });
     // no record yet: both runs are queued
-    await refused(['A1'], 'ATTEMPT_NO_EVIDENCE', { match: /no record yet .*queued/ });
+    // 4.1.3: a run a seat holds keeps its code; the field's other codes are NOT_ALLOWED with the reason
+    await refused(['A1'], 'NOT_ALLOWED', { match: /no record yet .*queued/ });
     await hand(w, 'constructor-experiment', blind(cardOf<ExperimentCard>(w, 'constructor-experiment'), 'no'), { runs: ['failed'] });
     await w.advance();
     // A2 still queued (held: nobody dispatched it), A1 has its record
-    await refused(['A1', 'A2'], 'ATTEMPT_NO_EVIDENCE', { match: /attempt A2/ });
-    await refused(['A9'], 'ATTEMPT_NOT_REGISTERED', { match: /registers A1, A2; not A9/ });
+    await refused(['A1', 'A2'], 'NOT_ALLOWED', { match: /attempt A2/ });
+    await refused(['A9'], 'NOT_ALLOWED', { match: /registers A1, A2; not A9/ });
     // a run of A1 queued since, then in flight: its record is the one that counts
     await pmRerunAttempt(ctx, { mission: M, exploration: w.x, attempts: ['A1'], words });
-    await refused(['A1'], 'ATTEMPT_QUEUED', { match: /queued/ });
+    await refused(['A1'], 'NOT_ALLOWED', { match: /queued/ });
     const run = only(w, 'constructor-experiment');
     w.scheduler.dispatchOf(run.task);
-    await refused(['A1'], 'ATTEMPT_QUEUED', { match: /in flight/ });
+    await refused(['A1'], 'DISPATCH_IN_FLIGHT', { match: /in flight/ });
     await handInFlight(w, run.task, run.card as unknown as ExperimentCard);
     await w.advance();
     await hand(w, 'researcher-reader', blind(cardOf<ReaderCard>(w, 'researcher-reader')));
@@ -119,7 +120,7 @@ describe('mp pm rerun-attempt', () => {
     await recordExplorationRuling({ ledger: w.ledger, scheduler: w.scheduler }, M, w.x, { id: 'stop-it', decision: 'stop', findings: [], text: 'the PM stops it', extraRounds: 0, by: 'pm' });
     await advance(ctx, M);
     assert.notEqual((await state(w)).settled, null);
-    await refused(['A2'], 'EXPLORATION_SETTLED', { match: /reopen-exploration/ });
+    await refused(['A2'], 'NOT_ALLOWED', { match: /reopen-exploration/ });
     assert.equal(reruns(w).length, 1);
   });
 
@@ -127,10 +128,10 @@ describe('mp pm rerun-attempt', () => {
     const r = await world({ product: 'answer', research: true, question: 'Does the file lock survive a crash?', decision: { type: 'structure', text: 'which lock to use' } });
     await r.advance();
     const words = say(r, 'run it again');
-    await assert.rejects(pmRerunAttempt(r.ports.ctx, { mission: M, exploration: r.x, attempts: ['A1'], words }), /ATTEMPT_NOT_REGISTERED: .*no method in effect/);
+    await assert.rejects(pmRerunAttempt(r.ports.ctx, { mission: M, exploration: r.x, attempts: ['A1'], words }), /NOT_ALLOWED: .*no method in effect/);
     const d = await world({ exploration: 'E2' });
     await d.advance();
-    await assert.rejects(pmRerunAttempt(d.ports.ctx, { mission: M, exploration: d.x, attempts: ['A1'], words: say(d, 'run it again') }), /ATTEMPT_NOT_REGISTERED: .*not a research exploration/);
+    await assert.rejects(pmRerunAttempt(d.ports.ctx, { mission: M, exploration: d.x, attempts: ['A1'], words: say(d, 'run it again') }), /NOT_ALLOWED: .*not a research exploration/);
     // the interpreter's step given up: stopped, the decision layer decides first
     const { w, words: w2 } = await attemptsPhase();
     await bothRecorded(w);
@@ -139,7 +140,7 @@ describe('mp pm rerun-attempt', () => {
     assert.equal(await w.scheduler.cancel(it.task), true);
     await w.advance();
     assert.equal((await state(w)).stopped?.reason, 'seat-abandoned');
-    await assert.rejects(pmRerunAttempt(w.ports.ctx, { mission: M, exploration: w.x, attempts: ['A1'], words: w2 }), /EXPLORATION_STOPPED/);
+    await assert.rejects(pmRerunAttempt(w.ports.ctx, { mission: M, exploration: w.x, attempts: ['A1'], words: w2 }), /NOT_ALLOWED: .*stopped/);
     assert.equal(reruns(w).length, 0);
   });
 
@@ -157,7 +158,7 @@ describe('mp pm rerun-attempt', () => {
 
     const r = await pmRerunAttempt(ctx, { mission: M, exploration: w.x, attempts: ['A1'], words, reason: 'killed by the time limit, raised since' });
     const again = only(w, 'constructor-experiment');
-    assert.deepEqual(r, { n: 1, attempts: [{ attempt: 'A1', replaces: old, step: again.task, evidence: (again.card as unknown as ExperimentCard).evidence.id }], withdrawn: null, phase: 'attempts', rounds: budget[0], allowedRounds: budget[1] });
+    assert.deepEqual(r, { n: 1, repair: null, attempts: [{ attempt: 'A1', replaces: old, step: again.task, evidence: (again.card as unknown as ExperimentCard).evidence.id }], withdrawn: null, phase: 'attempts', rounds: budget[0], allowedRounds: budget[1] });
     // the same card as the attempt's first run: the same method version's steps and commands, blind
     const c1 = first.card as unknown as ExperimentCard;
     const c2 = again.card as unknown as ExperimentCard;

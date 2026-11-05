@@ -5,7 +5,14 @@
 //
 //   about an exploration   the exploration is reopened for one more round with the repair as an added
 //                          question (exploration/flow.ts recordExplorationRerun); its settled
-//                          conclusion stays in the record as history; a new settle is routed again
+//                          conclusion stays in the record as history; a new settle is routed again.
+//                          4.1.3 (E-5, #31): the author gets the turn at once, even in the attempts
+//                          phase (the method goes back to its author; a queued interpreter is
+//                          withdrawn in the same write). With a change form (`--attempts`, `--rerun`,
+//                          `--resnapshot`) the user's decision about the method is applied directly
+//                          instead (process/explorationAttempts.ts, explorationSnapshot.ts): the repair
+//                          and the change are one write, the change answers the repair, and no round
+//                          is added
 //   otherwise              an Architect repair step (card "architect-repair") on the plan in effect:
 //                          its hand-back reopens tasks with accepted products and/or adds tasks. Only
 //                          the mechanical checks apply (mechanical.ts, the plan in effect plus the
@@ -35,7 +42,7 @@ import type { FlowPorts } from './ports.ts';
 import { currentConstraints } from './requirements.ts';
 import { decisionFor, escalateToUser, isApplied, markApplied, raiseEscalation } from './secretary.ts';
 import { recordExplorationRerun } from './exploration/flow.ts';
-import { ATTEMPTS_AMENDED, type AttemptsAmendedBody } from './exploration/machine.ts';
+import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED, type AttemptRerunBody, type AttemptsAmendedBody, type ConsumedBody, type ResnapshotBody, type Role } from './exploration/machine.ts';
 import { WI } from './wi.ts';
 
 /** One Architect repair attempt (line "repairs", event "attempt", key "<repair>#<k>"). */
@@ -53,9 +60,10 @@ const archRepairTask = (mission: string, repair: string, k: number): string => s
 /** A mission's repairs with where each stands (the one resolver: reads, cards and the close snapshot use it). */
 export interface RepairState extends RepairBody {
   /**
-   * exploration: reopened for one more round; answered: about an exploration, and answered by the
-   * user's amendment of its method instead of a round (`mp pm amend-attempts --answers`); architect:
-   * its Architect step is under way; decided: amended and/or reopened; waiting: nothing to amend yet.
+   * exploration: reopened for one more round; answered: about an exploration, and answered by a
+   * change the user's decision made to its method instead of a round (4.1.3: `mp pm repair --attempts`,
+   * `--rerun`, `--resnapshot`; before: `mp pm amend-attempts --answers`); architect: its Architect
+   * step is under way; decided: amended and/or reopened; waiting: nothing to amend yet.
    */
   readonly state: 'exploration' | 'answered' | 'architect' | 'decided' | 'waiting';
   readonly added: readonly string[];
@@ -64,8 +72,35 @@ export interface RepairState extends RepairBody {
   readonly changed?: readonly string[];
   /** The plan it amended (decided), or works on. */
   readonly dplan: string | null;
-  /** answered: the amendment that answered it (its number on the exploration, and the user's words it rests on). */
-  readonly answeredBy?: { readonly exploration: string; readonly amendment: number; readonly words: string };
+  /**
+   * answered: the change that answered it (its event, its number on the exploration, and the user's
+   * words it rests on); `amendment` is that number for an amendment of the attempts.
+   */
+  readonly answeredBy?: { readonly exploration: string; readonly change: 'attempts-amended' | 'attempt-rerun' | 'resnapshotted'; readonly n: number; readonly amendment?: number; readonly words: string };
+}
+
+/** The change about an exploration that answered a repair (4.1.3: any of the three change forms), or null. */
+async function answeringChange(c: FlowCtx, r: RepairBody): Promise<RepairState['answeredBy'] | null> {
+  if (r.about?.kind !== 'exploration') return null;
+  const x = r.about.id;
+  const line = explorationLine(x);
+  const amended = (await eventsOf<AttemptsAmendedBody>(c, line, ATTEMPTS_AMENDED)).find((e) => e.body.answers === r.id || e.body.repair === r.id)?.body;
+  if (amended !== undefined) return { exploration: x, change: ATTEMPTS_AMENDED, n: amended.n, amendment: amended.n, words: amended.words };
+  const rerun = (await eventsOf<AttemptRerunBody>(c, line, ATTEMPT_RERUN)).find((e) => e.body.answers === r.id)?.body;
+  if (rerun !== undefined) return { exploration: x, change: ATTEMPT_RERUN, n: rerun.n, words: rerun.words };
+  const snap = (await eventsOf<ResnapshotBody>(c, line, RESNAPSHOTTED)).find((e) => e.body.answers === r.id)?.body;
+  if (snap !== undefined) return { exploration: x, change: RESNAPSHOTTED, n: snap.n, words: snap.words ?? r.words };
+  return null;
+}
+
+/**
+ * The repair a change form records in the write that applies it (4.1.3, E-5): its id (after the
+ * repairs recorded so far) and its body. The caller checked the reason against the words entry.
+ */
+export function changeFormRepair(recorded: number, req: { readonly words: string; readonly kind: RepairKind; readonly text: string; readonly exploration: string }): RepairBody {
+  if (!(REPAIR_KINDS as readonly string[]).includes(req.kind)) throw new Error(`a repair's kind is one of ${REPAIR_KINDS.join(', ')}`);
+  if (req.text.trim() === '') throw new Error("a repair records the user's reason");
+  return { id: `R-${recorded + 1}`, words: req.words, kind: req.kind, text: req.text, about: { kind: 'exploration', id: req.exploration } };
 }
 
 export async function repairsOf(ctx: FlowCtx, mission: string = ctx.mission): Promise<RepairState[]> {
@@ -77,9 +112,9 @@ export async function repairsOf(ctx: FlowCtx, mission: string = ctx.mission): Pr
     const r = e.body;
     const d = decided.get(r.id);
     const a = attempts.filter((x) => x.key.startsWith(`${r.id}#`)).at(-1)?.body;
-    // about an exploration: answered by the user's amendment of its method, or one more round
-    const amended = r.about?.kind === 'exploration' ? (await eventsOf<AttemptsAmendedBody>(c, explorationLine(r.about.id), ATTEMPTS_AMENDED)).find((x) => x.body.answers === r.id)?.body : undefined;
-    const state: RepairState['state'] = r.about?.kind === 'exploration' ? (amended !== undefined ? 'answered' : 'exploration') : d !== undefined ? 'decided' : a !== undefined ? 'architect' : 'waiting';
+    // about an exploration: answered by a change to its method on the user's decision, or one more round
+    const answered = await answeringChange(c, r);
+    const state: RepairState['state'] = r.about?.kind === 'exploration' ? (answered !== null ? 'answered' : 'exploration') : d !== undefined ? 'decided' : a !== undefined ? 'architect' : 'waiting';
     out.push({
       ...r,
       state,
@@ -87,7 +122,7 @@ export async function repairsOf(ctx: FlowCtx, mission: string = ctx.mission): Pr
       reopened: d?.reopen.map((x) => x.task) ?? [],
       ...((d?.changed ?? []).length > 0 ? { changed: [...d!.changed!] } : {}),
       dplan: d?.dplan ?? a?.dplan ?? null,
-      ...(amended !== undefined && r.about !== null ? { answeredBy: { exploration: r.about.id, amendment: amended.n, words: amended.words } } : {}),
+      ...(answered !== null ? { answeredBy: answered } : {}),
     });
   }
   return out;
@@ -108,7 +143,15 @@ export async function repairRefs(ctx: FlowCtx, ids: Iterable<string>): Promise<R
  */
 export async function recordRepair(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null },
+  req: {
+    readonly mission: MissionId;
+    readonly words: string;
+    readonly kind: RepairKind;
+    readonly text: string;
+    readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
+    /** About an exploration in its attempts phase (4.1.3, #31): its interpreter step, only queued, withdrawn in the same write. */
+    readonly withdraw?: ReadonlyArray<{ readonly task: string; readonly role: Role }>;
+  },
 ): Promise<{ readonly id: string; readonly repeated: boolean }> {
   const ctx = flowCtx(ports, req.mission);
   if (!(REPAIR_KINDS as readonly string[]).includes(req.kind)) throw new Error(`a repair's kind is one of ${REPAIR_KINDS.join(', ')}`);
@@ -129,8 +172,14 @@ export async function recordRepair(
   if (req.about?.kind === 'exploration') {
     const x = req.about.id;
     if ((await eventsOf(ctx, `exploration:${x}`, 'defined')).length === 0) throw new Error(`mission ${req.mission} has no exploration ${x}`);
-    // one more round with the repair as an added question; the settled conclusion stays as history (one write)
-    await recordExplorationRerun(ports, req.mission, x, { evidence: [], environment: `repair:${id}`, repair: repairRef(body) }, { events: [event] });
+    // one more round with the repair as an added question, the author's turn at once (4.1.3); the
+    // settled conclusion stays as history; a queued interpreter on the method it sends back is withdrawn (one write)
+    const withdrawn = (req.withdraw ?? []).map((w) => {
+      const c: ConsumedBody = { kind: 'withdrawn', task: w.task, role: w.role, reason: `repair ${id} sent the method back to its author: the interpretation waits for the method's new version` };
+      return ev(ctx, explorationLine(x), 'consumed', w.task, c);
+    });
+    await recordExplorationRerun(ports, req.mission, x, { evidence: [], environment: `repair:${id}`, repair: repairRef(body), authorTurn: true }, { events: [event, ...withdrawn] });
+    for (const w of req.withdraw ?? []) await ports.scheduler.cancel(w.task);
     return { id, repeated: false };
   }
   if (pie === null) throw new Error(`mission ${req.mission} has no detailed plan in effect: a repair amends the plan in effect (plan the work with mp pm plan submit first)`);

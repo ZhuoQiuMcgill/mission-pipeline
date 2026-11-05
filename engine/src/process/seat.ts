@@ -64,6 +64,7 @@ import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/co
 import { handBackDataTexts, handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
 import { dataPaths, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
 import { checkDataFiles } from '../common/dataFile.ts';
+import { explorationCardAtHandBack } from './explorationSnapshot.ts';
 import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
 import { productObjectId, verificationStopped } from './actions.ts';
@@ -590,7 +591,9 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
   }
   // 4.1.3: a blind executor's report is kept with its evidence record; the leaf is the one this hand-back files
   const report = { text: more.report, leaf: dispatchLeaf(v.info.mission, v.info.dispatch, 'report'), fields };
-  return handBackRecords(v.card, fields, { launch: v.info.dispatch, runs, content, report, ...(more.data !== undefined ? { data: more.data } : {}) });
+  // #25 (E-3): a Stabilizer's position is judged with the direction questions as they stand at its hand-back
+  const card = v.card.seat === 'stabilizer' ? ctx.memory.read((db) => explorationCardAtHandBack(db, data, v.info.mission as MissionId, v.spec.lineage, v.card)) : v.card;
+  return handBackRecords(card, fields, { launch: v.info.dispatch, runs, content, report, ...(more.data !== undefined ? { data: more.data } : {}) });
 }
 
 /**

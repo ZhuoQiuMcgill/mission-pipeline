@@ -23,7 +23,7 @@ import { M, attack, blind, cardOf, finding, hand, only, recheckAll, reviseAll, s
 const REQUEST = { steps: ['run probe'], data: 'fixture', measure: ['status'], assertions: ['record exists'] };
 
 describe('review r1 #2: the exploration proof dependency chain', () => {
-  test('the closing attack keeps the rebuttal evidence: revoking it takes the version\'s proof away', async () => {
+  test('the round that converges keeps the rebuttal evidence: revoking it takes the version\'s proof away', async () => {
     const w = await world();
     await w.advance();
     await hand(w, 'researcher-author', submit('v1'));
@@ -38,13 +38,8 @@ describe('review r1 #2: the exploration proof dependency chain', () => {
     await hand(w, 'researcher-author', submit('', [{ finding: a.openFindings[0]?.id as string, action: 'rebut', note: 'run confirms it', evidence: 'xpe.M1.E1.1' }]));
     await w.advance();
     const c = cardOf<CrititorCard>(w, 'crititor');
+    // 4.1.3 (E-3): the re-check round converges; its Stabilizer's judgment requires the rebuttal's run
     await hand(w, 'crititor', attack([], recheckAll(c, 'yes', ['xpe.M1.E1.1'])));
-    await w.advance();
-    // the closing attacker cites nothing, yet its judgment still requires the rebuttal's run
-    const closing = cardOf<CrititorCard>(w, 'crititor');
-    assert.equal(closing.fresh, true);
-    assert.deepEqual(closing.requiredEvidence, ['xpe.M1.E1.1']);
-    await hand(w, 'crititor', attack());
     const r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged');
     const last = (await w.ledger.records(['judgment'])).at(-1)?.record;
@@ -72,8 +67,6 @@ describe('review r1 #2: the exploration proof dependency chain', () => {
     const c = cardOf<CrititorCard>(w, 'crititor');
     assert.deepEqual(c.requiredEvidence, ['xpe.M1.E1.1']);
     assert.deepEqual(w.ledger.content.getList(c.binding?.reliesOn as never), [method]);
-    await hand(w, 'crititor', attack());
-    await w.advance();
     await hand(w, 'crititor', attack());
     const r = await w.advance();
     assert.equal(r.stopped?.reason, 'converged');
@@ -303,8 +296,6 @@ describe('review r1 #2: a settled conclusion that loses its proof', () => {
     await hand(w, 'researcher-author', submit('', [{ finding: a.openFindings[0]?.id as string, action: 'rebut', note: 'the run', evidence: 'xpe.M1.E1.1' }]));
     await pump();
     await hand(w, 'crititor', attack([], recheckAll(cardOf<CrititorCard>(w, 'crititor'), 'yes', ['xpe.M1.E1.1'])));
-    await pump();
-    await hand(w, 'crititor', attack());
     await pump();
     // converged: the step settled it for the decision layer
     const settled = await w.ledger.events({ mission: M, line: 'exploration:E1', event: 'settled' });

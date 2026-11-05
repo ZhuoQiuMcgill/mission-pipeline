@@ -92,8 +92,7 @@ describe('exploration in the flow engine', () => {
     assert.deepEqual(a.attackScope, ['gets stuck', 'internal contradiction']);
     await w.hand('researcher-author', submit('design v1'));
     await w.step();
-    await w.hand('crititor', attack());
-    await w.step();
+    // 4.1.3 (E-3): the round the attacker passed, judged on track by its Stabilizer, converges
     await w.hand('crititor', attack());
     await w.step();
     const s = await w.ledger.events<ExplorationSettledBody>({ mission: M, line: 'exploration:X1', event: EXPLORATION_SETTLED });
@@ -251,11 +250,9 @@ describe('exploration in the flow engine: the plan changes the exploration', () 
     await w.step();
     await w.hand('researcher-author', submit('v1'));
     await w.step();
-    await w.hand('crititor', attack());
-    await w.step();
-    // the closing attacker is queued; the user changes the goal before it runs
+    // the first round's attacker finds a problem; the user changes the goal while the author answers it
     const c1 = w.one('crititor').card as unknown as CrititorCard;
-    assert.equal(c1.fresh, true);
+    assert.equal(c1.fresh, false);
     await w.hand('crititor', attack([finding('serious', 'gets stuck', 'x')]));
     await w.step();
     const target = c1.target as string;
