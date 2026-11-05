@@ -16,7 +16,7 @@ import type { MissionId } from '../../common/ids.ts';
 import type { BaseRecord, EnvSnapshotRecord, EvidenceRecord, PlainBasisVersionRecord } from '../../common/records.ts';
 import { attackOutcome, crititorEvidence, crititorFindingDocument, crititorFindingIds, versionId, type CrititorCard, type CrititorResult } from '../../seat/cards/crititor.ts';
 import { stabilizedRevision, stabilizedVerdict, type StabilizerCard, type StabilizerResult } from '../../seat/cards/stabilizer.ts';
-import { blindEvidenceRecord, blindReportDocument, failedEvidenceRecord, type BlindResult, type ExperimentCard } from '../../seat/cards/experiment.ts';
+import { blindEvidenceRecord, blindReportDocument, evidenceDataNote, failedEvidenceRecord, type BlindResult, type ExperimentCard } from '../../seat/cards/experiment.ts';
 import {
   authorSubmittedVersion,
   interpretationDocument,
@@ -28,7 +28,7 @@ import {
   type ReaderCard,
 } from '../../seat/cards/researcher.ts';
 import type { AnyCard, AppendGuard, FlowEventInput, FlowLedgerPort, FlowNotice, FlowSchedulerPort, FlowTask, FlowTaskStatus } from '../ports.ts';
-import { attackerCard, authorCard, cardAtClaim, evidenceSummary, executorCard, interpreterCard, parseEvidenceRequest, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
+import { attackerCard, authorCard, cardAtClaim, checkedData, evidenceSummary, executorCard, interpreterCard, parseEvidenceRequest, requestExecutor, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
 import { ExplorationDefinitionSchema, xid, type ExplorationDefinition } from './definition.ts';
 import { predecessorsOf } from './predecessors.ts';
 import {
@@ -310,6 +310,15 @@ function dispositions(ds: AuthorResult['dispositions']): Disposition[] {
 
 /** The flow's reading of a finished task, or null while it is not finished. */
 function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTaskStatus): ConsumedBody | null {
+  const body = consumedBody(p, s, q, st);
+  // 4.1.3 (E-4): the data the hand-back cites, as checked at it, travels with what the flow took in;
+  // the cards built from the state label each pointer with it (cards.ts checkedData)
+  const data = st.handBack?.data;
+  const cites = body !== null && (body.kind === 'author' || body.kind === 'interpretation' || body.kind === 'attack' || body.kind === 'discuss-reply' || body.kind === 'evidence');
+  return !cites || data === undefined || data.length === 0 ? body : ({ ...body, data } as unknown as ConsumedBody);
+}
+
+function consumedBody(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTaskStatus): ConsumedBody | null {
   if (st.state === 'abandoned') {
     if (q.role === 'executor') return { kind: 'evidence', task: q.task, evidence: q.evidence?.id ?? '', status: 'failed', summary: `the run was given up: ${st.note ?? 'no reason recorded'}`, report: null, attempt: q.evidence?.attempt ?? null, auto: true };
     return { kind: 'abandoned', task: q.task, role: q.role, reason: st.note ?? 'given up' };
@@ -407,7 +416,7 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
         task: q.task,
         evidence: card.evidence.id,
         status,
-        summary: `${status === 'unverified' ? `UNVERIFIED (${rec.fields['unbacked'] ?? '?'} claim(s) rest on no program record) | ` : ''}${blindSummary(card, r)}`,
+        summary: `${status === 'unverified' ? `UNVERIFIED (${rec.fields['unbacked'] ?? '?'} claim(s) rest on no program record) | ` : ''}${blindSummary(card, r)}${evidenceDataNote(rec)}`,
         report: rec.fields['report'] ?? put(blindReportDocument(card, r)),
         attempt: card.evidence.attempt,
         auto: false,
@@ -417,15 +426,15 @@ function consumption(p: ExplorationPorts, s: XState, q: QueuedBody, st: FlowTask
 }
 
 /**
- * The evidence record of a blind run (review r1 #20): a reading's comes with the hand-back (its
- * url:<address> pointers were checked against the card's addresses); an experiment's is the
- * program's, written here from the claims checked against the dispatch's runs (`mp seat <id> rerun`).
+ * The evidence record of a blind run (review r1 #20): it comes with the hand-back (a reading's url:
+ * pointers were checked against the card's addresses, an experiment's claims against the dispatch's
+ * runs, `mp seat <id> rerun`; 4.1.3: data pointers against their files, and the executor's report
+ * kept). An experiment's hand-back recorded before 4.1.3 carries none: the program writes it here
+ * from the claims and the runs, as then.
  */
 function blindRecordOf(p: ExplorationPorts, card: ExperimentCard | ReaderCard, r: BlindResult, hb: NonNullable<FlowTaskStatus['handBack']>): EvidenceRecord {
-  if (card.seat === 'researcher-reader') {
-    const rec = hb.records.find((x): x is EvidenceRecord => x.kind === 'evidence' && x.evidence === card.evidence.id);
-    if (rec !== undefined) return rec;
-  }
+  const rec = hb.records.find((x): x is EvidenceRecord => x.kind === 'evidence' && x.evidence === card.evidence.id);
+  if (rec !== undefined) return rec;
   return blindEvidenceRecord(card, r, card.seat === 'researcher-reader' ? 'reading' : 'experiment', { content: p.ledger.content }, card.seat === 'researcher-reader' ? null : hb.runs);
 }
 
@@ -569,7 +578,7 @@ async function perform(p: ExplorationPorts, mission: MissionId, x: string, s: XS
       const task = xid.task(mission, x, n, 'executor');
       const doc = aw.request !== null ? safeGet(p, aw.request) : null;
       const req: EvidenceRequestDoc | null = doc === null ? null : parseEvidenceRequest(doc);
-      const executor = req?.executor ?? (s.def as ExplorationDefinition).evidenceExecutor;
+      const executor = requestExecutor(req ?? {}, s.def as ExplorationDefinition);
       const evLineage = xid.evidenceLineage(mission, x, k);
       if (req === null || a.overCap) {
         // an unreadable request, or one past the turn's cap (6.5): the program records the run as
@@ -733,6 +742,8 @@ export interface ExplorationHandoff {
   /** Every record, history included: an attempt's record a later run of it superseded (`mp pm rerun-attempt`) names that run's record. */
   readonly evidence: ReadonlyArray<{ readonly id: string; readonly status: string; readonly summary: string; readonly attempt: string | null; readonly supersededBy?: string }>;
   readonly questions: readonly string[];
+  /** 4.1.3 (E-4): the data outside the commit its hand-backs cited, each with the check made at hand-back (absent when none). */
+  readonly dataChecked?: ReadonlyArray<import('../../seat/cards/experiment.ts').RecordedData>;
   /**
    * Research explorations: whether the key answer does not stand (8.2 "没有结论"), the method version
    * in force, and the user's amendments of the method (`mp pm amend-attempts`), when there were any.
@@ -788,6 +799,7 @@ export function buildHandoff(s: XState, reason: StopReason, wi: string | null): 
     residualRisks: findings.filter((f) => f.residualRisk).map((f) => f.id),
     evidence: [...s.evidence.values()].map((e) => ({ id: e.id, status: e.status, summary: evidenceSummary(s, e), attempt: e.attempt, ...(e.attempt !== null && supersededAttemptRecord(s, e.id) ? { supersededBy: attemptEvidence(s, e.attempt) ?? '' } : {}) })),
     questions: [...s.questions],
+    ...(checkedData(s).length > 0 ? { dataChecked: checkedData(s) } : {}),
     research: def.research
       ? {
           noConclusion: s.noConclusion,

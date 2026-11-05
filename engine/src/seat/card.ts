@@ -185,7 +185,7 @@ export const EvidenceRequestSchema = z.object({
   measure: z.array(z.string().min(1)).describe('The quantities to record (may be empty only when there are assertions).'),
   assertions: z.array(z.string().min(1)).describe('The assertions to check (holds / does not hold / not checked).'),
   executor: z.enum(['experiment', 'reading']).optional().describe('experiment: commands are run; reading: sources are read.'),
-  commands: z.array(Command).optional().describe('experiment: the commands the steps run (the executor runs each with mp seat <id> rerun <command-id>).'),
+  commands: z.array(Command).optional().describe('experiment: the commands the steps run (the executor runs each with mp seat <id> rerun <command-id>). Each id once; cwd is "." or a path relative to the repository root (or left out): an absolute path goes in the command text.'),
 });
 export type EvidenceRequest = z.infer<typeof EvidenceRequestSchema>;
 
