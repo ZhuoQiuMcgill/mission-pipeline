@@ -110,12 +110,25 @@ export interface HandbackDoc {
 export const DISPATCH_LINE = (dispatch: string): string => `dispatch:${dispatch}`;
 export const TASKS_LINE = 'tasks';
 
-/** The runs a dispatch had `mp` rerun, in order, with the environment identity each was recorded under (4.1 §6.5). */
-export function dispatchRuns(db: Db, data: { text(h: string): string }, d: { readonly mission: string; readonly dispatch: string }): Array<{ run: string; completed: boolean; envLine?: string; envSnapshot?: string }> {
-  return flowEvents(db, { mission: d.mission as MissionId, line: DISPATCH_LINE(d.dispatch), event: 'run' }).map((e) => {
+/**
+ * The runs a dispatch had `mp` rerun, in order, with the environment identity each was recorded under
+ * (4.1 §6.5). 4.1.3 (#30): a step dispatched again carries the runs of its earlier, released
+ * dispatches (its card lists them; the seat records from them and cites them), so they come first.
+ */
+export function dispatchRuns(db: Db, data: { text(h: string): string }, d: { readonly mission: string; readonly dispatch: string; readonly task?: string }): Array<{ run: string; completed: boolean; envLine?: string; envSnapshot?: string }> {
+  const of = (dispatch: string) => flowEvents(db, { mission: d.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'run' }).map((e) => {
     const b = JSON.parse(data.text(e.body)) as { run: string; completed: boolean; envLine?: string; envSnapshot?: string };
     return { run: b.run, completed: b.completed, ...(b.envLine !== undefined && b.envSnapshot !== undefined ? { envLine: b.envLine, envSnapshot: b.envSnapshot } : {}) };
   });
+  const earlier = d.task === undefined ? [] : earlierDispatches(db, { mission: d.mission as MissionId, dispatch: d.dispatch, task: d.task });
+  return [...earlier.flatMap((x) => of(x.dispatch)), ...of(d.dispatch)];
+}
+
+/** The released dispatches of the same step claimed before `d` (4.1.3: the step dispatched again carries their runs). */
+export function earlierDispatches(db: Db, d: Pick<DispatchInfo, 'mission' | 'dispatch' | 'task'>): DispatchInfo[] {
+  const all = listDispatches(db, { task: d.task, limit: 1000 });
+  const self = all.find((x) => x.dispatch === d.dispatch);
+  return all.filter((x) => x.dispatch !== d.dispatch && x.mission === d.mission && x.state === 'released' && (self === undefined || x.claimedRevision < self.claimedRevision));
 }
 
 /** The material pages a dispatch read (`mp seat <id> read`), as `${material}#${page}` keys. */

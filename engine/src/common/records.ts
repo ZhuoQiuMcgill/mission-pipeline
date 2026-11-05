@@ -185,6 +185,8 @@ export interface EnvironmentParts {
   readonly versions: Readonly<Record<string, string>>;
   /** The sha256 of each command's whole output (what makes the identity cover all of it). */
   readonly digests?: Readonly<Record<string, string>>;
+  /** 4.1.3: the project's shell (config.json `shell`), when it sets one. */
+  readonly shell?: string;
 }
 
 // ---------------------------------------------------------------- evidence

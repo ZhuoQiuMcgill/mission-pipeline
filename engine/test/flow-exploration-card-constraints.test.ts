@@ -52,7 +52,7 @@ describe('exploration cards show the project constraints in force (9.5)', () => 
     assert.deepEqual(ids(author), ['constraint.recount']);
     assert.deepEqual(claimed<AuthorCard>(w, at), author, 'the claim selects the same constraints');
     const text = renderAuthorCard(author);
-    assert.ok(text.includes('## Project constraints\n- [constraint.recount] Instruction (context only; not a proof input): When you read result X, also report recount Y'));
+    assert.ok(text.includes('## Project constraints\n- [constraint.recount] Instruction (follow it; not a proof input): When you read result X, also report recount Y'));
     assert.ok(!text.includes('Only for the other mission'));
     await handClaimed(w, at, submit('design v1'));
     await w.advance();

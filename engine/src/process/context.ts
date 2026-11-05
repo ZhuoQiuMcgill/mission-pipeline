@@ -63,8 +63,10 @@ export interface ProcessOptions {
    * constructor-experiment card; config.json `experimentCommandTimeoutMs`). Default: commandTimeoutMs.
    */
   readonly experimentCommandTimeoutMs?: number;
-  /** The shell of the commands an experiment executor reruns (config.json `experimentShell`); default: the platform's shell. */
+  /** The shell of the commands an experiment executor reruns (config.json `experimentShell`); default: the project's shell. */
   readonly experimentShell?: string;
+  /** The shell of every declared command (config.json `shell`, 4.1.3); default: the platform's shell. */
+  readonly shell?: string;
   /** The project's full test suite (config.json `fullSuite`, or its alias `closingChecks`: fullSuiteOf); default none. */
   readonly fullSuite?: readonly SuiteCommand[];
   /** Tests without a repository: the files of a snapshot commit that hand-back pointers are checked against (null: not checked). Default: git's (seat.ts commitFiles). */
@@ -89,8 +91,10 @@ export interface ProcessContext {
   readonly commandTimeoutMs: number;
   /** The time limit of an experiment executor's reruns (runs.ts commandTimeoutFor); commandTimeoutMs when the project sets none. */
   readonly experimentCommandTimeoutMs: number;
-  /** The shell of an experiment executor's reruns (runs.ts commandShellFor); undefined: the platform's shell. */
+  /** The shell of an experiment executor's reruns (runs.ts commandShellFor); undefined: `shell`. */
   readonly experimentShell?: string;
+  /** The shell of every declared command (runs.ts commandShellFor, config.json `shell`); undefined: the platform's shell. */
+  readonly shell?: string;
   /** The project's full test suite (4.1.2: integration Reviewer full-run, mp pm full-run); empty when none is configured. */
   readonly fullSuite: readonly SuiteCommand[];
   /** The PM's filler for this process's `mp pm` writes (information only). */
@@ -150,6 +154,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     commandTimeoutMs: o.commandTimeoutMs ?? 30 * 60_000,
     experimentCommandTimeoutMs: o.experimentCommandTimeoutMs ?? o.commandTimeoutMs ?? 30 * 60_000,
     ...(o.experimentShell === undefined ? {} : { experimentShell: o.experimentShell }),
+    ...(o.shell === undefined ? {} : { shell: o.shell }),
     fullSuite: o.fullSuite ?? [],
     filler: o.filler ?? null,
     snapshotFiles: o.snapshotFiles ?? null,

@@ -7,7 +7,7 @@ import { recompute } from '../../evaluator/index.ts';
 import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { CliError, EXIT, usage } from '../errors.ts';
-import { configPath, DEFAULT_COMMIT_IDENT, experimentCommandTimeoutOf, fullSuiteSource, parseConfig, readConfig } from '../config.ts';
+import { configPath, DEFAULT_COMMIT_IDENT, experimentCommandTimeoutOf, fullSuiteSource, parseConfig, readConfig, shellsInEffect } from '../config.ts';
 import { fullSuiteOf } from '../../common/fullSuite.ts';
 import { copyDocs, mpInit, mpVersion, type PointerTarget } from '../init.ts';
 import type { Project } from '../project.ts';
@@ -60,6 +60,7 @@ const config: Command = {
     const cfg = parseConfig(JSON.parse(readFileSync(file, 'utf8')));
     const src = fullSuiteSource(cfg);
     const suite = fullSuiteOf(cfg);
+    const shells = shellsInEffect(cfg);
     const lines = [
       `.mission-pipeline/config.json is valid.`,
       ...(src.both ? ['Warning: both fullSuite and the deprecated closingChecks are present; fullSuite is used and closingChecks is ignored (remove it).'] : []),
@@ -77,8 +78,12 @@ const config: Command = {
       ...section('Filler hints', Object.entries(cfg.fillers).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`), 'none'),
       `Command timeout: ${Math.round(cfg.commandTimeoutMs / 1000)} s`,
       `Experiment command timeout (an exploration's experiment reruns): ${Math.round(experimentCommandTimeoutOf(cfg) / 1000)} s${cfg.experimentCommandTimeoutMs === undefined ? ' (experimentCommandTimeoutMs not set: the command timeout)' : ''}`,
+      // 4.1.3 (#27): the shell in effect per run class
+      `Shell of declared commands (local tests, reruns, renewals, full runs, cleanup): ${shells.declared}${shells.declaredFrom === 'shell' ? ' (shell; part of the environment identity)' : " (the platform's shell; shell not set)"}`,
+      `Shell of an exploration's experiment reruns: ${shells.experimentReruns}${shells.experimentFrom === 'experimentShell' ? ' (experimentShell)' : shells.experimentFrom === 'shell' ? ' (experimentShell not set: shell)' : " (neither experimentShell nor shell set: the platform's shell)"}`,
+      ...[cfg.shell, cfg.experimentShell].filter((x): x is string => x !== undefined && !existsSync(x)).map((x) => `Warning: the shell ${x} does not exist on this machine: every command it runs fails to start.`),
     ];
-    return ok(lines.join('\n'), { ...cfg, fullSuiteReadFrom: src.key, fullSuiteKeysBoth: src.both, experimentCommandTimeoutMsInEffect: experimentCommandTimeoutOf(cfg) });
+    return ok(lines.join('\n'), { ...cfg, fullSuiteReadFrom: src.key, fullSuiteKeysBoth: src.both, experimentCommandTimeoutMsInEffect: experimentCommandTimeoutOf(cfg), shellInEffect: { declared: shells.declared, experimentReruns: shells.experimentReruns } });
   },
 };
 

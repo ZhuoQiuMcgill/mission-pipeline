@@ -36,7 +36,7 @@ describe('P3: dispatch refresh with real checkout/worktree cards', () => {
       await pmConstraint(ctx, { mission, constraint: 'instruction', kind: 'instruction', text: 'Explain any behavior change', scope: { paths: ['**'], taskTypes: [] } });
       const d = pmDispatch(ctx, queued.step);
       assert.match(d.card, /Keep it reversible/);
-      assert.match(d.card, /Instruction \(context only; not a proof input\)/);
+      assert.match(d.card, /Instruction \(follow it; not a proof input\)/);
       const v = dispatchView(ctx, d.dispatch);
       const authorizations = (v.card['materials'] as Array<{ id: string; ref: string }> | undefined)?.find((m) => m.id === 'authorizations');
       if (kind === 'secretary') assert.equal(ctx.memory.data.text(authorizations!.ref), '(none)');

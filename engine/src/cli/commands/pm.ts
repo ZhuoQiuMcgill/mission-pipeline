@@ -177,6 +177,8 @@ export function renderNext(p: Project, n: NextReport, hints: Readonly<Record<str
   lines.push(...section('Held', n.held.map((h) => `${h.step}: ${h.seat} in ${h.mission} — ${h.why}${h.wi !== null ? ` [${wiText(h.wi, p.dir)}]` : ''}`)));
   lines.push(...section('Waiting on the user', n.waitingOnUser.map((w) => `${w.mission} ${w.escalation}: ${clip(w.summary, 200)} — options ${w.options.join(', ')} (mp pm answer ${w.mission} ${w.escalation} --option <option> --words W-<n>)`)));
   lines.push(...section('In flight', n.inFlight.map((d) => `${d.dispatch}: ${d.seat} on ${d.step} (${d.mission}), ${age(d.ageMs)}, ${filler(d.filler)}`)));
+  // 4.1.3 (#30): detached runs that ended while their dispatch is in flight; mp cannot see whether the seat is alive
+  lines.push(...section('Detached runs that ended (their dispatch is in flight)', (n.detachedRuns ?? []).map((r) => r.text)));
   if (n.labels.recomputing) lines.push(`Labels recomputing: ${n.labels.toVisit} to visit, ${n.labels.toRecompute} to recompute${n.labels.since !== null ? ` (since ${age(Date.now() - n.labels.since)})` : ''}; decisions that need "proven" wait.`);
   if (n.errors.length > 0) lines.push(...section('Flow errors (each also a notice)', n.errors));
   if (n.ready.length > 0) lines.push('', 'Dispatch: mp pm dispatch <step> --filled-by "<harness>/<model>", then start the seat with the prompt it prints.');
@@ -540,7 +542,7 @@ const constraint: Command = {
   group: 'pm',
   name: ['constraint'],
   summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope',
-  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>]\n       mp pm constraint withdraw <constraint> --words W-<n>',
+  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>]   (a pattern is "**", an exact path, or "<folder>/**")\n       mp pm constraint withdraw <constraint> --words W-<n>',
   flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string' },
   async run(c, args) {
     const p = P(c);
@@ -564,7 +566,15 @@ const constraint: Command = {
     // the words the constraint came from (optional, as `withdraw` needs them): recorded with it
     const w = wordsArg(p.ctx, args, false);
     const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(missionScope !== null ? { missionScope } : {}), ...(w !== null ? { words: w } : {}), scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
-    return ok(`Constraint ${id} (${kind}) recorded as ${r.version}${w !== null ? ` on ${w}` : ''}.`, { mission: m, constraint: id, version: r.version, words: w });
+    // 4.1.3 (#36): what the scope reaches now; nothing is a warning, never a refusal
+    const reach = `${kind === 'object' ? `${r.reach.objects} current object version${r.reach.objects === 1 ? '' : 's'} and ` : ''}${r.reach.tasks.length} task${r.reach.tasks.length === 1 ? '' : 's'} of the plans in effect${r.reach.tasks.length > 0 ? ` (${r.reach.tasks.slice(0, 10).join(', ')}${r.reach.tasks.length > 10 ? ', ...' : ''})` : ''}`;
+    const none = r.reach.objects === 0 && r.reach.tasks.length === 0;
+    const lines = [
+      `Constraint ${id} (${kind}) recorded as ${r.version}${w !== null ? ` on ${w}` : ''}${r.scopeChanged ? ' (the same text: the version is kept and its scope is changed)' : ''}.`,
+      `Its scope matches ${reach} now.`,
+      ...(none ? ['Warning: it matches nothing now. It reaches the cards of tasks and objects its scope covers as they appear; check the paths and task types if you expected a match.'] : []),
+    ];
+    return ok(lines.join('\n'), { mission: m, constraint: id, version: r.version, words: w, scopeChanged: r.scopeChanged, reach: r.reach });
   },
 };
 

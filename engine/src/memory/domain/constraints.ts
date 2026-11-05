@@ -45,6 +45,40 @@ export function resolveConstraints(ix: BasisIndex, events: readonly FlowEvent[])
   return [...latest.values()].map((x) => x.body);
 }
 
+/** The path patterns constraintApplies reads (4.1.3, #36), in words for a refusal. */
+export const CONSTRAINT_PATTERN_FORMS = '"**" (every path), an exact path such as "src/app.ts", or a folder and everything under it such as "docs/reports/**"';
+
+/** A glob wildcard ("[", "{" and "!" are left alone: they occur in real file names, such as "pages/[id].tsx"). */
+const WILDCARD = /[*?]/;
+
+/**
+ * Why constraintApplies cannot read a scope path pattern, with the nearest form it reads (4.1.3, #36:
+ * "docs/reports/Report_Batch_*" matched nothing, silently); null when it reads it. The matcher is not
+ * extended with globs: the three forms cover the field's cases, and overlap between glob sets is hard.
+ */
+export function constraintPatternProblem(pattern: string): { readonly problem: string; readonly suggestion: string } | null {
+  if (pattern === '**') return null;
+  const clean = pattern.replace(/\\/g, '/').trim().replace(/^(\.\/)+/, '').replace(/^\/+/, '').replace(/\/{2,}/g, '/');
+  const segments = clean.split('/').filter((s) => s !== '' && s !== '.');
+  const folder = (segs: readonly string[]): string => (segs.length === 0 ? '**' : `${segs.join('/')}/**`);
+  const firstWild = segments.findIndex((s) => WILDCARD.test(s));
+  // the nearest form: the folder above the first segment with a wildcard, or the path as it is
+  const nearest = (): string => {
+    if (firstWild >= 0) return folder(segments.slice(0, firstWild).filter((s) => s !== '..'));
+    if (segments.includes('..')) return folder([]);
+    return clean.endsWith('/') ? folder(segments) : segments.join('/');
+  };
+  if (pattern.trim() === '') return { problem: 'the pattern is empty', suggestion: '**' };
+  if (pattern !== pattern.trim()) return { problem: 'the pattern has spaces around it', suggestion: nearest() };
+  if (pattern.includes('\\')) return { problem: 'the pattern uses "\\"; paths use "/"', suggestion: nearest() };
+  if (pattern.startsWith('/') || pattern.startsWith('./')) return { problem: 'the pattern is not relative to the repository root as the paths are ("src/app.ts", not "/src/app.ts" or "./src/app.ts")', suggestion: nearest() };
+  if (segments.includes('..') || pattern.includes('//') || pattern.split('/').includes('.')) return { problem: 'the pattern has an empty, "." or ".." segment', suggestion: nearest() };
+  if (pattern.endsWith('/**') && !WILDCARD.test(pattern.slice(0, -3))) return null;
+  if (firstWild >= 0) return { problem: `"${segments[firstWild]}" is a wildcard; the matcher reads no wildcard except a final "/**", so this scope would match nothing`, suggestion: nearest() };
+  if (pattern.endsWith('/')) return { problem: 'a folder is written with "/**" after it', suggestion: nearest() };
+  return null;
+}
+
 /** Applicability belongs to the object (each proof-unit member has its own mission). */
 export function constraintApplies(c: { readonly scope: ConstraintScope }, obj: { readonly scope: ObjectScope; readonly mission: string }): boolean {
   return (c.scope.mission === undefined || c.scope.mission === obj.mission)

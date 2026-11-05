@@ -485,7 +485,9 @@ describe('7: a failing full run keeps the last 400 lines (at most 64 KiB) of eac
     p = processProject();
     const ctx = p.ctx;
     const head = p.git('rev-parse', 'HEAD');
-    const LOUD = `node -e "for (let i = 1; i <= 1000; i++) console.log('L' + i); process.exit(3)"`;
+    // the child sets its exit code and ends by itself: process.exit() would drop what is still queued
+    // for a full pipe (under load, the end of these 1000 lines)
+    const LOUD = `node -e "for (let i = 1; i <= 1000; i++) console.log('L' + i); process.exitCode = 3"`;
     const r = await runFullSuite(ctx, { mission: M, commit: head, suite: [{ id: 'loud', command: LOUD }], by: 'pm', cites: { words: 'W-1', authority: null, reason: 'trace', dispatch: null } });
     assert.equal(r.marker.passed, false);
     const t = r.marker.failing.find((f) => f.id === 'loud')!.tail.split('\n');

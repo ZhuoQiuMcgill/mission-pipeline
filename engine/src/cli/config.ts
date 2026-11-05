@@ -20,6 +20,10 @@
 //                           (`mp seat <id> rerun` on a constructor-experiment card), so that a long
 //                           experiment can run to its end while every other command keeps the
 //                           shorter limit; at most 7 days; absent: commandTimeoutMs
+//   shell                   (4.1.3) the shell, an absolute path, of every declared command (local
+//                           tests, reruns, renewals, full runs, cleanup); part of the environment
+//                           identity when set; absent: the platform's shell (/bin/sh, cmd.exe)
+//   experimentShell         the shell of an exploration's experiment reruns; absent: `shell`
 //   environment             { versionCommands }: what the environment identity covers (§6.5)
 //   exclusiveResources      resources tasks may lease (a database, a device); informational here
 //   fillers                 per seat, a filler hint "<harness>/<model>" shown by `mp pm next`
@@ -64,8 +68,10 @@ export const ConfigSchema = z
     commandTimeoutMs: z.number().int().min(1_000).max(24 * 3_600_000).default(30 * 60_000),
     // optional with no default: absent, it is commandTimeoutMs (experimentCommandTimeoutOf)
     experimentCommandTimeoutMs: z.number().int().min(1_000).max(MAX_EXPERIMENT_COMMAND_TIMEOUT_MS).optional(),
-    // optional: the shell (an absolute path) of an exploration's experiment reruns; absent, the platform's shell
+    // optional: the shell (an absolute path) of an exploration's experiment reruns; absent, `shell`
     experimentShell: z.string().min(1).max(400).regex(/^\//, 'an absolute path').optional(),
+    // optional (4.1.3, #27): the shell (an absolute path) of every declared command; absent, the platform's shell
+    shell: z.string().min(1).max(400).regex(/^(\/|[A-Za-z]:[\\/])/, 'an absolute path').optional(),
     environment: z.object({ versionCommands: z.array(z.string().min(1).max(1000)).max(50).default([]) }).strict().default({ versionCommands: [] }),
     exclusiveResources: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/)).max(200).default([]),
     fillers: z.record(z.string(), z.string().min(1).max(400).nullable()).default({}),
@@ -85,6 +91,25 @@ export const ConfigSchema = z
  */
 export function experimentCommandTimeoutOf(c: Pick<ProjectConfig, 'commandTimeoutMs' | 'experimentCommandTimeoutMs'>): number {
   return c.experimentCommandTimeoutMs ?? c.commandTimeoutMs;
+}
+
+/** The platform's shell, as `mp config` names it: what Node's `shell: true` runs. */
+export function platformShell(): string {
+  return process.platform === 'win32' ? (process.env['ComSpec'] ?? 'cmd.exe') : '/bin/sh';
+}
+
+/**
+ * The shell in effect per run class (4.1.3, #27; process/runs.ts commandShellFor): every declared
+ * command takes `shell`, else the platform's; an experiment executor's reruns take `experimentShell` first.
+ */
+export function shellsInEffect(c: Pick<ProjectConfig, 'shell' | 'experimentShell'>): { readonly declared: string; readonly declaredFrom: 'shell' | 'platform'; readonly experimentReruns: string; readonly experimentFrom: 'experimentShell' | 'shell' | 'platform' } {
+  const declared = c.shell ?? platformShell();
+  return {
+    declared,
+    declaredFrom: c.shell !== undefined ? 'shell' : 'platform',
+    experimentReruns: c.experimentShell ?? declared,
+    experimentFrom: c.experimentShell !== undefined ? 'experimentShell' : c.shell !== undefined ? 'shell' : 'platform',
+  };
 }
 
 /** The default identity of the commits `mp` writes (process/context.ts DEFAULT_IDENT). */
