@@ -16,8 +16,8 @@ Your card (`mp seat <id> card`); *required* marks a required input.
   - the git history and the past run durations;
   - on a revision: the previous detailed plan in full (a must-read material, written as the fields of your hand-back) and why it came back (mechanical check failures, feasibility findings, instructions, the PM plan elements that changed).
 - **Feasibility review**: the detailed plan version and its content *(required)*; the past run data *(required)*; the findings of an earlier review this revision answers.
-- **Repair**: the repair *(required)*: its kind, the user's reason verbatim and its words entry, and what it is about; the plan in effect in full, with earlier repairs' additions *(required)*; the PM plan elements an added task may trace to; the tasks with accepted work, each with its product, attempt and changed paths; who changed the paths the repair is about; on a return, the mechanical check failures to fix.
-- All: the project constraints in force, the relevant decisions, materials.
+- **Repair**: the repair *(required)*: its kind, the user's reason verbatim and its words entry, and what it is about; the plan in effect in full, with earlier repairs' additions *(required)*; the PM plan elements an added task may trace to; the tasks with accepted work, each with its product, attempt and changed paths; the tasks with no accepted product, whose card a repair may change; who changed the paths the repair is about; on a return, the mechanical check failures to fix.
+- All: the project constraints in force (an instruction is labelled "Instruction (follow it; not a proof input)": follow it), the relevant decisions, materials.
 - Decomposition, revision and repair cards also carry the planning rules: how to cut tasks, the mechanical checks your plan must pass, the project's local commands and full suite, and what a Reviewer can see.
 
 `mp seat <id> checkout` prints the path of a read-only directory holding the commit your card names: read the project there, not in anyone's working tree. Other seats reading the same commit share it: never write there.
@@ -38,8 +38,9 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - **Repair**:
   - `reopen`: the tasks whose accepted work causes the problem, each with the issue its work must fix (each gets a new attempt with the issue on its card);
   - `add`: new tasks only for work no existing task owns, each with a fresh id, depending on the existing tasks whose work it builds on or whose paths it touches, and tracing to the PM plan elements it serves (or `architect`);
-  - `note`: why the repair is these reopenings and additions, in a few sentences.
-  Change no existing task: existing tasks keep their cards. Reopen at least one task or add at least one.
+  - `change`: tasks of the plan in effect with no accepted product whose card the repair must change: the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs. Each starts a new attempt under its new card and carries its earlier work on;
+  - `note`: why the repair is these reopenings, changes and additions, in a few sentences.
+  A task with an accepted product keeps its card: reopen it with the issue instead. Reopen, change or add at least one task.
 
 Rules for the plan:
 - A task may cover several plan elements: one change that satisfies several elements is one task.
@@ -64,7 +65,7 @@ On a revision, fix exactly what the card says came back, and carry everything el
 ## Upstream and downstream
 - Decomposition: upstream, the PM plan approved by Calibrator ①. Downstream: the program's mechanical checks, the feasibility review, then Calibrator ②. A plan that fails a check comes back to you.
 - Feasibility review: upstream, the detailed plan. Downstream: a `return` goes to the decomposition once; what is still unresolved goes to the Secretary.
-- Repair: upstream, the user's repair, recorded by the PM. Downstream: the program's mechanical checks only (no Calibrator, no feasibility review); a failure comes back to you. On a pass the added tasks join the plan in effect and the reopened tasks get new attempts; nothing else is re-reviewed.
+- Repair: upstream, the user's repair, recorded by the PM. Downstream: the program's mechanical checks only (no Calibrator, no feasibility review); a failure comes back to you. On a pass the added tasks join the plan in effect, the reopened tasks get new attempts, and the changed tasks start again under their new cards; nothing else is re-reviewed.
 
 ## Never
 - Change files, or run the project's commands (the run history is on the card).

@@ -21,7 +21,9 @@ Three parts, and nothing else:
 - **A seat is a role, not a model.** Calibrators check the plan against your words, an Architect breaks it into tasks, Constructors build them in their own git worktrees, Reviewers accept them, Researchers and Crititors run explorations with a Stabilizer after every attack round, a Secretary decides escalations within your authority, an Auditor legalizes a lineage when you ask. Any model in any harness can fill any seat; who filled it is recorded and invalidates nothing.
 - **Your words are the root.** The PM records every message verbatim as a words entry; requirement items must quote it verbatim. `mp read why <anything>` walks from a delivered commit back to the words it rests on.
 - **Proof is the program's.** Verification runs on a clean checkout of the candidate commit; the labels (proven, not fully proven, refuted, …) are computed from the records and stored. Only important design decisions come back to you.
+- **Your words settle what you decided.** The PM carries your decision out on your words and records it; it is not sent back through a review or refused for form. You may waive a mission's plan reviews (`mp pm waive`), accept a verified task or an exploration's result with its risks, or change an exploration's method directly (`mp pm repair` with a change form). Every place where the process stops has an exit your words can take: accept, change, run again or drop. This adds no questions: details stay with the PM.
 - **You guide the direction; you never accept details.** The PM reports when the work is done. You try the result and name what to repair (`mp pm repair`), or say "close and merge" once: `mp pm finish` delivers, lands and closes on those words. Closing never refuses: the record says what is proven, what is not, and whether the full suite ran on the delivered tree.
+- **Explorations end by their state.** An exploration converges in the round its Stabilizer judges on track with nothing fatal or serious left open and no direction question waiting, the budget's last round included. Evidence may cite data outside the repository by path, sha256 and size; `mp` checks it at hand-back and labels it "outside the commit". Long experiment runs can run detached from the seat that started them.
 - **The full suite runs where it matters.** Constructors run local tests. An integration task's Reviewer runs the project's full suite (`fullSuite` in `config.json`) last, once nothing visible is wrong; a failure reopens the task that caused it. Every full run leaves a marker, and the PM decides with you whether another run is worth it before closing.
 - **Stops take effect at once.** `mp pm stop` is written before anything else; nothing in its scope is dispatched, accepted or landed afterwards.
 - **Landing never merges.** A delivery fast-forwards your target branch from the base it was proven on, or leaves a delivery ref for you.
@@ -46,7 +48,7 @@ Known issue since 4.1.1: an object constraint recorded while a plan review runs,
 
 ## Documentation
 
-- [engine/README.md](engine/README.md): install, `mp init` and `config.json` (`fullSuite`, `commit`), the PM's loop, seats, the memory folder and its `tmp/` layout, the tree reads, harness notes, platforms and known limitations.
+- [engine/README.md](engine/README.md): install, `mp init` and `config.json` (`fullSuite`, `commit`, `shell`, `experimentShell`, `cleanupCommands`, `startOnHandback`), the PM's loop, seats, the memory folder and its `tmp/` layout, the tree reads, harness notes, platforms and known limitations.
 - [`docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md`](docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md): the design contract.
 - [CHANGELOG.md](CHANGELOG.md).
 
