@@ -1,4 +1,4 @@
-import { withdrawConstraint } from '../memory/domain/constraints.ts';
+import { constraintApplies, constraintPatternProblem, CONSTRAINT_PATTERN_FORMS, withdrawConstraint } from '../memory/domain/constraints.ts';
 import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 // The PM's dispatch loop and commands (design 4.1 §5.1, §5.4, §6.5, §6.6; decisions 8, 15, 18).
 //
@@ -70,8 +70,10 @@ import {
   type StopRequest,
   type WriteTx,
 } from '../memory/index.ts';
-import { recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
-import { submitPmBatch } from '../flow/planning.ts';
+import { constraintLine, currentConstraints, recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
+import { planInEffect, submitPmBatch } from '../flow/planning.ts';
+import { flowCtx } from '../flow/context.ts';
+import { constraintsForTask } from '../seat/cards/dynamic.ts';
 import { recordRepair } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
 import { answerEscalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
@@ -79,7 +81,7 @@ import { RENEW_LINE, REVIEW_NEEDED, SECRETARY_LINE, type ReviewNeededBody } from
 import { scopesOverlap } from '../flow/mechanical.ts';
 import { legalizationState, requestLegalization, startLegalization, type LegalizationRequest } from '../flow/audit/index.ts';
 import type { ReconcileReport } from '../flow/engine.ts';
-import type { ConstraintScope } from '../common/records.ts';
+import type { ConstraintScope, ObjectScope } from '../common/records.ts';
 import { renderSeatCard, handBackFiles } from '../seat/card.ts';
 import type { MaterialRef } from '../seat/cards/common.ts';
 import type { DecisionOption } from '../seat/cards/secretary.ts';
@@ -99,6 +101,7 @@ import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
 import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts';
 import { heldByPredecessors } from './explorationAfter.ts';
 import { materialLeaf } from './seat.ts';
+import { carriedRunLines, detachedRunNotes, stopDetachedRuns, type DetachedRunNote } from './detached.ts';
 
 // ---------------------------------------------------------------- shared
 
@@ -228,6 +231,8 @@ export interface NextReport {
   readonly landings: RecoveryReport | null;
   /** Flow steps that failed this time (each also a WI-20 notice). */
   readonly errors: readonly string[];
+  /** 4.1.3 (#30): detached runs that ended (finished, or lost: their worker is gone) for a dispatch still in flight. */
+  readonly detachedRuns: readonly DetachedRunNote[];
 }
 
 /** Steps conflict when they write overlapping paths or need the same exclusive resource. */
@@ -347,6 +352,13 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
   // 4.1.2: an environment change is told once (runs from older environments still count), never a ready step
   const olderEnvironmentRuns = noticeOlderEnvironment(ctx);
   const steps = readSteps(ctx);
+  // 4.1.3 (#30): a detached run that ended while its dispatch is in flight (its seat may be gone); a lost one is recorded so
+  let detachedRuns: DetachedRunNote[] = [];
+  try {
+    detachedRuns = detachedRunNotes(ctx);
+  } catch (e) {
+    errors.push(`detached runs: ${(e as Error).message}`);
+  }
   const data = ctx.memory.data;
   const notices = ctx.memory.read((db) => listNotices(db, data)).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
   if (o.markDelivered !== false) markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
@@ -358,6 +370,7 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
     labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since },
     landings,
     errors,
+    detachedRuns,
   };
 }
 
@@ -385,6 +398,30 @@ export interface Dispatched {
   readonly prompt: string;
 }
 
+/** How long `mp pm dispatch` waits before it tries its write again after OVER_BUDGET: a short random delay, so a burst spreads out. */
+export const DISPATCH_RETRY_MS = { min: 100, max: 600 } as const;
+
+/**
+ * 4.1.3 (#33): a burst of dispatches can push one write over its work budget by waiting, not by work.
+ * The write rolled back cleanly, so it is tried once more by itself after a short random delay; a
+ * second OVER_BUDGET says that a plain retry is safe and nothing was written. The budget is unchanged.
+ */
+function claimOnceMore<T>(claim: () => T): T {
+  try {
+    return claim();
+  } catch (e) {
+    if (!(e instanceof LedgerError) || e.code !== 'OVER_BUDGET') throw e;
+  }
+  const ms = DISPATCH_RETRY_MS.min + Math.floor(Math.random() * (DISPATCH_RETRY_MS.max - DISPATCH_RETRY_MS.min));
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  try {
+    return claim();
+  } catch (e) {
+    if (e instanceof LedgerError && e.code === 'OVER_BUDGET') throw new LedgerError('OVER_BUDGET', `${e.message}. mp pm dispatch tried twice (the machine is busy): nothing was written, and running the same command again is safe`);
+    throw e;
+  }
+}
+
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
 export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Dispatched {
   settleLabels(ctx);
@@ -396,12 +433,15 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   const prior = ctx.memory.read((db) => listDispatches(db, { task: step, limit: 1000 }).length);
   // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
   const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
-  const out = pmWrite(
+  const queued = spec;
+  const claim = (): { dispatch: string; card: string; cardLeaf: string; worktree: string | null } => pmWrite(
     ctx,
     'dispatch',
     `dispatch:${step}:${prior + 1}`,
     { step, attempt: prior + 1, filler },
     (tx) => {
+      // a retry starts again from the queued spec (4.1.3, #33)
+      spec = queued;
       // a closed mission's production steps are held (§6.7): checked in the claim's own write
       if (heldByClose(tx, spec)) throw new ProcessError('NOT_READY', `mission ${task.mission} is closed: step ${step} is production work and waits until the mission is opened again`);
       // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
@@ -413,7 +453,9 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       const refreshed = tx.data.put(canonicalJson(spec));
       const n = Number((tx.stmt('SELECT COUNT(*) AS n FROM dispatches').get() as { n: number }).n) + 1;
       const dispatch = `D-${n}`;
-      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite });
+      // 4.1.3 (#30): a step dispatched again lists the runs its earlier dispatches made
+      const carriedRuns = carriedRunLines(tx, tx.data, { mission: task.mission as MissionId, task: step, dispatch });
+      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite, carriedRuns });
       const claimed = claimDispatch(tx, { dispatch, task: step, seat: spec.card.seat, capabilities: spec.capabilities, filler, worktree: entry.exportsProduct === true, card });
       // the materials as leaves (§5.2): `mp seat <id> read` reads them, hash-checked
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
@@ -424,6 +466,7 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     },
     filler,
   );
+  const out = claimOnceMore(claim);
   mkdirSync(join(ctx.memory.paths.tmp, out.dispatch), { recursive: true });
   let worktree: string | null = null;
   if (entry.exportsProduct === true) {
@@ -696,10 +739,18 @@ export function pmDrain(ctx: ProcessContext, o: { readonly maxBatches?: number }
 }
 
 /** `mp pm stop "<the words>"` (§6.6): written before anything queued; "stop recorded; N dispatches in flight". */
-export function pmStop(ctx: ProcessContext, req: { readonly stop: string; readonly scope: StopRequest['scope']; readonly words: string; readonly wordsEntry?: string | null; readonly at?: number }): { readonly committed: boolean; readonly inFlight: number; readonly message: string } {
+export function pmStop(ctx: ProcessContext, req: { readonly stop: string; readonly scope: StopRequest['scope']; readonly words: string; readonly wordsEntry?: string | null; readonly at?: number }): { readonly committed: boolean; readonly inFlight: number; readonly message: string; readonly detached: ReadonlyArray<{ readonly run: string; readonly dispatch: string; readonly outcome: 'stopped' | 'lost' }> } {
   const r: StopRequest & { wordsEntry: string | null } = { stop: req.stop as StopId, scope: req.scope, words: req.words, at: req.at ?? ctx.now(), wordsEntry: req.wordsEntry ?? null };
   const out = ctx.memory.write({ op: `stop:${req.stop}`, payload: r, stop: true, command: 'stop', filler: ctx.filler }, (tx) => commitStop(tx, r));
-  return { ...out, message: `stop recorded; ${out.inFlight} dispatch${out.inFlight === 1 ? ' was' : 'es were'} in flight in its scope: stop them in your harness and report what it confirmed` };
+  // 4.1.3 (#30): a stop stops the detached runs in its scope too (their process groups), recorded as stopped
+  let detached: ReturnType<typeof stopDetachedRuns> = [];
+  try {
+    detached = stopDetachedRuns(ctx, req.scope, req.stop);
+  } catch {
+    /* the stop is recorded: a worker refuses its result when it sees it */
+  }
+  const stopped = detached.filter((x) => x.outcome === 'stopped').map((x) => `${x.run} (${x.dispatch})`);
+  return { ...out, detached, message: `stop recorded; ${out.inFlight} dispatch${out.inFlight === 1 ? ' was' : 'es were'} in flight in its scope: stop them in your harness and report what it confirmed${stopped.length > 0 ? `; mp stopped ${stopped.length} detached run${stopped.length === 1 ? '' : 's'} in its scope: ${stopped.join(', ')}` : ''}` };
 }
 
 // ---------------------------------------------------------------- the PM's flow commands
@@ -798,13 +849,50 @@ export async function pmWithdrawRequirement(ctx: ProcessContext, req: { readonly
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm requirement withdraw' });
 }
 
+/** What a constraint's scope reaches now (4.1.3, #36): current object versions, and the tasks of each mission's plan in effect. */
+export interface ConstraintReach {
+  /** Object versions no later version revises, that the scope applies to (memory/domain/constraints.ts constraintApplies). */
+  readonly objects: number;
+  /** Tasks of the plans in effect whose cards take the constraint (seat/cards/dynamic.ts constraintsForTask), as "<mission>/<task>". */
+  readonly tasks: readonly string[];
+}
+
+/**
+ * The reach of a constraint scope now, read with the resolvers the labels and the cards use: an object
+ * constraint by constraintApplies over the current object versions, either kind by constraintsForTask
+ * over the tasks of each mission's plan in effect.
+ */
+export async function constraintReach(ctx: ProcessContext, c: { readonly kind: 'object' | 'instruction'; readonly scope: ConstraintScope }): Promise<ConstraintReach> {
+  const body = { line: 'constraint.reach', version: 'reach', kind: c.kind, text: '', scope: c.scope };
+  const objects = c.kind !== 'object' ? 0 : ctx.memory.read((db) => {
+    const rows = db.stmt("SELECT record FROM log WHERE kind = 'object.version'").all() as Array<{ record: string }>;
+    const recs = rows.map((r) => JSON.parse(r.record) as { object: string; mission: string; scope?: ObjectScope; predecessor?: string });
+    const revised = new Set(recs.flatMap((r) => (r.predecessor !== undefined ? [r.predecessor] : [])));
+    return recs.filter((r) => !revised.has(r.object) && r.scope !== undefined && constraintApplies(body, { scope: r.scope, mission: r.mission })).length;
+  });
+  const missions = c.scope.mission !== undefined ? [c.scope.mission as MissionId] : await ctx.ports().ledger.missions();
+  const tasks: string[] = [];
+  for (const m of missions) {
+    const p = await planInEffect(flowCtx(ctx.ports(), m));
+    for (const t of p?.plan.tasks ?? []) if (constraintsForTask([body], t, m).length > 0) tasks.push(`${m}/${t.id}`);
+  }
+  return { objects, tasks };
+}
+
 /** `mp pm constraint add <mission> <constraint> --kind object|instruction --text ... [--paths] [--task-types] [--words W-<n>]`. */
-export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string; readonly words?: string }): Promise<{ readonly version: string }> {
+export async function pmConstraint(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly missionScope?: string; readonly words?: string }): Promise<{ readonly version: string; readonly reach: ConstraintReach; readonly scopeChanged: boolean }> {
   const scope: ConstraintScope = { ...req.scope, ...(req.missionScope !== undefined ? { mission: req.missionScope } : {}) };
+  // 4.1.3 (#36): a pattern the matcher cannot read is refused at once, with the forms it reads and the nearest one
+  const bad = scope.paths.flatMap((p) => { const x = constraintPatternProblem(p); return x === null ? [] : [`"${p}": ${x.problem}; the nearest form is "${x.suggestion}"`]; });
+  if (bad.length > 0) throw new ProcessError('NOT_ALLOWED', `the scope's path patterns: ${bad.join('; ')}. A scope path is ${CONSTRAINT_PATTERN_FORMS}. Nothing was recorded`);
   if (req.words !== undefined) wordsText(ctx, req.words);
+  const line = constraintLine(req.constraint);
+  const before = (await currentConstraints(flowCtx(ctx.ports(), req.mission as MissionId))).find((c) => c.line === line);
   const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: req.kind, text: req.text, scope, ...(req.words !== undefined ? { words: req.words } : {}) });
   await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint' });
-  return { version };
+  // the same id and text keep the version: say so when only the scope changed (#36: it looked unchanged)
+  const scopeChanged = before !== undefined && before.version === version && canonicalJson(before.scope) !== canonicalJson(scope);
+  return { version, reach: await constraintReach(ctx, { kind: req.kind, scope }), scopeChanged };
 }
 
 /** Withdraw a constraint under the user's recorded words; never delete its record. */

@@ -167,7 +167,7 @@ export function renderCommon(c: { duties: string; constraints: readonly { id: st
     (k !== undefined
       ? `## This card continues task ${k.previous}\nYou asked for evidence; here is what came back. Your previous notes${k.notes !== null ? ` are material ${k.notes}` : ' were not saved'}.\n\n${k.evidence.trim()}\n\n`
       : '') +
-    list('Project constraints', c.constraints.map((x) => `[${x.id}] ${x.kind === 'instruction' ? 'Instruction (context only; not a proof input): ' : ''}${x.text}`)) +
+    list('Project constraints', c.constraints.map((x) => `[${x.id}] ${x.kind === 'instruction' ? 'Instruction (follow it; not a proof input): ' : ''}${x.text}`)) +
     list('Relevant decisions (verbatim)', c.decisionQuotes) +
     (c.seat === 'secretary' ? '' : list('Authorizations currently in force (verbatim)', (c.authorizations ?? []).map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition === null ? '' : ` (tell the user when: ${a.notifyCondition})`}`)))
   );

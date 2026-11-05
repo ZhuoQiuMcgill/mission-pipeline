@@ -20,14 +20,19 @@ export function taskReferencePlan(events: readonly FlowEvent[], contract?: Revie
   return contract === undefined ? planInEffect(events)?.dplan : contract.reliesOn.find((id) => id.startsWith('dplan.'));
 }
 
-/** Instructions are seat context; object constraints retain their proof scope semantics. */
+/**
+ * Instructions are seat context; object constraints retain their proof scope semantics.
+ * 4.1.3 (#34, #42): an instruction with no task types whose paths include "**" is meant for the whole
+ * mission scope, so it reaches every task there, a task with an empty write scope too (an integration
+ * task and its review). A narrower path pattern still needs an overlap with the write scope.
+ */
 export function constraintsForTask(constraints: readonly ConstraintBody[], task: { readonly kind: string; readonly writeScope: readonly string[] }, mission: string): ConstraintBody[] {
   return constraints.filter((c) => {
     const paths = scopesOverlap(c.scope.paths, task.writeScope).length > 0;
     if (c.scope.mission !== undefined && c.scope.mission !== mission) return false;
     // a write scope is a set of patterns: overlap decides, never a display string as a concrete path
     return c.kind === 'object' ? (c.scope.taskTypes.length === 0 || c.scope.taskTypes.includes(task.kind)) && paths
-      : c.scope.taskTypes.length > 0 ? c.scope.taskTypes.includes(task.kind) || (c.scope.paths.some((p) => p !== '**') && paths) : paths;
+      : c.scope.taskTypes.length > 0 ? c.scope.taskTypes.includes(task.kind) || (c.scope.paths.some((p) => p !== '**') && paths) : paths || c.scope.paths.includes('**');
   });
 }
 
@@ -40,16 +45,17 @@ const BLIND_SEATS: ReadonlySet<string> = new Set(['researcher-reader', 'construc
  * A seat that knows the exploration writes to its product's path and answers to the task type
  * "exploration" (its product's, so an object constraint means for the author what it means for the
  * Crititor and the Stabilizer who review it) and, for an instruction, to its own seat name too. A
- * blind executor writes no product and knows no exploration (`exploration` may be null): like a task
- * card without write paths, only an instruction whose task types name its seat reaches it, so no
- * reading of the exploration's results arrives by default (4.3).
+ * blind executor writes no product and knows no exploration (`exploration` may be null): only an
+ * instruction whose task types name its seat reaches it, not even a mission-wide "**" instruction
+ * (which reaches every pathless task card, 4.1.3), so no reading of the exploration's results arrives
+ * by default (4.3).
  */
 export function constraintsForExploration(constraints: readonly ConstraintBody[], seat: string, mission: string, exploration: string | null): Array<{ id: string; text: string; kind: 'object' | 'instruction' }> {
   const blind = BLIND_SEATS.has(seat);
   const writeScope = blind || exploration === null ? [] : [xid.path(mission, exploration)];
   const lines = new Set([
     ...(blind ? [] : constraintsForTask(constraints, { kind: 'exploration', writeScope }, mission)),
-    ...constraintsForTask(constraints, { kind: seat, writeScope }, mission).filter((c) => c.kind === 'instruction'),
+    ...constraintsForTask(constraints, { kind: seat, writeScope }, mission).filter((c) => c.kind === 'instruction' && (!blind || c.scope.taskTypes.includes(seat))),
   ].map((c) => c.line));
   return constraints.filter((c) => lines.has(c.line)).map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
 }

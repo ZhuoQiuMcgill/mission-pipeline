@@ -29,12 +29,14 @@
 // them again); the first writer of that event wins, the other adopts it.
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
+import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
 import type { Collection } from '../git/workspace.ts';
-import { continuationCheck, type ContinuationRequest } from '../evaluator/index.ts';
+import { continuationCheck, sampleRunId, type ContinuationRequest } from '../evaluator/index.ts';
 import {
   appendRecords,
   assertNotStopped,
@@ -66,7 +68,8 @@ import { productObjectId, verificationStopped } from './actions.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
-import { runOnCommit, type RecordedRun } from './runs.ts';
+import { groupShellRunner, newRunId, RERUN_TAIL, runOnCommit, shellRunner, type RecordedRun } from './runs.ts';
+import { DETACHED_END_EVENT, DETACHED_EVENT, noticeLost, processStart, recordDetachedEnd, spawnRerunWorker, stepRuns, WAIT_DEFAULT_SECONDS, WAIT_MAX_SECONDS, WAIT_POLL_MS, type DetachedBody, type DetachedEndBody, type DetachSpawner, type RunEventBody, type StepRun, type WorkerStarted } from './detached.ts';
 import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
 import { tagScope } from '../delivery/scope.ts';
 import { pathOwners } from '../flow/execution.ts';
@@ -186,11 +189,15 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promi
   return { path: c.path, commit: c.commit };
 }
 
-/**
- * `mp seat <id> rerun <command-id>` (§6.5, decision 11): a declared command of the card, run by
- * `mp` on a clean checkout of the card's commit: a sampling run, new run id, executed every time.
- */
-export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<{ readonly run: string; readonly passed: boolean; readonly summary: string; readonly leaf: string | null }> {
+/** What a rerun of a card's declared command runs on: the dispatch, the command, the card's commit (the checks of `mp seat <id> rerun`). */
+export interface RerunTarget {
+  readonly v: DispatchView;
+  readonly c: { readonly id: string; readonly command: string; readonly cwd?: string };
+  readonly snap: string;
+}
+
+/** The checks of `mp seat <id> rerun` (a stop first), for a foreground rerun, a detached one and its worker alike. */
+export function rerunTarget(ctx: ProcessContext, dispatch: string, commandId: string): RerunTarget {
   const v = dispatchView(ctx, dispatch);
   // a stop stops (§6.6): nothing is run in its scope, refused before any other refusal
   ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this rerun'));
@@ -203,24 +210,177 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
   if (c === undefined) throw new ProcessError('NOT_ALLOWED', `"${commandId}" is not a declared command on the card (ids: ${rerunnableCommands(v.card, { fullSuite: ctx.fullSuite }).map((x) => x.id).join(', ')})`);
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
-  const r = await runOnCommit(ctx, {
+  return { v, c, snap };
+}
+
+/** A rerun's result as the seat sees it, from `mp seat <id> rerun` or, for a detached one, `mp seat <id> wait`. */
+export interface RerunResult {
+  /** The evidence id to cite. */
+  readonly run: string;
+  readonly passed: boolean;
+  readonly summary: string;
+  readonly leaf: string | null;
+  /** The last lines of its output, passing or failing (4.1.3, #37), within RERUN_TAIL. */
+  readonly tail: string;
+}
+
+/**
+ * The runOnCommit request of a rerun, foreground or detached: the same declaration, fields and
+ * evidence, and the dispatch line's "run" event in the recording write (4.1.3: with the kept tail and
+ * the time). `check`: more checks inside that write (a detached run's worker: not stopped).
+ */
+function rerunRequest(t: RerunTarget, extra: { readonly detached?: string; readonly check?: (tx: WriteTx) => void } = {}) {
+  const { v, c, snap } = t;
+  const dispatch = v.info.dispatch;
+  return {
     mission: v.info.mission,
     commit: snap,
     commands: [c],
     purpose: `rerun of ${c.id} by dispatch ${dispatch}`,
-    declaration: { by: 'mp', checkout: 'clean', declared: true, rerun: true, experiment: v.card.seat === 'constructor-experiment' },
+    declaration: { by: 'mp', checkout: 'clean', declared: true, rerun: true, experiment: v.card.seat === 'constructor-experiment' } as const,
     fields: { dispatch },
+    tail: RERUN_TAIL,
+    keepPassingTail: true,
     also: (tx: WriteTx, runs: readonly RecordedRun[], _run: string, records: readonly EvidenceRecord[]) => {
+      extra.check?.(tx);
       for (const x of runs) {
         // the run's environment identity (4.1 §6.5): an experiment's evidence that cites it is bound to it
         const rec = records.find((r) => r.evidence === x.evidence);
         const env = rec !== undefined ? { envLine: rec.envLine as string, envSnapshot: rec.envSnapshot as string } : {};
-        appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'run', key: x.evidence, body: tx.data.put(canonicalJson({ run: x.evidence, command: c.id, completed: x.fields['status'] === 'completed', exit: x.fields['exit'], ...env })) as ContentHash }]);
+        const body: RunEventBody = { run: x.evidence, command: c.id, completed: x.fields['status'] === 'completed', exit: x.fields['exit'] ?? 'none', ...env, ...(x.tail !== '' ? { tail: tx.data.put(x.tail) } : {}), at: tx.at, ...(extra.detached !== undefined ? { detached: extra.detached } : {}) };
+        appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'run', key: x.evidence, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
       }
     },
-  });
+  };
+}
+
+/**
+ * `mp seat <id> rerun <command-id>` (§6.5, decision 11): a declared command of the card, run by
+ * `mp` on a clean checkout of the card's commit: a sampling run, new run id, executed every time.
+ * 4.1.3: the result carries the last lines of the output, passing or failing (#37).
+ */
+export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<RerunResult> {
+  const t = rerunTarget(ctx, dispatch, commandId);
+  const r = await runOnCommit(ctx, rerunRequest(t));
   const x = r.runs[0]!;
-  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf };
+  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail };
+}
+
+/** A detached rerun as `mp seat <id> rerun --detach` answers: its run id and the evidence id its result is recorded under. */
+export interface DetachedStart {
+  readonly run: string;
+  readonly evidence: string;
+  readonly pid: number;
+  readonly dispatch: string;
+}
+
+/**
+ * `mp seat <id> rerun <command-id> --detach` (4.1.3, #30): the rerun runs in a worker process of its
+ * own (detached.ts), which records it as running against the dispatch; this returns its run id at
+ * once. The checks are the foreground rerun's, here first and again in the worker.
+ */
+export async function seatRerunDetached(ctx: ProcessContext, dispatch: string, commandId: string, spawner: DetachSpawner = spawnRerunWorker): Promise<DetachedStart> {
+  const t = rerunTarget(ctx, dispatch, commandId);
+  const w = await spawner(ctx, { dispatch, command: t.c.id });
+  return { ...w, dispatch };
+}
+
+/** Refused inside a detached run's recording write: it was stopped (nothing of it is recorded). */
+class RunStopped extends Error {}
+
+/**
+ * The worker of a detached rerun (`mp seat <id> rerun <command-id> --worker`, detached.ts): the
+ * foreground rerun's checks, then the run recorded as running (its pid, start time and host), `ready`
+ * called, and the command run and recorded exactly as a foreground rerun, with the command in its own
+ * process group (groupShellRunner). When `stopping` fires (SIGTERM from `mp pm stop`), or a stop or a
+ * "stopped" record is there when it records, nothing of the run is recorded and it is recorded as
+ * stopped. A worker error after `ready` is recorded as lost, with the reason.
+ */
+export async function seatRerunWorker(ctx: ProcessContext, dispatch: string, commandId: string, o: { readonly ready: (w: WorkerStarted) => void; readonly stopping?: AbortSignal }): Promise<{ readonly start: WorkerStarted; readonly state: 'finished' | 'stopped' | 'lost'; readonly result: RerunResult | null }> {
+  const t = rerunTarget(ctx, dispatch, commandId);
+  const run = newRunId('rerun');
+  const evidence = sampleRunId(`${run}.${idPart(t.c.id)}`);
+  const line = DISPATCH_LINE(dispatch);
+  const started: DetachedBody = { run, evidence, command: t.c.id, dispatch, task: t.v.info.task, pid: process.pid, start: processStart(process.pid), host: hostname(), startedAt: ctx.now() };
+  ctx.memory.write({ op: `detached:${run}`, payload: { run, dispatch } }, (tx) => {
+    assertNotStopped(tx, t.v.info.tag, 'this rerun');
+    if (dispatchInfo(tx, dispatch)?.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${dispatch} is no longer in flight: a rerun is for a dispatch in flight`);
+    appendRecords(tx, [{ kind: 'flow.event', mission: t.v.info.mission, line, event: DETACHED_EVENT, key: run, body: tx.data.put(canonicalJson({ ...started, startedAt: tx.at })) as ContentHash }]);
+  });
+  const start: WorkerStarted = { run, evidence, pid: process.pid };
+  o.ready(start);
+  const check = (tx: WriteTx): void => {
+    if (o.stopping?.aborted === true) throw new RunStopped('the worker was told to stop');
+    if (flowEventExists(tx, { mission: t.v.info.mission, line, event: DETACHED_END_EVENT, key: run })) {
+      const end = flowEvents(tx, { mission: t.v.info.mission, line, event: DETACHED_END_EVENT }).find((e) => e.key === run);
+      // "lost" is a reader's inference: a result that arrives after it still counts; "stopped" does not
+      if (end !== undefined && (JSON.parse(tx.data.text(end.body)) as DetachedEndBody).outcome === 'stopped') throw new RunStopped('it was recorded as stopped');
+    }
+    if (stoppedFor(tx, t.v.info.tag)) throw new RunStopped('a stop covers it');
+  };
+  // the platform's shell, the command in its own process group; a test's runner as it is
+  const runner = ctx.runner === shellRunner ? groupShellRunner(o.stopping !== undefined ? { stopping: o.stopping } : {}) : ctx.runner;
+  const cleanupRunner = ctx.runner === shellRunner ? groupShellRunner() : ctx.runner;
+  try {
+    const r = await runOnCommit(ctx, { ...rerunRequest(t, { detached: run, check }), run, evidenceId: () => evidence, runner, cleanupRunner, recordRetries: 3 });
+    const x = r.runs[0]!;
+    return { start, state: 'finished', result: { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail } };
+  } catch (e) {
+    const stopped = e instanceof RunStopped || o.stopping?.aborted === true;
+    const why = stopped ? `stopped: ${e instanceof RunStopped ? e.message : 'the worker was told to stop'}` : `its worker failed: ${(e as Error).message}`;
+    try {
+      recordDetachedEnd(ctx, started, stopped ? 'stopped' : 'lost', why);
+    } catch {
+      /* the next look (mp pm next, mp seat <id> wait) records it as lost once this worker is gone */
+    }
+    return { start, state: stopped ? 'stopped' : 'lost', result: null };
+  }
+}
+
+/** What `mp seat <id> wait <run>` answers. */
+export interface WaitAnswer {
+  readonly run: string;
+  readonly evidence: string;
+  readonly state: StepRun['state'];
+  /** Finished: the result as a foreground rerun returns it. */
+  readonly result: RerunResult | null;
+  /** Stopped or lost: why. */
+  readonly why: string | null;
+  /** Running: since when (ms). */
+  readonly since: number | null;
+  /** The dispatch that started it. */
+  readonly startedBy: string;
+  readonly waitedMs: number;
+}
+
+/**
+ * `mp seat <id> wait <run> [--seconds <n>]` (4.1.3, #30): waits up to `seconds` (default 50 minutes,
+ * below common harness limits on one command) for a run of this step, a detached one of this dispatch
+ * or one an earlier dispatch of the step started (the card lists them), and answers its state:
+ * running, or finished with its result as a foreground rerun returns it (a recorded run at once, with
+ * its recorded tail), or stopped or lost. A running run whose worker is gone is recorded as lost.
+ */
+export async function seatWait(ctx: ProcessContext, dispatch: string, runId: string, o: { readonly seconds?: number; readonly pollMs?: number } = {}): Promise<WaitAnswer> {
+  const v = dispatchView(ctx, dispatch);
+  inFlight(v, 'a wait');
+  allows(ctx, v, 'rerun');
+  const seconds = o.seconds ?? WAIT_DEFAULT_SECONDS;
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds > WAIT_MAX_SECONDS) throw new ProcessError('NOT_ALLOWED', `--seconds is 0 to ${WAIT_MAX_SECONDS}`);
+  const t0 = Date.now();
+  const deadline = t0 + seconds * 1000;
+  const data = ctx.memory.data;
+  for (;;) {
+    const runs = ctx.memory.read((db) => stepRuns(db, data, v.info));
+    let r = runs.find((x) => x.run === runId || x.evidence === runId);
+    if (r === undefined) throw new ProcessError('NOT_ALLOWED', `no run ${runId} for this step (its runs: ${runs.map((x) => x.run).join(', ') || 'none'})`);
+    if (r.state === 'running' && noticeLost(ctx, r)) r = ctx.memory.read((db) => stepRuns(db, data, v.info)).find((x) => x.run === r!.run) ?? r;
+    const waitedMs = Date.now() - t0;
+    if (r.state !== 'running' || Date.now() >= deadline) {
+      const result = r.state === 'finished' ? { run: r.evidence, passed: r.passed === true, summary: r.summary ?? '', leaf: r.leaf, tail: r.tail } : null;
+      return { run: r.run, evidence: r.evidence, state: r.state, result, why: r.why, since: r.detached?.startedAt ?? null, startedBy: r.dispatch, waitedMs };
+    }
+    await new Promise((res) => setTimeout(res, Math.max(1, Math.min(o.pollMs ?? WAIT_POLL_MS, deadline - Date.now()))));
+  }
 }
 
 /** An integration task's Reviewer card (the flow marks it; `full-run` is offered when the project declares a full suite). */
