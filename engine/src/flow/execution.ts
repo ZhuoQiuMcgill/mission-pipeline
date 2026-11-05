@@ -1025,7 +1025,12 @@ async function earlyStart(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, 
     const dl = await readLine(ctx, d);
     const v = dl.all<ProductBody>('product').map((x) => x.body.object).filter((o) => pre.has(o)).at(-1);
     if (v === undefined) continue;
-    if (dl.all<{ product: string }>('accepted').some((a) => a.body.product === v)) continue;
+    if (dl.all<{ product: string }>('accepted').some((a) => a.body.product === v)) {
+      // accepted once, but reopened since and not accepted now (sol INT r1): the acceptance waits until the
+      // dependency is accepted again, as it would without the setting (dependencyGate reads acceptedProduct)
+      if (!dl.abandoned && (await acceptedProduct(ctx, d)) === null) wait = true;
+      continue;
+    }
     if (!dl.abandoned && dl.one<ProductBody>('product', String(dl.k))?.object === v) {
       wait = true;
       continue;

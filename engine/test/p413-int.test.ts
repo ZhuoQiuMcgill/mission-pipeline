@@ -287,6 +287,32 @@ describe('INT 11 (P1, sol r2): accept-risk reads the dependencies as the pass do
   });
 });
 
+describe('INT 11b (sol INT r1): with startOnHandback, accept-risk waits for a reopened dependency to be accepted again', () => {
+  test('iface accepted, then reopened; its new attempt is verified but still in review; accept-risk on impl waits, and is carried out once iface is accepted again', async () => {
+    const { ports, engine } = await delivery('fast', { localCommands: [], fullSuite: [], startOnHandback: [TM] });
+    await drive(engine, ports.scheduler, withKinds({ reviewer: (t) => { const c = t.card as unknown as ReviewerCard; return { handBack: reviewer(c, c.target.includes('impl') ? 'needs-decision' : 'pass') }; }, secretary: () => null }));
+    assert.equal(await acceptedProduct(flowCtx(ports, TM), 'iface'), 'prod.con.m1.iface.1');
+    const esc = (await eventsOf<{ id: string; source: string; options: string[] }>(ports, 'secretary', 'escalation')).find((e) => e.body.source === 'reviewer-needs-decision')!.body;
+    const w2 = say(ports, 'The interface misses a delimiter option.');
+    await pmRepair(ports.ctx, { mission: TM, words: w2, kind: 'defect', text: 'misses a delimiter option' });
+    // iface's new attempt is built and verified; its Reviewer has not judged it yet
+    await drive(engine, ports.scheduler, withKinds({
+      'architect-repair': () => ({ handBack: { reopen: [{ task: 'iface', issue: 'add a delimiter option' }], add: [], note: 'iface owns it' } }),
+      reviewer: (t) => { const c = t.card as unknown as ReviewerCard; return c.target.includes('iface') ? null : { handBack: reviewer(c, 'needs-decision') }; },
+      secretary: (t) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'accept-risk', { classification: 'important-within-authority', notice: 'accept it as it is' }) }),
+    }));
+    assert.equal(await acceptedProduct(flowCtx(ports, TM), 'iface'), null, 'iface is reopened and in review: not accepted now');
+    assert.ok((await eventsOf(ports, 'task:iface', 'verified')).some((e) => e.key === '2'), "iface's new attempt has a verified hand-back (startOnHandback lets work start on it)");
+    assert.ok((await eventsOf(ports, 'secretary', 'decision')).some((e) => e.key.startsWith(esc.id)), 'the Secretary decided accept-risk');
+    assert.equal(await acceptedProduct(flowCtx(ports, TM), 'impl'), null, 'impl is not accepted while iface is not accepted now');
+    assert.ok(!(await eventsOf(ports, 'secretary', 'applied')).some((e) => e.key === esc.id), 'the decision stays recorded, not carried out');
+    await drive(engine, ports.scheduler, happyScript(TM));
+    assert.equal(await acceptedProduct(flowCtx(ports, TM), 'iface'), 'prod.con.m1.iface.2');
+    const acc = (await eventsOf<{ k: number; decision?: { escalation: string; by: string } }>(ports, 'task:impl', 'accepted')).map((e) => e.body);
+    assert.deepEqual(acc.map((a) => [a.k, a.decision?.escalation, a.decision?.by]), [[1, esc.id, 'secretary']]);
+  });
+});
+
 // ---------------------------------------------------------------- a mission whose PM plan holds an exploration X1 (e2 waits for it)
 
 const X = 'X1';
