@@ -112,17 +112,11 @@ describe('process: exploration with the Stabilizer (4.1 §6.3)', () => {
     assert.notEqual(ctx.memory.read((db) => decisionLabels(db, [v1]))[v1], 'negated', 'an out-of-scope serious finding never refutes the version');
     s = await explorationState(ctx.ports(), M, X);
     assert.equal([...s.findings.values()][0]?.scope, 'out-of-scope');
-    // round 2 (on the author's revision) passes and is stabilized: converged (4.1.3, E-3: no closing round)
-    await step(ctx, 'crititor', (c: CrititorCard) => attack([], c));
-    s = await explorationState(ctx.ports(), M, X);
-    assert.equal(s.stopped, null, 'not converged before the round is stabilized');
-    await step(ctx, 'stabilizer', (c: StabilizerCard) => {
-      assert.deepEqual(c.findings, [], 'a round without findings is stabilized too (code review r1 #1)');
-      return judge(c, 'in-scope', 'general');
-    });
-    s = await explorationState(ctx.ports(), M, X);
+    // nothing in scope fatal or serious is left on the author's revision: the Stabilizer's pass on it ends the
+    // round, converged on the revision, with no attack round on it (4.1.3, E-3; sol final review r1)
     assert.equal(s.stopped?.reason, 'converged');
     const v2 = s.version!.id;
+    assert.notEqual(v2, v1);
     assert.equal(ctx.memory.read((db) => decisionLabels(db, [v2]))[v2], 'proven');
   });
 

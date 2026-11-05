@@ -63,9 +63,7 @@ async function exploration(p: ProcessProject, mission: string): Promise<void> {
   await step(ctx, 'researcher-author', () => ({ step: 'submit', message: 'v1', artifact: 'v1: an LRU cache', dispositions: [], directionQuestions: [], attempts: [] }));
   await step(ctx, 'crititor', () => ({ findings: [{ severity: 'serious', class: 'cost out of control', title: 'the cache costs memory', basis: 'the passage', consequence: 'memory', direction: 'size it', evidence: [] }], rechecks: [], settled: [], reply: 'assessment' }));
   await step(ctx, 'researcher-author', (c: AuthorCard) => ({ step: 'submit', message: 'v2', artifact: 'v2: a sized LRU cache', dispositions: c.openFindings.map((f) => ({ finding: f.id, action: 'revise', note: 'sized' })), directionQuestions: [], attempts: [] }));
-  await step(ctx, 'stabilizer', (c: StabilizerCard) => ({ findings: c.findings.map((f) => ({ finding: f.id, verdict: 'out-of-scope', severity: 'general', reason: 'outside the scope', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
-  await step(ctx, 'crititor', (c: CrititorCard) => ({ findings: [], rechecks: c.priorFindings.filter((f) => f.status === 'awaiting-recheck').map((f) => ({ finding: f.id, resolved: 'yes', reason: 'fixed', evidence: [] })), settled: [], reply: 'ok' }));
-  // every attack round is stabilized: the re-check round's Stabilizer is left (its judgment converges it, 4.1.3)
+  // the round's Stabilizer is left: its judgment (the finding out of scope) converges it on the revision (4.1.3)
 }
 
 describe('mp read status: layer 0, plus the layer-1 entries of exactly the subtasks that changed since the user last asked', () => {
@@ -87,7 +85,7 @@ describe('mp read status: layer 0, plus the layer-1 entries of exactly the subta
       const pass = reviewerPass(c) as { judgments: Array<Record<string, unknown>> };
       return { ...pass, judgments: pass.judgments.map((j) => ({ ...j, met: 'no', reason: 'the check is missing a case' })), verdict: 'rework' };
     });
-    await step(p.ctx, 'stabilizer', () => ({ findings: [], round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
+    await step(p.ctx, 'stabilizer', (c: StabilizerCard) => ({ findings: c.findings.map((f) => ({ finding: f.id, verdict: 'out-of-scope', severity: 'general', reason: 'outside the scope', question: '' })), round: { verdict: 'on-track', reason: 'answers the question', question: '' } }));
     // --no-mark keeps the cursor: the same changes twice
     const a = await cli(p.dir, ['read', 'status', '--json', '--no-mark']);
     const b = await cli(p.dir, ['read', 'status', '--json', '--no-mark']);
