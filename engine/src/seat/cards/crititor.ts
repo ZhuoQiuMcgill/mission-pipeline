@@ -184,7 +184,7 @@ export const CrititorCardSchema = z.object({
   /** Required: what counts as a hole (4.3). */
   attackScope: z.array(z.string().min(1)).min(1),
   mode: z.enum(['attack', 'discuss']),
-  /** The closing attacker: a new session, a fresh view (4.3 连续性). */
+  /** A fresh attacker after a redefinition (4.1.3, E-3: no closing attacker): a new session, a fresh view (4.3 连续性). */
   fresh: z.boolean(),
   round: z.number().int().positive(),
   /** attack: the version attacked (required); discuss: the current version, if any. */
@@ -396,7 +396,7 @@ export function renderCrititorCard(c: CrititorCard): string {
   return (
     renderCommon(c) +
     renderExploration(c.exploration, c.goal, c.attackScope) +
-    (c.fresh ? '## You are the closing attacker\nA new session with a fresh view: you have not seen the earlier conversation. Attack the version as if for the first time, and re-check what is listed.\n\n' : '') +
+    (c.fresh ? '## You are a fresh attacker\nA new session with a fresh view: you have not seen the earlier conversation. Attack the version as if for the first time, and re-check what is listed.\n\n' : '') +
     (c.mode === 'attack'
       ? `## Round ${c.round}: attack version ${c.target ?? '(none)'}\n${c.previousTarget !== null ? `It revises ${c.previousTarget}; both full texts are materials.\n` : ''}\n`
       : `## Round ${c.round}: discussion\nThe author asks to align the framing and the attack scope before (or while) the product takes shape. Answer in the reply.\n\n`) +
