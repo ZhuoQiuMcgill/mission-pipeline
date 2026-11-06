@@ -1404,3 +1404,47 @@ describe('Stabilizer INT r2: fast mode compares closures as they are and keeps t
     assert.equal(await current(ports, 'docs'), 'prod.con.m1.docs.1');
   });
 });
+
+it('a failing re-bind review after the attempt\'s own used-up loop was decided reaches the Secretary with its own escalation (#51)', async () => {
+  const { ports, engine } = await setup();
+  const first = happyScript(M);
+  const decided: string[] = [];
+  // iface's own review uses its rework loop up; the Secretary accepts the verified product with its findings as risks
+  await drive(engine, ports.scheduler, (t, s) => {
+    if (t.card.seat === 'reviewer' && /^rev\.m1\.iface\.\d+$/.test(t.task)) {
+      const result = reviewer(t.card as ReviewerCard, 'rework');
+      result.judgments[0]!.reason = `A distinct missing case in ${t.task}`;
+      return { handBack: result };
+    }
+    if (t.card.seat === 'secretary') {
+      const card = t.card as SecretaryCard;
+      decided.push(card.request.id);
+      return { handBack: secretary(card, 'accept-risk') };
+    }
+    return first(t, s);
+  });
+  assert.equal(decided.length, 1, `one loop-exhausted decision on the first plan: ${decided.join(', ')}`);
+  const k = Number(/\.(\d+)$/.exec((await current(ports, 'iface'))!)![1]);
+  assert.equal(decided[0], `exh.${taskLineage(M, 'iface')}.${k}`);
+  // a later decision takes the proof away; the next plan keeps iface's card, so its product is re-bound and judged again
+  const w = await laterDecision(ports);
+  await submitPmBatch(ports, { mission: M, plan: plan2(), userWords: [w], changedItems: ['d1'] });
+  const base = happyScript(M, keeps);
+  await drive(engine, ports.scheduler, (t, s) => {
+    if (t.card.seat === 'secretary') return null;
+    if (t.card.seat === 'reviewer' && t.task === `rev.m1.iface.${k}.b1`) {
+      const result = reviewer(t.card as ReviewerCard, 'rework');
+      result.judgments[0]!.reason = 'A case the re-bound version still misses';
+      return { handBack: result };
+    }
+    return base(t, s);
+  });
+  const queued = ports.scheduler.queued('secretary').map((q) => (q.card as SecretaryCard).request);
+  assert.equal(queued.length, 1, `the re-bind's exhaustion has a pending decision: ${JSON.stringify(queued.map((r) => r.id))}`);
+  assert.equal(queued[0]!.source, 'loop-exhausted');
+  assert.notEqual(queued[0]!.id, decided[0], 'its own escalation, not the decided one');
+  assert.ok(ports.ledger.notices.filter((n) => n.category === 'loop-exhausted').length >= 2, 'a second loop-exhausted notice');
+  // a further pass raises nothing new
+  await engine.reconcile(M);
+  assert.equal(ports.scheduler.queued('secretary').length, 1);
+});

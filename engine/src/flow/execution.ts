@@ -1877,7 +1877,9 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
     return;
   }
   const v = r.status;
-  const id = safeId(o.reopen !== undefined ? `exh.${lineage}.${k}.${idPart(key)}` : `exh.${lineage}.${k}`);
+  // #51: only the attempt's own review keeps the base id; every other rework of the attempt (a reopen, a re-bind or
+  // re-review, an export refusal, a Secretary rework) names its escalation by its key, so a decided base id never hides it
+  const id = safeId(key === `rework:${k}` ? `exh.${lineage}.${k}` : `exh.${lineage}.${k}.${idPart(key)}`);
   // 4.1.3 (#35, E-1): with a verified hand-back, the decision may accept the attempt's product with its open findings as risks
   const reopenRisk = o.reopen?.kind === 'review' ? await waitingReopenRisk(ctx, t.id, k, o.reopen) : null;
   const risk = reopenRisk === null ? await riskAcceptable(ctx, t, k) : { product: reopenRisk.product.object, judgment: reopenRisk.review.judgment };
