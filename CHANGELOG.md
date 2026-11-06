@@ -29,8 +29,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 - Resident commands: `mp pm secretary start`, `handle`, `stop`; `mp read secretary`; `mp sec handbook`, `session`, `next`, `dispatch`, `release`, `renew`, `drain`, `alerts`, `wait --since R`.
 - Decision commands: `mp sec card`, `read`, `decide`; `mp pm inbox`, `inbox --asked-user`; `mp pm answer --by pm|user`, `--no-words`, and PM grants with `--by pm`.
-- Channel commands: `mp pm note`, `mp pm ask-secretary`, `mp sec ack-note`, `mp sec reply`; words commands: `say --tag`, `tag`, `retag`, `summary`, supersession with explicit withdraw/keep, and `mp read words` filters.
-- Record kinds: `secretary.generation`, `pm.note`, `pm.question`, `sec.reply`, `user.words-tags`, `words.summary`; flow event `pm-answer`, decider `pm` and applied ruling `j.pm.<id>`; classification `needs-pm` and option `ask-pm`.
+- Channel commands: `mp pm note`, `mp pm ask-secretary`, `mp sec ack-note`, `mp sec reply`, `mp sec ask-pm` (a question for the PM outside an escalation, e.g. a WI's) and `mp pm reply`, `mp pm inbox --ack`; words commands: `say --tag`, `tag`, `retag`, `summary`, supersession with explicit withdraw/keep, and `mp read words` filters.
+- Record kinds: `secretary.generation`, `pm.note`, `pm.question`, `sec.reply`, `sec.question`, `pm.reply`, `user.words-tags`, `words.summary`; flow event `pm-answer`, decider `pm` and applied ruling `j.pm.<id>`; classification `needs-pm` and option `ask-pm`.
 - Secretary handbook at `secretary/SECRETARY.md`, installed and refreshed with the PM handbook, role pages and WI pages.
 
 ### Compatibility

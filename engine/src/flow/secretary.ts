@@ -536,7 +536,8 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
 export function carryGuard(carries: readonly Carry[]): AppendGuard | undefined {
   const absent = carries.flatMap((c) => c.absent);
   const latest = carries.flatMap((c) => c.latest ?? []);
-  return absent.length === 0 && latest.length === 0 ? undefined : { absent, latest, words: carries.flatMap((c) => c.words ?? []), openMissions: carries.flatMap((c) => c.openMissions ?? []), code: 'STALE_REQUEST', message: `escalation ${carries.map((c) => c.id).join(', ')} or its facts changed meanwhile; nothing was written (the next pass reads it again)` };
+  const why = latest.length === 0 ? 'was carried out, closed or answered by another writer meanwhile' : 'was carried out, closed or answered by another writer, or its facts changed meanwhile';
+  return absent.length === 0 && latest.length === 0 ? undefined : { absent, latest, words: carries.flatMap((c) => c.words ?? []), openMissions: carries.flatMap((c) => c.openMissions ?? []), code: 'STALE_REQUEST', message: `escalation ${carries.map((c) => c.id).join(', ')} ${why}; nothing was written (the next pass reads it again)` };
 }
 
 /** After the write that carried decisions out: the "in effect" notices of the Secretary's decisions. */

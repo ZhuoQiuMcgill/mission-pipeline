@@ -116,7 +116,7 @@ export function renderSecretary(c: SecretaryCard): string {
 export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: ReadonlySet<string> | undefined): string[] {
   const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not read`);
   if (c.classifications !== undefined && r.classification === 'important-within-authority') out.push('classification: new decisions use detail or needs-pm; PM-class questions go to the PM');
-  if ((c.request.source === 'plan-structure-change' || c.request.source === 'plan-restarts-work') && !isAskOption(r.option)) out.push('plan structure is the PM’s decision');
+  if (c.classifications !== undefined && (c.request.source === 'plan-structure-change' || c.request.source === 'plan-restarts-work') && !isAskOption(r.option)) out.push('plan structure is the PM’s decision');
   if (!c.options.some((o) => sameDecisionOption(o.id, r.option))) out.push(`option: "${r.option}" is not an option on the card (${c.options.map((o) => o.id).join(', ')})`);
   if (isAskOption(r.option) !== (r.classification === 'needs-user' || r.classification === 'needs-pm')) out.push('classification: "needs-user" goes with option "ask-user", and only with it');
   if (r.classification === 'important-within-authority' && (r.authorization === null || !c.authorizations.some((a) => a.id === r.authorization))) {
