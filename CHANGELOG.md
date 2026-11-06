@@ -11,12 +11,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ### Fixed
 - #47: a review's or repair's reopen of a decided, used-up loop gets its own escalation;
   a kept verdict whose escalation was lost is retried, and a grant starts the reopened attempt.
+  Existing 4.1.3 reopen escalations keep their identity and are not duplicated.
 - #48: a conflicting rework carry starts fresh on the current dependencies, with the earlier
   version, commit and paths in notice `rework-carry-dropped` and a manual carry-over duty on the card.
-- #49: landing's clean checks accept LF or CRLF when the engine's supported eol/ident conversion
-  gives the recorded blob, including with `core.autocrlf=true`; real edits still differ.
+- #49: before landing, supported eol/ident clean conversion accepts equivalent LF or CRLF
+  bytes. After landing, only paths whose blob and conversion the delivery left unchanged may
+  normalize; changed paths need exact checkout bytes (WI-04).
 - #50: a review-reopen loop-exhausted escalation offers both deciders `accept-risk`: keep the
   dependency's accepted product and accept the reviewed integration product with its findings as risks.
+  The accepted attempt adopts that product, preserving later renewal and kept-product rebinds.
 
 ### Changed
 - #48's fresh start is the default, with no config key. The earlier change stays readable at its commit.

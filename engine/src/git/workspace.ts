@@ -45,7 +45,7 @@ import type { GitOid } from '../common/ids.ts';
 import { inWriteScope } from '../delivery/writeScope.ts';
 import { LedgerError, PATH_ID, type Memory, type MemoryPaths } from '../memory/index.ts';
 import { holdOwner, moveToTrash, ownedTempDir, releaseOwner, removeOwned } from '../memory/scratch.ts';
-import { decodePath, discoverRepo, gitOid, gitObjectId, readObjects, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
+import { decodePath, discoverRepo, gitOid, gitObjectId, readObjects, lsTree, treeOfCommit, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
 import { GitError, GitExitError, type PlainGit } from './plainGit.ts';
 import { attachCheckoutRepository, checkoutSetupGit } from './checkoutRepository.ts';
 import { linkedGitDirs } from './worktreeRecord.ts';
@@ -60,6 +60,8 @@ import {
   sha256Hex,
   writeCommit,
   toRepository,
+  resolveConversion,
+  sameConversion,
   type SnapshotEntry,
   type RepresentationRejection,
   type SnapshotManifest,
@@ -464,12 +466,13 @@ export type WorktreeComparison =
  * index entry against the commit's tree (path, mode, object), and every file
  * of the commit against the bytes, mode and kind a clean checkout of it would
  * have, or the same blob after the engine's supported eol/ident clean conversion
- * (representation.ts, under the worktree's transform description).
+ * (representation.ts, under the worktree's transform description). `unchangedFrom`
+ * restricts normalization to paths whose blob and conversion that commit shares.
  * Untracked files do not count. When the comparison cannot be made (a
  * transform the program does not implement, an LFS object that is not local, a
  * missing object), the answer is "undetermined", never "match".
  */
-export async function compareToCommit(ctx: GitContext, root: string, commit: string): Promise<WorktreeComparison> {
+export async function compareToCommit(ctx: GitContext, root: string, commit: string, o: { readonly unchangedFrom?: GitOid } = {}): Promise<WorktreeComparison> {
   if (!existsSync(root)) return { state: 'undetermined', reason: `${root} does not exist` };
   const scratch = ownedTempDir(ctx.memory.paths, 'compare-');
   let attributes: AttributeEvaluator | null = null;
@@ -484,7 +487,7 @@ export async function compareToCommit(ctx: GitContext, root: string, commit: str
     }
     const index = rawChanges(git.okSync(['diff-index', '--cached', '-z', '--raw', '--no-renames', commit, '--'], { cwd: root, config: NO_CACHES }).stdout).map((c) => c.path);
     const files: string[] = [];
-    const normalize: Array<{ entry: SnapshotEntry; content: Buffer }> = [];
+    let normalize: Array<{ entry: SnapshotEntry; content: Buffer }> = [];
     for (const e of manifest.entries) {
       const abs = join(root, ...e.path.split('/'));
       if (e.mode === '160000') {
@@ -517,6 +520,19 @@ export async function compareToCommit(ctx: GitContext, root: string, commit: str
         if (isAbsent(err)) files.push(e.path);
         else return { state: 'undetermined', reason: `${e.path} cannot be read: ${(err as Error).message}` };
       }
+    }
+    if (o.unchangedFrom !== undefined && normalize.length > 0) {
+      // After landing, normalization is safe only for a path the delivery left alone:
+      // its repository blob and its effective conversion must both be unchanged.
+      const base = new Map((await lsTree(git, repo, o.unchangedFrom, { recursive: true })).map((e) => [e.path, e]));
+      const before = await attributes.atTree(await treeOfCommit(git, repo, o.unchangedFrom), normalize.map(({ entry }) => entry.path));
+      normalize = normalize.filter(({ entry }) => {
+        const old = base.get(entry.path);
+        if (old !== undefined && (old.mode === '100644' || old.mode === '100755') && old.oid === entry.oid &&
+            sameConversion(resolveConversion(before.get(entry.path)!, description), entry.conversion!)) return true;
+        files.push(entry.path);
+        return false;
+      });
     }
     // One batch for the differing regular files; the commit blob supplies auto-eol's
     // index context. LFS, links, unsupported conversions and modes keep their checks.

@@ -294,7 +294,9 @@ export function staleFilesRecoveryCommand(root: string, base: GitOid, delivery: 
 
 /**
  * WI-04: the worktree holding the branch, compared with the delivery after a
- * landing, on its actual index, files and modes (compareToCommit). Consistent
+ * landing, on its actual index, files and modes (compareToCommit). Only paths whose
+ * blob and conversion the delivery left unchanged may normalize; changed paths
+ * must have the exact checkout bytes. Consistent
  * only when that comparison says so; "branch advanced, files stale" only when
  * HEAD is D on the branch and the index and files are exactly B; anything else,
  * or a comparison that cannot be made, is "cannot determine".
@@ -303,7 +305,7 @@ export async function compareWorktree(ctx: GitContext, root: string, branch: str
   if (!existsSync(root)) return { root, relation: 'cannot-determine', head: null, branch: null, differing: [], command: null, detail: `${root} does not exist` };
   const { head, branch: on } = headOf(ctx, root);
   const onBranch = on === `refs/heads/${branch}`;
-  const vsD = await compareToCommit(ctx, root, commit);
+  const vsD = await compareToCommit(ctx, root, commit, { unchangedFrom: base });
   if (vsD.state === 'match' && onBranch && head === commit) return { root, relation: 'consistent', head, branch: on, differing: [], command: null, detail: 'HEAD, index and files are the delivery commit' };
   if (vsD.state === 'undetermined') return { root, relation: 'cannot-determine', head, branch: on, differing: [], command: null, detail: vsD.reason };
   const differing = vsD.state === 'differs' ? [...new Set([...vsD.index, ...vsD.files])].slice(0, 200) : [];

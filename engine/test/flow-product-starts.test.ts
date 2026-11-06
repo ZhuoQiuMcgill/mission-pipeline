@@ -57,7 +57,7 @@ test('an intervening cancelled attempt does not erase the latest recorded work u
   assert.ok(ports.scheduler.queued().some((t) => t.task === 'con.m1.impl.3'), 'waiting always has an actionable attempt');
 });
 
-test('a conflicting carry retries, then a changed card starts without it and can finish', async () => {
+test('a conflicting carry starts fresh at once and finishes; a changed card still starts without it', async () => {
   const { ports, engine } = await setup();
   await ports.scheduler.run('con.m1.impl.1', { handBack: constructorDone() });
   await engine.reconcile(M);
@@ -69,10 +69,20 @@ test('a conflicting carry retries, then a changed card starts without it and can
     return { path: 'b'.repeat(40), commit: 'b'.repeat(40), products: req.products ?? [] };
   } };
   await engine.reconcile(M);
+  assert.equal(conflicts, 1, 'the carry is tried once before the fresh start is recorded');
+  assert.ok(ports.ledger.notices.some((n) => n.category === 'rework-carry-dropped'));
+  assert.ok(!ports.ledger.notices.some((n) => n.category === 'rework-start-conflict'));
+  assert.ok(ports.scheduler.tasks.has('con.m1.impl.2'));
+  const card = ports.scheduler.card<{ duties: string }>('con.m1.impl.2');
+  assert.match(card.duties, /earlier attempt's change is not in the tree/);
+  assert.match(card.duties, /carry over by hand/i);
+  const dispatch = (await ports.ledger.events<{ origin: string; commit: string }>({ mission: M, line: 'task:impl', event: 'dispatched' })).at(-1)!;
+  assert.equal(dispatch.body.origin, dispatch.body.commit);
+  const head = ports.ledger.head;
   await engine.reconcile(M);
-  assert.ok(conflicts >= 2, 'a carry conflict is retried without a permanent dispatch record');
-  assert.ok(ports.ledger.notices.some((n) => n.category === 'rework-start-conflict'));
-  assert.ok(!ports.scheduler.tasks.has('con.m1.impl.2'));
+  assert.equal(ports.ledger.head, head, 'a further pass writes nothing');
+  await drive(engine, ports.scheduler, happyScript(M));
+  assert.equal(await acceptedProduct(flowCtx(ports, M), 'impl'), 'prod.con.m1.impl.2');
   await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: pmPlan(M).elements.map((e, i) => i === 0 ? { ...e, text: `${e.text}, revised` } : e) }), userWords: ['W-1'], mode: 'fast' });
   const revised = detailedPlan(M);
   const script = happyScript(M, () => ({ ...revised, tasks: revised.tasks.map((t) => t.id === 'impl' ? { ...t, goal: `${t.goal}, revised` } : t) }));

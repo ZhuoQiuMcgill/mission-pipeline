@@ -890,16 +890,23 @@ Cost, before → after (from the part reports): a waiver saves 2 seat dispatches
 
 - #47: a reopen names its loop-exhausted escalation with its reopen key too. A kept negative
   verdict retries a missing escalation; each decision applies to that reopen, including a grant.
+  An existing 4.1.3 old-id escalation is reused when its task, attempt and rework loop match and
+  it was recorded after this reopen's verdict. An earlier one belongs to the dependency's own loop.
 - #48: a conflicting carry starts fresh by default, with its origin and manual carry-over duty
   recorded as in Appendix M; no config key or per-path partial carry.
-- #49: the pre-landing and post-landing clean checks also compare the blob after supported
-  eol/ident clean conversion. LFS, unsupported transforms, modes, links and index checks stay as before.
+- #49: the pre-landing clean check also compares the blob after supported eol/ident clean
+  conversion. After landing, only paths with the same blob and conversion in base and delivery
+  may normalize; changed paths need exact checkout bytes (WI-04). LFS, unsupported transforms,
+  modes, links and index checks stay as before.
 - #50: a review-reopen loop-exhausted escalation offers both deciders `accept-risk`, with its
   outcome on the card. The dependency keeps its accepted product; the waiting integration rebuild
   is accepted with the product actually reviewed and the review's findings quoted as risks, with
   the decider's ruling revoking that review judgment. Every dependency must still be accepted at
   the version reviewed (`accept-risk-waits`, checked each pass); no waiting rebuild means
-  `accept-risk-moot`. A repair's reopen does not offer it. No further integration review runs.
+  `accept-risk-moot`. A repair's reopen does not offer it. No acceptance review round runs.
+  The rebuild attempt adopts the reviewed product in an existing `product` event, retaining
+  its original source dispatch; later environment renewals, re-reviews and kept-product rebinds
+  follow the normal accepted-product paths.
 
 No event or record format changes. 4.1.3 records fold without migration; stuck reopen and carry
 cases retry on the next pass. The program writes no judgment in its own name.

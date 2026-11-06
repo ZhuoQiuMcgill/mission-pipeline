@@ -1243,7 +1243,12 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
   const words = by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
   const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : 'the Secretary'} on ${e.id}: ${x}`);
   await commitCarrying(ctx, `flow:accepted-risk:${ctx.mission}:task:${idPart(integration)}:${line.k}`,
-    [ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks })],
+    [
+      // Adopt the reviewed product at this attempt, preserving its actual source dispatch.
+      // Renewal and kept-product rebinds then read the same body as any accepted attempt.
+      ev(ctx, taskLine(integration), 'product', String(line.k), { ...product, k: line.k } satisfies ProductBody),
+      ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }),
+    ],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);
 }
 
@@ -1335,9 +1340,18 @@ async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, a
   const line = await readLine(ctx, taskId);
   // it moved on (its new attempt is this one, or a re-plan restarted it), or it was given up: nothing to do
   if (line.abandoned || line.k !== attempt || line.one('accepted', String(attempt)) === null) return;
-  const verdict = line.one<{ proceed: boolean }>('loop-verdict', key);
-  // A kept negative verdict can lack its escalation after a 4.1.3 id collision or a crash.
-  if (verdict?.proceed === false && await escalation(ctx, safeId(`exh.${taskLineage(ctx.mission, taskId)}.${attempt}.${idPart(key)}`)) !== null) return;
+  const verdict = line.all<{ proceed: boolean }>('loop-verdict').find((v) => v.key === key);
+  if (verdict?.body.proceed === false) {
+    const prefix = `exh.${taskLineage(ctx.mission, taskId)}.${attempt}`;
+    if (await escalation(ctx, safeId(`${prefix}.${idPart(key)}`)) !== null) return;
+    // 4.1.3 kept no reopen source in the facts. Its matching old-id escalation belongs
+    // to this reopen only when it followed this verdict; a prior one is the #47 collision.
+    const legacy = (await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).find((e) => e.key === safeId(prefix));
+    const facts = legacy?.body.facts as { task?: string; attempt?: number; loop?: string } | undefined;
+    if (legacy !== undefined && legacy.revision > verdict.revision && legacy.body.source === 'loop-exhausted' &&
+        legacy.body.subject === `task:${taskId}` && facts?.task === taskId && facts.attempt === attempt && facts.loop === 'rework') return;
+  }
+  // No escalation for this reopen survived: retry after a 4.1.3 collision or an interrupted write.
   await rework(ctx, t, attempt, [issue], [instruction], key, { reason: 'reopen', reopen: source });
 }
 

@@ -3,7 +3,9 @@ import test from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { acceptedProduct } from '../src/flow/execution.ts';
+import { acceptedProduct, taskLineage } from '../src/flow/execution.ts';
+import { RENEW_LINE, REVIEW_NEEDED, type ReviewNeededBody } from '../src/flow/plandoc.ts';
+import { recordItem } from '../src/flow/requirements.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import { answerEscalation, type EscalationBody } from '../src/flow/secretary.ts';
 import { detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
@@ -67,6 +69,92 @@ async function unchanged(w: World, engine: FlowEngine) {
   assert.deepEqual(reports.flatMap((r) => r.errors), []);
   assert.equal(w.ledger.head, head, 'a further pass writes nothing');
 }
+
+test('S1 a 4.1.3 old-id reopen escalation is reused and its grant starts the reopened attempt', async () => {
+  const w = memoryPorts();
+  say(w, SEED_TEXT);
+  await seedMission(w, M);
+  await submitPmBatch(w, { mission: M, plan: pmPlan(M), userWords: ['W-1'], mode: 'fast' });
+  const engine = new FlowEngine(w);
+  await drive(engine, w.scheduler, script({ reviewer: (t) => {
+    const c = t.card as unknown as ReviewerCard;
+    if (c.target.includes('integ')) return null;
+    return { handBack: reviewer(c, c.target.includes('impl') && !c.target.endsWith('impl.3') ? 'rework' : 'pass', { findings: [`finding at ${c.target}`] }) };
+  }, secretary: () => null }));
+  assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.3');
+  assert.equal((await escalations(w)).length, 0, 'the dependency passed its last allowed attempt');
+  // Stop at the old release's write boundary, then append its actual old-id shape.
+  w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
+  await assert.rejects(drive(engine, w.scheduler, script({ reviewer: reopenReview, secretary: () => null })), /injected failure/);
+  const lineage = taskLineage(M, 'impl');
+  const id = `exh.${lineage}.3`;
+  await w.ledger.append('test:413-existing-reopen-escalation', { events: [{ mission: M, line: 'secretary', event: 'escalation', key: id, body: {
+    id, task: `sec.${id}`, source: 'loop-exhausted', lineage, subject: 'task:impl',
+    summary: 'Task impl: the reworks are used up (2/2).', reasons: ['dependency is slow'],
+    options: ['grant', 'replan', 'abandon', 'ask-user'], items: [],
+    facts: { task: 'impl', attempt: 3, loop: 'rework', issues: ['dependency is slow'], attempts: 2, allowed: 2, reason: 'cap' },
+    handover: { from: 'rev.m1.impl.3', objects: ['prod.con.m1.impl.3'] },
+  } }] });
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  assert.deepEqual((await escalations(w)).map((e) => e.id), [id]);
+  assert.deepEqual(w.scheduler.queued('secretary').map((t) => t.task), [`sec.${id}`]);
+  await unchanged(w, engine);
+  const words = say(w, 'Grant the reopened dependency another attempt.');
+  await answerEscalation(w, { mission: M, escalation: id, option: 'grant', grantExtra: 1, words: `Grant another attempt. (${words})` });
+  await drive(engine, w.scheduler, script());
+  assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.4');
+  assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'));
+  assert.equal((await escalations(w)).length, 1);
+  await unchanged(w, engine);
+});
+
+async function acceptedReopenRisk() {
+  const x = await reviewedReopen();
+  const esc = (await escalations(x.w)).at(-1)!;
+  const words = say(x.w, 'Accept the reviewed integration with its remaining findings as risks.');
+  await answerEscalation(x.w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept it. (${words})` });
+  await drive(x.engine, x.w.scheduler, script());
+  const product = await acceptedProduct(flowCtx(x.w, M), 'integ');
+  assert.ok(product);
+  return { ...x, product };
+}
+
+test('S2 a review-reopen risk acceptance can renew and queue a Reviewer for the accepted product', async () => {
+  const { w, engine, product } = await acceptedReopenRisk();
+  const accepted = (await events(w, 'task:integ', 'accepted'))[0]!.body;
+  const environment = w.ctx.environment().identity;
+  const body: ReviewNeededBody = { target: product, judgment: accepted.judgment, review: 'reviewer', environment, reason: 'environment renewal requires a seat judgment', rerun: null, passed: null };
+  await w.ledger.append('test:renew-risk-acceptance', { events: [{ mission: M, line: RENEW_LINE, event: REVIEW_NEEDED, key: `${accepted.judgment}@${environment}`, body }] });
+  await engine.reconcile();
+  const review = w.scheduler.queued('reviewer').find((t) => t.task === 'rev.m1.integ.2.e1');
+  assert.ok(review, 'renewal queues the normal re-review of the adopted product');
+  assert.equal((review.card as unknown as ReviewerCard).target, product);
+  await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  assert.ok((await events(w, 'task:integ', 'reaccepted')).some((e) => e.body.k === 2 && e.body.product === product));
+  await unchanged(w, engine);
+});
+
+test('S2 a re-plan keeping a review-reopen risk acceptance rebinds its accepted product', async () => {
+  const { w, product } = await acceptedReopenRisk();
+  const engine = new FlowEngine(w);
+  const words = say(w, 'Keep the parser read-only once it has parsed a file.');
+  await recordItem(w, { mission: M, item: 'd1', type: 'decision', text: 'Keep the parser read-only once it has parsed a file', source: { kind: 'words', words, quote: 'Keep the parser read-only' } });
+  const next = pmPlan(M, { elements: pmPlan(M).elements.map((e, i) => i === 0 ? { ...e, text: `${e.text}, read-only after parsing`, items: ['g1', 'd1'] } : e) });
+  await submitPmBatch(w, { mission: M, plan: next, userWords: ['W-1', words], mode: 'stable' });
+  await drive(engine, w.scheduler, script({ reviewer: (t) => t.task.includes('.integ.2.b') ? null : { handBack: reviewer(t.card as unknown as ReviewerCard, 'pass') } }));
+  const rebind = (await events(w, 'task:integ', 'rebind')).at(-1);
+  assert.ok(rebind, 'the kept integration enters its normal rebind path');
+  assert.equal(rebind.body.from, product);
+  assert.equal(rebind.body.k, 2);
+  const review = w.scheduler.queued('reviewer').find((t) => t.task === 'rev.m1.integ.2.b1');
+  assert.ok(review);
+  assert.equal((review.card as unknown as ReviewerCard).target, rebind.body.product);
+  await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  assert.equal(await acceptedProduct(flowCtx(w, M), 'integ'), rebind.body.product);
+  await unchanged(w, engine);
+});
 
 test('#47 review reopen gets a distinct escalation and its own Secretary step', async () => {
   const { w, engine } = await reviewedReopen();
@@ -132,6 +220,8 @@ for (const by of ['user', 'secretary'] as const) test(`#50 review-reopen accept-
   const review = (await events(w, 'task:integ', 'review'))[0]!.body;
   assert.equal(accepted.k, 2);
   assert.equal(accepted.product, reviewed.object);
+  assert.deepEqual((await events(w, 'task:integ', 'product')).at(-1)!.body, { ...reviewed, k: 2 }, 'adoption retains the actual product and source dispatch');
+  assert.ok(!(await events(w, 'task:integ', 'dispatched')).some((e) => e.body.k === 2), 'adoption does not invent a Constructor run');
   assert.equal(accepted.decision.escalation, esc.id);
   assert.equal(accepted.decision.option, 'accept-risk');
   assert.equal(accepted.decision.by, by);
@@ -240,5 +330,25 @@ test('#49 landing helper fast-forwards an autocrlf=true checkout with LF worktre
     const result = await land(f.ctx, { mission: GM, delivery: 'd414', words: words(f.m) });
     assert.equal(result.kind, 'landed', JSON.stringify(result));
     if (result.kind === 'landed') assert.equal(result.worktree?.relation, 'consistent');
+  } finally { f.cleanup(); }
+});
+
+
+test('T1 post-landing normalization accepts untouched LF paths but requires exact bytes for a changed blob', async () => {
+  const f = fixture({ files: { 'eol.txt': 'untouched\n' } });
+  try {
+    f.git('config', 'core.autocrlf', 'true');
+    const base = f.git('rev-parse', 'HEAD') as any;
+    const delivery = commitOn(f.dir, base, { 'new.txt': 'changed by delivery\n' }) as any;
+    f.git('reset', '--hard', delivery);
+    write(f.dir, 'eol.txt', 'untouched\n');
+    assert.equal((await compareWorktree(f.ctx, f.dir, 'main', base, delivery)).relation, 'consistent');
+    write(f.dir, 'new.txt', 'changed by delivery\n');
+    assert.equal((await compareToCommit(f.ctx, f.dir, delivery)).state, 'match', 'pre-landing normalization still accepts equivalent repository bytes');
+    const checked = await compareWorktree(f.ctx, f.dir, 'main', base, delivery);
+    assert.equal(checked.relation, 'cannot-determine');
+    assert.deepEqual(checked.differing, ['new.txt']);
+    write(f.dir, 'new.txt', 'changed by delivery\r\n');
+    assert.equal((await compareWorktree(f.ctx, f.dir, 'main', base, delivery)).relation, 'consistent');
   } finally { f.cleanup(); }
 });
