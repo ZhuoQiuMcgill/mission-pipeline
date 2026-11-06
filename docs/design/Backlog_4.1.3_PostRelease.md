@@ -81,3 +81,12 @@ the CHANGELOG. The open items of the 4.1.2 backlog stay open unless 4.1.3 says o
 - The executor's report is served whole, up to 256 KiB, not only the parts the card's quantities name.
 - The version commands run under the platform's shell, and `experimentShell` is not part of the
   environment identity.
+
+
+## Field items left after 4.2.0 (#47–#50)
+
+- #48: per-path partial carry, keeping the non-conflicting part of an earlier change, needs
+  per-path resolution in the delivery overlay. 4.2.0 starts the whole attempt fresh on a conflict.
+- #49: Windows-only test failures outside the small fixture fixes: EBUSY on lock files,
+  `A.txt`/`a.txt` case folding, and the fixture's failing `update-ref`. Investigate on Windows;
+  4.2.0 only pins the LF-literal fixtures and makes the delivery scratch path check portable.

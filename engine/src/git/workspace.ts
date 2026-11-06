@@ -39,13 +39,13 @@
 //   process that made it holds its owner lock for its whole life, so the sweep
 //   removes what a killed process left, never what a running one is using.
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import type { GitOid } from '../common/ids.ts';
 import { inWriteScope } from '../delivery/writeScope.ts';
 import { LedgerError, PATH_ID, type Memory, type MemoryPaths } from '../memory/index.ts';
 import { holdOwner, moveToTrash, ownedTempDir, releaseOwner, removeOwned } from '../memory/scratch.ts';
-import { decodePath, discoverRepo, gitOid, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
+import { decodePath, discoverRepo, gitOid, gitObjectId, readObjects, lsTree, treeOfCommit, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
 import { GitError, GitExitError, type PlainGit } from './plainGit.ts';
 import { attachCheckoutRepository, checkoutSetupGit } from './checkoutRepository.ts';
 import { linkedGitDirs } from './worktreeRecord.ts';
@@ -59,6 +59,10 @@ import {
   sha256File,
   sha256Hex,
   writeCommit,
+  toRepository,
+  resolveConversion,
+  sameConversion,
+  type SnapshotEntry,
   type RepresentationRejection,
   type SnapshotManifest,
   type TransformDescription,
@@ -461,12 +465,14 @@ export type WorktreeComparison =
  * Judged on what is there, never on `git status` or the index's flags: every
  * index entry against the commit's tree (path, mode, object), and every file
  * of the commit against the bytes, mode and kind a clean checkout of it would
- * have (representation.ts, under the worktree's transform description).
+ * have, or the same blob after the engine's supported eol/ident clean conversion
+ * (representation.ts, under the worktree's transform description). `unchangedFrom`
+ * restricts normalization to paths whose blob and conversion that commit shares.
  * Untracked files do not count. When the comparison cannot be made (a
  * transform the program does not implement, an LFS object that is not local, a
  * missing object), the answer is "undetermined", never "match".
  */
-export async function compareToCommit(ctx: GitContext, root: string, commit: string): Promise<WorktreeComparison> {
+export async function compareToCommit(ctx: GitContext, root: string, commit: string, o: { readonly unchangedFrom?: GitOid } = {}): Promise<WorktreeComparison> {
   if (!existsSync(root)) return { state: 'undetermined', reason: `${root} does not exist` };
   const scratch = ownedTempDir(ctx.memory.paths, 'compare-');
   let attributes: AttributeEvaluator | null = null;
@@ -481,6 +487,7 @@ export async function compareToCommit(ctx: GitContext, root: string, commit: str
     }
     const index = rawChanges(git.okSync(['diff-index', '--cached', '-z', '--raw', '--no-renames', commit, '--'], { cwd: root, config: NO_CACHES }).stdout).map((c) => c.path);
     const files: string[] = [];
+    let normalize: Array<{ entry: SnapshotEntry; content: Buffer }> = [];
     for (const e of manifest.entries) {
       const abs = join(root, ...e.path.split('/'));
       if (e.mode === '160000') {
@@ -501,13 +508,39 @@ export async function compareToCommit(ctx: GitContext, root: string, commit: str
         else if (!st.isFile()) same = false;
         else {
           same = st.size === e.size && sha256File(abs).sha256 === e.sha256;
-          if (same && e.mode !== '120000' && description.fileMode) same = ((st.mode & 0o100) !== 0) === (e.mode === '100755');
+          const modeMatches = e.mode === '120000' || !description.fileMode || ((st.mode & 0o100) !== 0) === (e.mode === '100755');
+          if (!same && modeMatches && e.conversion !== null && !e.conversion.lfs && e.conversion.unsupported === null) {
+            normalize.push({ entry: e, content: readFileSync(abs) });
+            continue;
+          }
+          same = same && modeMatches;
         }
         if (!same) files.push(e.path);
       } catch (err) {
         if (isAbsent(err)) files.push(e.path);
         else return { state: 'undetermined', reason: `${e.path} cannot be read: ${(err as Error).message}` };
       }
+    }
+    if (o.unchangedFrom !== undefined && normalize.length > 0) {
+      // After landing, normalization is safe only for a path the delivery left alone:
+      // its repository blob and its effective conversion must both be unchanged.
+      const base = new Map((await lsTree(git, repo, o.unchangedFrom, { recursive: true })).map((e) => [e.path, e]));
+      const before = await attributes.atTree(await treeOfCommit(git, repo, o.unchangedFrom), normalize.map(({ entry }) => entry.path));
+      normalize = normalize.filter(({ entry }) => {
+        const old = base.get(entry.path);
+        if (old !== undefined && (old.mode === '100644' || old.mode === '100755') && old.oid === entry.oid &&
+            sameConversion(resolveConversion(before.get(entry.path)!, description), entry.conversion!)) return true;
+        files.push(entry.path);
+        return false;
+      });
+    }
+    // One batch for the differing regular files; the commit blob supplies auto-eol's
+    // index context. LFS, links, unsupported conversions and modes keep their checks.
+    const blobs = new Map<GitOid, Buffer>();
+    await readObjects(git, repo, normalize.map(({ entry }) => entry.oid), (oid, _type, content) => { blobs.set(oid, content); }, Infinity);
+    for (const { entry, content } of normalize) {
+      const clean = toRepository(content, entry.conversion!, blobs.get(entry.oid)!);
+      if (gitObjectId(repo.objectFormat, 'blob', clean.blob) !== entry.oid) files.push(entry.path);
     }
     return index.length === 0 && files.length === 0 ? { state: 'match' } : { state: 'differs', index: [...new Set(index)].sort(compareBytes), files: files.sort(compareBytes) };
   } catch (e) {

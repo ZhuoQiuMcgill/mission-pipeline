@@ -99,7 +99,8 @@ test('every WI the program can name is a 4.1 page: the flows and the memory\'s r
 
 test('the Claude Code plugin is an optional adapter of 4.1', () => {
   const manifest = JSON.parse(readFileSync(join(PLUGIN, '.claude-plugin', 'plugin.json'), 'utf8')) as { name: string; version: string; description: string };
-  assert.deepEqual([manifest.name, manifest.version], ['mission-pipeline', '4.1.3']);
+  const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+  assert.deepEqual([manifest.name, manifest.version], ['mission-pipeline', version]);
   assert.match(manifest.description, /Optional/i);
   const hooks = readFileSync(join(PLUGIN, 'hooks', 'hooks.json'), 'utf8');
   assert.match(hooks, /claude-code\.mjs/);

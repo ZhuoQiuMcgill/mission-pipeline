@@ -280,7 +280,7 @@ describe('INT item 3: a delivery materializes nothing (P2 materialize none, owne
     const tmp = ctx.memory.paths.tmp;
     const { value: r, writes } = await writesUnder(join(q.dir, '.mission-pipeline'), () => pmDeliver(ctx, { mission: M, delivery: 'v1', selected: [obj('prod.con.m1.impl.1')], words }));
     assert.equal(r.kind, 'delivered', JSON.stringify(r).slice(0, 500));
-    assert.ok(writes.some((w) => w.includes('/tmp/deliver-')), `the spy sees the delivery's owned scratch: ${writes.join('\n')}`);
+    assert.ok(writes.some((w) => w.replaceAll('\\', '/').includes('/tmp/deliver-')), `the spy sees the delivery's owned scratch: ${writes.join('\n')}`);
     const tree = writes.filter((w) => w.includes('/tmp/') && (/\/candidate-/.test(w) || /\/src\/(add|check)\.js$/.test(w)));
     assert.deepEqual(tree, [], 'no candidate tree is written');
     assert.deepEqual(files(tmp).filter((x) => x.startsWith('deliver-')), [], 'its scratch is removed');

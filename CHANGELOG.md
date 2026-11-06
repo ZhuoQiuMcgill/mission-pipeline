@@ -6,6 +6,30 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.2.0] - 2026-11-06
+
+### Fixed
+- #47: a review's or repair's reopen of a decided, used-up loop gets its own escalation;
+  a kept verdict whose escalation was lost is retried, and a grant starts the reopened attempt.
+  An old 4.1.3 escalation stands for every reopen of that attempt whose negative verdict
+  preceded it; a grant carries every covered finding and request. Later verdicts get distinct escalations.
+  Separate grants share one next attempt, carrying all granted requests without conflicting writes;
+  dropping one reopen preserves other grants.
+- #48: a conflicting rework carry starts fresh on the current dependencies, with the earlier
+  version, commit and paths in notice `rework-carry-dropped` and a manual carry-over duty on the card.
+- #49: before landing, supported eol/ident clean conversion accepts equivalent LF or CRLF
+  bytes. After landing, only paths whose blob and conversion the delivery left unchanged may
+  normalize; changed paths need exact checkout bytes (WI-04).
+- #50: a review-reopen loop-exhausted escalation offers both deciders `accept-risk`: keep the
+  dependency's accepted product and accept the reviewed integration product with its findings as risks.
+  The accepted attempt adopts that product, preserving later renewal and kept-product rebinds.
+  Completed reviews cover older renewal and basis-change requests across adoption; later requests still run.
+
+### Changed
+- #48's fresh start is the default, with no config key. The earlier change stays readable at its commit.
+- No record or event format changes: 4.1.3 records fold without migration. The stuck reopen and
+  carry-conflict cases come unstuck on the next pass where the decision or fresh start allows it.
+
 ## [4.1.3] - unreleased
 
 4.1.3 raises the user's say and makes the process less rigid. Between 2026-10-25 and 2026-11-02 a
