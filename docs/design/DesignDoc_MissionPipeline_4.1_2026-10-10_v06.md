@@ -890,8 +890,10 @@ Cost, before → after (from the part reports): a waiver saves 2 seat dispatches
 
 - #47: a reopen names its loop-exhausted escalation with its reopen key too. A kept negative
   verdict retries a missing escalation; each decision applies to that reopen, including a grant.
-  An existing 4.1.3 old-id escalation is reused when its task, attempt and rework loop match and
-  it was recorded after this reopen's verdict. An earlier one belongs to the dependency's own loop.
+  An old 4.1.3 escalation covers every reopen of that task, lineage, attempt and rework loop
+  whose negative verdict preceded it. A grant carries every covered finding and request,
+  including a repair whose escalation write was interrupted. A later verdict, or a collision
+  with the dependency's own earlier loop escalation, gets a suffixed escalation covering only itself.
 - #48: a conflicting carry starts fresh by default, with its origin and manual carry-over duty
   recorded as in Appendix M; no config key or per-path partial carry.
 - #49: the pre-landing clean check also compares the blob after supported eol/ident clean

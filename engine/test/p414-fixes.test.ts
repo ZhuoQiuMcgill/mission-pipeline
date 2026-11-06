@@ -70,7 +70,7 @@ async function unchanged(w: World, engine: FlowEngine) {
   assert.equal(w.ledger.head, head, 'a further pass writes nothing');
 }
 
-test('S1 a 4.1.3 old-id reopen escalation is reused and its grant starts the reopened attempt', async () => {
+async function lastAllowedPass() {
   const w = memoryPorts();
   say(w, SEED_TEXT);
   await seedMission(w, M);
@@ -83,6 +83,11 @@ test('S1 a 4.1.3 old-id reopen escalation is reused and its grant starts the reo
   }, secretary: () => null }));
   assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.3');
   assert.equal((await escalations(w)).length, 0, 'the dependency passed its last allowed attempt');
+  return { w, engine };
+}
+
+test('S1 a 4.1.3 old-id reopen escalation is reused and its grant starts the reopened attempt', async () => {
+  const { w, engine } = await lastAllowedPass();
   // Stop at the old release's write boundary, then append its actual old-id shape.
   w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
   await assert.rejects(drive(engine, w.scheduler, script({ reviewer: reopenReview, secretary: () => null })), /injected failure/);
@@ -105,6 +110,79 @@ test('S1 a 4.1.3 old-id reopen escalation is reused and its grant starts the reo
   assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.4');
   assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'));
   assert.equal((await escalations(w)).length, 1);
+  await unchanged(w, engine);
+});
+
+/** 4.1.3: a repair loses its escalation write; a later review records the shared old id. */
+async function sharedLegacyReopen() {
+  const { w, engine } = await lastAllowedPass();
+  const words = say(w, 'Keep the header requested by the repair.');
+  await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'Keep the header requested by the repair.' });
+  w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
+  await assert.rejects(drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
+    'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'repair finding: keep the header' }], add: [], note: 'impl owns the header' } }),
+  })), /injected failure/);
+  assert.ok((await events(w, 'task:impl', 'loop-verdict')).some((e) => e.key === 'reopen:repair:R-1' && !e.body.proceed));
+  // The old engine returned on that kept verdict, letting I's review reopen D next.
+  const review = w.scheduler.queued('reviewer').find((t) => t.task === 'rev.m1.integ.1')!;
+  assert.deepEqual(await w.scheduler.run(review.task, reopenReview(review, w.scheduler)!), []);
+  const lineage = taskLineage(M, 'impl');
+  const source = { kind: 'review', integration: 'integ', review: review.task, attempt: 1 };
+  await w.ledger.append('test:413-review-after-interrupted-repair', { events: [
+    { mission: M, line: 'task:integ', event: 'review', key: review.task, body: { task: review.task, k: 1, verdict: 'rework', judgment: 'j.rev.m1.integ.1', issues: ['quoted integration finding'], reopen: [{ task: 'impl', issue: 'dependency is slow' }] } },
+    { mission: M, line: 'task:integ', event: 'reopen', key: '1', body: { k: 1, review: review.task, tasks: [{ task: 'impl', attempt: 3, product: 'prod.con.m1.impl.3', issue: 'dependency is slow' }] } },
+    { mission: M, line: 'task:integ', event: 'rework', key: '2', body: { k: 2, reason: 'rebuild', issues: [], instructions: ['Wait for the reopened dependency.'], reopen: source } },
+    { mission: M, line: 'task:impl', event: 'loop-return', key: 'reopen:integ:1', body: { decision: 'exhausted', lineage, loop: 'rework', signature: 'legacy-review-reopen' } },
+    { mission: M, line: 'task:impl', event: 'loop-verdict', key: 'reopen:integ:1', body: { proceed: false, attempts: 2, allowed: 2, reason: 'cap' } },
+  ] });
+  const id = `exh.${lineage}.3`;
+  await w.ledger.append('test:413-shared-reopen-escalation', { events: [{ mission: M, line: 'secretary', event: 'escalation', key: id, body: {
+    id, task: `sec.${id}`, source: 'loop-exhausted', lineage, subject: 'task:impl',
+    summary: 'Task impl: the reworks are used up (2/2).', reasons: ['dependency is slow'],
+    options: ['grant', 'replan', 'abandon', 'ask-user'], items: [],
+    facts: { task: 'impl', attempt: 3, loop: 'rework', issues: ['dependency is slow'], attempts: 2, allowed: 2, reason: 'cap' },
+    handover: { from: 'rev.m1.impl.3', objects: ['prod.con.m1.impl.3'] },
+  } }] });
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  assert.deepEqual((await escalations(w)).map((e) => e.id), [id]);
+  return { w, engine, id, repairWords: words };
+}
+
+test('A a shared 4.1.3 escalation grants both the interrupted repair and the later review request', async () => {
+  const { w, engine, id, repairWords } = await sharedLegacyReopen();
+  const words = say(w, 'Grant an attempt for both requests.');
+  await answerEscalation(w, { mission: M, escalation: id, option: 'grant', grantExtra: 1, words: `Grant both requests. (${words})` });
+  const holdConstructor: Script = (t, scheduler) => t.task === 'con.m1.impl.4' ? null : happyScript(M, plan)(t, scheduler);
+  await drive(engine, w.scheduler, script({ constructor: holdConstructor }));
+  const card = w.scheduler.card<{ duties: string }>('con.m1.impl.4');
+  assert.match(card.duties, /repair finding: keep the header/);
+  assert.match(card.duties, /dependency is slow/);
+  assert.match(card.duties, /Reopened by repair R-1/);
+  assert.match(card.duties, /Reopened by the review rev.m1.integ.1/);
+  assert.ok(card.duties.includes(repairWords), 'the repair request retains its user words');
+  await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.4');
+  assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'));
+  await unchanged(w, engine);
+});
+
+test('A a negative verdict after the old escalation gets its own suffixed escalation', async () => {
+  const { w, engine, id } = await sharedLegacyReopen();
+  const words = say(w, 'Also keep the footer.');
+  await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'Also keep the footer.' });
+  w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
+  await assert.rejects(drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
+    'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'later repair finding: keep the footer' }], add: [], note: 'impl owns the footer' } }),
+  })), /injected failure/);
+  assert.ok((await events(w, 'task:impl', 'loop-verdict')).some((e) => e.key === 'reopen:repair:R-2' && !e.body.proceed));
+  assert.equal((await escalations(w)).length, 1, 'the later verdict survived without its escalation');
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  const es = await escalations(w);
+  assert.equal(es.length, 2);
+  assert.equal(es[0]!.id, id);
+  assert.ok(es[1]!.id.startsWith(`${id}.`));
+  assert.ok(es[1]!.reasons.includes('later repair finding: keep the footer'));
   await unchanged(w, engine);
 });
 

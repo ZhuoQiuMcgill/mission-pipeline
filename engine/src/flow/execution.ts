@@ -66,7 +66,7 @@ import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, p
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
-import { cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalation, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
+import { cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 
 interface SpecBody {
@@ -1332,6 +1332,20 @@ async function reopenFromReview(ctx: FlowCtx, plan: DetailedPlanDoc, t: Detailed
   await carryReopens(ctx, plan);
 }
 
+/** Reopens represented by this escalation, from the kept verdicts of this task attempt. */
+function coveredReopens(ctx: FlowCtx, task: string, line: Line, e: { readonly body: EscalationBody; readonly revision: number }): string[] {
+  const esc = e.body;
+  const facts = esc.facts as { task?: string; attempt?: number; loop?: string } | undefined;
+  if (esc.source !== 'loop-exhausted' || esc.subject !== `task:${task}` || facts?.task !== task ||
+      facts.loop !== 'rework' || facts.attempt !== line.k || esc.lineage !== taskLineage(ctx.mission, task)) return [];
+  const prefix = `exh.${esc.lineage}.${facts.attempt}`;
+  const start = line.all<ReworkBody>('rework').find((r) => r.body.k === facts.attempt)?.revision ?? 0;
+  return line.all<{ proceed: boolean }>('loop-verdict')
+    .filter((v) => !v.body.proceed && v.key.startsWith('reopen:') && v.revision > start &&
+      (esc.id === safeId(prefix) ? v.revision < e.revision : esc.id === safeId(`${prefix}.${idPart(v.key)}`)))
+    .map((v) => v.key);
+}
+
 /** One reopened task's new attempt (D-6, D-10), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. */
 async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, attempt: number, issue: string, instruction: string, key: string, source: ReopenSource): Promise<void> {
   const t = plan.tasks.find((x) => x.id === taskId);
@@ -1340,18 +1354,11 @@ async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, a
   const line = await readLine(ctx, taskId);
   // it moved on (its new attempt is this one, or a re-plan restarted it), or it was given up: nothing to do
   if (line.abandoned || line.k !== attempt || line.one('accepted', String(attempt)) === null) return;
-  const verdict = line.all<{ proceed: boolean }>('loop-verdict').find((v) => v.key === key);
-  if (verdict?.body.proceed === false) {
-    const prefix = `exh.${taskLineage(ctx.mission, taskId)}.${attempt}`;
-    if (await escalation(ctx, safeId(`${prefix}.${idPart(key)}`)) !== null) return;
-    // 4.1.3 kept no reopen source in the facts. Its matching old-id escalation belongs
-    // to this reopen only when it followed this verdict; a prior one is the #47 collision.
-    const legacy = (await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).find((e) => e.key === safeId(prefix));
-    const facts = legacy?.body.facts as { task?: string; attempt?: number; loop?: string } | undefined;
-    if (legacy !== undefined && legacy.revision > verdict.revision && legacy.body.source === 'loop-exhausted' &&
-        legacy.body.subject === `task:${taskId}` && facts?.task === taskId && facts.attempt === attempt && facts.loop === 'rework') return;
+  if (line.one<{ proceed: boolean }>('loop-verdict', key)?.proceed === false) {
+    const escalations = await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation');
+    if (escalations.some((e) => coveredReopens(ctx, taskId, line, e).includes(key))) return;
   }
-  // No escalation for this reopen survived: retry after a 4.1.3 collision or an interrupted write.
+  // No escalation covers this request: retry after a collision or an interrupted write.
   await rework(ctx, t, attempt, [issue], [instruction], key, { reason: 'reopen', reopen: source });
 }
 
@@ -1362,13 +1369,19 @@ async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, a
  * cascade): the integration's full run checks the combination.
  */
 async function carryReopens(ctx: FlowCtx, plan: DetailedPlanDoc): Promise<void> {
+  for (const r of await reopenRequests(ctx)) await reopenTask(ctx, plan, r.task, r.attempt, r.issue, r.instruction, r.key, r.source);
+}
+
+/** The recorded findings and requests, shared by reopening and a grant covering several reopens. */
+async function reopenRequests(ctx: FlowCtx): Promise<Array<{ task: string; attempt: number; issue: string; instruction: string; key: string; source: ReopenSource }>> {
+  const requests: Array<{ task: string; attempt: number; issue: string; instruction: string; key: string; source: ReopenSource }> = [];
   for (const e of await ctx.ports.ledger.events<ReopenBody>({ mission: ctx.mission, event: 'reopen' })) {
     if (!e.line.startsWith('task:')) continue;
     const integration = e.line.slice('task:'.length);
     for (const x of e.body.tasks) {
       const issue = `${x.issue}${x.evidence !== undefined ? ` (evidence: ${x.evidence})` : ''}`;
       const instruction = `Reopened by the review ${e.body.review} of integration task ${integration} (attempt ${e.body.k}): fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted); the integration task builds again on your new work.`;
-      await reopenTask(ctx, plan, x.task, x.attempt, issue, instruction, `reopen:${integration}:${e.body.k}`, { kind: 'review', integration, review: e.body.review, attempt: e.body.k });
+      requests.push({ task: x.task, attempt: x.attempt, issue, instruction, key: `reopen:${integration}:${e.body.k}`, source: { kind: 'review', integration, review: e.body.review, attempt: e.body.k } });
     }
   }
   const repairs = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((r) => [r.key, r.body]));
@@ -1376,9 +1389,10 @@ async function carryReopens(ctx: FlowCtx, plan: DetailedPlanDoc): Promise<void> 
     const r = repairs.get(e.body.repair);
     for (const x of e.body.reopen) {
       const instruction = `Reopened by repair ${e.body.repair}${r !== undefined ? ` (${r.kind}; the user's words ${r.words}: "${r.text}")` : ''}: fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted).`;
-      await reopenTask(ctx, plan, x.task, x.attempt, x.issue, instruction, `reopen:repair:${e.body.repair}`, { kind: 'repair', repair: e.body.repair });
+      requests.push({ task: x.task, attempt: x.attempt, issue: x.issue, instruction, key: `reopen:repair:${e.body.repair}`, source: { kind: 'repair', repair: e.body.repair } });
     }
   }
+  return requests;
 }
 
 /** The repairs a task's work answers (D-10): the repair that added the task, and the one that reopened this attempt. */
@@ -1895,7 +1909,12 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
         return true;
       }
       await ctx.ports.ledger.loopAttempt({ op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage, loop: 'rework', signature: `granted:${e.id}` });
-      await commitCarrying(ctx, `flow:rework:${ctx.mission}:task:${idPart(t.id)}:${k + 1}`, [ev(ctx, lineName, 'rework', String(k + 1), { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...await deferredInstructions(ctx, line, k)] } satisfies ReworkBody)], [await carryOut(ctx, e.id, { option: 'grant' })]);
+      const raised = (await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).find((x) => x.key === e.id);
+      const keys = raised === undefined ? [] : coveredReopens(ctx, t.id, line, raised);
+      const requests = keys.length === 0 ? [] : (await reopenRequests(ctx)).filter((r) => r.task === t.id && r.attempt === k && keys.includes(r.key));
+      const issues = [...new Set([...(facts.issues ?? []), ...requests.map((r) => r.issue)])];
+      const instructions = [...new Set([...(d.instructions !== '' ? [d.instructions] : []), ...requests.map((r) => r.instruction), ...await deferredInstructions(ctx, line, k)])];
+      await commitCarrying(ctx, `flow:rework:${ctx.mission}:task:${idPart(t.id)}:${k + 1}`, [ev(ctx, lineName, 'rework', String(k + 1), { k: k + 1, reason: 'secretary', issues, instructions } satisfies ReworkBody)], [await carryOut(ctx, e.id, { option: 'grant' })]);
       return false;
     }
     case 'answer':

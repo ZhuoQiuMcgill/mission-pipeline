@@ -11,7 +11,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ### Fixed
 - #47: a review's or repair's reopen of a decided, used-up loop gets its own escalation;
   a kept verdict whose escalation was lost is retried, and a grant starts the reopened attempt.
-  Existing 4.1.3 reopen escalations keep their identity and are not duplicated.
+  An old 4.1.3 escalation stands for every reopen of that attempt whose negative verdict
+  preceded it; a grant carries every covered finding and request. Later verdicts get distinct escalations.
 - #48: a conflicting rework carry starts fresh on the current dependencies, with the earlier
   version, commit and paths in notice `rework-carry-dropped` and a manual carry-over duty on the card.
 - #49: before landing, supported eol/ident clean conversion accepts equivalent LF or CRLF
