@@ -11,7 +11,7 @@ import { productAttempt, taskCardHash, taskLineage } from '../../flow/execution.
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
-import type { EscalationBody } from '../../flow/secretary.ts';
+import { secretaryOptions, type EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
 import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints } from './dynamic.ts';
@@ -164,6 +164,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       const round = secretaryRoundInputs(e, events);
       if (round.esc.task !== spec.task) throw new ProcessError('NOT_READY', `Secretary step ${spec.task} was superseded; run mp pm next.`);
       Object.assign(card, secretaryInputs(mission, round.esc, items, constraints, events, task, !loopState(db, card.request.lineage, 'env-retry').secretaryGrantUsed, (text) => data.put(text)));
+      card.options = secretaryOptions(round.esc);
       break;
     }
     case 'calibrator-1':

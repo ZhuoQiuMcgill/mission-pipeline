@@ -78,13 +78,26 @@ const OPTION_TEXT: Readonly<Record<DecisionOption, { label: string; outcome: str
   'accept-risk': { label: 'Accept the remaining risk', outcome: 'the unresolved items go to the risk list; the work goes on' },
   'send-back': { label: 'Send back with instructions', outcome: 'the Architect revises the plan per your instructions (counted with the plan returns)' },
   replan: { label: 'Re-plan', outcome: 'the Architect decomposes again with your instructions (split the task, change the approach)' },
-  grant: { label: 'Grant 1 or 2 more attempts (your one grant on this lineage)', outcome: 'the exhausted loop runs again; after that only the user can grant more' },
+  grant: { label: 'Grant 1 or 2 more attempts (your one grant on this lineage)', outcome: 'the exhausted loop runs again; grants for reopens of one dependency attempt share its next attempt and carry their own covered requests; after your grant only the user can grant more' },
   restart: { label: 'Restart the seat', outcome: 'the task is dispatched again (counted with the restarts after quarantine or seat failure, cap 2)' },
-  abandon: { label: 'Give the task up', outcome: 'the task stops and goes to the risk list; the rest of the mission continues' },
+  abandon: { label: 'Give up this work', outcome: 'the escalated work is given up and recorded; a reopen drops only its covered requests and preserves other grants; the rest of the mission continues' },
   answer: { label: 'Answer the question', outcome: 'your answer goes to the seat as a decision; the work goes on' },
   rework: { label: 'Send back to the Constructor', outcome: 'the Constructor reworks per your instructions (counted with the reworks)' },
   'ask-user': { label: 'Ask the user', outcome: 'the related work waits; the PM asks the user' },
 };
+
+/** Current option meanings, also used when an older queued card is dispatched. */
+export function secretaryOptions(e: EscalationBody): SecretaryCard['options'] {
+  const taskId = e.subject.startsWith('task:') ? e.subject.slice('task:'.length) : null;
+  const reopen = (e.facts as { reopen?: { kind: string; integration?: string } } | undefined)?.reopen;
+  return e.options.map((o) => ({
+    id: o,
+    ...OPTION_TEXT[o],
+    ...(o === 'accept-risk' && e.source === 'loop-exhausted' && reopen?.kind === 'review'
+      ? { outcome: `${taskId} keeps its accepted product; ${reopen.integration}'s reviewed attempt is accepted as it is, with the review's open findings quoted as risks; no further review round runs. If another grant has advanced ${taskId}, this older-start acceptance is moot.` }
+      : {}),
+  }));
+}
 
 export const escalationTask = (id: string): string => `sec.${id}`;
 
@@ -143,7 +156,6 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
     const neg = await judgmentRecordOf(ctx, e.position.revokes);
     if (neg !== null) position = { target: e.position.target, review: e.position.review, revokes: e.position.revokes, binding: rulingBinding(neg, rulingJudgmentId(e.id, 'secretary')) };
   }
-  const reopen = (e.facts as { reopen?: { kind: string; integration?: string } } | undefined)?.reopen;
   return {
     ...cardBase(ctx, e.task, {
       duties: 'Decide this one escalation within the recorded authority, pick one option, classify it, and write the notice for the PM.',
@@ -151,13 +163,7 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
     seat: 'secretary',
     request: { id: e.id, source: e.source, lineage: e.lineage, subject: e.subject, summary: e.summary, original: e.original ?? '', changed: e.changed ?? '', reasons: [...e.reasons] },
     ...inputs,
-    options: e.options.map((o) => ({
-      id: o,
-      ...OPTION_TEXT[o],
-      ...(o === 'accept-risk' && e.source === 'loop-exhausted' && reopen?.kind === 'review'
-        ? { outcome: `${taskId} keeps its accepted product; ${reopen.integration}'s reviewed attempt is accepted as it is, with the review's open findings quoted as risks; no further review round runs.` }
-        : {}),
-    })),
+    options: secretaryOptions(e),
     position,
   };
 }

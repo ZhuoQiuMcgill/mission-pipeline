@@ -416,7 +416,9 @@ async function rereviewStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlan
     ...(await eventsOf<ReviewNeededBody>(ctx, RENEW_LINE, REVIEW_NEEDED))
       .filter((e) => e.body.target === cur.product && e.body.review === 'reviewer')
       .map((e) => ({ key: e.key, revision: e.revision, body: { reason: `the environment changed (${e.body.reason}), so the runs were recorded again under the current environment` } })),
-    ...line.all<{ k: number; reason: string; product?: string }>('basis-revised').filter((e) => e.body.k === k && (e.body.product ?? original) === cur.product),
+    // Basis changes, like renewals, belong to the version even before its adoption.
+    ...line.all<{ k: number; reason: string; product?: string }>('basis-revised').filter((e) =>
+      (e.body.product ?? line.one<{ product: string }>('accepted', String(e.body.k))?.product) === cur.product),
   ].sort((a, b) => a.revision - b.revision);
   const history = line.all<RereviewBody>('rereview');
   // Completed requests belong to the product version, including rounds before adoption.
@@ -605,6 +607,15 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     return;
   }
 
+  // Reconcile independent decisions before waiting on any still-open escalation or re-plan.
+  let blocked = false;
+  for (const e of await openEscalations(ctx, `task:${t.id}`)) {
+    blocked = (await applyTaskDecision(ctx, eff, plan, t, line, e, kept.waived)) || blocked;
+    line = await readLine(ctx, t.id);
+    if (line.abandoned) return;
+  }
+  if (blocked) return;
+
   // a re-plan this task asked for: wait for a newer effective plan, then start the next attempt
   const waits = line.all<{ dplan: string; escalation: string }>('waiting-replan');
   const reworkRevisions = line.events.filter((e) => e.event === 'rework').map((e) => e.revision);
@@ -617,13 +628,6 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     // the new plan kept this task's card: start the next attempt anyway (the re-plan was decided for it)
     await commit(ctx, `flow:replanned:${ctx.mission}:task:${idPart(t.id)}:${w.key}`, { events: [ev(ctx, lineName, 'rework', String(line.k + 1), { k: line.k + 1, reason: 'replan', issues: [], instructions: [`Re-planned (${w.key}).`] } satisfies ReworkBody)] });
     return;
-  }
-
-  // decisions on this task's escalations
-  for (const e of await openEscalations(ctx, `task:${t.id}`)) {
-    const blocking = await applyTaskDecision(ctx, eff, plan, t, line, e, kept.waived);
-    line = await readLine(ctx, t.id);
-    if (blocking) return;
   }
 
   const k = line.k;
@@ -1230,9 +1234,10 @@ async function waitingReopenRisk(ctx: FlowCtx, dependency: string, attempt: numb
 async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, dependency: DetailedTask, attempt: number, e: EscalationBody, d: DecisionBody): Promise<void> {
   const waiting = await waitingReopenRisk(ctx, dependency.id, attempt, (e.facts as { reopen?: ReopenSource } | undefined)?.reopen);
   const by = deciderOf(d.by);
-  if (waiting === null || !plan.tasks.some((t) => t.id === waiting.integration && t.kind === 'integration') || by === null || e.position?.target !== waiting.product.object || e.position.revokes !== waiting.review.judgment) {
+  const moved = (await readLine(ctx, dependency.id)).k !== attempt;
+  if (moved || waiting === null || !plan.tasks.some((t) => t.id === waiting.integration && t.kind === 'integration') || by === null || e.position?.target !== waiting.product.object || e.position.revokes !== waiting.review.judgment) {
     await notify(ctx, { category: 'accept-risk-moot', wi: null, key: e.id,
-      trigger: `no integration waits for the review reopen of ${dependency.id} attempt ${attempt} on ${e.id}`,
+      trigger: moved ? `task ${dependency.id} moved beyond attempt ${attempt}; ${e.id} cannot accept its integration's older reviewed start` : `no integration waits for the review reopen of ${dependency.id} attempt ${attempt} on ${e.id}`,
       defaultAction: 'nothing is accepted; the decision is closed', detail: { escalation: e.id } });
     await markApplied(ctx, e.id, { option: 'accept-risk', moot: true });
     return;
@@ -1356,11 +1361,13 @@ function coveredReopens(ctx: FlowCtx, task: string, line: Line, e: { readonly bo
   const esc = e.body;
   const facts = esc.facts as { task?: string; attempt?: number; loop?: string } | undefined;
   if (esc.source !== 'loop-exhausted' || esc.subject !== `task:${task}` || facts?.task !== task ||
-      facts.loop !== 'rework' || facts.attempt !== line.k || esc.lineage !== taskLineage(ctx.mission, task)) return [];
-  const prefix = `exh.${esc.lineage}.${facts.attempt}`;
-  const start = line.all<ReworkBody>('rework').find((r) => r.body.k === facts.attempt)?.revision ?? 0;
+      facts.loop !== 'rework' || facts.attempt === undefined || facts.attempt > line.k || esc.lineage !== taskLineage(ctx.mission, task)) return [];
+  const attempt = facts.attempt;
+  const prefix = `exh.${esc.lineage}.${attempt}`;
+  const start = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt)?.revision ?? 0;
+  const end = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt + 1)?.revision ?? Infinity;
   return line.all<{ proceed: boolean }>('loop-verdict')
-    .filter((v) => !v.body.proceed && v.key.startsWith('reopen:') && v.revision > start &&
+    .filter((v) => !v.body.proceed && v.key.startsWith('reopen:') && v.revision > start && v.revision < end &&
       (esc.id === safeId(prefix) ? v.revision < e.revision : esc.id === safeId(`${prefix}.${idPart(v.key)}`)))
     .map((v) => v.key);
 }
@@ -1920,6 +1927,8 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const d = await decisionFor(ctx, e.id);
   if (d === null) return blocking;
   const k = facts.attempt ?? line.k;
+  const raised = (await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).find((x) => x.key === e.id);
+  const reopen = raised !== undefined && coveredReopens(ctx, t.id, line, raised).length > 0;
   switch (d.option) {
     case 'grant': {
       const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${e.id}:${d.by}`, lineage, loop: 'rework', by: d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
@@ -1927,13 +1936,16 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
         await escalateToUser(ctx, e.id, `the Secretary's grant on lineage ${lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
         return true;
       }
-      await ctx.ports.ledger.loopAttempt({ op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage, loop: 'rework', signature: `granted:${e.id}` });
-      const raised = (await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).find((x) => x.key === e.id);
-      const keys = raised === undefined ? [] : coveredReopens(ctx, t.id, line, raised);
-      const requests = keys.length === 0 ? [] : (await reopenRequests(ctx)).filter((r) => r.task === t.id && r.attempt === k && keys.includes(r.key));
-      const issues = [...new Set([...(facts.issues ?? []), ...requests.map((r) => r.issue)])];
-      const instructions = [...new Set([...(d.instructions !== '' ? [d.instructions] : []), ...requests.map((r) => r.instruction), ...await deferredInstructions(ctx, line, k)])];
-      await commitCarrying(ctx, `flow:rework:${ctx.mission}:task:${idPart(t.id)}:${k + 1}`, [ev(ctx, lineName, 'rework', String(k + 1), { k: k + 1, reason: 'secretary', issues, instructions } satisfies ReworkBody)], [await carryOut(ctx, e.id, { option: 'grant' })]);
+      const next = line.one<ReworkBody>('rework', String(k + 1));
+      if (next === null) await ctx.ports.ledger.loopAttempt({ op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage, loop: 'rework', signature: `granted:${e.id}` });
+      const body: ReworkBody = { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...await deferredInstructions(ctx, line, k)] };
+      const carry = await carryOut(ctx, e.id, { option: 'grant' });
+      await commit(ctx, `flow:rework:${ctx.mission}:${e.id}:apply-grant`, {
+        events: [...(next === null ? [ev(ctx, lineName, 'rework', String(k + 1), body)] : []), ...carry.events], records: carry.records,
+        guard: { absent: [...carry.absent, ...(next === null ? [{ mission: ctx.mission, line: lineName, event: 'rework', key: String(k + 1) }] : [])],
+          code: 'STALE_REQUEST', message: 'the grant or next attempt was recorded meanwhile; retry from the task line' },
+      });
+      await carried(ctx, [carry]);
       return false;
     }
     case 'answer':
@@ -1951,13 +1963,21 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       await markApplied(ctx, e.id, { option: 'rework' });
       return false;
     case 'replan':
-      await requestReplan(ctx, eff, t, e.id, d);
-      return true;
+      await requestReplan(ctx, eff, t, e.id, d, !reopen || line.k === k);
+      return !reopen || line.k === k;
     case 'accept-risk':
       if (line.one('accepted', String(k)) !== null) await acceptReopenWithRisk(ctx, plan, t, k, e, d);
       else await acceptWithRisk(ctx, eff, plan, t, k, e, d, waived);
-      return true;
+      return !reopen || line.k === k;
     case 'abandon':
+      if (reopen) {
+        await notify(ctx, { category: 'reopened-task-abandoned', wi: WI.loopExhausted, key: e.id,
+          trigger: `the reopen request on ${e.id} for task ${t.id} attempt ${k} was given up`,
+          defaultAction: 'only this reopen is dropped; other grants and work stay. A waiting integration needs new accepted dependency work, a re-plan or a repair',
+          detail: { task: t.id, attempt: k, escalation: e.id, reason: d.reason } });
+        await markApplied(ctx, e.id, { option: 'abandon' });
+        return false;
+      }
       await abandon(ctx, t, line.k, e.id, d.reason);
       return true;
     default:
@@ -1972,14 +1992,14 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
  * answers it is written in the same write (planning.ts replanRoute); otherwise the waiting task tells the
  * PM what the routing waits on (tellReplanWait).
  */
-async function requestReplan(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, escalationId: string, d: DecisionBody): Promise<void> {
+async function requestReplan(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, escalationId: string, d: DecisionBody, wait = true): Promise<void> {
   const req = { escalation: escalationId, task: t.id, instructions: d.instructions };
   const route = await replanRoute(ctx, req);
   const carry = await carryOut(ctx, escalationId, { option: 'replan' });
   const guard = carryGuard([carry]);
   const absent = [...(guard?.absent ?? []), ...(route.kind === 'now' ? route.absent : [])];
   await commit(ctx, `flow:replan-request:${ctx.mission}:${escalationId}`, {
-    events: [ev(ctx, PLAN_LINE, 'replan-request', escalationId, req), ev(ctx, taskLine(t.id), 'waiting-replan', escalationId, { dplan: eff.dplan, escalation: escalationId }), ...(route.kind === 'now' ? route.events : []), ...carry.events],
+    events: [ev(ctx, PLAN_LINE, 'replan-request', escalationId, req), ...(wait ? [ev(ctx, taskLine(t.id), 'waiting-replan', escalationId, { dplan: eff.dplan, escalation: escalationId })] : []), ...(route.kind === 'now' ? route.events : []), ...carry.events],
     records: carry.records,
     ...(absent.length > 0 ? { guard: { absent, code: 'STALE_REQUEST', message: `escalation ${escalationId} was carried out, or the decision layer moved, while its re-plan was being recorded; nothing was written (the next pass reads it again)` } } : {}),
   });
@@ -2162,6 +2182,26 @@ async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet
     .map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
 }
 
+/** One next attempt, with the context of every grant that ensured it (the rework event stays immutable). */
+async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): Promise<ReworkBody | null> {
+  const body = line.one<ReworkBody>('rework', String(k));
+  if (body === null) return null;
+  const applied = new Set((await eventsOf<{ what?: { option?: string } }>(ctx, SECRETARY_LINE, 'applied')).filter((e) => e.body.what?.option === 'grant').map((e) => e.key));
+  const requests = await reopenRequests(ctx);
+  const issues = [...body.issues];
+  const instructions = [...body.instructions];
+  for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
+    const facts = e.body.facts as { attempt?: number; loop?: string; issues?: string[] } | undefined;
+    if (!applied.has(e.key) || e.body.source !== 'loop-exhausted' || e.body.subject !== `task:${t.id}` || facts?.loop !== 'rework' || facts.attempt !== k - 1) continue;
+    const d = await decisionFor(ctx, e.key);
+    const keys = coveredReopens(ctx, t.id, line, e);
+    const covered = requests.filter((r) => r.task === t.id && r.attempt === k - 1 && keys.includes(r.key));
+    issues.push(...(facts.issues ?? []), ...covered.map((r) => r.issue));
+    instructions.push(...(d?.instructions ? [d.instructions] : []), ...covered.map((r) => r.instruction));
+  }
+  return { ...body, issues: [...new Set(issues)], instructions: [...new Set(instructions)] };
+}
+
 async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number, task: string, deps: readonly string[]): Promise<void> {
   const prev = await latestRecordedProduct(ctx, line, k);
   // A first attempt starts from the base with its dependencies' products. A later attempt (a rework,
@@ -2209,7 +2249,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     carryDropped = (await ctx.ports.ledger.records(['alert'])).some(({ record }) => record.alert === alert);
   }
   const items = await currentItems(ctx);
-  const rw = line.one<ReworkBody>('rework', String(k));
+  const rw = await reworkAt(ctx, t, line, k);
   const duties = [
     ...(prev !== null && carryDropped ? [`The earlier attempt's change is not in the tree; it stays readable at commit ${prev.commit}. Carry over by hand what still applies to the current dependencies.`] : []),
     `Implement task ${t.id} (${t.kind}${t.module !== null ? ` of module ${t.module}` : ''}) inside its writable paths, so that every acceptance standard is met.`,
@@ -2347,7 +2387,7 @@ async function submitReviewer(
   // 4.1.2 (D-6): an integration task's review sees each dependency's product and the paths it changed, and may reopen one
   const startOnlyAttempt = startOnly(line, product);
   const integration = t.kind === 'integration' ? { hasConstructor: !startOnlyAttempt, dependencies: await dependencyProducts(ctx, plan, t) } : undefined;
-  const rw = line.one<ReworkBody>('rework', String(k));
+  const rw = await reworkAt(ctx, t, line, k);
   const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
   const card: ReviewerCard = {

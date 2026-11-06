@@ -7,7 +7,7 @@ import { acceptedProduct, builtOnOlder, productAttempt, taskLineage } from '../s
 import { RENEW_LINE, REVIEW_NEEDED, type ReviewNeededBody } from '../src/flow/plandoc.ts';
 import { recordItem } from '../src/flow/requirements.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
-import { answerEscalation, type EscalationBody } from '../src/flow/secretary.ts';
+import { answerEscalation, carryOut, decisionFor, type EscalationBody } from '../src/flow/secretary.ts';
 import { detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { compareToCommit } from '../src/git/workspace.ts';
 import { compareWorktree, land } from '../src/git/land.ts';
@@ -17,6 +17,7 @@ import { dispatchView } from '../src/process/seat.ts';
 import { buildGraph, resolveNodes, walk } from '../src/cli/tree.ts';
 import type { ReviewerCard } from '../src/seat/card.ts';
 import type { SecretaryCard } from '../src/seat/cards/secretary.ts';
+import { refreshDispatchCard } from '../src/seat/cards/refresh.ts';
 import { memoryPorts, say } from './flow-memory-fixtures.ts';
 import { commitOn, fixture, M as GM, recordedDelivery, words, write } from './git41-fixtures.ts';
 
@@ -187,6 +188,188 @@ test('A a negative verdict after the old escalation gets its own suffixed escala
   await unchanged(w, engine);
 });
 
+/** Two independently raised requests against the same accepted D3, before either is decided. */
+async function reopenPair(legacy: boolean) {
+  const { w, engine } = await lastAllowedPass();
+  const repairWords = say(w, 'Keep the header requested by this repair.');
+  await pmRepair(w.ctx, { mission: M, words: repairWords, kind: 'defect', text: 'Keep the header requested by this repair.' });
+  const repairScript = script({ reviewer: () => null, secretary: () => null,
+    'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'repair finding: keep the header' }], add: [], note: 'impl owns the header' } }),
+  });
+  if (legacy) {
+    w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
+    await assert.rejects(drive(engine, w.scheduler, repairScript), /injected failure/);
+    const lineage = taskLineage(M, 'impl');
+    const id = `exh.${lineage}.3`;
+    await w.ledger.append('test:413-repair-escalation', { events: [{ mission: M, line: 'secretary', event: 'escalation', key: id, body: {
+      id, task: `sec.${id}`, source: 'loop-exhausted', lineage, subject: 'task:impl', summary: 'Task impl: the reworks are used up (2/2).',
+      reasons: ['repair finding: keep the header'], options: ['grant', 'replan', 'abandon', 'ask-user'], items: [],
+      facts: { task: 'impl', attempt: 3, loop: 'rework', issues: ['repair finding: keep the header'], attempts: 2, allowed: 2, reason: 'cap' },
+      handover: { from: 'rev.m1.impl.3', objects: ['prod.con.m1.impl.3'] },
+    } }] });
+  } else await drive(engine, w.scheduler, repairScript);
+  await drive(engine, w.scheduler, script({ reviewer: reopenReview, secretary: () => null }));
+  const pair = await escalations(w);
+  assert.equal(pair.length, 2);
+  assert.equal(pair[1]!.options.includes('accept-risk'), true);
+  for (const e of pair) {
+    const card = w.scheduler.card<SecretaryCard>(e.task);
+    assert.match(card.options.find((o) => o.id === 'abandon')!.outcome, /only its covered requests/);
+    assert.match(card.options.find((o) => o.id === 'grant')!.outcome, /share its next attempt/);
+  }
+  return { w, engine, pair, repairWords };
+}
+test('R4 A an older queued Secretary card refreshes the independent grant and abandon outcomes', async () => {
+  const { w, engine, pair } = await reopenPair(true);
+  const spec = dispatchView(w.ctx, w.scheduler.dispatchOf(pair[0]!.task)).spec;
+  const card = spec.card as unknown as SecretaryCard;
+  const old = { ...spec, card: { ...spec.card, options: card.options.map((o) => ({ ...o,
+    ...(o.id === 'grant' ? { outcome: 'the exhausted loop runs again' } : {}),
+    ...(o.id === 'abandon' ? { label: 'Give the task up', outcome: 'the task stops and goes to the risk list' } : {}),
+  })) } };
+  const refreshed = w.ctx.memory.read((db) => refreshDispatchCard(db, w.ctx.memory.data, old)).card as unknown as SecretaryCard;
+  assert.match(refreshed.options.find((o) => o.id === 'grant')!.outcome, /share its next attempt/);
+  assert.match(refreshed.options.find((o) => o.id === 'abandon')!.outcome, /only its covered requests/);
+  await unchanged(w, engine);
+});
+
+const holdDependency: Script = (t, scheduler) => t.task === 'con.m1.impl.4' ? null : happyScript(M, plan)(t, scheduler);
+const holdReopenWork = () => script({ constructor: holdDependency, secretary: () => null });
+async function grantReopen(w: World, id: string) {
+  const instructions = `Apply the request granted on ${id}.`;
+  const words = say(w, instructions);
+  await answerEscalation(w, { mission: M, escalation: id, option: 'grant', grantExtra: 1, instructions, words: `Grant this request. (${words})` });
+  return instructions;
+}
+
+for (const legacy of [true, false]) for (const reverse of [false, true]) test(`R4 A ${legacy ? 'legacy and suffixed' : 'two suffixed'} grants merge in ${reverse ? 'reverse' : 'forward'} order and retry safely`, async () => {
+  const { w, engine, pair, repairWords } = await reopenPair(legacy);
+  const order = reverse ? [...pair].reverse() : pair;
+  const attempts = (await w.ledger.loop(taskLineage(M, 'impl'), 'rework')).attempts;
+  const instructions: string[] = [];
+  for (let i = 0; i < order.length; i++) {
+    instructions.push(await grantReopen(w, order[i]!.id));
+    // Crash at the write carrying the decision, after its idempotent grant/loop operations.
+    w.ledger.failNext = (op) => op.startsWith('flow:rework:') && !op.endsWith(':granted');
+    await assert.rejects(drive(engine, w.scheduler, holdReopenWork()), /injected failure/);
+    await drive(engine, w.scheduler, holdReopenWork());
+    assert.equal((await events(w, 'task:impl', 'rework')).filter((e) => e.body.k === 4).length, 1);
+    if (i === 0) assert.ok(!w.scheduler.tasks.has('con.m1.impl.4'), 'the other open escalation holds the next attempt');
+    await unchanged(w, engine);
+  }
+  assert.equal((await w.ledger.loop(taskLineage(M, 'impl'), 'rework')).attempts, attempts + 1, 'one next attempt, regardless of the number of grants');
+  const card = w.scheduler.card<{ duties: string }>('con.m1.impl.4');
+  assert.match(card.duties, /repair finding: keep the header/);
+  assert.match(card.duties, /dependency is slow/);
+  assert.match(card.duties, /Reopened by repair R-1/);
+  assert.match(card.duties, /Reopened by the review rev.m1.integ.1/);
+  assert.ok(card.duties.includes(repairWords));
+  for (const words of instructions) assert.ok(card.duties.includes(words));
+  await drive(engine, w.scheduler, script());
+  assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.4');
+  assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'));
+  await unchanged(w, engine);
+});
+
+test('R4 A a field ledger already stuck on the shared grant operation heals without migration', async () => {
+  const { w, engine, pair } = await reopenPair(true);
+  const ctx = flowCtx(w, M);
+  const op = 'flow:rework:m1:task:impl:4';
+  for (let i = 0; i < pair.length; i++) {
+    const e = pair[i]!;
+    await grantReopen(w, e.id);
+    const d = (await decisionFor(ctx, e.id))!;
+    await w.scheduler.grant({ op: `grant:${M}:${e.id}:user`, lineage: e.lineage, loop: 'rework', by: 'user', extra: 1, reason: d.reason });
+    await w.ledger.loopAttempt({ op: `flow:rework:${M}:${e.id}:granted`, lineage: e.lineage, loop: 'rework', signature: `granted:${e.id}` });
+    const carry = await carryOut(ctx, e.id, { option: 'grant' });
+    const entries = { events: [{ mission: M, line: 'task:impl', event: 'rework', key: '4', body: {
+      k: 4, reason: 'secretary', issues: (e.facts as { issues: string[] }).issues, instructions: [d.instructions],
+    } }, ...carry.events], records: carry.records };
+    // The previous release used this same operation for both different grant payloads.
+    if (i === 0) await w.ledger.append(op, entries);
+    else await assert.rejects(w.ledger.append(op, entries), /OP_CONFLICT/);
+  }
+  await drive(engine, w.scheduler, holdReopenWork());
+  assert.equal((await events(w, 'task:impl', 'rework')).filter((e) => e.body.k === 4).length, 1);
+  const card = w.scheduler.card<{ duties: string }>('con.m1.impl.4');
+  assert.match(card.duties, /repair finding: keep the header/);
+  assert.match(card.duties, /dependency is slow/);
+  await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  assert.equal(await acceptedProduct(ctx, 'impl'), 'prod.con.m1.impl.4');
+  await unchanged(w, engine);
+});
+
+for (const option of ['abandon', 'accept-risk', 'replan'] as const) test(`R4 A a grant survives another reopen's ${option} decision`, async () => {
+  const { w, engine, pair } = await reopenPair(false);
+  await grantReopen(w, pair[0]!.id);
+  await drive(engine, w.scheduler, holdReopenWork());
+  assert.ok(!w.scheduler.tasks.has('con.m1.impl.4'));
+  const words = say(w, `Choose ${option} for the review's reopen only.`);
+  await answerEscalation(w, { mission: M, escalation: pair[1]!.id, option, instructions: 'Route only this review request.', words: `Choose ${option}. (${words})` });
+  const hold = script({ constructor: holdDependency, secretary: () => null, 'architect-decompose': () => null });
+  await drive(engine, w.scheduler, hold);
+  assert.equal((await events(w, 'task:impl', 'abandoned')).length, 0);
+  const card = w.scheduler.card<{ duties: string }>('con.m1.impl.4');
+  assert.match(card.duties, /repair finding: keep the header/);
+  assert.doesNotMatch(card.duties, /dependency is slow|Route only this review request/);
+  assert.equal((await events(w, 'task:impl', 'rework')).filter((e) => e.body.k >= 4).length, 1);
+  assert.ok((await events(w, 'secretary', 'applied')).some((e) => e.key === pair[1]!.id && e.body.what.option === option));
+  if (option === 'accept-risk') {
+    assert.ok(w.ledger.notices.some((n) => n.category === 'accept-risk-moot'));
+    assert.equal((await events(w, 'task:integ', 'accepted')).length, 0);
+    assert.ok(!(await w.ledger.records(['judgment'])).some(({ record }) => record.judgment === `j.user.${pair[1]!.id}`), 'a moot decision writes no ruling');
+  }
+  if (option === 'replan') {
+    assert.ok((await events(w, 'plan', 'replan-request')).some((e) => e.key === pair[1]!.id));
+    assert.equal((await events(w, 'task:impl', 'waiting-replan')).length, 0, 'a request to re-plan does not replace the other grant');
+  }
+  await unchanged(w, engine);
+  if (option !== 'replan') {
+    await drive(engine, w.scheduler, script());
+    assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.4');
+    assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'));
+    await unchanged(w, engine);
+  }
+});
+
+for (const option of ['abandon', 'accept-risk', 'replan'] as const) test(`R4 A another reopen's ${option} before the grant remains independent`, async () => {
+  const { w, engine, pair } = await reopenPair(false);
+  const words = say(w, `Choose ${option} for only the review reopen, before deciding the repair.`);
+  await answerEscalation(w, { mission: M, escalation: pair[1]!.id, option, words: `Choose ${option}. (${words})` });
+  const hold = script({ constructor: holdDependency, secretary: () => null, 'architect-decompose': () => null });
+  await drive(engine, w.scheduler, hold);
+  assert.ok((await events(w, 'secretary', 'applied')).some((e) => e.key === pair[1]!.id && e.body.what.option === option), 'an earlier unanswered escalation does not hide this decision');
+  assert.equal((await events(w, 'task:impl', 'abandoned')).length, 0);
+  assert.ok(!w.scheduler.tasks.has('con.m1.impl.4'));
+  if (option === 'accept-risk') assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'), 'the dependency has not moved, so this decision can accept the reviewed product');
+  await unchanged(w, engine);
+  await grantReopen(w, pair[0]!.id);
+  await drive(engine, w.scheduler, hold);
+  const card = w.scheduler.card<{ duties: string }>('con.m1.impl.4');
+  assert.match(card.duties, /repair finding: keep the header/);
+  assert.doesNotMatch(card.duties, /dependency is slow/);
+  assert.equal((await events(w, 'task:impl', 'rework')).filter((e) => e.body.k >= 4).length, 1);
+  await unchanged(w, engine);
+});
+
+test('R4 A asking the user on one reopen preserves and holds the other grant', async () => {
+  const { w, engine, pair } = await reopenPair(false);
+  await grantReopen(w, pair[0]!.id);
+  await drive(engine, w.scheduler, holdReopenWork());
+  const sec = w.scheduler.queued('secretary').find((t) => t.task === pair[1]!.task)!;
+  assert.deepEqual(await w.scheduler.run(sec.task, { handBack: secretary(sec.card as unknown as SecretaryCard, 'ask-user') }), []);
+  await drive(engine, w.scheduler, holdReopenWork());
+  assert.ok(!w.scheduler.tasks.has('con.m1.impl.4'));
+  await unchanged(w, engine);
+  await grantReopen(w, pair[1]!.id);
+  await drive(engine, w.scheduler, holdReopenWork());
+  assert.match(w.scheduler.card<{ duties: string }>('con.m1.impl.4').duties, /dependency is slow/);
+  await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  await unchanged(w, engine);
+});
+
 async function acceptedReopenRisk() {
   const x = await reviewedReopen();
   const esc = (await escalations(x.w)).at(-1)!;
@@ -269,6 +452,42 @@ test('B a renewal re-review settled by reopen accept-risk is not replayed after 
   assert.notEqual(later, request);
   await drive(engine, w.scheduler, script({ reviewer: () => null }));
   assert.equal((await events(w, 'task:integ', 'rereview')).at(-1)!.body.request, later);
+  assert.ok(w.scheduler.queued('reviewer').some((t) => t.task === 'rev.m1.integ.2.e1'));
+  await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  await unchanged(w, engine);
+});
+
+for (const later of ['renewal', 'basis'] as const) test(`R4 B a completed basis review covers an older renewal across adoption; a later ${later} still runs`, async () => {
+  const { w, engine } = await usedUp();
+  await drive(engine, w.scheduler, script());
+  const product = await acceptedProduct(flowCtx(w, M), 'integ');
+  assert.ok(product);
+  await requestIntegrationReview(w, product, 'the older environment renewal');
+  const judgment = (await events(w, 'task:integ', 'accepted')).at(-1)!.body.judgment;
+  const basis = '1:changed-basis';
+  await w.ledger.append('test:newer-basis-request', { events: [{ mission: M, line: 'task:integ', event: 'basis-revised', key: basis,
+    body: { k: 1, judgment, revised: [{ from: 'basis.old', to: 'basis.new' }], reason: 'a newer basis-change request' },
+  }] });
+  await drive(engine, w.scheduler, script({ reviewer: reopenReview, secretary: () => null }));
+  assert.equal((await events(w, 'task:integ', 'rereview')).at(-1)!.body.request, basis);
+  const esc = (await escalations(w)).at(-1)!;
+  const words = say(w, 'Accept this basis review with its remaining findings as risks.');
+  await answerEscalation(w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept this review. (${words})` });
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  assert.equal((await events(w, 'task:integ', 'rereview')).length, 1, 'the older renewal is covered by the completed newer basis review');
+  assert.deepEqual(w.scheduler.queued('reviewer'), []);
+  await unchanged(w, engine);
+  let request: string;
+  if (later === 'renewal') request = await requestIntegrationReview(w, product, 'a later renewal after adoption');
+  else {
+    request = '2:later-basis';
+    await w.ledger.append('test:later-basis-request', { events: [{ mission: M, line: 'task:integ', event: 'basis-revised', key: request,
+      body: { k: 2, judgment: (await events(w, 'task:integ', 'accepted')).at(-1)!.body.judgment, revised: [{ from: 'basis.new', to: 'basis.later' }], reason: 'a later basis change after adoption' },
+    }] });
+  }
+  await drive(engine, w.scheduler, script({ reviewer: () => null }));
+  assert.equal((await events(w, 'task:integ', 'rereview')).at(-1)!.body.request, request);
   assert.ok(w.scheduler.queued('reviewer').some((t) => t.task === 'rev.m1.integ.2.e1'));
   await unchanged(w, engine);
   await drive(engine, w.scheduler, script());

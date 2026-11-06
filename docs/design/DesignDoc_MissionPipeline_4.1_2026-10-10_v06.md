@@ -894,6 +894,9 @@ Cost, before → after (from the part reports): a waiver saves 2 seat dispatches
   whose negative verdict preceded it. A grant carries every covered finding and request,
   including a repair whose escalation write was interrupted. A later verdict, or a collision
   with the dependency's own earlier loop escalation, gets a suffixed escalation covering only itself.
+  Separate grants on that attempt ensure one next attempt and carry all granted requests; it waits
+  for other open choices. Abandon drops only its covered requests. A re-plan routes its request
+  without replacing another grant's next attempt; asking the user keeps that attempt waiting.
 - #48: a conflicting carry starts fresh by default, with its origin and manual carry-over duty
   recorded as in Appendix M; no config key or per-path partial carry.
 - #49: the pre-landing clean check also compares the blob after supported eol/ident clean
@@ -905,10 +908,12 @@ Cost, before → after (from the part reports): a waiver saves 2 seat dispatches
   is accepted with the product actually reviewed and the review's findings quoted as risks, with
   the decider's ruling revoking that review judgment. Every dependency must still be accepted at
   the version reviewed (`accept-risk-waits`, checked each pass); no waiting rebuild means
-  `accept-risk-moot`. A repair's reopen does not offer it. No acceptance review round runs.
+  `accept-risk-moot`, as does a grant that already advanced the dependency. A repair's reopen does
+  not offer it. No acceptance review round runs.
   The rebuild attempt adopts the reviewed product in an existing `product` event, retaining
   its original source dispatch; later environment renewals, re-reviews and kept-product rebinds
-  follow the normal accepted-product paths.
+  follow the normal accepted-product paths. Completed reviews cover older renewal and basis-change
+  requests on that version across adoption; a later request still starts a round.
 
 No event or record format changes. 4.1.3 records fold without migration; stuck reopen and carry
 cases retry on the next pass. The program writes no judgment in its own name.
