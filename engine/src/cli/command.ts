@@ -22,7 +22,7 @@ export interface RunContext {
   readonly now: number;
 }
 
-export type Group = 'pm' | 'seat' | 'read' | 'admin';
+export type Group = 'pm' | 'sec' | 'seat' | 'read' | 'admin';
 
 export interface Command {
   readonly group: Group;

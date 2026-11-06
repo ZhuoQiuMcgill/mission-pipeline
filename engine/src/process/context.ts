@@ -3,6 +3,7 @@
 // program actions the flows need beyond the memory (snapshots, product versions, verification
 // runs: actions.ts). A context lives for one `mp` process; nothing here runs in the background.
 
+import { requireSecretary, liveSecretary, requireDriver } from '../memory/resident.ts';
 import { realpathSync } from 'node:fs';
 import type { Filler, Memory } from '../memory/index.ts';
 import { openMemory, type OpenOptions } from '../memory/index.ts';
@@ -37,6 +38,10 @@ export type GitActions = Pick<FlowSchedulerPort, 'startHolds' | 'composition' | 
 };
 
 export interface ProcessOptions {
+  readonly secretary?: string | null;
+  readonly pendingSecretary?: boolean;
+  readonly seatResult?: boolean;
+  readonly operational?: boolean;
   /** How git runs (default: plain `git` from PATH). */
   readonly git?: PlainGit;
   readonly now?: () => number;
@@ -82,6 +87,9 @@ export interface ProcessOptions {
 }
 
 export interface ProcessContext {
+  secretary: string | null;
+  operational: boolean;
+  pureRead: boolean;
   readonly memory: Memory;
   readonly git: PlainGit;
   readonly projectDir: string;
@@ -146,6 +154,9 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
   let workspaces: WorkspaceOps | null = null;
   const ctx: ProcessContext = {
     memory,
+    secretary: o.secretary ?? null,
+    operational: o.operational ?? false,
+    pureRead: false,
     git,
     projectDir: memory.projectDir,
     now: o.now ?? Date.now,
@@ -196,12 +207,17 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
       return workspaces;
     },
   };
+  memory.suppressOperationsWhen = () => ctx.secretary === null && liveSecretary(memory) !== null;
+  memory.writeGuard = (tx) => {
+    if (ctx.secretary !== null && o.seatResult !== true) requireSecretary(tx, ctx.secretary, o.pendingSecretary === true);
+    else if (ctx.operational) requireDriver(tx, null);
+  };
   return ctx;
 }
 
 /** Open the project's memory and a context on it (`mp` commands). The caller closes `ctx.memory`. */
 export function openProcess(projectDir: string, o: ProcessOptions & { readonly open?: OpenOptions } = {}): ProcessContext {
   const git = o.git ?? PlainGit.create();
-  const memory = openMemory(realpathSync.native(projectDir), { ...(o.open ?? {}), git: o.open?.git === undefined ? git.runner() : o.open.git });
+  const memory = openMemory(realpathSync.native(projectDir), {deferResidentRecovery: o.secretary == null || o.seatResult === true, ...(o.seatResult === true ? {} : {secretaryIdentity: o.secretary ?? null, pendingSecretary: o.pendingSecretary === true}), ...(o.open ?? {}), git: o.open?.git === undefined ? git.runner() : o.open.git });
   return processContext(memory, { ...o, git });
 }

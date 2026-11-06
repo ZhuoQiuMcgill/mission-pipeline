@@ -12,7 +12,7 @@
 
 import type { DecisionOption } from '../seat/cards/secretary.ts';
 import { safeId, type FlowCtx, type TaskView } from './context.ts';
-import { decisionFor, escalateToUser, escalation, isApplied, markApplied, raiseEscalation, type DecisionBody } from './secretary.ts';
+import { grantForDecision, grantedAttempt, decisionFor, escalateToUser, escalation, isApplied, markApplied, raiseEscalation, type DecisionBody } from './secretary.ts';
 import { WI } from './wi.ts';
 
 export type FailureOutcome =
@@ -97,12 +97,12 @@ export async function handleFailure(
     return { kind: 'retrying' };
   }
   if (d.option === 'grant') {
-    const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}`, lineage: f.lineage, loop: s.loop ?? 'quarantine-restart', by: d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
+    const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${id}`, lineage: f.lineage, loop: s.loop ?? 'quarantine-restart', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
     if (!g.granted) {
       await escalateToUser(ctx, id, `the Secretary's grant on lineage ${f.lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
       return { kind: 'waiting' };
     }
-    await markApplied(ctx, id, { granted: d.grantExtra });
+    await markApplied(ctx, id, { option: 'grant', granted: d.grantExtra }, g.records);
     return { kind: 'retrying' };
   }
   return { kind: 'decided', escalation: id, decision: d };

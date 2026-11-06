@@ -1,4 +1,5 @@
 // Claim-time selection is owned by the queue-time builders; refresh adds no seat context.
+import { liveSecretary } from '../../memory/resident.ts';
 import type { BaseRecord, ObjectVersionRecord, ProofUnitRecord, ListRef } from '../../common/records.ts';
 import type { BasisIndex } from '../../flow/context.ts';
 import { predecessorMaterials, predecessorsFrom, withPredecessorMaterials } from '../../flow/exploration/predecessors.ts';
@@ -164,7 +165,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       const round = secretaryRoundInputs(e, events);
       if (round.esc.task !== spec.task) throw new ProcessError('NOT_READY', `Secretary step ${spec.task} was superseded; run mp pm next.`);
       Object.assign(card, secretaryInputs(mission, round.esc, items, constraints, events, task, !loopState(db, card.request.lineage, 'env-retry').secretaryGrantUsed, (text) => data.put(text)));
-      card.options = secretaryOptions(round.esc);
+      card.options = secretaryOptions(round.esc, liveSecretary(db) !== null);
       break;
     }
     case 'calibrator-1':

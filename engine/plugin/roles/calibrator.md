@@ -35,6 +35,8 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 
 ## Upstream and downstream
+
+The Secretary dispatches your seat. PM-class questions route to the PM inbox; the PM decides on recorded words or asks the user. The card's finding fields keep their names.
 - ①: upstream, the PM, who records the plan with the user. Downstream: a pass goes to the Architect; a fail goes back to the PM with your reasons and questions.
 - ②: upstream, the Architect (decomposition). Downstream: a pass releases the plan's tasks; an escalation goes to the Secretary.
 

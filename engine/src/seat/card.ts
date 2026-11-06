@@ -173,9 +173,15 @@ export function handBackFiles(dispatch: string): { readonly dir: string; readonl
 }
 
 /** The JSON schema of a card kind's structured hand-back fields (printed on the card). */
-export function handBackSchema(kind: string): unknown {
+export function handBackSchema(kind: string, card?: Readonly<Record<string, unknown>>): unknown {
   const e = seatCardEntry(kind);
-  return z.toJSONSchema(e.resultSchema as z.ZodType, { unrepresentable: 'any' });
+  const schema = z.toJSONSchema(e.resultSchema as z.ZodType, { unrepresentable: 'any' });
+  if (kind === 'secretary' && Array.isArray(card?.['classifications']) && schema.properties !== undefined) {
+    schema.properties['classification'] = {type: 'string', enum: ['detail', 'needs-pm'], description: 'Decide a detail within the plan, or ask-pm for a PM-class question.'};
+    schema.properties['authorization'] = {anyOf: [{type: 'string'}, {type: 'null'}], description: 'An authorization on the card, when relevant to a detail; otherwise null.'};
+    schema.properties['option'] = {type: 'string', enum: (card['options'] as {id: string}[]).map((o) => o.id)};
+  }
+  return schema;
 }
 
 /** The JSON schema of an evidence request (`mp seat <id> request-evidence`, decision 13). */
@@ -371,7 +377,7 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
     'The fields match this JSON schema:',
     '',
     '```json',
-    JSON.stringify(handBackSchema(e.kind), null, 2),
+    JSON.stringify(handBackSchema(e.kind, card), null, 2),
     '```',
     '',
     `Or with two files (never inside a worktree): the report in \`${f.report}\`, the fields in \`${f.result}\`, then \`mp seat ${o.dispatch} handback --report ${f.report} --result ${f.result}\`.`,

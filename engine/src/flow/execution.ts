@@ -66,7 +66,7 @@ import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, p
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
-import { cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
+import { grantForDecision, grantedAttempt, cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 
 interface SpecBody {
@@ -1196,10 +1196,10 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // only the user or the Secretary accepts with a risk: nothing is accepted in the program's name
   const by = deciderOf(d.by);
   if (by === null) return moot('no user or Secretary decided it');
-  const words = by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
+  const words = by === 'pm' ? (d.words ?? []).map((w) => w.id).join(',') : by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
   // the decider's ruling, written by carryOut in this write (flow/secretary.ts deciderJudgment): the same id here
   const ruling = rulingJudgmentId(e.id, by);
-  const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : 'the Secretary'} on ${e.id}: ${x}`);
+  const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
   await commitCarrying(
     ctx,
     `flow:accepted-risk:${ctx.mission}:task:${idPart(t.id)}:${k}`,
@@ -1264,8 +1264,8 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
       defaultAction: 'the decision is kept and checked on every pass', detail: { escalation: e.id, integration, dependencies: missing } });
     return;
   }
-  const words = by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
-  const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : 'the Secretary'} on ${e.id}: ${x}`);
+  const words = by === 'pm' ? (d.words ?? []).map((w) => w.id).join(',') : by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
+  const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
   await commitCarrying(ctx, `flow:accepted-risk:${ctx.mission}:task:${idPart(integration)}:${line.k}`,
     [
       // Adopt the reviewed product at this attempt, preserving its actual source dispatch.
@@ -1931,18 +1931,18 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const reopen = raised !== undefined && coveredReopens(ctx, t.id, line, raised).length > 0;
   switch (d.option) {
     case 'grant': {
-      const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${e.id}:${d.by}`, lineage, loop: 'rework', by: d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
+      const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${e.id}:${d.by}`, lineage, loop: 'rework', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
       if (!g.granted) {
         await escalateToUser(ctx, e.id, `the Secretary's grant on lineage ${lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
         return true;
       }
       const next = line.one<ReworkBody>('rework', String(k + 1));
-      if (next === null) await ctx.ports.ledger.loopAttempt({ op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage, loop: 'rework', signature: `granted:${e.id}` });
+      if (next === null) await grantedAttempt(ctx, g, { op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage, loop: 'rework', signature: `granted:${e.id}` });
       const body: ReworkBody = { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...await deferredInstructions(ctx, line, k)] };
-      const carry = await carryOut(ctx, e.id, { option: 'grant' });
+      const carry = await carryOut(ctx, e.id, { option: 'grant' }, g.records);
       await commit(ctx, `flow:rework:${ctx.mission}:${e.id}:apply-grant`, {
         events: [...(next === null ? [ev(ctx, lineName, 'rework', String(k + 1), body)] : []), ...carry.events], records: carry.records,
-        guard: { absent: [...carry.absent, ...(next === null ? [{ mission: ctx.mission, line: lineName, event: 'rework', key: String(k + 1) }] : [])],
+        guard: { latest: carry.latest, words: carry.words, openMissions: carry.openMissions, absent: [...carry.absent, ...(next === null ? [{ mission: ctx.mission, line: lineName, event: 'rework', key: String(k + 1) }] : [])],
           code: 'STALE_REQUEST', message: 'the grant or next attempt was recorded meanwhile; retry from the task line' },
       });
       await carried(ctx, [carry]);
@@ -2001,7 +2001,7 @@ async function requestReplan(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, 
   await commit(ctx, `flow:replan-request:${ctx.mission}:${escalationId}`, {
     events: [ev(ctx, PLAN_LINE, 'replan-request', escalationId, req), ...(wait ? [ev(ctx, taskLine(t.id), 'waiting-replan', escalationId, { dplan: eff.dplan, escalation: escalationId })] : []), ...(route.kind === 'now' ? route.events : []), ...carry.events],
     records: carry.records,
-    ...(absent.length > 0 ? { guard: { absent, code: 'STALE_REQUEST', message: `escalation ${escalationId} was carried out, or the decision layer moved, while its re-plan was being recorded; nothing was written (the next pass reads it again)` } } : {}),
+    ...(absent.length > 0 ? { guard: { ...guard, absent, code: 'STALE_REQUEST', message: `escalation ${escalationId} was carried out, or the decision layer moved, while its re-plan was being recorded; nothing was written (the next pass reads it again)` } } : {}),
   });
   await carried(ctx, [carry]);
 }

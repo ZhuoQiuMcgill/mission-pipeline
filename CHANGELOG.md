@@ -6,6 +6,47 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.3.0] - 2026-11-06
+
+### Changed
+
+- PM/Secretary split: the PM is the user's anchor; a resident Secretary holds dispatch detail and drives the field.
+- F-1: the PM aligns, records words, plans results, decides big questions, handles stops and consent, and answers requested progress.
+- F-2: `<project>-Secretary` is resident, runs the loop, answers questions, takes no direct user instructions and reports no progress unasked.
+- F-3: the Secretary decides within the plan; the PM decides its class on words, asks the user without support and with major impact, and records the minor-impact no-words default with a reason.
+- F-4: PM contact is for the user's progress details or a new instruction; Secretary contact is for PM-class decisions; memory is the record.
+- F-5: questions for the PM wait while no PM session is open; other work continues.
+- F-6: every PM reply starts with its reading of the message type in the user's language, listing composite parts.
+- F-7: recording waits for the next message without objection; one-off instructions record at once with all tags; unrelated messages never record; re-tagging needs the user's words.
+- F-8: words lose force through supersession, scope end or being one-off, never by calendar time.
+- F-9: bounded layer 1 at session start, layer 2 by subject, layer 3 verbatim; old untyped words get their first tags only when relevant.
+- Every structural detailed-plan revision waits for a `plan-structure-change` PM answer (`approve` / `send-back`); the first plan and text-only revisions keep their ordinary checks.
+- Layer 1 has a hard 8 KiB bound; before a PM-class decision, the PM reads subject layer 2 and all principles in force, including omitted principles.
+- Stops track unconfirmed seats from existing dispatch state, including abandoned seats not yet ended; a gone Secretary is retired and stopped before PM releases in 4.2 mode.
+- The optional prompt hook reminds the PM about type and deferred recording; it records nothing and is silent when `MP_SECRETARY` is set.
+
+### Added
+
+- Resident commands: `mp pm secretary start`, `handle`, `stop`; `mp read secretary`; `mp sec handbook`, `session`, `next`, `dispatch`, `release`, `renew`, `drain`, `alerts`, `wait --since R`.
+- Decision commands: `mp sec card`, `read`, `decide`; `mp pm inbox`, `inbox --asked-user`; `mp pm answer --by pm|user`, `--no-words`, and PM grants with `--by pm`.
+- Channel commands: `mp pm note`, `mp pm ask-secretary`, `mp sec ack-note`, `mp sec reply`, `mp sec ask-pm` (a question for the PM outside an escalation, e.g. a WI's) and `mp pm reply`, `mp pm inbox --ack`; words commands: `say --tag`, `tag`, `retag`, `summary`, supersession with explicit withdraw/keep, and `mp read words` filters.
+- Record kinds: `secretary.generation`, `pm.note`, `pm.question`, `sec.reply`, `sec.question`, `pm.reply`, `user.words-tags`, `words.summary`; flow event `pm-answer`, decider `pm` and applied ruling `j.pm.<id>`; classification `needs-pm` and option `ask-pm`.
+- Secretary handbook at `secretary/SECRETARY.md`, installed and refreshed with the PM handbook, role pages and WI pages.
+
+### Compatibility
+
+- 4.2 records fold unchanged, with no migration or automatic tagging of old words.
+- Without a live Secretary, the project stays in 4.2 mode and older `mp pm` loop names still work; a pending launch does not disable them.
+- A live Secretary adopts in-flight 4.2 dispatches; older `ask-user` aliases `ask-pm`, and queued or claimed decision steps keep working.
+- Old decision classifications and applied history stay readable; runs admitted before generation replacement still record results under their existing guards.
+
+### Upgrade steps
+
+- Run `mp docs update` to install both handbooks and the revised roles and WI pages.
+- Have the PM read its new core and layer 1; leave old untyped words alone until relevant.
+- Run `mp pm secretary start`, launch its printed command with `MP_SECRETARY`, and bind its harness handle; preferably let PM dispatches finish first, or let the resident adopt them.
+- Verify the resident harness launch, attach, messaging and stop behavior on your version; the Claude Code 2.1.319 examples are to verify.
+
 ## [4.2.0] - 2026-11-06
 
 ### Fixed

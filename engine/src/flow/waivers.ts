@@ -41,7 +41,9 @@ export interface ReviewsWaiverBody {
   /** The words entry (W-<n>) or the authorization item line in force. */
   readonly ref: string;
   readonly reason: string | null;
+  readonly scopeOnly?: boolean;
 }
+
 
 /** What waived a plan's reviews: the user's words, an authorization item in force, or (field 4.1.2) the config key. */
 export interface PlanReviewsWaiver {
@@ -101,8 +103,7 @@ export function planReviewsWaiverIn(events: readonly PlanEvent[], mission: strin
     const b = e.body as ReviewsWaiverBody;
     if (b.check !== 'plan-reviews') continue;
     if (b.action === 'withdraw') {
-      inForce = null;
-      withdrawn = true;
+      if (b.scopeOnly !== true || b.dplan === null || b.dplan === dplan) {inForce = null; withdrawn = true;}
     } else if (b.dplan === null || b.dplan === dplan) inForce = b;
   }
   if (inForce !== null) return { by: inForce.by, ref: inForce.ref, reason: inForce.reason };
@@ -116,7 +117,7 @@ export function waiversInForce(events: readonly PlanEvent[]): ReviewsWaiverBody[
   for (const e of events) {
     if (e.event !== REVIEWS_WAIVER) continue;
     const b = e.body as ReviewsWaiverBody;
-    if (b.action === 'withdraw') out = [];
+    if (b.action === 'withdraw') out = b.scopeOnly === true ? out.filter((w) => w.dplan !== b.dplan) : [];
     else out = [...out.filter((x) => x.dplan !== b.dplan), b];
   }
   return out;
@@ -128,7 +129,8 @@ export function waiversInForce(events: readonly PlanEvent[]): ReviewsWaiverBody[
  * and the close snapshot label with it.
  */
 export async function planReviewsWaiver(ctx: FlowCtx, dplan: string): Promise<PlanReviewsWaiver | null> {
-  const events = await eventsOf(ctx, PLAN_LINE);
+  const raw = await eventsOf(ctx, PLAN_LINE);
+  const events = raw.filter((e) => {if (e.event !== REVIEWS_WAIVER) return true; const w = e.body as ReviewsWaiverBody; return w.action === 'withdraw' || w.by !== 'words' || ctx.ports.wordsAuthority === undefined || ctx.ports.wordsAuthority(w.ref, ctx.mission) !== null;});
   const reviews = (await objectRecord(ctx, dplan))?.reviews.map((r) => r.review) ?? null;
   return planReviewsWaiverIn(events, ctx.mission, dplan, ctx.ports.project?.planReviewsWaived ?? [], reviews);
 }

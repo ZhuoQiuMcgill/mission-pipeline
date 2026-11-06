@@ -4,6 +4,8 @@
 // scheduler, isolation or spend fields any more; it shows the dispatches in flight and their age.
 // Notices are shown, never marked: only `mp pm next` marks them delivered.
 
+import { liveSecretary } from '../memory/resident.ts';
+import { pmInbox, unconfirmedSeats, pmDecisionsWithoutWords } from '../process/secretary.ts';
 import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
@@ -26,6 +28,9 @@ export interface Layer0 {
   readonly project: string;
   readonly head: number;
   readonly problems: Project['problems'];
+  readonly unconfirmed: ReturnType<typeof unconfirmedSeats>;
+  readonly pmDecisionsWithoutWords: ReturnType<typeof pmDecisionsWithoutWords>;
+  readonly pmInbox: ReturnType<typeof pmInbox>;
   readonly stops: ReadonlyArray<{ stop: string; scope: string; words: string; wordsEntry: string | null }>;
   readonly missions: ReadonlyArray<{ mission: string; state: string; queued: number; inFlight: number; tasks: number; deliveries: ReadonlyArray<{ delivery: string; state: string; landed: boolean | null }> }>;
   readonly inFlight: ReadonlyArray<{ dispatch: string; seat: string; step: string; mission: string; ageMs: number; filler: string }>;
@@ -85,11 +90,11 @@ export function layer0(p: Project, inScope: (mission: string, subject: string) =
         deliveries: dels.map((d) => ({ delivery: d.delivery, state: d.state, landed: landed.has(`${m.mission}/${d.delivery}`) })),
       };
     });
-    const notices = listNotices(db, data).map((n) => ({ id: n.id, wi: n.wi, state: n.state, trigger: clip(n.trigger, 160), mission: n.mission }));
+    const notices = listNotices(db, data, liveSecretary(db) !== null ? {audience: ctx.secretary === null ? 'pm' : 'secretary'} : {}).map((n) => ({ id: n.id, wi: n.wi, state: n.state, trigger: clip(n.trigger, 160), mission: n.mission }));
     const sum = labelSummary(db);
     const env = recordedEnvironment(db);
     const older = olderEnvironmentProof(db);
-    const c = cursor(db, ASKED_CURSOR);
+    const c = cursor(db, ctx.secretary === null ? ASKED_CURSOR : 'asked.sec');
     let since: Layer0['since'] = null;
     if (c !== null) {
       const changes: Record<string, number> = {};
@@ -101,13 +106,16 @@ export function layer0(p: Project, inScope: (mission: string, subject: string) =
     }
     return {
       format: 'mp41.status.v1',
+      unconfirmed: unconfirmedSeats(db),
+      pmInbox: pmInbox(ctx),
+      pmDecisionsWithoutWords: pmDecisionsWithoutWords(ctx),
       project: p.dir,
       head: Number(ctx.memory.head()),
       problems: p.problems,
       stops,
       missions,
       inFlight: steps.inFlight.map((d) => ({ dispatch: d.dispatch, seat: d.seat, step: d.step, mission: String(d.mission), ageMs: d.ageMs, filler: filler(d.filler) })),
-      waitingOnUser: steps.waitingOnUser.filter((w) => inScope(String(w.mission), w.subject)).map((w) => ({ mission: String(w.mission), escalation: w.escalation, summary: clip(w.summary, 160), options: w.options })),
+      waitingOnUser: steps.waitingOnUser.filter((w) => liveSecretary(db) === null || pmInbox(ctx).some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')).filter((w) => inScope(String(w.mission), w.subject)).map((w) => ({ mission: String(w.mission), escalation: w.escalation, summary: clip(w.summary, 160), options: w.options })),
       notices,
       labels: { recomputing: sum.status.recomputing, toVisit: sum.status.toVisit, toRecompute: sum.status.toRecompute, counts: sum.targets.labels, proofDebt: sum.proofDebt, cycles: sum.cycles },
       landingsOpen: openIntents(db)
@@ -132,6 +140,9 @@ export function layer0Text(l: Layer0): string {
       'none (mp pm mission open <id>)',
     ),
   );
+  lines.push(...section('Unconfirmed seats under stops', l.unconfirmed.map((d) => `${d.dispatch} (${d.mission}); ${d.stops.join(', ')}; stop in harness, release --ended`), 'none'));
+  if (l.pmDecisionsWithoutWords.length) lines.push(...section('Decisions by the PM, no words on record', l.pmDecisionsWithoutWords.map((d) => `${d.mission}/${d.escalation} (${d.applied ? 'in effect' : 'awaits application'}): ${d.reason}`)));
+  if (l.pmInbox.length) lines.push(...section('PM inbox', l.pmInbox.map((i) => `[${i.id}] ${i.state}: ${i.text}; ${i.action}`)));
   lines.push(...section('Dispatches in flight', l.inFlight.map((d) => `${d.dispatch}: ${d.seat} on ${d.step} (${d.mission}), ${age(d.ageMs)}, ${d.filler}`), 'none'));
   lines.push(...section('Waiting on the user', l.waitingOnUser.map((w) => `${w.mission} ${w.escalation}: ${w.summary} (options: ${w.options.join(', ')}; mp pm answer)`), 'nothing'));
   lines.push(...section('Notices not acknowledged', l.notices.map((n) => `[${n.state}] ${n.id}${n.wi !== null ? ` ${wiText(n.wi, dir)}` : ''}: ${n.trigger}`), 'none'));
@@ -181,7 +192,7 @@ export function statusText(s: StatusRead): string {
  */
 export function markAsked(ctx: ProcessContext, head: number): boolean {
   try {
-    ctx.memory.write({}, (tx) => setCursor(tx, { cursor: ASKED_CURSOR, rev: head }));
+    ctx.memory.write({}, (tx) => setCursor(tx, { cursor: ctx.secretary === null ? ASKED_CURSOR : 'asked.sec', rev: head }));
     return true;
   } catch {
     return false;

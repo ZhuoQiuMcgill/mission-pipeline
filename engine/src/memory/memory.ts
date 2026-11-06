@@ -41,6 +41,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { liveSecretary, requireSecretary } from './resident.ts';
 import type { StatementSync } from 'node:sqlite';
 import { canonicalJson, hashJson } from '../common/hash.ts';
 import { revision, type Revision } from '../common/ids.ts';
@@ -105,6 +106,9 @@ export function registerMemoryExtension(ext: MemoryExtension): void {
 
 export interface OpenOptions {
   /** SQLite's busy timeout, and the wait for the maintenance and stop locks (§4.1: 30 s). */
+  readonly deferResidentRecovery?: boolean;
+  readonly secretaryIdentity?: string | null;
+  readonly pendingSecretary?: boolean;
   readonly busyTimeoutMs?: number;
   /** The work budget of one write (§4.1: 2 s). */
   readonly workBudgetMs?: number;
@@ -126,6 +130,7 @@ export interface WriteRequest {
   /** A stop (§4.1): written before anything queued, in every process. */
   readonly stop?: boolean;
   /** The `mp pm` command that issues the write, and the PM's filler (§3.2 item 13); needs `op`. */
+  readonly admittedResult?: boolean;
   readonly command?: string;
   readonly filler?: Filler | null;
   /**
@@ -348,6 +353,9 @@ export class Memory implements Db {
   private readonly now: () => number;
   private current: WriteTx | null = null;
   private inBeforeWrite = false;
+  suppressOperations = false;
+  suppressOperationsWhen: (() => boolean) | null = null;
+  writeGuard: ((tx: WriteTx, req: WriteRequest) => void) | null = null;
   private closed = false;
   /**
    * A damaged event this process saw (a read, a write, the open's gate, a
@@ -584,7 +592,7 @@ export class Memory implements Db {
       if (req.stop === true) throw new LedgerError('BAD_REQUEST', 'a stop gets no work budget of its own');
     }
     this.refuseIfBroken();
-    if (req.stop !== true && !this.inBeforeWrite) {
+    if (req.stop !== true && req.admittedResult !== true && !(this.suppressOperations || this.suppressOperationsWhen?.()) && !this.inBeforeWrite) {
       this.inBeforeWrite = true;
       try {
         for (const ext of this.extensions) ext.beforeWrite?.(this);
@@ -592,7 +600,7 @@ export class Memory implements Db {
         this.inBeforeWrite = false;
       }
     }
-    return this.transaction({ op, payload: req.payload, command: req.command, filler }, fn, { budgetMs: req.workBudgetMs ?? this.workBudgetMs, maintenance: false, stop: req.stop === true });
+    return this.transaction({ op, payload: req.payload, command: req.command, filler }, (tx) => { if (req.admittedResult !== true) this.writeGuard?.(tx, req); return fn(tx); }, { budgetMs: req.workBudgetMs ?? this.workBudgetMs, maintenance: false, stop: req.stop === true });
   }
 
   /** @internal A write for maintenance (init, the recovery after a move, a rebuild): no work budget; `chain: false` skips the chain checks. */
@@ -753,7 +761,7 @@ export class Memory implements Db {
           throw new LedgerError('BAD_REQUEST', 'a write runs synchronously: its callback returned a promise, so the write was rolled back');
         }
         // The extensions finish the write's own work in it (A2: the label propagation of what it appended).
-        if (!opts.maintenance) {
+        if (!opts.maintenance && !(this.suppressOperations || this.suppressOperationsWhen?.())) {
           for (const ext of this.extensions) {
             const r: unknown = ext.beforeCommit?.(tx);
             if (isThenable(r)) {
@@ -1119,7 +1127,9 @@ export function openMemory(projectDir: string, opts: OpenOptions = {}): Memory {
     m.installExtensions();
     const format = m.getMeta('format');
     if (format !== MEMORY_FORMAT) throw new LedgerError('BAD_REQUEST', `${paths.db} is not a project memory of this mp (format ${format ?? 'none'}, expected ${MEMORY_FORMAT})`);
-    recoverIfMoved(m, { path: project, machine: m.machine });
+    if (opts.secretaryIdentity != null) requireSecretary(m, opts.secretaryIdentity, opts.pendingSecretary === true);
+    const resident = opts.deferResidentRecovery === true && liveSecretary(m) !== null;
+    if (!resident) recoverIfMoved(m, { path: project, machine: m.machine });
     m.checkIntegrity();
     return m;
   } catch (e) {

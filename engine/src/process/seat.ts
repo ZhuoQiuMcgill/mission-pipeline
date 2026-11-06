@@ -28,6 +28,7 @@
 // "verified" event of that attempt in the same process (4.1.2: the flow reads it and never runs
 // them again); the first writer of that event wins, the other adopts it.
 
+import { requireSecretary } from '../memory/resident.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -286,6 +287,7 @@ export interface DetachedStart {
  * once. The checks are the foreground rerun's, here first and again in the worker.
  */
 export async function seatRerunDetached(ctx: ProcessContext, dispatch: string, commandId: string, spawner: DetachSpawner = spawnRerunWorker): Promise<DetachedStart> {
+  if (ctx.secretary !== null) ctx.memory.write({}, (tx) => {requireSecretary(tx, ctx.secretary);});
   const t = rerunTarget(ctx, dispatch, commandId);
   const w = await spawner(ctx, { dispatch, command: t.c.id });
   return { ...w, dispatch };
@@ -309,6 +311,7 @@ export async function seatRerunWorker(ctx: ProcessContext, dispatch: string, com
   const line = DISPATCH_LINE(dispatch);
   const started: DetachedBody = { run, evidence, command: t.c.id, dispatch, task: t.v.info.task, pid: process.pid, start: processStart(process.pid), host: hostname(), startedAt: ctx.now() };
   ctx.memory.write({ op: `detached:${run}`, payload: { run, dispatch } }, (tx) => {
+    if (ctx.secretary !== null) requireSecretary(tx, ctx.secretary);
     assertNotStopped(tx, t.v.info.tag, 'this rerun');
     if (dispatchInfo(tx, dispatch)?.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${dispatch} is no longer in flight: a rerun is for a dispatch in flight`);
     appendRecords(tx, [{ kind: 'flow.event', mission: t.v.info.mission, line, event: DETACHED_EVENT, key: run, body: tx.data.put(canonicalJson({ ...started, startedAt: tx.at })) as ContentHash }]);
@@ -328,7 +331,7 @@ export async function seatRerunWorker(ctx: ProcessContext, dispatch: string, com
   const runner = ctx.runner === shellRunner ? groupShellRunner(o.stopping !== undefined ? { stopping: o.stopping } : {}) : ctx.runner;
   const cleanupRunner = ctx.runner === shellRunner ? groupShellRunner() : ctx.runner;
   try {
-    const r = await runOnCommit(ctx, { ...rerunRequest(t, { detached: run, check }), run, evidenceId: () => evidence, runner, cleanupRunner, recordRetries: 3 });
+    const r = await runOnCommit(ctx, { ...rerunRequest(t, { detached: run, check }), alreadyAdmitted: true, run, evidenceId: () => evidence, runner, cleanupRunner, recordRetries: 3 });
     const x = r.runs[0]!;
     return { start, state: 'finished', result: { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail } };
   } catch (e) {
@@ -402,6 +405,7 @@ function integrationReview(ctx: ProcessContext, card: DispatchView['card']): boo
  * visible is wrong.
  */
 export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promise<{ readonly marker: FullRunMarker; readonly reused: boolean }> {
+  if (ctx.secretary !== null) ctx.memory.write({}, (tx) => {requireSecretary(tx, ctx.secretary);});
   const v = dispatchView(ctx, dispatch);
   // a stop stops (§6.6): no suite is run in its scope, refused before any other refusal
   ctx.memory.read((db) => assertNotStopped(db, v.info.tag, 'this full run'));
@@ -690,6 +694,12 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks);
   }
   const out = ctx.memory.write({ op: `handback:${dispatch}`, payload: { seat: seatHash } }, (tx) => {
+    if (v.card.seat === 'secretary') {
+      const claim = flowEvents(tx, {mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'claimed'}).find((e) => e.key === 'spec');
+      const owner = claim === undefined ? null : (JSON.parse(tx.data.text(claim.body)) as {generation?: string | null}).generation;
+      if (owner != null) requireSecretary(tx, owner);
+      if (ctx.secretary !== null) requireSecretary(tx, ctx.secretary);
+    }
     // 5.2 part 5: a continuation judgment is committed only after the labels' check passed for it, carrying
     // exactly the inputs the check merged; a refused one sends the work to a full review (a normal branch)
     const close = dispatchInfo(tx, dispatch)?.state === 'in-flight' ? lateForClose(tx, v.info, v.spec) : null;

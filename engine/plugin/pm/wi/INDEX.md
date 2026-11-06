@@ -1,8 +1,11 @@
-# PM work instructions (WI): index
+# Secretary work instructions (WI): index
 
-Notices name a WI number. Open a WI's page (`WI-NN.md` in this directory) only when a notice names it. Each page gives: trigger and evidence, the default action already taken, the options (with their `mp` commands) and outcomes, how to choose, and when to ask the user.
+The Secretary handles operational notices.
+Open a WI page (`WI-NN.md` here) only when a notice names it.
+Each page gives the trigger and evidence, default, commands and outcomes, choice rule, and PM routing (`needs-pm` / `ask-pm`).
+The PM decides on recorded words or asks the user under F-3.
 
-Principles: an exception stops only the one affected action; the default action never blocks other work; only important design decisions go to the user; the safety floor is never an option. Numbers of retired WIs are not reused, so the list has gaps.
+Principles: an exception stops only the one affected action; the default action never blocks other work; PM-class choices go to the PM inbox; the safety floor is never an option. Numbers of retired WIs are not reused, so the list has gaps.
 
 - WI-01: Target branch checked out in several worktrees, or held by a rebase or bisect: not landed
 - WI-02: Target branch checked out in one worktree that is not clean, or that is external: not landed
@@ -18,21 +21,21 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-20: Inconsistent program records or namespace, or an internal error
 - WI-21: A full run at the end failed
 - WI-23: A re-plan dropped or changed a task that has work in flight
-- WI-24: The Secretary could not decide: you and the user decide (mp pm answer)
+- WI-24: A Secretary decision could not complete: recover its round, or leave it in the PM inbox
 - WI-25: A legalization cannot complete: a broken link, a failed backfill, or the chain not accepted
 - WI-26: A decision-layer step cannot continue as it is (a stop covered it)
 - WI-28: A dispatch is interrupted: its seat ended without a hand-back, or nobody knows (release --ended / --abandoned); a detached run ended
 - WI-29: The memory's event chain is broken: all writes are stopped
 - WI-30: A leaf is missing or edited by hand, or a commit the memory names is not reachable here
 - WI-31: The repository lives outside the folder, a copy shares one repository with another copy, or a copy's worktree links cannot be verified
-- WI-32: Recomputing the labels does not finish (mp pm drain)
+- WI-32: Recomputing the labels does not finish (mp sec drain)
 - WI-33: An exploration awaits a ruling: the Stabilizer found a shift of direction or a drift
 - WI-34: A plan’s current pass judgments leave applicable object constraints uncovered; re-check the PM plan or submit an agreed changed plan
 
 Integration start conflict (notice `integration-start-conflict`, no WI page): only that integration task waits, tried again on every pass; a repair that reopens the dependency whose work conflicts (`mp pm repair ... --about <task>`), or a re-plan, routes it.
 
-Constraint maintenance: `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` (project-wide by default); `mp pm constraint withdraw <id> --words W-n` keeps the record and removes its force.
+PM actions (send choices to its inbox): constraint maintenance, `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` (project-wide by default); `mp pm constraint withdraw <id> --words W-n` keeps the record and removes its force.
 
-The user's decision about an exploration's method: `mp pm repair <mission> --about <exploration> ... --attempts <file> | --rerun <ids> | --resnapshot` applies it on their words, with no round and no review.
+The PM records the user's decision about an exploration's method: `mp pm repair <mission> --about <exploration> ... --attempts <file> | --rerun <ids> | --resnapshot` applies it on their words, with no round and no review.
 
 No-page notices (information; the default is taken): `integration-restarted` and `integration-start-stale` (an integration starts again on its dependencies' current work), `early-start-rebuilt` (work started on a dependency's version that was sent back is carried onto its next one), `accept-risk-moot` (the attempt moved on; nothing was accepted).

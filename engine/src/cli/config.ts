@@ -58,6 +58,7 @@ export const SEATS: readonly string[] = ['pm', 'calibrator', 'architect', 'secre
 
 export const ConfigSchema = z
   .object({
+    projectName: z.string().min(1).max(200).optional(),
     format: z.literal(CONFIG_FORMAT),
     targetBranch: z.string().min(1).max(255).regex(/^[^\s~^:?*[\\]+$/, 'a branch name'),
     verificationCommands: z.array(Command).max(100).default([]),

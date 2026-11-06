@@ -16,6 +16,7 @@
 // 8) and recorded as PM actions under an operation id: the same id again with the same arguments
 // replays the recorded result; with other arguments it is refused (OP_CONFLICT).
 
+import { liveSecretary, requireSecretary, generations } from '../memory/resident.ts';
 import { fullSuiteOf } from '../common/fullSuite.ts';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -130,7 +131,7 @@ function landingProblems(results: readonly LandingResult[]): Problem[] {
  * Open the project for one command: the memory (recovered after a move), its problems, the
  * landing recovery, and for a deciding command the environment identity.
  */
-export async function openProject(io: CliIo, o: { readonly flag: string | null; readonly decides: boolean; readonly recover?: boolean; readonly readsConfig?: boolean; readonly filler?: Filler | null }): Promise<Project> {
+export async function openProject(io: CliIo, o: { readonly flag: string | null; readonly decides: boolean; readonly recover?: boolean; readonly readsConfig?: boolean; readonly filler?: Filler | null; readonly secretary?: string | null; readonly pending?: boolean; readonly seatResult?: boolean }): Promise<Project> {
   const dir = findProject(io.cwd, o.flag, io.env);
   if (dir === null) throw new CliError('NOT_INITIALIZED', `no Mission Pipeline memory here (${o.flag ?? io.cwd}): run \`mp init\` in the project folder, or give --project <dir>`, { exitCode: EXIT.NO_PROJECT });
   // a stop (Appendix E) never reads config.json: a broken or missing one never blocks it; the defaults stand in where the context needs a value
@@ -142,12 +143,15 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   // the project's commands, read once from the config into the context (4.1.2): its full suite
   // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there.
   // Its cleanup commands run after each run's commands, before the run's checkout is removed (runs.ts)
-  const ctx = openProcess(dir, { git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), ...(config.experimentShell === undefined ? {} : { experimentShell: config.experimentShell }), ...(config.shell === undefined ? {} : { shell: config.shell }), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, planReviewsWaived: config.planReviewsWaived ?? [], startOnHandback: config.startOnHandback ?? [], filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
+  const ctx = openProcess(dir, { secretary: o.secretary ?? null, pendingSecretary: o.pending === true, seatResult: o.seatResult === true, open: {deferResidentRecovery: o.secretary == null || o.seatResult === true, ...(o.seatResult === true ? {} : {secretaryIdentity: o.secretary ?? null, pendingSecretary: o.pending === true})}, git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), ...(config.experimentShell === undefined ? {} : { experimentShell: config.experimentShell }), ...(config.shell === undefined ? {} : { shell: config.shell }), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, planReviewsWaived: config.planReviewsWaived ?? [], startOnHandback: config.startOnHandback ?? [], filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {
+    if (o.secretary != null && o.seatResult !== true) requireSecretary(ctx.memory, o.secretary, o.pending === true);
+    const residentPm = o.secretary == null && liveSecretary(ctx.memory) !== null;
+    ctx.memory.suppressOperations = residentPm;
     problems.push(...statusProblems(ctx.memory), ...moveProblems(ctx.memory, startedAt - 1));
-    if (o.recover !== false) {
+    if (o.recover !== false && !residentPm) {
       try {
         const r = await recoverLandings(ctx.gitCtx);
         if (r.kind === 'in-progress') problems.push({ code: 'LANDING_IN_PROGRESS', wi: 'WI-06', message: `a landing is in progress (${r.intents.join(', ')}): nothing was touched` });
@@ -161,7 +165,7 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
       }
     }
     // a deciding command observes the environment first (§6.5), and so does any command that just recovered a moved folder
-    if (o.decides || (o.recover !== false && problems.some((x) => x.code === 'MOVED'))) {
+    if (!residentPm && (o.decides || (o.recover !== false && problems.some((x) => x.code === 'MOVED')))) {
       try {
         const env = ctx.environment();
         if (env.changed && env.previous !== null) problems.push({ code: 'ENVIRONMENT', wi: null, message: `the environment identity changed (${env.previous.slice(0, 12)} → ${env.identity.slice(0, 12)}): runs recorded under the old identity still count and are shown as "older environment"; nothing is rerun unless the PM decides to (\`mp pm renew\`)` });
@@ -179,7 +183,8 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
 // ---------------------------------------------------------------- PM sessions and actions (decision 8)
 
 /** The latest PM session: its id and the filler it recorded. */
-export function latestSession(memory: Memory): { readonly session: string; readonly filler: Filler | null; readonly at: number } | null {
+export function latestSession(memory: Memory, secretary: string | null = null): { readonly session: string; readonly filler: Filler | null; readonly at: number } | null {
+  if (secretary !== null) {const g = generations(memory).find((g) => g.generation === secretary); return g?.session == null ? null : {session: g.session, filler: g.filler, at: g.claimedAt ?? g.createdAt};}
   return memory.read((db) => {
     const r = db.stmt("SELECT action, args, started_at FROM pm_actions WHERE command = 'session' ORDER BY rev DESC LIMIT 1").get() as { action: string; args: string; started_at: number } | undefined;
     if (r === undefined) return null;

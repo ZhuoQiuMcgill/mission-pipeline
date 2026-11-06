@@ -1,7 +1,9 @@
 // `mp read …`: the layered reads and the tree reads (design 4.1 §8). Reads change nothing except
 // "since the maintainer last asked" (`mp read status` moves it, unless --no-mark).
 
-import { flagBool, positional } from '../args.ts';
+import { generations, liveSecretary } from '../../memory/resident.ts';
+import { taggedWords } from '../../memory/words.ts';
+import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { CliError, EXIT, refused, usage } from '../errors.ts';
 import type { Project } from '../project.ts';
@@ -179,4 +181,12 @@ const fullRuns: Command = {
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+
+
+const secretaryRead: Command = {group: 'read', name: ['secretary'], summary: 'the resident generation, handle, claim and last command times', usage: 'mp read secretary', flags: {}, async run(c) {const p = P(c); const all = generations(p.ctx.memory); const live = liveSecretary(p.ctx.memory); const current = live ?? all.filter((g) => g.state === 'pending').at(-1) ?? null; return ok(current === null ? 'No pending or live Secretary; the 4.2 PM loop is available.' : `${current.generation} ${current.state}: ${current.name}\nHandle: ${current.handle ?? '(not recorded; stop by name)'}; claimed: ${current.claimedAt ?? 'not yet'}; last command: ${current.lastCommandAt ?? 'none'}`, {live, current, generations: all});}};
+const wordsRead: Command = {
+  group: 'read', name: ['words'], summary: 'layer 2 words by tag, mission, force, text or untyped entries', usage: 'mp read words [--tag <type>] [--mission <mission>] [--in-force|--all] [--grep <text>] [--untyped]', flags: {tag: 'string', mission: 'string', 'in-force': 'boolean', all: 'boolean', grep: 'string', untyped: 'boolean'},
+  async run(c, a) {const p = P(c); const tag = flagStr(a, 'tag'), mission = flagStr(a, 'mission'), grep = flagStr(a, 'grep')?.toLocaleLowerCase(); if (tag !== null && !['principle','decision','requirement','instruction'].includes(tag)) throw usage('unknown words tag'); if (flagBool(a, 'all') && flagBool(a, 'in-force')) throw usage('choose --all or --in-force'); const entries = taggedWords(p.ctx.memory, p.ctx.memory.data); const words = entries.map((w) => ({...w, tags: w.tags.filter((t) => (tag === null || t.type === tag) && (mission === null || t.mission === mission) && (!flagBool(a, 'in-force') || t.inForce))})).filter((w) => (flagBool(a, 'untyped') ? w.tags.length === 0 && entries.find((x) => x.words === w.words)!.tags.length === 0 : w.tags.length > 0 || (tag === null && mission === null && !flagBool(a, 'in-force'))) && (grep === undefined || w.text.toLocaleLowerCase().includes(grep))); return ok(words.length ? words.flatMap((w) => w.tags.length ? w.tags.map((t) => `[${t.id}] ${t.type}${t.mission ? ` @${t.mission}` : ''} (${t.inForce ? 'in force' : 'out of force'}): ${t.quote ?? w.text}`) : [`[${w.words}] untyped: ${w.text}`]).join('\n') : 'No matching words.', {words});},
+};
+
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];

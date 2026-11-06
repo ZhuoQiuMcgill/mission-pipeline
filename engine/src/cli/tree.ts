@@ -447,7 +447,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           if (n !== undefined) {
             const dec = (b['decision'] ?? null) as Json | null;
             // 4.1.3 (E-1): accepted by a decision with its risks: whose decision, and the open findings it took on
-            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${((b['risks'] ?? []) as unknown[]).length} open finding(s) on the risk list`);
+            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : dec['by'] === 'pm' ? 'the PM' : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${((b['risks'] ?? []) as unknown[]).length} open finding(s) on the risk list`);
             else addCheck(n, `accepted (${String(b['judgment'] ?? '')})`);
             // the acceptance names its judgment; the judgment names its Reviewer dispatch and the runs it cites
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
@@ -465,7 +465,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           }
         }
       } else if (f.line === SECRETARY_LINE) {
-        const id = `${f.mission}/${f.key}`;
+        const id = `${f.mission}/${typeof b['escalation'] === 'string' ? b['escalation'] : f.event === 'pm-answer-rejected' && typeof b['id'] === 'string' ? b['id'] : f.key}`;
         if (f.event === 'escalation') {
           const n = node('escalation', id, f.mission, f.rev, `${String(b['source'] ?? '')}: ${clip(String(b['summary'] ?? b['subject'] ?? ''), 120)}`);
           n.state = 'open';
@@ -480,7 +480,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
             const v = versionAt(line, f.rev);
             if (v !== null) edge(n.key, `requirement:${v}`, 'involves');
           }
-        } else if (f.event === 'decision' || f.event === 'user-answer') {
+        } else if (f.event === 'decision' || f.event === 'user-answer' || f.event === 'pm-answer') {
           const user = f.event === 'user-answer' || b['by'] === 'user';
           const what = `${String(b['option'] ?? '')}${b['classification'] ? ` (${String(b['classification'])})` : ''}`;
           const text = `${what}: ${clip(String(b['reason'] ?? b['instructions'] ?? ''), 100)}`;
@@ -503,12 +503,22 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
               node('words', w[1]!, null, 0);
               edge(n.key, `words:${w[1]}`, 'the user decided in');
             }
+          } else if (b['by'] === 'pm') {
+            n.by = 'the PM'; n.state = 'recorded; awaits application';
+            for (const w of (b['words'] ?? []) as {id: string}[]) {node('words', w.id, null, 0); edge(n.key, `words:${w.id}`, 'the PM decided on');}
           } else {
             const t = byKey.get(flowKey(f.mission, SECRETARY_LINE, 'escalation', f.key))?.body['task'];
             const d = typeof t === 'string' ? handingDispatch(t) : null;
             n.by = d !== null ? seatBy(d) : `the ${String(b['by'] ?? 'Secretary')}`;
             if (d !== null) edge(n.key, `dispatch:${d}`, 'handed back by');
             n.state = 'recorded';
+          }
+        } else if (f.event === 'pm-answer-rejected') {
+          const n = nodes.get(`decision:${id}`);
+          if (n?.by === 'the PM') {
+            n.state = `rejected: the words it rested on changed; PM answer round ${Number(b['round'] ?? 1) + 1} waits`;
+            addCheck(n, n.state);
+            const esc = nodes.get(`escalation:${id}`); if (esc !== undefined) esc.state = 'open; awaits a current PM or user answer';
           }
         } else if (f.event === 'applied') {
           const n = nodes.get(`decision:${id}`);

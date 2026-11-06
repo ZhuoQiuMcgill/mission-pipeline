@@ -54,6 +54,9 @@ export function errorMessage(e: unknown): string {
 
 /** The 4.1 work instruction for the process actions' errors (process/actions.ts ActionError) and the flows' refusals of a PM action, which carry none. */
 const BY_CODE: Readonly<Record<string, string | null>> = {
+  NOT_ALLOWED: null,
+  NOT_READY: null,
+  STALE_REQUEST: null,
   // the flows' refusals of a PM action (nothing was written)
   'already-applied': 'WI-24',
   'withdrawn-item': null,

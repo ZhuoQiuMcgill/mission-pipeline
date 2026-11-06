@@ -40,7 +40,7 @@ import { explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardL
 import { acceptedProduct, lineAcceptance, pathOwners } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints } from './requirements.ts';
-import { decisionFor, escalateToUser, isApplied, markApplied, raiseEscalation } from './secretary.ts';
+import { grantForDecision, grantedAttempt, decisionFor, escalateToUser, isApplied, markApplied, raiseEscalation } from './secretary.ts';
 import { recordExplorationRerun } from './exploration/flow.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED, type AttemptRerunBody, type AttemptsAmendedBody, type ConsumedBody, type ResnapshotBody, type Role } from './exploration/machine.ts';
 import { WI } from './wi.ts';
@@ -291,13 +291,13 @@ async function repairReturn(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, t
   const d = await decisionFor(ctx, id);
   if (d === null || d.option !== 'grant') return;
   if (!(await isApplied(ctx, id))) {
-    const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'mechanical-return', by: d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
+    const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'mechanical-return', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
     if (!g.granted) {
       await escalateToUser(ctx, id, `the Secretary's grant on lineage ${lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
       return;
     }
-    await ctx.ports.ledger.loopAttempt({ op: `flow:repair-return:${ctx.mission}:${task}:granted`, lineage, loop: 'mechanical-return', signature: `${signature}:granted` });
-    await markApplied(ctx, id, { option: 'grant', extra: d.grantExtra });
+    await grantedAttempt(ctx, g, { op: `flow:repair-return:${ctx.mission}:${task}:granted`, lineage, loop: 'mechanical-return', signature: `${signature}:granted` });
+    await markApplied(ctx, id, { option: 'grant', extra: d.grantExtra }, g.records);
   }
   await newAttempt(ctx, r.id, { ...next, reason: 'granted', mechanicalFailures: [...failures, ...(d.instructions !== '' ? [d.instructions] : [])] });
 }

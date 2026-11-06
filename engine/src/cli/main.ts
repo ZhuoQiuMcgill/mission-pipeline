@@ -19,6 +19,8 @@ import '../evaluator/index.ts';
 import { GLOBAL_FLAGS, flagBool, flagStr, parseArgs, type ParsedArgs } from './args.ts';
 import { commandName, type Command, type CommandResult, type RunContext } from './command.ts';
 import { ADMIN_COMMANDS, mpVersion } from './commands/admin.ts';
+import { SEC_COMMANDS, RESIDENT_PM_COMMANDS } from './commands/secretary.ts';
+import { requirePm, requireDriver, requireSecretary, touchSecretary, generations } from '../memory/resident.ts';
 import { PM_COMMANDS } from './commands/pm.ts';
 import { READ_COMMANDS } from './commands/read.ts';
 import { SEAT_COMMANDS } from './commands/seat.ts';
@@ -27,7 +29,7 @@ import { actionArgs, beginAction, checkOpId, endAction, latestSession, newOpId, 
 import { problemLines, wiText } from './render.ts';
 import { parseFiller } from '../process/index.ts';
 
-export const COMMANDS: readonly Command[] = [...PM_COMMANDS, ...SEAT_COMMANDS, ...READ_COMMANDS, ...ADMIN_COMMANDS];
+export const COMMANDS: readonly Command[] = [...PM_COMMANDS, ...RESIDENT_PM_COMMANDS, ...SEC_COMMANDS, ...SEAT_COMMANDS, ...READ_COMMANDS, ...ADMIN_COMMANDS];
 
 export interface CliOutput {
   readonly exitCode: number;
@@ -36,7 +38,7 @@ export interface CliOutput {
 }
 
 /** PM commands whose first positional is a sub-command (recorded as "<command> <sub>"). */
-const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission']);
+const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission', 'secretary']);
 
 function groupHelp(group: string): string {
   const cs = COMMANDS.filter((c) => c.group === group);
@@ -45,7 +47,7 @@ function groupHelp(group: string): string {
 }
 
 export function help(group?: string): string {
-  if (group === 'pm' || group === 'seat' || group === 'read') return `mp ${group}: ${group === 'pm' ? 'the PM\'s commands' : group === 'seat' ? 'a dispatched seat\'s commands (its card lists the ones it may use)' : 'the reads (layered, and the tree reads)'}\n\n${groupHelp(group)}\n\nUsage of one command: mp ${group} ${group === 'seat' ? '<dispatch> ' : ''}<command> --help`;
+  if (group === 'pm' || group === 'sec' || group === 'seat' || group === 'read') return `mp ${group}: ${group === 'pm' ? 'the PM\'s commands' : group === 'seat' ? 'a dispatched seat\'s commands (its card lists the ones it may use)' : 'the reads (layered, and the tree reads)'}\n\n${groupHelp(group)}\n\nUsage of one command: mp ${group} ${group === 'seat' ? '<dispatch> ' : ''}<command> --help`;
   return [
     `mp ${mpVersion()}: Mission Pipeline — an objective project memory, role descriptions and a process.`,
     '',
@@ -54,6 +56,9 @@ export function help(group?: string): string {
     '',
     'The PM (any harness that can run a shell command):',
     groupHelp('pm'),
+    '',
+    'The resident Secretary:',
+    groupHelp('sec'),
     '',
     'A dispatched seat:',
     groupHelp('seat'),
@@ -71,14 +76,14 @@ function find(argv: readonly string[]): { cmd: Command; rest: string[] } | { hel
   if ((g === 'help' || g === '--help') && rest.length > 0) {
     // `mp help pm plan`, `mp help seat handback`, `mp help init`: one command's usage
     const [group, ...words] = rest;
-    const name = group === 'pm' || group === 'read' || group === 'seat' ? words.filter((w) => !w.startsWith('<'))[0] : group;
+    const name = group === 'pm' || group === 'sec' || group === 'read' || group === 'seat' ? words.filter((w) => !w.startsWith('<'))[0] : group;
     const cmd = name === undefined ? undefined : COMMANDS.find((c) => c.name[0] === name && (c.group === group || (c.group === 'admin' && group === name)));
     if (cmd !== undefined) return { help: `${cmd.summary}\nUsage: ${cmd.usage}` };
     return { help: help(group) };
   }
   if (g === undefined || g === 'help' || g === '--help' || g === '-h') return { help: help(rest[0]) };
   if (g === '--version' || g === 'version') return { help: mpVersion() };
-  if (g === 'pm' || g === 'read') {
+  if (g === 'pm' || g === 'sec' || g === 'read') {
     const name = rest[0];
     if (name === undefined || name === '--help' || name === 'help') return { help: help(g) };
     const cmd = COMMANDS.find((c) => c.group === g && c.name[0] === name);
@@ -130,19 +135,29 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
     const args = parseArgs(rest, spec);
     if (flagBool(args, 'help')) return { exitCode: 0, stdout: `${cmd.summary}\nUsage: ${cmd.usage}\n`, stderr: '' };
     const json = flagBool(args, 'json');
+    const identity = io.env.MP_SECRETARY || null;
+    if (cmd.group === 'pm') requirePm(identity);
     if (cmd.noProject !== true) {
-      project = await openProject(io, { flag: flagStr(args, 'project'), decides: cmd.decides === true && cmd.stop !== true, recover: cmd.stop !== true, readsConfig: cmd.stop !== true });
+      project = await openProject(io, { flag: flagStr(args, 'project'), decides: cmd.decides === true && cmd.stop !== true, recover: cmd.stop !== true, readsConfig: cmd.stop !== true, secretary: identity, pending: cmd.group === 'sec' && cmd.name[0] === 'session', seatResult: cmd.group === 'seat' });
       problems = project.problems;
+      if (cmd.group === 'sec') {
+        requireSecretary(project.ctx.memory, identity, cmd.name[0] === 'session');
+        if (!['session','next','wait'].includes(cmd.name[0]!)) touchSecretary(project.ctx.memory, identity);
+      }
+      if (cmd.group === 'pm' && ['next','dispatch','release','drain','renew','alerts','ack'].includes(cmd.name[0]!)) {
+        requireDriver(project.ctx.memory, null); project.ctx.operational = true;
+      }
+      if (cmd.group === 'read') project.ctx.pureRead = true;
     }
     let replayed = false;
     let result: CommandResult;
-    if (cmd.group === 'pm' && project !== null) {
+    if ((cmd.group === 'pm' || cmd.group === 'sec') && project !== null) {
       op = checkOpId(flagStr(args, 'op') ?? newOpId(cmd.name[0]!, now));
       // decision 8: the PM's filler is the latest session's (`--filled-by` overrides it; on dispatch it names the seat's filler)
-      const session = latestSession(project.ctx.memory);
+      const session = latestSession(project.ctx.memory, cmd.group === 'sec' ? identity : null);
       const own = cmd.name[0] === 'dispatch' ? null : parseFiller(flagStr(args, 'filled-by'));
       project.ctx.filler = own ?? session?.filler ?? null;
-      const action = { op, command: [cmd.name[0]!, ...(WITH_SUB.has(cmd.name[0]!) && args.positionals[0] !== undefined ? [args.positionals[0]] : [])].join(' '), args: identityOf(cmd, args), stop: cmd.stop === true };
+      const action = { op, command: [...(cmd.group === 'sec' ? ['sec'] : []), cmd.name[0]!, ...(WITH_SUB.has(cmd.name[0]!) && args.positionals[0] !== undefined ? [args.positionals[0]] : [])].join(' '), args: cmd.group === 'sec' ? {generation: identity, args: identityOf(cmd, args)} : identityOf(cmd, args), stop: cmd.stop === true };
       const c: RunContext = { io, project, op, now };
       if (cmd.unrecorded === true) result = await cmd.run(c, args);
       else if (cmd.stop === true) {

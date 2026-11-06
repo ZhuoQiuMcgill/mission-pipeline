@@ -50,6 +50,7 @@
 // operating system releases the lock when its holder exits however it exits, so a killed holder
 // blocks nothing: the next call executes in a checkout of its own. Sampling runs take no lock.
 
+import { requireSecretary } from '../memory/resident.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
@@ -509,6 +510,8 @@ export async function runOnCommit(
   ctx: ProcessContext,
   req: {
     readonly mission: MissionId | string;
+    /** The detached worker's start transaction already admitted this group. */
+    readonly alreadyAdmitted?: boolean;
     readonly commit: string;
     readonly commands: readonly DeclaredCommand[];
     readonly purpose: string;
@@ -539,6 +542,7 @@ export async function runOnCommit(
     readonly recordRetries?: number;
   },
 ): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
+  if (ctx.secretary !== null && req.alreadyAdmitted !== true) ctx.memory.write({}, (tx) => {requireSecretary(tx, ctx.secretary);});
   const env = ctx.environment();
   const classOf = (c: DeclaredCommand): RunClass => runClassOf({ ...req.declaration, sampled: c.sampled === true, network: c.network === true });
   // Every declared command takes its own lock, including in a mixed group and when
@@ -617,7 +621,7 @@ async function executeRuns(
   }
   const text = summaryLeaf({ run, mission: req.mission, commit: req.commit, purpose: req.purpose, runClass: records[0]?.runClass ?? 'other', environment: env, runs: executed, cleanup });
   const leaf = runLeaf(req.mission, run);
-  const record = () => ctx.memory.write({ op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
+  const record = () => ctx.memory.write({ admittedResult: true, op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
     if (records.length > 0) appendRecords(tx, records as BaseRecord[]);
     tx.leaves.writeDocument(leaf, text);
     return req.also?.(tx, executed, run, records);

@@ -219,6 +219,8 @@ export function taskCardHash(t: DetailedTask): string {
 }
 
 export const DetailedPlanDoc = z.object({
+  dataFormats: z.array(z.string()).optional(),
+  storage: z.array(z.string()).optional(),
   reusedInterfaces: z.array(z.object({ name: z.string().min(1), file: z.string().min(1), location: z.string().min(1), provenance: TaskProvenance })),
   newInterfaces: z.array(
     z.object({

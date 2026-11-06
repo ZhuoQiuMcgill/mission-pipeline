@@ -3,6 +3,7 @@
 // `mp pm next`. Nothing runs between commands: the process advances only while some PM session
 // runs `mp` (§5.1 step 5, accepted cost).
 
+import { liveSecretary } from '../memory/resident.ts';
 import type { MissionId } from '../common/ids.ts';
 import { createFlowEngine } from '../flow/compose.ts';
 import type { ReconcileReport } from '../flow/engine.ts';
@@ -15,6 +16,8 @@ import type { ProcessContext } from './context.ts';
  * environment is left to the PM's next step, without a notice (4.1.2).
  */
 export async function advance(ctx: ProcessContext, mission?: MissionId, by?: { readonly dispatch: string | null; readonly task: string | null; readonly step: string }, o: { readonly seatSide?: boolean } = {}): Promise<ReconcileReport[]> {
+  if (o.seatSide === true && ctx.secretary !== null && liveSecretary(ctx.memory)?.generation !== ctx.secretary) return [];
+  if (liveSecretary(ctx.memory) !== null && (ctx.secretary === null || o.seatSide === true)) return [];
   const prev = ctx.handover;
   ctx.handover = by ?? prev ?? { dispatch: null, task: null, step: 'the process advanced (mp pm next)' };
   try {

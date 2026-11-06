@@ -81,7 +81,7 @@ export function feasibilityReturn(c: ArchitectFeasibilityCard, detail: string): 
 }
 
 export function secretary(c: SecretaryCard, option: DecisionOption, o: { classification?: SecretaryResult['classification']; instructions?: string; grantExtra?: number; authorization?: string | null; notice?: string } = {}): SecretaryResult {
-  const classification = o.classification ?? (option === 'ask-user' ? 'needs-user' : 'detail');
+  const classification = o.classification ?? (option === 'ask-pm' ? 'needs-pm' : option === 'ask-user' ? 'needs-user' : 'detail');
   return {
     option,
     classification,
