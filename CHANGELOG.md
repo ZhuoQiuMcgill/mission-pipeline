@@ -6,7 +6,7 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
-## [4.2.0] - unreleased
+## [4.2.0] - 2026-11-06
 
 ### Fixed
 - #47: a review's or repair's reopen of a decided, used-up loop gets its own escalation;
