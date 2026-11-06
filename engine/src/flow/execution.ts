@@ -181,6 +181,17 @@ export function lineAcceptance(events: Line['events']): { abandoned: boolean; k:
   return { abandoned: line.abandoned, k: line.k, product, pinned: dispatch === undefined || dispatch.body.prerequisites !== undefined };
 }
 
+/** A version stands at its own product/rebind attempt, unless a later accepted product
+ * event adopts it. Prefer that accepted attempt; retain acceptance-only legacy records. */
+export function productAttempt(events: Line['events'], product: string): number | null {
+  const line = new Line(events);
+  const products = line.all<ProductBody>('product').filter((p) => p.body.object === product);
+  const accepted = line.all<{ k: number; product: string }>('accepted').filter((a) => a.body.product === product);
+  const adoption = accepted.findLast((a) => products.some((p) => p.body.k === a.body.k));
+  return adoption?.body.k ?? products[0]?.body.k ??
+    line.all<RebindBody>('rebind').find((r) => r.body.product === product)?.body.k ?? accepted.at(-1)?.body.k ?? null;
+}
+
 /** A task's current acceptance by a decision with its risks (4.1.3, accept-risk). */
 export interface RiskAcceptance {
   readonly k: number;
@@ -401,14 +412,22 @@ async function rereviewStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlan
       });
     }
   }
-  const requests: Array<{ readonly key: string; readonly revision: number; readonly body: { readonly reason: string } }> = [
+  let requests: Array<{ readonly key: string; readonly revision: number; readonly body: { readonly reason: string } }> = [
     ...(await eventsOf<ReviewNeededBody>(ctx, RENEW_LINE, REVIEW_NEEDED))
       .filter((e) => e.body.target === cur.product && e.body.review === 'reviewer')
       .map((e) => ({ key: e.key, revision: e.revision, body: { reason: `the environment changed (${e.body.reason}), so the runs were recorded again under the current environment` } })),
     ...line.all<{ k: number; reason: string; product?: string }>('basis-revised').filter((e) => e.body.k === k && (e.body.product ?? original) === cur.product),
   ].sort((a, b) => a.revision - b.revision);
+  const history = line.all<RereviewBody>('rereview');
+  // Completed requests belong to the product version, including rounds before adoption.
+  // Their original attempt and runs remain history; only a later request starts a new round.
+  const handled = history.filter((r) => r.body.k !== k && line.one('review', r.body.rev) !== null &&
+    (r.body.product ?? line.one<{ product: string }>('accepted', String(r.body.k))?.product) === cur.product &&
+    productAttempt(line.events, cur.product) === k);
+  const through = Math.max(0, ...handled.map((r) => requests.find((q) => q.key === r.body.request)?.revision ?? 0));
+  requests = requests.filter((q) => q.revision > through);
   if (requests.length === 0) return;
-  const all = line.all<RereviewBody>('rereview').filter((r) => r.body.k === k);
+  const all = history.filter((r) => r.body.k === k);
   const rounds = all.filter((r) => (r.body.product ?? original) === cur.product);
   const last = rounds.at(-1);
   let request = requests.at(-1)!;
@@ -2467,13 +2486,15 @@ export function builtOnOlder(prerequisites: readonly string[], lines: ReadonlyMa
   const out: Array<{ prerequisite: string; task: string; attempt: number; newer: string }> = [];
   for (const [task, events] of lines) {
     const line = new Line(events);
-    const versions = new Map(line.all<{ k: number; product: string }>('accepted').map((a) => [a.body.product, a.body.k]));
-    for (const r of line.all<ReboundBody>('rebound')) versions.set(r.body.product, r.body.k);
+    const versions = new Set([
+      ...line.all<{ product: string }>('accepted').map((a) => a.body.product),
+      ...line.all<ReboundBody>('rebound').map((r) => r.body.product),
+    ]);
     const now = lineAcceptance(events);
     if (now.product === null) continue;
     for (const p of prerequisites) {
-      const k = versions.get(p);
-      if (k !== undefined && p !== now.product && now.k > k) out.push({ prerequisite: p, task, attempt: k, newer: now.product });
+      const k = versions.has(p) ? productAttempt(events, p) : null;
+      if (k !== null && p !== now.product && now.k > k) out.push({ prerequisite: p, task, attempt: k, newer: now.product });
     }
   }
   return out;

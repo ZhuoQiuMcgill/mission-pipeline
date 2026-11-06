@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { acceptedProduct, taskLineage } from '../src/flow/execution.ts';
+import { acceptedProduct, builtOnOlder, productAttempt, taskLineage } from '../src/flow/execution.ts';
 import { RENEW_LINE, REVIEW_NEEDED, type ReviewNeededBody } from '../src/flow/plandoc.ts';
 import { recordItem } from '../src/flow/requirements.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
@@ -13,6 +13,7 @@ import { compareToCommit } from '../src/git/workspace.ts';
 import { compareWorktree, land } from '../src/git/land.ts';
 import { pmClose } from '../src/process/close.ts';
 import { pmRepair } from '../src/process/pm.ts';
+import { dispatchView } from '../src/process/seat.ts';
 import { buildGraph, resolveNodes, walk } from '../src/cli/tree.ts';
 import type { ReviewerCard } from '../src/seat/card.ts';
 import type { SecretaryCard } from '../src/seat/cards/secretary.ts';
@@ -208,6 +209,97 @@ test('S2 a review-reopen risk acceptance can renew and queue a Reviewer for the 
   assert.ok(review, 'renewal queues the normal re-review of the adopted product');
   assert.equal((review.card as unknown as ReviewerCard).target, product);
   await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  assert.ok((await events(w, 'task:integ', 'reaccepted')).some((e) => e.body.k === 2 && e.body.product === product));
+  await unchanged(w, engine);
+});
+
+test('B the resolver and older-product reads prefer adoption over a product rebind origin', () => {
+  const line: Parameters<typeof productAttempt>[0][number][] = [];
+  const append = (event: string, key: string, body: unknown) => line.push({ revision: line.length + 1, event, key, body });
+  append('product', '1', { k: 1, object: 'original' });
+  append('accepted', '1', { k: 1, product: 'original', judgment: 'j1' });
+  append('rebind', '1:1', { k: 1, product: 'rebound', from: 'original' });
+  append('rebound', '1:1', { k: 1, product: 'rebound', judgment: 'jb' });
+  assert.equal(productAttempt(line, 'original'), 1);
+  assert.equal(productAttempt(line, 'rebound'), 1);
+  append('rework', '2', { k: 2, reason: 'rebuild' });
+  append('product', '2', { k: 2, object: 'rebound' });
+  append('accepted', '2', { k: 2, product: 'rebound', judgment: 'j2' });
+  assert.equal(productAttempt(line, 'rebound'), 2);
+  append('rework', '3', { k: 3, reason: 'respec' });
+  append('product', '3', { k: 3, object: 'newer' });
+  append('accepted', '3', { k: 3, product: 'newer', judgment: 'j3' });
+  assert.deepEqual(builtOnOlder(['rebound'], new Map([['integ', line]])), [
+    { prerequisite: 'rebound', task: 'integ', attempt: 2, newer: 'newer' },
+  ]);
+  assert.equal(productAttempt(line, 'unknown'), null);
+});
+
+async function requestIntegrationReview(w: World, product: string, reason: string) {
+  const accepted = (await events(w, 'task:integ', 'accepted')).at(-1)!.body;
+  const environment = w.ctx.environment().identity;
+  const key = `${accepted.judgment}@${environment}`;
+  const body: ReviewNeededBody = { target: product, judgment: accepted.judgment, review: 'reviewer', environment, reason, rerun: null, passed: null };
+  await w.ledger.append(`test:renew:${key}`, { events: [{ mission: M, line: RENEW_LINE, event: REVIEW_NEEDED, key, body }] });
+  return key;
+}
+
+test('B a renewal re-review settled by reopen accept-risk is not replayed after adoption', async () => {
+  const { w, engine } = await usedUp();
+  await drive(engine, w.scheduler, script());
+  const product = await acceptedProduct(flowCtx(w, M), 'integ');
+  assert.ok(product);
+  const request = await requestIntegrationReview(w, product, 'renew the original integration judgment');
+  await drive(engine, w.scheduler, script({ reviewer: reopenReview, secretary: () => null }));
+  const round = (await events(w, 'task:integ', 'rereview')).at(-1)!;
+  assert.equal(round.body.k, 1);
+  assert.equal(round.body.request, request);
+  const esc = (await escalations(w)).at(-1)!;
+  const words = say(w, 'Settle this renewal with the reviewed integration and its risks.');
+  await answerEscalation(w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept the reviewed integration. (${words})` });
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  assert.equal(await acceptedProduct(flowCtx(w, M), 'integ'), product);
+  assert.equal((await events(w, 'task:integ', 'accepted')).at(-1)!.body.k, 2);
+  assert.equal((await events(w, 'task:integ', 'rereview')).length, 1, 'the same renewal request does not start another round');
+  assert.deepEqual(w.scheduler.queued('reviewer'), []);
+  await unchanged(w, engine);
+  // The settled request does not suppress a genuinely later renewal of the ruling.
+  const later = await requestIntegrationReview(w, product, 'renew the later accept-risk ruling');
+  assert.notEqual(later, request);
+  await drive(engine, w.scheduler, script({ reviewer: () => null }));
+  assert.equal((await events(w, 'task:integ', 'rereview')).at(-1)!.body.request, later);
+  assert.ok(w.scheduler.queued('reviewer').some((t) => t.task === 'rev.m1.integ.2.e1'));
+  await unchanged(w, engine);
+  await drive(engine, w.scheduler, script());
+  await unchanged(w, engine);
+});
+
+test('B an adopted product renewal keeps the user answer on the dispatched Reviewer card', async () => {
+  const { w, engine, product } = await acceptedReopenRisk();
+  await requestIntegrationReview(w, product, 'renew the adopted integration judgment');
+  await drive(engine, w.scheduler, script({ reviewer: () => null }));
+  const first = w.scheduler.queued('reviewer').find((t) => t.task === 'rev.m1.integ.2.e1')!;
+  assert.ok(first);
+  assert.deepEqual(await w.scheduler.run(first.task, { handBack: reviewer(first.card as unknown as ReviewerCard, 'needs-decision', { findings: ['Which compatibility rule applies?'] }) }), []);
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  const esc = (await events<EscalationBody>(w, 'secretary', 'escalation')).find((e) => e.body.id === `rnd.${first.task}`)!.body;
+  const instructions = 'Use the documented compatibility rule, including the older client.';
+  const words = say(w, instructions);
+  await answerEscalation(w, { mission: M, escalation: esc.id, option: 'answer', instructions, words: `${instructions} (${words})` });
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  const answer = (await events(w, 'task:integ', 'reanswer')).at(-1)!;
+  assert.equal(answer.key, '2:1');
+  assert.equal(answer.body.decision, instructions);
+  const next = w.scheduler.queued('reviewer').find((t) => t.task === 'rev.m1.integ.2.e2')!;
+  assert.ok(next);
+  const queued = next.card as unknown as ReviewerCard;
+  assert.ok(queued.decisionQuotes.includes(instructions));
+  const dispatched = dispatchView(w.ctx, w.scheduler.dispatchOf(next.task)).card as unknown as ReviewerCard;
+  assert.deepEqual(dispatched.decisionQuotes, queued.decisionQuotes, 'dispatch preserves the answer belonging to attempt 2');
+  assert.ok(dispatched.decisionQuotes.includes(instructions));
+  await unchanged(w, engine);
+  assert.deepEqual(await w.scheduler.run(next.task, { handBack: reviewer(dispatched, 'pass') }), []);
   await drive(engine, w.scheduler, script());
   assert.ok((await events(w, 'task:integ', 'reaccepted')).some((e) => e.body.k === 2 && e.body.product === product));
   await unchanged(w, engine);

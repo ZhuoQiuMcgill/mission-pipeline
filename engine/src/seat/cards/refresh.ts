@@ -7,7 +7,7 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { taskCardHash, taskLineage } from '../../flow/execution.ts';
+import { productAttempt, taskCardHash, taskLineage } from '../../flow/execution.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
@@ -153,8 +153,8 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       card.binding.constraints = data.putList(input.checks);
       card.constraints = [...input.list, ...(task === undefined ? [] : constraintsForTask(constraints, task, mission).filter((c) => c.kind === 'instruction').map((c) => ({ id: c.line, text: c.text, kind: c.kind })))];
       if (task !== undefined) {
-        const product = events.find((e) => e.line === `task:${task!.id}` && ((e.event === 'product' && (e.body as { object: string }).object === card.target) || (e.event === 'rebind' && (e.body as { product: string }).product === card.target)))?.body as { k: number } | undefined;
-        if (product !== undefined) card.decisionQuotes = reviewerDecisionQuotes(mission, items, events, task, constraints, product.k, taskReferencePlan(events, fixed));
+        const attempt = productAttempt(events.filter((e) => e.line === `task:${task!.id}`), card.target);
+        if (attempt !== null) card.decisionQuotes = reviewerDecisionQuotes(mission, items, events, task, constraints, attempt, taskReferencePlan(events, fixed));
       }
       break;
     }
