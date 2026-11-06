@@ -96,7 +96,7 @@ import {
 } from './plandoc.ts';
 import type { FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, currentConstraints, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
-import { cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
+import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 import { currentSettle, settledArtifactProven } from './exploration/step.ts';
 import { planReviewsWaiver, waiverLabel, type PlanReviewsWaiver } from './waivers.ts';
@@ -353,6 +353,8 @@ function renderPmPlan(d: PmPlanDoc): string {
 export function renderDetailedPlan(p: DetailedPlanDoc): string {
   const prov = (x: { provenance: DetailedTask['provenance'] }): string => provenanceText(x.provenance);
   return [
+    ...(p.dataFormats ?? []).map((f) => `data format: ${f}`),
+    ...(p.storage ?? []).map((f) => `storage: ${f}`),
     ...p.reusedInterfaces.map((i) => `reused interface ${i.name} at ${i.file}:${i.location} (${prov(i)})`),
     ...p.newInterfaces.map((i) => `new interface ${i.name}: ${i.definition}; searched: ${i.searched} (${prov(i)})`),
     ...p.modules.map((m) => `module ${m.id}: ${m.writeScope.join(', ')} (${prov(m)})`),
@@ -1059,6 +1061,26 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     }
   }
 
+  let structureCarry: Carry | null = null;
+  if (ctx.ports.resident?.() && (await eventOf(ctx, PLAN_LINE, 'effective', dplan)) === null) {
+    const previous = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).filter((e) => e.body.pmPlan === b.plan).at(-1)?.body;
+    const old = previous === undefined ? null : await detailedPlanOf(ctx, previous.dplan);
+    const diff = old === null ? [] : structuralDiff(amendedPlan(old.plan, previous?.amendments), plan);
+    if (diff.length > 0) {
+      const id = safeId(`structure.${dplan}`);
+      await raiseEscalation(ctx, {id, source: 'plan-structure-change', lineage, subject: `plan:${b.plan}`, summary: `Detailed plan ${dplan} changes the structure of ${previous!.dplan}.`, reasons: diff, changed: diff.join('\n'), options: ['approve', 'send-back'], facts: {dplan, inEffect: previous!.dplan, diff}});
+      const decision = await decisionFor(ctx, id);
+      if (decision === null) return;
+      if (decision.by !== 'pm' && decision.by !== 'user') return;
+      if (decision.option === 'send-back') {
+        await newAttempt(ctx, b, {reason: 'secretary', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [decision.instructions], conclusions: []}, a.k + 1, [], [await carryOut(ctx, id, {option: 'send-back'})]);
+        return;
+      }
+      if (decision.option !== 'approve') return;
+      structureCarry = await carryOut(ctx, id, {option: 'approve', dplan});
+    }
+  }
+
   // 4.1.3 (E-2; the cause of #35): a plan in effect never goes back through its reviews. A waiver
   // withdrawn, or the config key changed, after it took effect leaves it in effect, and its rounds
   // (the re-plan routing below) go on; before 4.1.3 its review gates ran again on every pass
@@ -1118,13 +1140,13 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
         if (d === null) return;
         if (d.option === 'send-back') {
           if (!(await isApplied(ctx, id))) {
-            const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'feasibility-return', by: d.by === 'user' ? 'user' : 'secretary', extra: 1, reason: d.reason });
+            const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'feasibility-return', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: 1, reason: d.reason });
             if (!g.granted) {
               await escalateToUser(ctx, id, `sending ${dplan} back needs one more feasibility return on lineage ${lineage}, and the Secretary's grant is used (${g.why ?? 'refused'}): only the user can allow it`, WI.loopExhausted);
               return;
             }
-            await ctx.ports.ledger.loopAttempt({ op: `flow:feasibility-return:${ctx.mission}:${dplan}:granted`, lineage, loop: 'feasibility-return', signature: shortHash([d.instructions]) });
-            await markApplied(ctx, id, { option: 'send-back' });
+            await grantedAttempt(ctx, g, { op: `flow:feasibility-return:${ctx.mission}:${dplan}:granted`, lineage, loop: 'feasibility-return', signature: shortHash([d.instructions]) });
+            await markApplied(ctx, id, { option: 'send-back' }, g.records);
           }
           await newAttempt(ctx, b, { reason: 'secretary', previous: dplan, mechanicalFailures: [], feasibilityFindings: fb.findings, instructions: [d.instructions], conclusions: [] }, a.k + 1);
           return;
@@ -1159,8 +1181,9 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const moot = waiver === null ? [] : (await openEscalations(ctx, `plan:${b.plan}`)).filter((e) => e.id === safeId(`cal2.${dplan}`) || e.id === safeId(`feas.${dplan}`)).map((e) => e.id);
     const close = closing(ctx, moot, `detailed plan ${dplan}: ${reviewsWaived === null ? '' : waiverLabel(reviewsWaived)}`);
     const body: EffectiveBody = { dplan, pmPlan: b.plan, n: b.n, round: b.round, mode: b.mode, tasks: plan.tasks.map((t) => t.id), risks, ...(reviewsWaived !== null ? { reviewsWaived } : {}) };
-    const guard = carryGuard([close]);
-    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...close.events], records, ...(guard !== undefined ? { guard } : {}) });
+    const carries = [close, ...(structureCarry === null ? [] : [structureCarry])];
+    const guard = carryGuard(carries);
+    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...carries.flatMap((c) => c.events)], records: [...records, ...carries.flatMap((c) => c.records)], ...(guard !== undefined ? { guard } : {}) });
     await cancelSecretarySteps(ctx, moot);
     // stable mode reads the waived plan as settled by the waiver (execution's gate): its tasks start on it,
     // and their products read "not fully proven" (the plan has no review to prove it)
@@ -1213,13 +1236,13 @@ async function planReturn(
   const d = await decisionFor(ctx, id);
   if (d === null || d.option !== 'grant') return;
   if (!(await isApplied(ctx, id))) {
-    const g = await ctx.ports.scheduler.grant({ op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'mechanical-return', by: d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
+    const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${id}:${d.by}`, lineage, loop: 'mechanical-return', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
     if (!g.granted) {
       await escalateToUser(ctx, id, `the Secretary's grant on lineage ${lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
       return;
     }
-    await ctx.ports.ledger.loopAttempt({ op: `flow:mechanical-return:${ctx.mission}:${dplan}:granted`, lineage, loop: 'mechanical-return', signature: `${signature}:granted` });
-    await markApplied(ctx, id, { option: 'grant', extra: d.grantExtra });
+    await grantedAttempt(ctx, g, { op: `flow:mechanical-return:${ctx.mission}:${dplan}:granted`, lineage, loop: 'mechanical-return', signature: `${signature}:granted` });
+    await markApplied(ctx, id, { option: 'grant', extra: d.grantExtra }, g.records);
   }
   await newAttempt(ctx, b, { ...next, instructions: [...next.instructions, ...(d.instructions !== '' ? [d.instructions] : [])] }, a.k + 1);
 }
@@ -1665,4 +1688,19 @@ export async function internalError(ctx: FlowCtx, key: string, what: string): Pr
 export async function pmPlanDoc(ctx: FlowCtx, plan: string): Promise<PmPlanDoc | null> {
   const o = await objectRecord(ctx, plan);
   return o === null ? null : PmPlanDoc.parse(JSON.parse(ctx.ports.ledger.content.get(o.content as ContentHash)));
+}
+
+/** Compare declared structure; task card prose and acceptance text do not require approval. */
+export function structuralDiff(before: DetailedPlanDoc, after: DetailedPlanDoc): string[] {
+  const out: string[] = [];
+  const oldIds = new Set(before.tasks.map((t) => t.id)), newIds = new Set(after.tasks.map((t) => t.id));
+  const added = [...newIds].filter((id) => !oldIds.has(id)), dropped = [...oldIds].filter((id) => !newIds.has(id));
+  if (added.length) out.push(`tasks added: ${added.join(', ')}`);
+  if (dropped.length) out.push(`tasks dropped: ${dropped.join(', ')}`);
+  const canonical = (v: readonly unknown[]) => canonicalJson(v.map((x) => canonicalJson(x)).sort());
+  const interfaces = (p: DetailedPlanDoc) => [...p.reusedInterfaces.map(({name, file, location}) => ({name, file, location})), ...p.newInterfaces.map(({name, definition}) => ({name, definition})), ...p.tasks.map((t) => ({id: t.id, module: t.module, implements: [...t.implements].sort(), calls: [...t.calls].sort()}))];
+  if (canonical(interfaces(before)) !== canonical(interfaces(after))) out.push(`declared module interfaces changed: ${canonicalJson(interfaces(before))} → ${canonicalJson(interfaces(after))}`);
+  if (canonical(before.dataFormats ?? []) !== canonical(after.dataFormats ?? [])) out.push(`declared data formats changed: ${canonicalJson(before.dataFormats ?? [])} → ${canonicalJson(after.dataFormats ?? [])}`);
+  if (canonical(before.storage ?? []) !== canonical(after.storage ?? [])) out.push(`declared storage changed: ${canonicalJson(before.storage ?? [])} → ${canonicalJson(after.storage ?? [])}`);
+  return out;
 }

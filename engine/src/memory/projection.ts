@@ -158,6 +158,9 @@ export function project(s: Db, rec: LogRecord, ctx: ProjectionContext): void {
     case 'cursor.set':
       s.stmt('INSERT INTO cursors (cursor, rev, at, set_rev) VALUES (?, ?, ?, ?) ON CONFLICT(cursor) DO UPDATE SET rev = excluded.rev, at = excluded.at, set_rev = excluded.set_rev').run(rec.cursor, rec.rev, ctx.at, ctx.rev);
       return;
+    case 'secretary.generation':
+      setState(s, `resident:generation:${rec.generation}`, canonicalJson(rec));
+      return;
     case 'memory.init':
     case 'memory.moved':
     case 'memory.git-confirmed':

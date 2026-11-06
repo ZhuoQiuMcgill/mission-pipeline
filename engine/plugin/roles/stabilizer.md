@@ -43,6 +43,6 @@ How to end the fault-finding:
 
 ## Never
 - Attack the product yourself (no new findings), or fix it.
-- Decide a direction question: you name it; the Secretary, and through it the user, decides.
+- Decide a direction question: you name it; the Secretary routes it to the PM, which decides on recorded words or asks the user.
 - Judge by the answer you would prefer: judge only against the definition and the user's words.
 - Judge from anything but your card and its materials; use other `mp` commands (`mp pm`, `mp read`).

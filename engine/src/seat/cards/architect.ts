@@ -94,6 +94,8 @@ export const ArchitectDecomposeCardSchema = z.object({
 export type ArchitectDecomposeCard = z.infer<typeof ArchitectDecomposeCardSchema>;
 
 export const ArchitectDecomposeResultShape = {
+  dataFormats: z.array(z.string()).optional(),
+  storage: z.array(z.string()).optional(),
   reusedInterfaces: z.array(z.object({ name: z.string(), file: z.string(), location: z.string(), provenance: TaskProvenance })).describe('Existing interfaces the plan reuses, with file and location.'),
   newInterfaces: z
     .array(
@@ -283,6 +285,8 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
     `## Target\nDetailed plan version ${c.target} (review position: feasibility)\n\n` +
     list('Reused interfaces', p.reusedInterfaces.map((i) => `${i.name} at ${i.file}:${i.location}`)) +
     list('New interfaces', p.newInterfaces.map((i) => `${i.name}: ${i.definition}`)) +
+    (p.dataFormats === undefined ? '' : list('Data formats', p.dataFormats)) +
+    (p.storage === undefined ? '' : list('Storage', p.storage)) +
     list('Modules', p.modules.map((m) => `${m.id}: ${m.writeScope.join(', ')}`)) +
     list(
       'Tasks',

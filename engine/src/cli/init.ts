@@ -59,6 +59,7 @@ export function installedDocs(): Map<string, string> {
   const m = new Map<string, string>();
   for (const f of filesUnder(join(INSTALLED_PLUGIN, 'roles'))) if (f.endsWith('.md') && !f.includes('/')) m.set(`roles/${f}`, join(INSTALLED_PLUGIN, 'roles', f));
   for (const f of filesUnder(join(INSTALLED_PLUGIN, 'pm'))) if (f.endsWith('.md')) m.set(`pm/${f}`, join(INSTALLED_PLUGIN, 'pm', ...f.split('/')));
+  for (const f of filesUnder(join(INSTALLED_PLUGIN, 'secretary'))) if (f.endsWith('.md')) m.set(`secretary/${f}`, join(INSTALLED_PLUGIN, 'secretary', ...f.split('/')));
   return m;
 }
 

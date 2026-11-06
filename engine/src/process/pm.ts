@@ -1,3 +1,5 @@
+import { requireDriver, liveSecretary, requirePm } from '../memory/resident.ts';
+import { wordsAuthority, assignTagsInTx } from '../memory/words.ts';
 import { constraintApplies, constraintPatternProblem, CONSTRAINT_PATTERN_FORMS, withdrawConstraint } from '../memory/domain/constraints.ts';
 import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 // The PM's dispatch loop and commands (design 4.1 §5.1, §5.4, §6.5, §6.6; decisions 8, 15, 18).
@@ -75,7 +77,7 @@ import { planInEffect, submitPmBatch } from '../flow/planning.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
 import { recordRepair } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
-import { answerEscalation, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
+import { answerEscalation, answerByPm, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
 import { flowCtx, missionClosed } from '../flow/context.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import { pendingTasks } from '../flow/exploration/machine.ts';
@@ -113,6 +115,7 @@ import { carriedRunLines, detachedRunNotes, stopDetachedRuns, type DetachedRunNo
 
 /** §4.1: one bounded label batch before a decision that reads labels (the frontier stays stored when it does not finish). */
 function settleLabels(ctx: ProcessContext): void {
+  if (ctx.secretary === null && liveSecretary(ctx.memory) !== null) return;
   try {
     labelBatch(ctx.memory);
   } catch {
@@ -313,10 +316,10 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
         const d = decisions.get(e.key);
         const dBody = d === undefined ? null : (JSON.parse(ctx.memory.data.text(d.body)) as DecisionBody);
         const t = toUser.get(e.key);
-        const why = t !== undefined ? (JSON.parse(ctx.memory.data.text(t.body)) as { why: string }).why : dBody !== null && dBody.classification === 'needs-user' ? dBody.notice || dBody.reason : null;
+        const why = t !== undefined ? (JSON.parse(ctx.memory.data.text(t.body)) as { why: string }).why : dBody !== null && (dBody.classification === 'needs-user' || dBody.classification === 'needs-pm') ? dBody.notice || dBody.reason : null;
         if (why === null) continue;
         const esc = JSON.parse(ctx.memory.data.text(e.body)) as EscalationBody;
-        waitingOnUser.push({ mission: m, escalation: esc.id, subject: esc.subject, summary: esc.summary, options: esc.options.filter((o) => o !== 'ask-user'), why });
+        waitingOnUser.push({ mission: m, escalation: esc.id, subject: esc.subject, summary: esc.summary, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), why });
       }
     }
     return { ready, held, inFlight, waitingOnUser };
@@ -337,7 +340,7 @@ function tidyWorktrees(ctx: ProcessContext): void {
 }
 
 /** `mp pm next` (§5.1 step 1). */
-export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: boolean } = {}): Promise<NextReport> {
+async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: boolean } = {}): Promise<NextReport> {
   ctx.environment();
   settleLabels(ctx);
   let landings: RecoveryReport | null = null;
@@ -366,7 +369,7 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
     errors.push(`detached runs: ${(e as Error).message}`);
   }
   const data = ctx.memory.data;
-  const notices = ctx.memory.read((db) => listNotices(db, data)).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
+  const notices = ctx.memory.read((db) => listNotices(db, data, ctx.secretary !== null ? {audience: 'secretary'} : {})).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
   if (o.markDelivered !== false) markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
   const st = ctx.memory.read((db) => labelStatus(db));
   return {
@@ -381,7 +384,8 @@ export async function pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
 }
 
 /** `mp pm alerts --ack <id...>`: notices acknowledged (never back). */
-export function pmAck(ctx: ProcessContext, ids: readonly string[]): { readonly acknowledged: number } {
+function driver_pmAck(ctx: ProcessContext, ids: readonly string[]): { readonly acknowledged: number } {
+  if (ctx.secretary !== null) {const allowed = new Set(listNotices(ctx.memory, ctx.memory.data, {audience: 'secretary', includeAcknowledged: true}).map((n) => n.id)); if (ids.some((id) => !allowed.has(id))) throw new ProcessError('NOT_ALLOWED', 'Secretary acknowledgments name notices addressed to the Secretary; PM notices resolve through the PM inbox');}
   return { acknowledged: markNotices(ctx.memory, ids, 'acknowledged') };
 }
 
@@ -429,7 +433,7 @@ function claimOnceMore<T>(claim: () => T): T {
 }
 
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
-export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Dispatched {
+function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Dispatched {
   settleLabels(ctx);
   const filler = parseFiller(o.filledBy);
   const task = ctx.memory.read((db) => db.stmt('SELECT task, card, state, mission FROM tasks WHERE task = ?').get(step) as { task: string; card: string; state: string; mission: string } | undefined);
@@ -454,6 +458,7 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       const after = heldByPredecessors(tx, tx.data, spec);
       if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
       spec = refreshDispatchCard(tx, tx.data, spec);
+      if (spec.card.seat === 'secretary' && liveSecretary(tx) !== null) spec = {...spec, card: {...spec.card, classifications: ['detail', 'needs-pm']}};
       // an exploration's step names the snapshot in force, taken again first when nothing of it ran yet and the branch moved
       spec = claimExplorationStep(tx, spec, head);
       const refreshed = tx.data.put(canonicalJson(spec));
@@ -467,7 +472,7 @@ export function pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
       for (const r of spec.exclusive ?? []) acquireLease(tx, { resource: r, dispatch });
       // which step and which spec this dispatch took over (§3.2 item 1: the run chain)
-      appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: refreshed, task: step, lineage: spec.lineage, dispatches: prior })) as ContentHash }]);
+      appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: refreshed, task: step, lineage: spec.lineage, dispatches: prior, generation: ctx.secretary })) as ContentHash }]);
       return { dispatch, card, cardLeaf: claimed.card?.leaf ?? dispatchLeaf(task.mission, dispatch, 'card'), worktree: claimed.worktree };
     },
     filler,
@@ -515,7 +520,7 @@ export interface Released {
 }
 
 /** `mp pm release <id> --ended | --abandoned` (§5.4, WI-28). */
-export async function pmRelease(ctx: ProcessContext, dispatch: string, how: 'ended' | 'abandoned', o: { readonly filler?: Filler | null } = {}): Promise<Released> {
+async function driver_pmRelease(ctx: ProcessContext, dispatch: string, how: 'ended' | 'abandoned', o: { readonly filler?: Filler | null } = {}): Promise<Released> {
   const d = ctx.memory.read((db) => dispatchInfo(db, dispatch));
   if (d === null) throw new LedgerError('UNKNOWN_DISPATCH', `no dispatch ${dispatch}`);
   const r = pmWrite(
@@ -577,7 +582,7 @@ export interface Renewed {
 }
 
 /** `mp pm renew` (§6.5): rerun the declared commands of the affected runs on clean checkouts; equal outputs renew the evidence. */
-export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
+async function driver_pmRenew(ctx: ProcessContext): Promise<Renewed> {
   const env = ctx.environment();
   const c = ctx.memory.read((db) => renewalCandidates(db));
   const reruns: Array<Renewed['reruns'][number]> = [];
@@ -659,7 +664,7 @@ export async function pmRenew(ctx: ProcessContext): Promise<Renewed> {
         // All pairs, including reused replacements, are renewed in one write.
         const pairs = originals.flatMap((cand) => cand.judgments.map((j) => [j.judgment, cand.evidence, replacementFor(r.runs, cand).evidence])).sort((a, b) => canonicalJson(a) < canonicalJson(b) ? -1 : canonicalJson(a) > canonicalJson(b) ? 1 : 0);
         const payload = { environment: env.identity, pairs };
-        results = ctx.memory.write({ op: `renew-pairs:${env.identity}:${sha256(canonicalJson(pairs))}`, payload }, (tx) => renewGroup(tx, r.runs));
+        results = ctx.memory.write({ admittedResult: true, op: `renew-pairs:${env.identity}:${sha256(canonicalJson(pairs))}`, payload }, (tx) => renewGroup(tx, r.runs));
       }
       reruns.push(...results);
     } catch (e) {
@@ -740,7 +745,7 @@ function missionOfEvidence(ctx: ProcessContext, evidence: string): string {
 }
 
 /** `mp pm drain` (§4.1, WI-32): label batches until the frontier is empty. */
-export function pmDrain(ctx: ProcessContext, o: { readonly maxBatches?: number } = {}): DrainReport {
+function driver_pmDrain(ctx: ProcessContext, o: { readonly maxBatches?: number } = {}): DrainReport {
   return drain(ctx.memory, o);
 }
 
@@ -768,17 +773,21 @@ export function pmStop(ctx: ProcessContext, req: { readonly stop: string; readon
  * words entry W-<n> before anything else. The same text as the latest entry returns that entry
  * (a hook adapter and the PM's own `say` record once).
  */
-export function pmSay(ctx: ProcessContext, text: string, o: { readonly session?: string; readonly at?: number } = {}): { readonly words: string; readonly repeated: boolean } {
+export function pmSay(ctx: ProcessContext, text: string, o: { readonly session?: string; readonly at?: number; readonly op?: string; readonly tags?: readonly string[]; readonly supersedes?: readonly string[]; readonly withdraw?: readonly string[]; readonly keep?: readonly string[] } = {}): { readonly words: string; readonly repeated: boolean } {
+  requirePm(ctx.secretary);
   const latest = ctx.memory.read((db) => latestUserWords(db, 1)[0] ?? null);
   if (latest !== null && latest.text === sha256(text)) {
     const w = ctx.memory.read((db) => wordsOfMessage(db, latest.message));
-    if (w !== null) return { words: w.words, repeated: true };
+    if (w !== null) {
+      if (o.tags?.length) ctx.memory.write({op: `say-tags:${o.op ?? sha256(canonicalJson({words: w.words, tags: o.tags}))}`, payload: o}, (tx) => assignTagsInTx(tx, {op: o.op ?? w.words, words: w.words, tags: o.tags!, supersedes: o.supersedes, withdraw: o.withdraw, keep: o.keep}));
+      return { words: w.words, repeated: true };
+    }
   }
   const at = o.at ?? ctx.now();
   const message = `say-${sha256(`${at}\n${text}`).slice(0, 24)}`;
   // the session the words were said in: the PM session `mp pm session` recorded last (decision 8), unless named
   const session = o.session ?? ctx.memory.read((db) => latestPmSession(db)) ?? 'pm';
-  const r = pmWrite(ctx, 'say', `say:${message}`, { message, text: sha256(text) }, (tx) => recordWords(tx, { message, session, at, text }));
+  const r = pmWrite(ctx, 'say', `say:${message}`, { message, text: sha256(text) }, (tx) => {const w = recordWords(tx, { message, session, at, text }); if (o.tags?.length) assignTagsInTx(tx, {op: o.op ?? message, words: w.words, tags: o.tags, supersedes: o.supersedes, withdraw: o.withdraw, keep: o.keep}); return w;});
   return { words: r.words, repeated: r.repeated };
 }
 
@@ -1058,8 +1067,8 @@ export async function pmPlan(
  * `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n] [--findings F,...]`:
  * the user's decision. 4.1.3 (#39): a grant on an exploration may name the findings it is for.
  */
-export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<void> {
-  const text = wordsText(ctx, req.words);
+export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly by?: 'pm' | 'user'; readonly noWords?: boolean; readonly reason?: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<void> {
+  const text = req.by === 'pm' ? '' : wordsText(ctx, req.words);
   const findings = [...new Set((req.findings ?? []).map((f) => f.trim()).filter((f) => f !== ''))];
   if (findings.length > 0) {
     if (req.option !== 'grant') throw new LedgerError('BAD_REQUEST', '--findings goes with --option grant (the findings the granted round is for)');
@@ -1069,7 +1078,8 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
     const unknown = findings.filter((f) => !s.findings.has(f));
     if (unknown.length > 0) throw new LedgerError('BAD_REQUEST', `${line.slice('exploration:'.length)} has no finding ${unknown.join(', ')} (mp read show exploration lists its findings)`);
   }
-  await answerEscalation(ctx.ports(), {
+  if (req.by === 'pm') await answerByPm(ctx.ports(), {...req, mission: req.mission as MissionId, words: req.words.split(',').map((w) => w.trim()).filter(Boolean), reason: req.reason ?? ''});
+  else await answerEscalation(ctx.ports(), {
     mission: req.mission as MissionId,
     escalation: req.escalation,
     option: req.option,
@@ -1082,9 +1092,12 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
 }
 
 /** `mp pm grant <lineage> <loop> --extra <n> --words W-<n>` (WI-08: after the Secretary's one grant, only the user). */
-export async function pmGrant(ctx: ProcessContext, req: { readonly mission?: string; readonly lineage: string; readonly loop: LoopKind; readonly extra: number; readonly words: string }): Promise<{ readonly granted: boolean; readonly why?: string }> {
-  const text = wordsText(ctx, req.words);
-  const g = await ctx.ports().scheduler.grant({ op: `grant:user:${req.lineage}:${req.loop}:${sha256(`${req.words}:${req.extra}`).slice(0, 12)}`, lineage: req.lineage, loop: req.loop, by: 'user', extra: req.extra, reason: `${text} (${req.words})` });
+export async function pmGrant(ctx: ProcessContext, req: { readonly mission?: string; readonly lineage: string; readonly loop: LoopKind; readonly extra: number; readonly words: string; readonly by?: 'pm' | 'user' }): Promise<{ readonly granted: boolean; readonly why?: string }> {
+  const ids = req.by === 'pm' ? req.words.split(',').map((w) => w.trim()).filter(Boolean) : [req.words];
+  if (ids.length === 0) throw new ProcessError('NOT_ALLOWED', 'a PM grant requires --words W-n');
+  const text = ids.map((id) => wordsText(ctx, id)).join('\n');
+  const words = req.by === 'pm' ? ids.map((id) => {const fingerprint = wordsAuthority(ctx.memory, ctx.memory.data, id, req.mission); if (fingerprint === null) throw new ProcessError('NOT_ALLOWED', `${id} is no longer in force`); return {id, fingerprint, ...(req.mission === undefined ? {} : {mission: req.mission})};}) : undefined;
+  const g = await ctx.ports().scheduler.grant({ op: `grant:${req.by ?? 'user'}:${req.lineage}:${req.loop}:${sha256(`${req.words}:${req.extra}`).slice(0, 12)}`, lineage: req.lineage, loop: req.loop, by: req.by ?? 'user', words, extra: req.extra, reason: `${text} (${req.words})` });
   await advance(ctx, req.mission as MissionId | undefined, { dispatch: null, task: null, step: 'mp pm grant' });
   return g;
 }
@@ -1166,3 +1179,51 @@ export function dispatchCandidate(ctx: ProcessContext, dispatch: string): string
 }
 
 export type { ReconcileReport };
+
+export async function pmNext(...args: Parameters<typeof driver_pmNext>): Promise<Awaited<ReturnType<typeof driver_pmNext>>> {
+  const ctx = args[0];
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return await driver_pmNext(...args); } finally { ctx.operational = was; }
+}
+
+export function pmDispatch(...args: Parameters<typeof driver_pmDispatch>): ReturnType<typeof driver_pmDispatch> {
+  const ctx = args[0];
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return driver_pmDispatch(...args); } finally { ctx.operational = was; }
+}
+
+export async function pmRelease(...args: Parameters<typeof driver_pmRelease>): Promise<Awaited<ReturnType<typeof driver_pmRelease>>> {
+  const ctx = args[0];
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return await driver_pmRelease(...args); } finally { ctx.operational = was; }
+}
+
+export async function pmRenew(...args: Parameters<typeof driver_pmRenew>): Promise<Awaited<ReturnType<typeof driver_pmRenew>>> {
+  const ctx = args[0];
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return await driver_pmRenew(...args); } finally { ctx.operational = was; }
+}
+
+export function pmDrain(...args: Parameters<typeof driver_pmDrain>): ReturnType<typeof driver_pmDrain> {
+  const ctx = args[0];
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return driver_pmDrain(...args); } finally { ctx.operational = was; }
+}
+
+export function pmAck(...args: Parameters<typeof driver_pmAck>): ReturnType<typeof driver_pmAck> {
+  const ctx = args[0];
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return driver_pmAck(...args); } finally { ctx.operational = was; }
+}

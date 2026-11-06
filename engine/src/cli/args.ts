@@ -5,7 +5,7 @@
 import { missionIdProblem } from '../common/ids.ts';
 import { usage } from './errors.ts';
 
-export type FlagKind = 'string' | 'boolean' | 'list';
+export type FlagKind = 'string' | 'boolean' | 'list' | 'repeat';
 
 export interface ParsedArgs {
   readonly positionals: readonly string[];
@@ -47,9 +47,9 @@ export function parseArgs(argv: readonly string[], spec: Readonly<Record<string,
       value = next;
       i++;
     }
-    if (kind === 'list') {
+    if (kind === 'list' || kind === 'repeat') {
       const prev = flags[name];
-      const items = value.split(',').map((s) => s.trim()).filter((s) => s !== '');
+      const items = (kind === 'repeat' ? [value] : value.split(',')).map((s) => s.trim()).filter((s) => s !== '');
       flags[name] = [...(Array.isArray(prev) ? prev : []), ...items];
     } else {
       if (flags[name] !== undefined) throw usage(`--${name} may be given only once`);

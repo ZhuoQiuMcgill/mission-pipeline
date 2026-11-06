@@ -3,6 +3,9 @@
 // parses the arguments, calls the process, and renders the answer with the WI an exception names.
 // The words a command rests on are named as words entries (`--words W-<n>`, decision 1).
 
+import { pmLayer1 } from '../pmMemory.ts';
+import { taggedWords, wordsAuthority } from '../../memory/words.ts';
+import { liveSecretary } from '../../memory/resident.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
@@ -119,7 +122,8 @@ const session: Command = {
     const p = P(c);
     const f = parseFiller(flagStr(args, 'filled-by'));
     if (f === null) throw usage('--filled-by "<harness>/<model>": who fills the PM in this session (information only)');
-    const inFlight = p.ctx.memory.read((db) => db.stmt("SELECT dispatch, seat, task, created_at FROM dispatches WHERE state = 'in-flight' ORDER BY claimed_rev").all() as Array<{ dispatch: string; seat: string; task: string; created_at: number }>);
+    const resident = liveSecretary(p.ctx.memory);
+    const inFlight = resident !== null ? [] : p.ctx.memory.read((db) => db.stmt("SELECT dispatch, seat, task, created_at FROM dispatches WHERE state = 'in-flight' ORDER BY claimed_rev").all() as Array<{ dispatch: string; seat: string; task: string; created_at: number }>);
     const lines = [
       `PM session ${c.op} recorded: the PM is filled by ${filler(f)}. Every mp pm command from now on is attributed to it.`,
       ...(inFlight.length > 0 ? [`${inFlight.length} dispatch(es) in flight from earlier work: ${inFlight.map((d) => `${d.dispatch} (${d.seat}, ${age(c.now - Number(d.created_at))})`).join(', ')}. Decide per ${wiText('WI-28', p.dir)}.`] : []),
@@ -127,9 +131,10 @@ const session: Command = {
       `The handbook core (${pmHandbookPath(p.dir).startsWith(p.dir) ? '.mission-pipeline/pm/PM.md' : pmHandbookPath(p.dir)}):`,
       pmCoreText(p.dir),
       '',
-      `Work instructions: read only the index (${wiDir(p.dir).startsWith(p.dir) ? '.mission-pipeline/pm/wi/INDEX.md' : `${wiDir(p.dir)}/INDEX.md`}). Next: mp pm next`,
+      resident !== null ? `Resident operator: ${resident.name} (${resident.generation}). PM decisions and replies: mp pm inbox.` : `Work instructions: read only the index (${wiDir(p.dir).startsWith(p.dir) ? '.mission-pipeline/pm/wi/INDEX.md' : `${wiDir(p.dir)}/INDEX.md`}). Next: mp pm next`,
     ];
-    return ok(lines.join('\n'), { session: c.op, filler: f, inFlight: inFlight.map((d) => d.dispatch) });
+    lines.push('', pmLayer1(p.ctx));
+    return ok(lines.join('\n'), { session: c.op, filler: f, inFlight: inFlight.map((d) => d.dispatch), layer1: pmLayer1(p.ctx) });
   },
 };
 
@@ -137,9 +142,9 @@ const say: Command = {
   group: 'pm',
   name: ['say'],
   summary: 'record the user\'s message verbatim as a words entry W-<n>, before anything else (§6.1; the same text again is the same entry, decision 9)',
-  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin',
-  flags: { file: 'string', stdin: 'boolean' },
-  identity: (a) => ({ text: a.positionals.join(' '), file: flagStr(a, 'file'), stdin: flagBool(a, 'stdin') }),
+  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin\n       [--tag <type[@mission][:"quote"]>] … [--supersedes W-n#k,…] [--withdraw-items <ids>] [--keep-items <ids>]',
+  flags: { file: 'string', stdin: 'boolean', tag: 'repeat', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list' },
+  identity: (a) => ({ text: a.positionals.join(' '), file: flagStr(a, 'file'), stdin: flagBool(a, 'stdin'), tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items') }),
   async run(c, args) {
     const p = P(c);
     const file = flagStr(args, 'file');
@@ -153,7 +158,8 @@ const say: Command = {
       text = args.positionals.join(' ');
     }
     if (text.trim() === '') throw usage('the message is empty');
-    const r = pmSay(p.ctx, text);
+    if (flagList(args, 'supersedes').length && !flagList(args, 'tag').length) throw usage('--supersedes requires the new message’s --tag');
+    const r = pmSay(p.ctx, text, {op: c.op!, tags: flagList(args, 'tag'), supersedes: flagList(args, 'supersedes'), withdraw: flagList(args, 'withdraw-items'), keep: flagList(args, 'keep-items')});
     const stop = detectStop(text);
     const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`];
     if (stop.detected) lines.push(`These words look like a stop (${stop.triggers.join(', ')}): if the user means it, at once \`mp pm stop "<the words>" --words ${r.words}\`.`);
@@ -760,28 +766,31 @@ const waive: Command = {
   },
 };
 
-const OPTIONS = DECISION_OPTIONS.filter((o) => o !== 'ask-user');
+const OPTIONS = DECISION_OPTIONS.filter((o) => o !== 'ask-user' && o !== 'ask-pm');
 
 const answer: Command = {
   group: 'pm',
   name: ['answer'],
   summary: 'the user\'s decision on an escalation waiting for them; carried out like a Secretary decision (WI-24)',
-  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)`,
-  flags: { option: 'string', words: 'string', instructions: 'string', extra: 'string', findings: 'string' },
+  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>"\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)`,
+  flags: { option: 'string', words: 'string', by: 'string', 'no-words': 'boolean', reason: 'string', instructions: 'string', extra: 'string', findings: 'string' },
   async run(c, args) {
     const p = P(c);
     const m = missionArg(args, 0);
     const esc = positional(args, 1, 'escalation');
     const option = flagStr(args, 'option');
-    if (option === null || !OPTIONS.includes(option as Exclude<DecisionOption, 'ask-user'>)) throw usage(`--option is one of ${OPTIONS.join(', ')}`);
-    const w = wordsArg(p.ctx, args, true)!;
+    if (option === null || !OPTIONS.includes(option as Exclude<DecisionOption, 'ask-user' | 'ask-pm'>)) throw usage(`--option is one of ${OPTIONS.join(', ')}`);
+    const by = flagStr(args, 'by') ?? 'user';
+    if (by !== 'pm' && by !== 'user') throw usage('--by is pm or user');
+    const w = by === 'pm' ? flagStr(args, 'words') ?? '' : wordsArg(p.ctx, args, true)!;
     const extra = flagStr(args, 'extra');
     const n = extra === null ? undefined : Number(extra);
     if (n !== undefined && (!Number.isSafeInteger(n) || n < 1)) throw usage('--extra is a positive integer');
     const ins = flagStr(args, 'instructions');
     const findings = (flagStr(args, 'findings') ?? '').split(',').map((f) => f.trim()).filter((f) => f !== '');
-    await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
-    return ok(`The user's answer to ${esc} recorded (${option}, ${w}); mp carries it out. Next: mp pm next`, { mission: m, escalation: esc, option, words: w });
+    await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
+    const uncited = by === 'pm' ? taggedWords(p.ctx.memory, p.ctx.memory.data).flatMap((entry) => entry.tags.filter((t) => t.inForce && (t.mission === null || t.mission === m) && !w.split(',').includes(entry.words)).map((t) => `[${t.id}] ${t.type}: ${t.quote ?? entry.text}`)) : [];
+    return ok(`${by === 'pm' ? 'The PM’s' : 'The user’s'} answer to ${esc} recorded (${option}, ${w}); mp carries it out. ${uncited.length ? `\nLayer 2 entries not cited:\n${uncited.join('\n')}` : ''}`, { mission: m, escalation: esc, option, words: w, by, uncited });
   },
 };
 
@@ -789,8 +798,8 @@ const grant: Command = {
   group: 'pm',
   name: ['grant'],
   summary: 'the user grants more attempts on an exhausted loop (after the Secretary\'s one grant, WI-08)',
-  usage: `mp pm grant <lineage> <loop> --extra <n> --words W-<n> [--mission <mission>]   (loops: ${LOOP_KINDS.join(', ')})`,
-  flags: { extra: 'string', words: 'string', mission: 'string' },
+  usage: `mp pm grant <lineage> <loop> --extra <n> --by pm|user --words W-<n> [--mission <mission>]   (loops: ${LOOP_KINDS.join(', ')})`,
+  flags: { extra: 'string', words: 'string', mission: 'string', by: 'string' },
   async run(c, args) {
     const p = P(c);
     const lineage = positional(args, 0, 'lineage');
@@ -798,9 +807,11 @@ const grant: Command = {
     if (!(LOOP_KINDS as readonly string[]).includes(loop)) throw usage(`the loop is one of ${LOOP_KINDS.join(', ')}`);
     const n = Number(flagStr(args, 'extra') ?? '');
     if (!Number.isSafeInteger(n) || n < 1) throw usage('--extra is a positive integer');
-    const w = wordsArg(p.ctx, args, true)!;
     const m = flagStr(args, 'mission');
-    const r = await pmGrant(p.ctx, { lineage, loop: loop as LoopKind, extra: n, words: w, ...(m !== null ? { mission: m } : {}) });
+    const by = flagStr(args, 'by') ?? 'user';
+    if (by !== 'pm' && by !== 'user') throw usage('--by is pm or user');
+    const w = by === 'pm' ? flagStr(args, 'words') ?? '' : wordsArg(p.ctx, args, true)!;
+    const r = await pmGrant(p.ctx, { lineage, loop: loop as LoopKind, extra: n, words: w, by, ...(m !== null ? { mission: m } : {}) });
     return ok(r.granted ? `Granted ${n} more attempt(s) on ${lineage} (${loop}).` : `Not granted: ${r.why ?? 'refused'}.`, { lineage, loop, extra: n, ...r }, r.granted ? 0 : EXIT.REFUSED);
   },
 };
@@ -1240,7 +1251,7 @@ const alerts: Command = {
       const r = pmAck(p.ctx, ids);
       return ok(`${r.acknowledged} notice(s) acknowledged.`, { acknowledged: r.acknowledged, ids });
     }
-    const xs = p.ctx.memory.read((db) => listNotices(db, p.ctx.memory.data, { includeAcknowledged: flagBool(args, 'all') }));
+    const xs = p.ctx.memory.read((db) => listNotices(db, p.ctx.memory.data, { includeAcknowledged: flagBool(args, 'all'), ...(p.ctx.secretary !== null ? {audience: 'secretary' as const} : {}) }));
     return ok(xs.length === 0 ? 'No notices.' : xs.map((n) => `[${n.state}] ${n.id}: ${clip(n.trigger, 200)}${n.wi !== null ? ` [${wiText(n.wi, p.dir)}]` : ''}`).join('\n'), { notices: xs });
   },
 };

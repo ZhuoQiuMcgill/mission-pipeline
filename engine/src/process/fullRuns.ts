@@ -292,7 +292,7 @@ export async function runFullSuite(ctx: ProcessContext, req: FullRunRequest): Pr
   // every command stood on a passing declared run of this commit (the same environment): recorded as this full run, nothing executed
   const own = newRunId('full');
   const body = bodyOf(own, r.runs, null, env.identity);
-  ctx.memory.write({ op: `full-run:${own}`, payload: { id: own, evidence: body.commands.map((c) => c.evidence) } }, (tx) => writeMarker(tx, body, dispatch));
+  ctx.memory.write({ admittedResult: true, op: `full-run:${own}`, payload: { id: own, evidence: body.commands.map((c) => c.evidence) } }, (tx) => writeMarker(tx, body, dispatch));
   return { marker: readMarker(ctx, req.mission, own), reused: false };
 }
 

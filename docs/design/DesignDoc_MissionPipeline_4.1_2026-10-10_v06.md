@@ -917,3 +917,10 @@ Cost, before → after (from the part reports): a waiver saves 2 seat dispatches
 
 No event or record format changes. 4.1.3 records fold without migration; stuck reopen and carry
 cases retry on the next pass. The program writes no judgment in its own name.
+
+
+### P.14 PM as anchor, resident Secretary (4.3.0)
+
+The [4.3 design](DesignDoc_PMSecretary_2026-11-06_v03.md) governs the PM/Secretary split, decisions on recorded words, typed and deferred recording, layered loading, generations, inbox and stops.
+Its Appendix A supersedes the named paragraphs; Appendix B wins over A.
+The unchanged process and earlier rulings here remain in force; 4.2 records fold without migration.

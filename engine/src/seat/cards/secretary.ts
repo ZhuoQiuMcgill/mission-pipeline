@@ -35,11 +35,13 @@ export const ESCALATION_SOURCES = [
   'needs-disposition',
   'replan',
   'cost-overrun',
+  'plan-restarts-work',
+  'plan-structure-change',
 ] as const;
 export type EscalationSource = (typeof ESCALATION_SOURCES)[number];
 
 /** What the program can do with a decision, mechanically. */
-export const DECISION_OPTIONS = ['accept', 'accept-risk', 'send-back', 'replan', 'grant', 'restart', 'abandon', 'answer', 'rework', 'ask-user'] as const;
+export const DECISION_OPTIONS = ['accept', 'accept-risk', 'send-back', 'replan', 'grant', 'restart', 'abandon', 'answer', 'rework', 'ask-user', 'ask-pm', 'approve'] as const;
 export type DecisionOption = (typeof DECISION_OPTIONS)[number];
 
 export const SecretaryCardSchema = z.object({
@@ -65,6 +67,7 @@ export const SecretaryCardSchema = z.object({
   options: z.array(z.object({ id: z.enum(DECISION_OPTIONS), label: z.string().min(1), outcome: z.string().min(1) })).min(1),
   /** 6.5: the Secretary's one extra grant on this lineage is still unused. */
   grantAvailable: z.boolean(),
+  classifications: z.array(z.enum(['detail', 'needs-pm'])).optional(),
   /** A negated review position this decision rules on (accepting it records a pass that revokes the negation). */
   position: z.object({ target: z.string().min(1), review: z.string().min(1), revokes: z.string().min(1), binding: Binding }).nullable(),
   /** 4.1.2: the earlier decisions on the same subject: the decision, its reason, and whether it was carried out. */
@@ -75,7 +78,7 @@ export type SecretaryCard = z.infer<typeof SecretaryCardSchema>;
 export const SecretaryResultShape = {
   option: z.enum(DECISION_OPTIONS).describe('One of the options on the card.'),
   classification: z
-    .enum(['detail', 'important-within-authority', 'needs-user'])
+    .enum(['detail', 'important-within-authority', 'needs-user', 'needs-pm'])
     .describe('detail: recorded only; important-within-authority: takes effect and the PM is told (cite the authorization); needs-user: related work pauses and the user decides (option "ask-user").'),
   authorization: z.string().nullable().describe('The authorization id you rely on (required for important-within-authority).'),
   reason: z.string().describe('Why, in a few sentences.'),
@@ -104,15 +107,18 @@ export function renderSecretary(c: SecretaryCard): string {
     list('Requirement items involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
     renderMaterials(c.materials) +
     list(`Earlier decisions on ${r.subject} (decide this one knowing them)`, (c.earlierDecisions ?? []).map((d) => `${d.escalation} (${d.source}): ${d.option} by ${d.by}${d.reason !== '' ? `: ${d.reason}` : ''} (${d.applied})`)) +
+    '## Classification\nNew decisions: detail (with mayMatter when relevant), or needs-pm with ask-pm. A replan that adds or drops deliverables, changes module interfaces, data formats or storage needs the PM.\n\n' +
     list('Options', c.options.map((o) => `${o.id}: ${o.label}. Outcome: ${o.outcome}`)) +
-    `## Your extra grant on lineage ${r.lineage}\n${c.grantAvailable ? 'Available (once per lineage, at most 2 attempts).' : 'Already used: only the user can grant more (choose ask-user if more attempts are the only way).'}\n\n`
+    `## Your extra grant on lineage ${r.lineage}\n${c.grantAvailable ? 'Available (once per lineage, at most 2 attempts).' : c.classifications !== undefined ? 'Already used: ask the PM for further grants (choose ask-pm).' : 'Already used: only the user can grant more (choose ask-user if more attempts are the only way).'}\n\n`
   );
 }
 
 export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: ReadonlySet<string> | undefined): string[] {
   const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not read`);
-  if (!c.options.some((o) => o.id === r.option)) out.push(`option: "${r.option}" is not an option on the card (${c.options.map((o) => o.id).join(', ')})`);
-  if ((r.option === 'ask-user') !== (r.classification === 'needs-user')) out.push('classification: "needs-user" goes with option "ask-user", and only with it');
+  if (c.classifications !== undefined && r.classification === 'important-within-authority') out.push('classification: new decisions use detail or needs-pm; PM-class questions go to the PM');
+  if ((c.request.source === 'plan-structure-change' || c.request.source === 'plan-restarts-work') && !isAskOption(r.option)) out.push('plan structure is the PM’s decision');
+  if (!c.options.some((o) => sameDecisionOption(o.id, r.option))) out.push(`option: "${r.option}" is not an option on the card (${c.options.map((o) => o.id).join(', ')})`);
+  if (isAskOption(r.option) !== (r.classification === 'needs-user' || r.classification === 'needs-pm')) out.push('classification: "needs-user" goes with option "ask-user", and only with it');
   if (r.classification === 'important-within-authority' && (r.authorization === null || !c.authorizations.some((a) => a.id === r.authorization))) {
     out.push('authorization: an important decision within authority cites one of the card\'s authorizations');
   }
@@ -170,3 +176,6 @@ const secretaryEntry: SeatCardEntry<SecretaryCard, SecretaryResult> = {
 };
 
 registerSeatCard(secretaryEntry);
+
+export function isAskOption(option: string): boolean { return option === 'ask-user' || option === 'ask-pm'; }
+export function sameDecisionOption(a: string, b: string): boolean { return a === b || (isAskOption(a) && isAskOption(b)); }

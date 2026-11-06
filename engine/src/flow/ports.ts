@@ -106,6 +106,8 @@ export interface FlowNotice {
  * recorded once another one was carried out).
  */
 export interface AppendGuard {
+  readonly openMissions?: readonly string[];
+  readonly words?: readonly {readonly id: string; readonly fingerprint: string; readonly mission: string}[];
   readonly absent: ReadonlyArray<{ readonly mission: string; readonly line: string; readonly event: string; readonly key: string }>;
   readonly code: string;
   readonly message: string;
@@ -325,7 +327,7 @@ export interface FlowSchedulerPort {
   /** The Secretary restarts a task that needs disposition (counted on the quarantine-restart loop, 6.5). Null: not restartable. */
   restart(task: string, signature: string): Promise<LoopStatus | null>;
   /** Extra attempts for an exhausted loop (6.5): the Secretary once per lineage, at most 2; the user any. */
-  grant(req: { readonly op: string; readonly lineage: string; readonly loop: LoopKind; readonly by: 'secretary' | 'user'; readonly extra: number; readonly reason: string }): Promise<{ readonly granted: boolean; readonly why?: string }>;
+  grant(req: { readonly op: string; readonly lineage: string; readonly loop: LoopKind; readonly by: 'secretary' | 'pm' | 'user'; readonly extra: number; readonly reason: string; readonly words?: readonly {id: string; fingerprint: string; mission?: string}[] }): Promise<{ readonly granted: boolean; readonly why?: string }>;
   /**
    * The commit a seat reads (default: the mission's base commit, the target branch's), with
    * accepted product versions laid over it when given (a dependent task sees its prerequisites,
@@ -405,6 +407,9 @@ export interface FlowProject {
 
 /** The three ports together, plus the clock and the project's declared commands. */
 export interface FlowPorts {
+  readonly resident?: () => boolean;
+  readonly readOnly?: () => boolean;
+  readonly wordsAuthority?: (words: string, mission?: string) => string | null;
   readonly ledger: FlowLedgerPort;
   readonly scheduler: FlowSchedulerPort;
   readonly evaluator: FlowEvaluatorPort;

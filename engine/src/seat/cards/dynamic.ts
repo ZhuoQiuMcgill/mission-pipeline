@@ -88,8 +88,8 @@ export function taskDecisionQuotes(items: readonly CurrentItem[], events: readon
     const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id);
     const what = applied?.body as { what?: { option?: string }; by?: string } | undefined;
     if (what?.what?.option !== 'answer') continue;
-    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || (a.event === 'decision' && (a.body as DecisionBody).escalation === esc.id)));
-    const d = (answers.find((a) => a.event === 'user-answer') ?? answers.at(-1))?.body as DecisionBody | undefined;
+    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
+    const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
     if (d?.option === 'answer' && d.by === what.by && d.instructions !== '') out.push(d.instructions);
   }
   return [...new Set(out)];
@@ -153,8 +153,8 @@ export function earlierDecisionsOf(e: EscalationBody, events: readonly FlowEvent
     if (x.line !== 'secretary' || x.event !== 'escalation') continue;
     const esc = x.body as EscalationBody;
     if (esc.id === e.id || esc.subject !== e.subject) continue;
-    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || (a.event === 'decision' && (a.body as DecisionBody).escalation === esc.id)));
-    const d = (answers.find((a) => a.event === 'user-answer') ?? answers.at(-1))?.body as DecisionBody | undefined;
+    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
+    const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
     const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id)?.body as { what?: { option?: string } } | undefined;
     if (d === undefined && applied?.what?.option !== 'superseded') continue;
     out.push({

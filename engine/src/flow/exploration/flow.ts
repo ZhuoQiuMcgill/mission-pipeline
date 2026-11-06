@@ -921,7 +921,7 @@ async function stop(p: ExplorationPorts, mission: MissionId, x: string, s: XStat
     mission,
     trigger: `exploration ${x}: ${accepted ?? (answered ? CONVERGED_ANSWERED : t.trigger)}; ${s.rounds} of ${allowedRounds(s)} rounds used`,
     defaultAction: t.action,
-    detail: { exploration: x, handoff, version: h.version?.id ?? null, unresolvedBlocking: h.unresolvedBlocking, residualRisks: h.residualRisks, acceptance: h.acceptance },
+    detail: { exploration: x, decision: h.decision, handoff, version: h.version?.id ?? null, unresolvedBlocking: h.unresolvedBlocking, residualRisks: h.residualRisks, acceptance: h.acceptance },
   });
   const body: StoppedBody = { n, reason, wi, handoff, version: s.version?.id ?? null };
   await p.ledger.append(xid.op(mission, x, `stop:${n}`), { events: [{ mission, line: line(x), event: 'stopped', key: String(n), body }] });

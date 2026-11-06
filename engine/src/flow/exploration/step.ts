@@ -39,6 +39,7 @@
 // is the one recorded since the last reopening; every reader here and in the decision layer uses it.
 
 import { canonicalJson, sha256 } from '../../common/hash.ts';
+import type { BaseRecord } from '../../common/records.ts';
 import type { MissionId } from '../../common/ids.ts';
 import type { JudgmentRecord } from '../../common/records.ts';
 import { idPart, missionClosed, safeId, type FlowCtx } from '../context.ts';
@@ -46,7 +47,7 @@ import { registerFlowStep } from '../engine.ts';
 import { EXPLORATION_SETTLED, PLAN_LINE, PM_PLAN_EFFECTIVE, PmPlanDoc, explorationLine, type ExplorationSettledBody, type PmPlanEffectiveBody } from '../plandoc.ts';
 import { handleFailure } from '../failures.ts';
 import type { FlowEventInput, FlowTaskStatus } from '../ports.ts';
-import { cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, decisionFor, deciderJudgment, deciderOf, escalateToUser, escalation, isApplied, openEscalations, raiseEscalation, rulingJudgmentId, type Carry, type Decider } from '../secretary.ts';
+import { grantForDecision, grantedAttempt, cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, decisionFor, deciderJudgment, deciderOf, escalateToUser, escalation, isApplied, openEscalations, raiseEscalation, rulingJudgmentId, type Carry, type Decider } from '../secretary.ts';
 import type { DecisionOption } from '../../seat/cards/secretary.ts';
 import { explorationDefinition, xid, type ExplorationDefinition } from './definition.ts';
 import { advanceExploration, buildHandoff, defineExploration, explorationState, explorationStateAfter, recordExplorationRerun, redefineExploration, rulingEvent, type ExplorationHandoff } from './flow.ts';
@@ -274,7 +275,7 @@ async function onFailedTask(ctx: FlowCtx, x: string, q: QueuedBody, st: FlowTask
   if (o.kind !== 'decided') return;
   await ctx.ports.scheduler.cancel(q.task);
   // a given-up turn ends the exploration: its stop ruling and the decision's "applied" are one write
-  const rulings: RulingBody[] = q.role !== 'executor' ? [{ id: o.escalation, decision: 'stop', findings: [], text: `the ${q.role} turn was given up: ${o.decision.reason}`, extraRounds: 0, by: o.decision.by === 'user' ? 'user' : 'secretary' }] : [];
+  const rulings: RulingBody[] = q.role !== 'executor' ? [{ id: o.escalation, decision: 'stop', findings: [], text: `the ${q.role} turn was given up: ${o.decision.reason}`, extraRounds: 0, by: o.decision.by === 'pm' ? 'pm' : o.decision.by === 'user' ? 'user' : 'secretary' }] : [];
   if (!(await isApplied(ctx, o.escalation))) await commitCarrying(ctx, xid.op(ctx.mission, x, `carry:${o.escalation}`), rulings.map((r) => rulingEvent(ctx.mission, x, r)), [await carryOut(ctx, o.escalation, { option: o.decision.option, task: q.task })]);
   ctx.progressed = true;
 }
@@ -379,11 +380,12 @@ async function carryDecision(
   rulings: readonly RulingBody[],
   end?: { readonly stop: ExplorationSettledBody['stop']; readonly outcome: ExplorationSettledBody['outcome']; readonly handoff: (now: XState) => ExplorationHandoff | null },
   judgment?: JudgmentRecord | null,
+  effects: readonly BaseRecord[] = [],
 ): Promise<void> {
   if (await isApplied(ctx, id)) return;
   const events = rulings.map((r) => rulingEvent(ctx.mission, x, r));
   // a judgment the decider makes in this write (4.1.3: plain "accept" on a version no pass stands on) rides with its "applied"
-  const carried0 = await carryOut(ctx, id, { option, ...(judgment != null ? { accepted: judgment.target, judgment: judgment.judgment } : {}) });
+  const carried0 = await carryOut(ctx, id, { option, ...(judgment != null ? { accepted: judgment.target, judgment: judgment.judgment } : {}) }, effects);
   const carries: Carry[] = [judgment != null ? { ...carried0, records: [...carried0.records, judgment] } : carried0];
   let stale: string[] = [];
   let now: XState | null = null;
@@ -614,7 +616,7 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
     const id = escId(ctx.mission, x, `stop${s.stopped.n}`);
     const d = (await isApplied(ctx, id)) ? null : await decisionFor(ctx, id);
     if (d !== null && d.option !== 'ask-user') {
-      const by = d.by === 'user' ? 'user' : 'secretary';
+      const by = d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary';
       if (d.option === 'restart') await carryDecision(ctx, x, id, d.option, [{ id, decision: 'retry', findings: [], text: d.reason, extraRounds: 0, by }]);
       else await carryDecision(ctx, x, id, d.option, [{ id, decision: 'stop', findings: [], text: d.reason, extraRounds: 0, by }], { stop: 'budget', outcome: 'no-conclusion', handoff: () => handoffOf(ctx, s) });
       return true;
@@ -629,14 +631,14 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
     const waitAccept = d !== null && (d.option === 'accept-risk' || d.option === 'accept') && directionPending(s);
     if (d !== null && !waitAccept && d.option !== 'ask-user') {
       const h = handoffOf(ctx, s) as ExplorationHandoff;
-      const by = d.by === 'user' ? 'user' : 'secretary';
+      const by = d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary';
       const stop = stopped.reason === 'budget-exhausted' ? 'budget' : 'repeated-fatal';
       switch (d.option) {
         case 'grant': {
           // through the ledger's grant rule (6.5: the Secretary once per lineage, across all its
           // loops; then only the user), never a local count (review r1 #7)
           const extra = d.grantExtra > 0 ? d.grantExtra : 2;
-          const g = await ctx.ports.scheduler.grant({ op: `grant:${id}:${by}`, lineage: xid.lineage(ctx.mission, x), loop: 'env-retry', by, extra, reason: `exploration rounds: ${d.reason}` });
+          const g = await grantForDecision(ctx, { op: `grant:${id}:${by}`, lineage: xid.lineage(ctx.mission, x), loop: 'env-retry', by, extra, reason: `exploration rounds: ${d.reason}` });
           if (!g.granted) {
             // the escalation stays open for the user's own answer (review r1 #8: not marked applied)
             await escalateToUser(ctx, id, `exploration ${x}: the ledger refused the Secretary's grant (${g.why ?? 'refused'}); only the user can grant more rounds (6.5, WI-08)`, 'WI-08');
@@ -644,7 +646,7 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
           }
           // 4.1.3 (#38, #39): the decision's instructions go to the next rounds' cards; the findings it names (of this exploration) get the author's turn
           const named = (d.findings ?? []).filter((f) => s.findings.has(f));
-          await carryDecision(ctx, x, id, d.option, [{ id, decision: 'extend', findings: named, text: d.reason, ...(d.instructions.trim() !== '' ? { instructions: d.instructions } : {}), extraRounds: extra, extraMicros: extraSpend(s, extra), by }]);
+          await carryDecision(ctx, x, id, d.option, [{ id, decision: 'extend', findings: named, text: d.reason, ...(d.instructions.trim() !== '' ? { instructions: d.instructions } : {}), extraRounds: extra, extraMicros: extraSpend(s, extra), by }], undefined, null, g.records);
           break;
         }
         case 'accept':
@@ -689,7 +691,7 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
     if (await isApplied(ctx, id)) continue;
     const d = await decisionFor(ctx, id);
     if (d === null || d.option === 'ask-user') continue;
-    await carryDecision(ctx, x, id, d.option, [{ id, decision: 'answer', findings: [], answers: q.task, text: d.instructions !== '' ? d.instructions : d.reason, extraRounds: 0, by: d.by === 'user' ? 'user' : 'secretary' }]);
+    await carryDecision(ctx, x, id, d.option, [{ id, decision: 'answer', findings: [], answers: q.task, text: d.instructions !== '' ? d.instructions : d.reason, extraRounds: 0, by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary' }]);
     applied = true;
   }
   // the Stabilizer's direction questions (4.1 §6.3, WI-33): keep the definition, change the direction, or end it
@@ -697,7 +699,7 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
     if (await isApplied(ctx, id)) return false;
     const d = await decisionFor(ctx, id);
     if (d === null || d.option === 'ask-user') return false;
-    const by = d.by === 'user' ? 'user' : 'secretary';
+    const by = d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary';
     const text = d.instructions !== '' ? d.instructions : d.reason;
     const which = drift ? { drift: true as const } : {};
     if (d.option === 'answer' || d.option === 'accept' || d.option === 'accept-risk') await carryDecision(ctx, x, id, d.option, [{ id, decision: 'keep-direction', findings: [...findings], text, extraRounds: 0, by, ...which }]);
@@ -717,7 +719,7 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
     if (await isApplied(ctx, id)) continue;
     const d = await decisionFor(ctx, id);
     if (d === null || d.option === 'ask-user') continue;
-    const by = d.by === 'user' ? 'user' : 'secretary';
+    const by = d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary';
     const text = d.instructions !== '' ? d.instructions : d.reason;
     await carryDecision(ctx, x, id, d.option, [{ id, decision: d.option === 'accept-risk' || d.option === 'accept' ? 'accept-risk' : 'redirect', findings: [f.id], text, extraRounds: 0, by }]);
     applied = true;

@@ -279,7 +279,7 @@ export function validateRecord(rec: unknown): asserts rec is BaseRecord {
     case 'loop.grant':
       str(r, 'lineage');
       oneOf(r, 'loop', LOOP_KINDS);
-      oneOf(r, 'by', ['secretary', 'user']);
+      oneOf(r, 'by', ['secretary', 'pm', 'user']);
       nat(r, 'extra');
       if (r.by === 'secretary' && (r.extra as number) > 2) fail('loop.grant', 'Secretary grants at most 2 extra attempts');
       hash(r, 'reason');

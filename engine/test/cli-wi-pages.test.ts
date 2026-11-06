@@ -1,11 +1,11 @@
-// The PM's handbook and work instructions as 4.1 ships them (design 4.1 §6.9; U-8): an INDEX with
+// The PM and resident Secretary handbooks and work instructions (4.3; design 4.1 §6.9; U-8): an INDEX with
 // one line per WI, one page per WI with its trigger and evidence, default action, options with
-// their `mp` commands and outcomes, how to choose and when to ask the user. Every `mp` command a
+// their `mp` commands and outcomes, how to choose and when to send a decision to the PM. Every `mp` command a
 // page, the handbook or a role description names exists; every WI the program can name has a
 // page, and the CLI never names a page that does not exist.
 
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { WI_CATALOG } from '../src/common/records.ts';
@@ -14,6 +14,7 @@ import { WI as FLOW_WI } from '../src/flow/wi.ts';
 import { COMMANDS } from '../src/cli/main.ts';
 import { toCliError, wi41 } from '../src/cli/errors.ts';
 import { INSTALLED_PM_DIR, WI_41, isWi, pmCoreText, wiDir, wiPagePath, wiRef, wiTitle } from '../src/cli/wi.ts';
+import { cli, gitProject } from './cli-fixtures.ts';
 
 const dir = wiDir(null);
 const PLUGIN = join(INSTALLED_PM_DIR, '..');
@@ -21,10 +22,10 @@ const PLUGIN = join(INSTALLED_PM_DIR, '..');
 /** Every `mp …` command line named in a text, as [group, name] (admin commands: ['admin', name]). */
 function named(text: string): Array<[string, string]> {
   const out: Array<[string, string]> = [];
-  for (const m of text.matchAll(/`mp ((?:pm|read) [a-z-]+|seat <[a-z]+>(?: [a-z-]+)?|[a-z-]+)/g)) {
+  for (const m of text.matchAll(/`mp ((?:pm|sec|read)(?: [a-z-]+)?|seat <[a-z]+>(?: [a-z-]+)?|[a-z-]+)/g)) {
     const words = m[1]!.split(' ');
-    if (words[0] === 'pm' || words[0] === 'read') {
-      // "every `mp pm` command": the group itself
+    if (words[0] === 'pm' || words[0] === 'sec' || words[0] === 'read') {
+      // A group alone ("every `mp sec` command") names no operation.
       if (words[1] !== undefined) out.push([words[0], words[1]]);
     }
     else if (words[0] === 'seat') {
@@ -41,10 +42,11 @@ function exists([group, name]: [string, string]): boolean {
   return COMMANDS.some((c) => c.group === group && c.name[0] === name);
 }
 
-test('the 4.1 set: the catalog, the CLI and the index agree (01-08, 13, 16, 19-21, 23-26, 28-34)', () => {
+test('the retained WI set: the catalog, the CLI and the Secretary index agree (01-08, 13, 16, 19-21, 23-26, 28-34)', () => {
   assert.deepEqual([...WI_CATALOG].sort(), [...WI_41].sort());
   assert.equal(WI_41.length, 24);
   const idx = readFileSync(join(dir, 'INDEX.md'), 'utf8');
+  assert.match(idx, /^# Secretary work instructions/);
   const lines = idx.split('\n').filter((l) => /^- WI-\d\d: /.test(l));
   assert.deepEqual(lines.map((l) => l.slice(2, 7)), [...WI_41]);
   assert.doesNotMatch(idx, /## /, 'sections belong to the pages');
@@ -58,25 +60,79 @@ test('every WI has a page with the five parts, and every mp command a page names
   assert.deepEqual(pages.map((f) => f.slice(0, 5)).sort(), [...WI_41].sort());
   for (const wi of WI_41) {
     const page = readFileSync(wiPagePath(wi, null)!, 'utf8');
-    for (const h of ['## Trigger and evidence', '## Default action already taken', '## Options and outcomes', '## How to choose', '## When to ask the user']) assert.ok(page.includes(h), `${wi}: ${h}`);
+    for (const h of ['## Trigger and evidence', '## Default action already taken', '## Options and outcomes', '## How to choose', '## When to send to the PM']) assert.ok(page.includes(h), `${wi}: ${h}`);
     assert.ok(page.startsWith(`# ${wi} `), wi);
     assert.ok(wiTitle(wi, null) !== null);
+    assert.match(page, /Secretary/, `${wi} names its operator`);
+    assert.match(page, /ask-pm/, `${wi} routes PM choices`);
+    assert.doesNotMatch(page, /mp pm (?:next|dispatch|release|renew|drain|alerts)\b/, `${wi} uses the Secretary loop`);
     for (const n of named(page)) assert.ok(exists(n), `${wi} names mp ${n.join(' ')}, which does not exist`);
     assert.doesNotMatch(page, /sandbox|systemd|watchdog|self-check|spend limit|metering/i, `${wi} names a removed 4.0 part`);
   }
 });
 
-test('the handbook and the role descriptions name only commands that exist', () => {
+test('both handbooks and the role descriptions name only commands that exist', () => {
   const pm = readFileSync(join(INSTALLED_PM_DIR, 'PM.md'), 'utf8');
   for (const n of named(pm)) assert.ok(exists(n), `PM.md names mp ${n.join(' ')}`);
   assert.match(pm, /mp pm session --filled-by/, 'the handbook starts a session (decision 8)');
   const core = pmCoreText(null);
   assert.match(core, /mp pm say/);
+  assert.match(core, /user's anchor/);
+  assert.match(core, /top of every reply/);
+  assert.match(core, /in their language/);
+  assert.match(core, /composite message/);
+  assert.match(core, /next message raises no objection/);
+  assert.match(core, /one-off instruction/);
+  assert.match(core, /unrelated is never recorded/);
+  assert.match(core, /re-tag only with the user's authorization/);
+  assert.match(core, /no words on record/);
+  assert.match(core, /layer 2.*all principles in force/);
+  assert.match(core, /mp pm inbox/);
+  assert.match(core, /mp pm note/);
+  assert.match(core, /mp pm ask-secretary/);
+  assert.match(core, /Never release while a generation is live/);
+  assert.match(core, /60 s.*mp pm secretary stop/);
   assert.match(core, /consent to land/);
+  assert.match(core, /mp pm secretary start/);
+  assert.match(core, /mp pm secretary handle/);
+  assert.doesNotMatch(core, /mp (?:pm|sec) (?:next|dispatch|renew|alerts|drain)\b/);
   assert.ok(core.length < pm.length / 2, 'the core is the short part');
+  const secretary = readFileSync(join(PLUGIN, 'secretary', 'SECRETARY.md'), 'utf8');
+  for (const n of named(secretary)) assert.ok(exists(n), `SECRETARY.md names mp ${n.join(' ')}`);
+  assert.match(secretary, /please tell the PM/);
+  assert.match(secretary, /MP_SECRETARY=S-<n>/);
+  assert.match(secretary, /mp sec wait --since R/);
+  assert.match(secretary, /mp seat <id> handback/);
+  assert.match(secretary, /needs-pm.*ask-pm/);
+  assert.match(secretary, /pm\/wi\/INDEX.md/);
   for (const f of readdirSync(join(PLUGIN, 'roles'))) {
     const t = readFileSync(join(PLUGIN, 'roles', f), 'utf8');
     for (const n of named(t)) assert.ok(exists(n), `roles/${f} names mp ${n.join(' ')}`);
+  }
+});
+
+test('init copies both handbooks and docs update restores the resident handbook and refreshes the PM core', async () => {
+  const p = gitProject();
+  try {
+    const init = await cli(p.dir, ['init', '--json']);
+    assert.equal(init.code, 0, init.err);
+    const memory = join(p.dir, '.mission-pipeline');
+    const secretary = join(memory, 'secretary', 'SECRETARY.md');
+    const installed = readFileSync(join(PLUGIN, 'secretary', 'SECRETARY.md'), 'utf8');
+    assert.equal(readFileSync(secretary, 'utf8'), installed);
+    assert.equal(pmCoreText(p.dir), pmCoreText(null));
+    const manifest = JSON.parse(readFileSync(join(memory, 'pm', 'installed.json'), 'utf8'));
+    assert.ok(Object.hasOwn(manifest.files, 'secretary/SECRETARY.md'));
+    rmSync(secretary);
+    writeFileSync(join(memory, 'pm', 'PM.md'), '# old PM\n');
+    const update = await cli(p.dir, ['docs', 'update', '--json']);
+    assert.equal(update.code, 0, update.err);
+    assert.ok(update.json.result.copied.includes('secretary/SECRETARY.md'));
+    assert.ok(update.json.result.updated.includes('pm/PM.md'));
+    assert.equal(readFileSync(secretary, 'utf8'), installed);
+    assert.equal(pmCoreText(p.dir), pmCoreText(null));
+  } finally {
+    p.cleanup();
   }
 });
 
@@ -97,7 +153,7 @@ test('every WI the program can name is a 4.1 page: the flows and the memory\'s r
   assert.equal(wiRef('WI-99', null), null);
 });
 
-test('the Claude Code plugin is an optional adapter of 4.1', () => {
+test('the Claude Code plugin is an optional adapter of 4.3', () => {
   const manifest = JSON.parse(readFileSync(join(PLUGIN, '.claude-plugin', 'plugin.json'), 'utf8')) as { name: string; version: string; description: string };
   const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
   assert.deepEqual([manifest.name, manifest.version], ['mission-pipeline', version]);

@@ -39,7 +39,22 @@ export type GitStepOutcome =
 
 export type DispatchHandbackOutcome = 'accepted' | 'after-release' | 'after-stop';
 
-export type MemoryEvent =
+export type ResidentEvent =
+  | ({ readonly kind: 'secretary.generation' } & import('./resident.ts').SecretaryGeneration)
+  | { readonly kind: 'pm.note'; readonly id: string; readonly text: string; readonly words: string | null; readonly acknowledged: boolean }
+  | { readonly kind: 'pm.question'; readonly id: string; readonly text: string }
+  | { readonly kind: 'sec.reply'; readonly id: string; readonly text: string; readonly generation: string }
+  | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null }
+  | { readonly kind: 'words.summary'; readonly id: string; readonly text: string; readonly covers: readonly { readonly id: string; readonly fingerprint: string }[] };
+
+export interface WordsTag {
+  readonly id: string;
+  readonly type: 'principle' | 'decision' | 'requirement' | 'instruction';
+  readonly mission: string | null;
+  readonly quote: string | null;
+}
+
+export type MemoryEvent = ResidentEvent
   /** The memory was created (`mp init`); the first event of the chain. */
   | { readonly kind: 'memory.init'; readonly format: string }
   /**

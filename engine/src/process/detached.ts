@@ -299,7 +299,7 @@ export function recordDetachedEnd(ctx: ProcessContext, b: Pick<DetachedBody, 'ru
   const info = ctx.memory.read((db) => dispatchInfo(db, b.dispatch));
   if (info === null) return false;
   const line = DISPATCH_LINE(b.dispatch);
-  return ctx.memory.write({ op: `detached-end:${b.run}:${outcome}`, payload: { run: b.run, outcome } }, (tx) => {
+  return ctx.memory.write({ admittedResult: true, op: `detached-end:${b.run}:${outcome}`, payload: { run: b.run, outcome } }, (tx) => {
     if (flowEventExists(tx, { mission: info.mission, line, event: DETACHED_END_EVENT, key: b.run })) return false;
     if (flowEventExists(tx, { mission: info.mission, line, event: 'run', key: b.evidence })) return false;
     const end: DetachedEndBody = { run: b.run, outcome, why: why.slice(0, 500), at: tx.at };

@@ -63,7 +63,7 @@ On a revision, fix exactly what the card says came back, and carry everything el
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 
 ## Upstream and downstream
-- Decomposition: upstream, the PM plan approved by Calibrator ①. Downstream: the program's mechanical checks, the feasibility review, then Calibrator ②. A plan that fails a check comes back to you.
+- Decomposition: upstream, the PM plan approved by Calibrator ①. Downstream: the program's mechanical checks, the feasibility review, then Calibrator ②. A plan that fails a check comes back to you. A structural revision of a detailed plan waits for PM approval (`plan-structure-change`); added, dropped, split or merged tasks, declared interfaces, data formats and storage count even without accepted work.
 - Feasibility review: upstream, the detailed plan. Downstream: a `return` goes to the decomposition once; what is still unresolved goes to the Secretary.
 - Repair: upstream, the user's repair, recorded by the PM. Downstream: the program's mechanical checks only (no Calibrator, no feasibility review); a failure comes back to you. On a pass the added tasks join the plan in effect, the reopened tasks get new attempts, and the changed tasks start again under their new cards; nothing else is re-reviewed.
 

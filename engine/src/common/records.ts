@@ -669,7 +669,7 @@ export interface LoopGrantRecord {
   readonly kind: 'loop.grant';
   readonly lineage: string;
   readonly loop: LoopKind;
-  readonly by: 'secretary' | 'user';
+  readonly by: 'secretary' | 'pm' | 'user';
   readonly extra: number;
   readonly reason: ContentHash;
 }

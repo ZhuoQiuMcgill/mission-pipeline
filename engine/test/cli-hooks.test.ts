@@ -13,8 +13,8 @@ import { ENGINE, cli, gitProject, type TestProject } from './cli-fixtures.ts';
 
 const ADAPTER = join(ENGINE, 'plugin', 'hooks', 'claude-code.mjs');
 
-function hook(event: string, input: unknown, cwd: string): { code: number; out: string } {
-  const r = spawnSync(process.execPath, [ADAPTER, event], { cwd, input: JSON.stringify(input), encoding: 'utf8', timeout: 200_000 });
+function hook(event: string, input: unknown, cwd: string, env: Record<string, string> = {}): { code: number; out: string } {
+  const r = spawnSync(process.execPath, [ADAPTER, event], { cwd, env: {...process.env, MP_SECRETARY: '', ...env}, input: JSON.stringify(input), encoding: 'utf8', timeout: 200_000 });
   return { code: r.status ?? -1, out: r.stdout };
 }
 
@@ -39,29 +39,25 @@ describe('the optional Claude Code adapter', () => {
   });
   after(() => p.cleanup());
 
-  it('records each prompt once; the PM\'s own mp pm say of the same text records nothing new; a seat\'s fixed prompt is never recorded', async () => {
-    const r = hook('user-prompt-submit', { prompt: 'Build me a small calculator.', cwd: p.dir }, p.dir);
-    assert.equal(r.code, 0);
-    assert.match(r.out, /Recorded as W-1/);
-    const again = await cli(p.dir, ['pm', 'say', 'Build me a small calculator.', '--json']);
-    assert.deepEqual([again.json.result.words, again.json.result.repeated], ['W-1', true]);
-    const seat = hook('user-prompt-submit', { prompt: 'You are the Constructor of Mission Pipeline. Your card: `mp seat D-3 card`.', cwd: p.dir }, p.dir);
-    assert.equal(seat.code, 0);
-    assert.equal(seat.out, '');
-    // harness envelopes are not the user's words either
-    for (const prompt of [
-      '<agent-message from="general-purpose">[Subagent hand-back] The Calibrator passed the plan.</agent-message>',
-      '<cross-session-message from="uds:/run/user/1000/sock" from-name="Secretary">Plan passed; D-4 is running.</cross-session-message>',
-      '<task-notification><task-id>b1</task-id></task-notification>',
-      '<ci-monitor-event>Checks failed on the pull request.</ci-monitor-event>',
-      '<system-reminder>context</system-reminder>',
-      '<command-name>/clear</command-name>',
-      'Note: [Subagent hand-back] from D-2',
-    ]) {
-      const r2 = hook('user-prompt-submit', { prompt, cwd: p.dir }, p.dir);
-      assert.deepEqual(r2, { code: 0, out: '' }, prompt);
+  it('4.3: only a two-line type/recording reminder; neither prompts nor harness envelopes are recorded', async () => {
+    const before = words(p.dir);
+    for (const prompt of ['Build me a small calculator.', 'You are the Constructor of Mission Pipeline. Your card: `mp seat D-3 card`.', '<agent-message>hand-back</agent-message>']) {
+      const r = hook('user-prompt-submit', {prompt, cwd: p.dir}, p.dir);
+      assert.equal(r.code, 0);
+      assert.equal(r.out.trim().split('\n').length, 2);
+      assert.match(r.out, /message type/);
+      assert.match(r.out, /previous message/);
     }
-    assert.equal(words(p.dir), 1);
+    assert.equal(words(p.dir), before, '4.2 recorded the prompt immediately; 4.3 defers recording to the PM');
+    const own = await cli(p.dir, ['pm', 'say', 'Build me a small calculator.', '--json']);
+    assert.deepEqual([own.json.result.words, own.json.result.repeated], ['W-1', false]);
+  });
+
+  it('B.6: MP_SECRETARY alone controls silence; MP_ROLE has no effect', () => {
+    for (const event of ['user-prompt-submit', 'session-start']) {
+      assert.deepEqual(hook(event, {prompt: 'hello', cwd: p.dir}, p.dir, {MP_SECRETARY: 'S-1'}), {code: 0, out: ''});
+    }
+    assert.match(hook('user-prompt-submit', {prompt: 'hello', cwd: p.dir}, p.dir, {MP_ROLE: 'secretary'}).out, /message type/);
   });
 
   it('4.1.2: at session start, a neutral three-line pointer; no mp command runs (a seat never acts as the PM)', () => {
@@ -70,7 +66,7 @@ describe('the optional Claude Code adapter', () => {
     assert.equal(r.code, 0);
     assert.equal(
       r.out,
-      'This project uses Mission Pipeline.\nIf you are the PM, read the core of `.mission-pipeline/pm/PM.md` and run `mp pm next`.\nIf you were started as a seat, your card (`mp seat <id> card`) is your whole instruction.\n',
+      'This project uses Mission Pipeline.\nIf you are the PM, read the core of `.mission-pipeline/pm/PM.md` and run `mp pm session`.\nIf you were started as a seat, your card (`mp seat <id> card`) is your whole instruction.\n',
     );
     assert.doesNotMatch(r.out, /Notices \(first\)|Ready steps/, 'no PM steps are shown');
     assert.deepEqual([count(p.dir, 'SELECT COUNT(*) AS n FROM log'), count(p.dir, 'SELECT COUNT(*) AS n FROM pm_actions')], before, 'nothing was written: no mp pm next ran');
