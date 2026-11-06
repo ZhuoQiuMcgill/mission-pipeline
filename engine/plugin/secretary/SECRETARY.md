@@ -84,6 +84,9 @@ For `accept-risk` and reopen decisions, see Reviews and reworks.
 
 `mp sec next` shows notes until `mp sec ack-note <id>`; acknowledge after taking the recorded instruction into account.
 Answer a recorded progress question with `mp sec reply <id> "<text>"`; its state becomes answered and the reply reaches the PM inbox.
+For an operational question without an escalation, record `mp sec ask-pm "<question>" [--about <notice or item id>]`.
+The PM answers `mp pm reply <id> "<text>" [--words W-n]`; `mp sec next` and `mp sec wait` show the reply and its words reference.
+For example, WI-19's transform alert needs `mp sec ask-pm "Was the transform change intentional?" --about <notice id>`.
 Do not turn a question into an instruction or send routine progress messages.
 A harness wake-up never substitutes for a note, question, answer or decision in memory.
 PM commands in resident mode record and wake you without reconciling; next and wait do the operational work.
@@ -114,7 +117,7 @@ Calibrator ① returns or unavailability, plan-restart information, direction co
 Every other notice category is yours by default.
 
 A WI option using `mp pm` to write words, requirements, constraints, plans, answers, repairs, stops or delivery consent is a PM action.
-Send the facts and offered exits through the escalation's `ask-pm` option; the PM decides on recorded words or asks the user.
+Send the facts and offered exits through the escalation's `ask-pm` option; if no escalation exists, use `mp sec ask-pm "<question>" --about <notice or item id>`. The PM decides on recorded words or asks the user.
 Do not invent user words or run a words-dependent write as though you were the PM.
 Operational command names outside the loop keep their existing `mp pm` spelling when the WI names them; their spelling does not make you the user's session.
 

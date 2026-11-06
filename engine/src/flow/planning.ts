@@ -1062,22 +1062,32 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
   }
 
   let structureCarry: Carry | null = null;
+  let structureInput: Carry['latest'] = [];
   if (ctx.ports.resident?.() && (await eventOf(ctx, PLAN_LINE, 'effective', dplan)) === null) {
-    const previous = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).filter((e) => e.body.pmPlan === b.plan).at(-1)?.body;
+    const effective = await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective');
+    structureInput = [{mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: effective.at(-1)?.revision ?? null}];
+    const previous = effective.filter((e) => e.body.pmPlan === b.plan).at(-1)?.body;
     const old = previous === undefined ? null : await detailedPlanOf(ctx, previous.dplan);
     const diff = old === null ? [] : structuralDiff(amendedPlan(old.plan, previous?.amendments), plan);
+    const diffHash = shortHash(diff);
+    const facts = {dplan, inEffect: previous?.dplan ?? null, diff, diffHash};
+    const base = safeId(`structure.${dplan}.${diffHash}`);
+    let id = base;
+    for (let n = 2; (await closedEscalation(ctx, id)) !== null; n++) id = safeId(`${base}.r${n}`);
+    // A different input diff is a different question. Old approvals remain history and cannot
+    // authorize deletions or interface changes that were absent from their recorded facts.
+    await closeEscalations(ctx, `flow:structure-current:${ctx.mission}:${dplan}:${shortHash(facts)}`, `plan:${b.plan}`, `the structural diff of ${dplan} changed`, {keep: (e) => e.source !== 'plan-structure-change' || (e.facts as {dplan?: string} | undefined)?.dplan !== dplan || (diff.length > 0 && e.id === id)});
     if (diff.length > 0) {
-      const id = safeId(`structure.${dplan}`);
-      await raiseEscalation(ctx, {id, source: 'plan-structure-change', lineage, subject: `plan:${b.plan}`, summary: `Detailed plan ${dplan} changes the structure of ${previous!.dplan}.`, reasons: diff, changed: diff.join('\n'), options: ['approve', 'send-back'], facts: {dplan, inEffect: previous!.dplan, diff}});
+      await raiseEscalation(ctx, {id, source: 'plan-structure-change', lineage, subject: `plan:${b.plan}`, summary: `Detailed plan ${dplan} changes the structure of ${previous!.dplan}.`, reasons: diff, changed: diff.join('\n'), options: ['approve', 'send-back'], facts});
       const decision = await decisionFor(ctx, id);
       if (decision === null) return;
       if (decision.by !== 'pm' && decision.by !== 'user') return;
       if (decision.option === 'send-back') {
-        await newAttempt(ctx, b, {reason: 'secretary', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [decision.instructions], conclusions: []}, a.k + 1, [], [await carryOut(ctx, id, {option: 'send-back'})]);
+        await newAttempt(ctx, b, {reason: 'secretary', previous: dplan, mechanicalFailures: [], feasibilityFindings: [], instructions: [decision.instructions], conclusions: []}, a.k + 1, [], [{...await carryOut(ctx, id, {option: 'send-back'}), latest: structureInput}]);
         return;
       }
       if (decision.option !== 'approve') return;
-      structureCarry = await carryOut(ctx, id, {option: 'approve', dplan});
+      structureCarry = {...await carryOut(ctx, id, {option: 'approve', dplan, inEffect: previous!.dplan, diffHash}), latest: structureInput};
     }
   }
 
@@ -1182,7 +1192,7 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const close = closing(ctx, moot, `detailed plan ${dplan}: ${reviewsWaived === null ? '' : waiverLabel(reviewsWaived)}`);
     const body: EffectiveBody = { dplan, pmPlan: b.plan, n: b.n, round: b.round, mode: b.mode, tasks: plan.tasks.map((t) => t.id), risks, ...(reviewsWaived !== null ? { reviewsWaived } : {}) };
     const carries = [close, ...(structureCarry === null ? [] : [structureCarry])];
-    const guard = carryGuard(carries);
+    const guard = carryGuard([...carries, {id: `structure-input:${dplan}`, events: [], records: [], absent: [], latest: structureInput}]);
     await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...carries.flatMap((c) => c.events)], records: [...records, ...carries.flatMap((c) => c.records)], ...(guard !== undefined ? { guard } : {}) });
     await cancelSecretarySteps(ctx, moot);
     // stable mode reads the waived plan as settled by the waiver (execution's gate): its tasks start on it,

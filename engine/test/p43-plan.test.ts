@@ -31,16 +31,17 @@ test('B.2 real revised Architect plan waits in PM inbox until approve; approval 
       await step(ctx, 'architect-decompose', () => plan);
       await secNext(ctx);
       assert.equal((await planInEffect(flowCtx(ctx.ports(), 'm1' as MissionId)))?.eff.dplan, 'dplan.m1.1.1', '4.2 treated this as an informational notice');
-      const inbox = (await done43(p, ['pm','inbox'])).items.find((i: any) => i.id === 'm1/structure.dplan.m1.1.2');
+      const inbox = (await done43(p, ['pm','inbox'])).items.find((i: any) => i.facts?.dplan === 'dplan.m1.1.2');
       assert.ok(inbox); assert.match(inbox.action, /answer/);
-      assert.equal(ctx.memory.stmt("SELECT 1 FROM tasks WHERE task = 'sec.structure.dplan.m1.1.2'").get(), undefined, 'structural changes go straight to the PM');
-      await done43(p, ['pm','answer','m1','structure.dplan.m1.1.2','--option','approve','--by','pm','--no-words','--reason','minor format adjustment within the intended result']);
+      const escalation = inbox.id.slice('m1/'.length);
+      assert.equal(ctx.memory.stmt('SELECT 1 FROM tasks WHERE task = ?').get(`sec.${escalation}`), undefined, 'structural changes go straight to the PM');
+      await done43(p, ['pm','answer','m1',escalation,'--option','approve','--by','pm','--no-words','--reason','minor format adjustment within the intended result']);
       assert.equal((await planInEffect(flowCtx(ctx.ports(), 'm1' as MissionId)))?.eff.dplan, 'dplan.m1.1.1');
       await secNext(ctx);
       await step(ctx, 'calibrator-2', (c) => cal2Pass(c));
       await secNext(ctx);
       assert.equal((await planInEffect(flowCtx(ctx.ports(), 'm1' as MissionId)))?.eff.dplan, 'dplan.m1.1.2');
-      const events = ctx.memory.stmt("SELECT op FROM log WHERE kind = 'flow.event' AND ((json_extract(record,'$.event') = 'effective' AND json_extract(record,'$.key') = 'dplan.m1.1.2') OR (json_extract(record,'$.event') = 'applied' AND json_extract(record,'$.key') = 'structure.dplan.m1.1.2'))").all() as {op: string}[];
+      const events = ctx.memory.stmt("SELECT op FROM log WHERE kind = 'flow.event' AND ((json_extract(record,'$.event') = 'effective' AND json_extract(record,'$.key') = 'dplan.m1.1.2') OR (json_extract(record,'$.event') = 'applied' AND json_extract(record,'$.key') = ?))").all(escalation) as {op: string}[];
       assert.equal(events.length, 2); assert.equal(events[0]!.op, events[1]!.op);
     } finally {ctx.memory.close();}
   } finally {p.cleanup();}
@@ -54,12 +55,13 @@ test('B.2 send-back hands instructions to the next Architect; card-prose-only re
       await revision(ctx, 2);
       const changed = DetailedPlanDoc.parse(addDetailedPlan('m1')); changed.storage = ['SQLite'];
       await step(ctx, 'architect-decompose', () => changed); await secNext(ctx);
-      await done43(p, ['pm','answer','m1','structure.dplan.m1.1.2','--option','send-back','--by','pm','--no-words','--reason','minor choice; keep storage','--instructions','Keep storage unchanged.']);
+      const inbox = (await done43(p, ['pm','inbox'])).items.find((i: any) => i.facts?.dplan === 'dplan.m1.1.2');
+      await done43(p, ['pm','answer','m1',inbox.id.slice('m1/'.length),'--option','send-back','--by','pm','--no-words','--reason','minor choice; keep storage','--instructions','Keep storage unchanged.']);
       await secNext(ctx);
       const prose = DetailedPlanDoc.parse(addDetailedPlan('m1')); prose.tasks[0]!.goal += ' with clearer prose';
       await step(ctx, 'architect-decompose', (card) => {assert.ok(card.revision.instructions.includes('Keep storage unchanged.')); return prose;});
       await secNext(ctx);
-      assert.equal((await done43(p, ['pm','inbox'])).items.some((i: any) => i.id === 'm1/structure.dplan.m1.1.3'), false);
+      assert.equal((await done43(p, ['pm','inbox'])).items.some((i: any) => i.facts?.dplan === 'dplan.m1.1.3'), false);
       await step(ctx, 'calibrator-2', (c) => cal2Pass(c)); await secNext(ctx);
       assert.equal((await planInEffect(flowCtx(ctx.ports(), 'm1' as MissionId)))?.eff.dplan, 'dplan.m1.1.3');
     } finally {ctx.memory.close();}

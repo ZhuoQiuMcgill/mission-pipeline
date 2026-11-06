@@ -383,6 +383,9 @@ export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBod
   if (answer !== null) return observed(ctx, id, answer.body);
   const pm = await currentPmAnswer(ctx, id);
   if (pm !== null) return observed(ctx, id, pm);
+  // Recording a PM answer permanently overrides the earlier Secretary choice. A rejected
+  // answer leaves the next PM round waiting, including on pure reads before rejection is recorded.
+  if ((await eventsOf(ctx, SECRETARY_LINE, 'pm-answer')).some((e) => e.key.startsWith(`${id}#`))) return null;
   if ((await eventOf(ctx, SECRETARY_LINE, 'to-user', id)) !== null) return null;
   const esc = await escalation(ctx, id);
   const round = esc === null ? null : await secretaryRound(ctx, esc);
@@ -472,12 +475,14 @@ export interface Carry {
   readonly absent: AppendGuard['absent'];
   readonly words?: AppendGuard['words'];
   readonly openMissions?: AppendGuard['openMissions'];
+  readonly latest?: AppendGuard['latest'];
 }
 
 export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, unknown>, effects: readonly BaseRecord[] = []): Promise<Carry> {
   const original = await escalation(ctx, id);
   const round = original === null ? null : await secretaryRound(ctx, original);
   const esc = round?.esc ?? null;
+  const pmRound = await pmAnswerRound(ctx, id);
   const expected = observedDecisions.get(ctx)?.get(id);
   const d = await decisionFor(ctx, id);
   if (expected !== undefined && d !== null && canonicalJson(expected) !== canonicalJson(d)) throw Object.assign(new Error('the decision changed while its effect was being prepared; retry with the current answer'), {code: 'STALE_REQUEST'});
@@ -515,8 +520,14 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
     absent: [
       { mission: ctx.mission, line: SECRETARY_LINE, event: 'applied', key: id },
       ...(d?.by === 'secretary' ? (d.inputs ?? []).filter((i) => i.type === 'decision' || i.type === 'decision-authority' || i.line === d.authorization).flatMap((i) => [{ mission: ctx.mission, line: 'requirements', event: 'withdrawn', key: i.line }, { mission: ctx.mission, line: 'requirements', event: 'item', key: i.version.replace(/\.v(\d+)$/, (_, n: string) => `.v${Number(n) + 1}`) }]) : []),
-      // a decision not the user's is the one in force only while the user has not answered (nor been handed it)
-      ...(d.by !== 'user' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'user-answer', key: id }, ...(d.by === 'secretary' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'to-user', key: id }] : [])] : []),
+      // Precedence is fenced in the effect's own transaction, including answers recorded
+      // after carryOut prepared it. Rejection never removes the immutable overriding answer.
+      ...(d.by !== 'user' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'user-answer', key: id }] : []),
+      ...(d.by === 'secretary' ? [
+        { mission: ctx.mission, line: SECRETARY_LINE, event: 'to-user', key: id },
+        { mission: ctx.mission, line: SECRETARY_LINE, event: 'pm-answer', key: `${id}#${pmRound}` },
+      ] : []),
+      ...(d.by === 'pm' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'pm-answer-rejected', key: `${id}#${d.answerRound}` }] : []),
     ],
   };
 }
@@ -524,7 +535,8 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
 /** The guard of a write that carries out or closes these escalations (a concurrent writer did first: retried on the next pass). */
 export function carryGuard(carries: readonly Carry[]): AppendGuard | undefined {
   const absent = carries.flatMap((c) => c.absent);
-  return absent.length === 0 ? undefined : { absent, words: carries.flatMap((c) => c.words ?? []), openMissions: carries.flatMap((c) => c.openMissions ?? []), code: 'STALE_REQUEST', message: `escalation ${carries.map((c) => c.id).join(', ')} was carried out, closed or answered by another writer meanwhile; nothing was written (the next pass reads it again)` };
+  const latest = carries.flatMap((c) => c.latest ?? []);
+  return absent.length === 0 && latest.length === 0 ? undefined : { absent, latest, words: carries.flatMap((c) => c.words ?? []), openMissions: carries.flatMap((c) => c.openMissions ?? []), code: 'STALE_REQUEST', message: `escalation ${carries.map((c) => c.id).join(', ')} or its facts changed meanwhile; nothing was written (the next pass reads it again)` };
 }
 
 /** After the write that carried decisions out: the "in effect" notices of the Secretary's decisions. */
@@ -559,16 +571,18 @@ export interface DecisionGrant {
   readonly records: BaseRecord[];
 }
 
-/** PM grants are effects of a pending answer: prepare them, then carry them with the
- * application under its user-precedence and words guards. Legacy grants retain their path. */
+/** Pending resident grants are effects, prepared for the guarded application write.
+ * Legacy grants retain their path when there is no resident Secretary. */
 export async function grantForDecision(ctx: FlowCtx, req: Parameters<FlowSchedulerPort['grant']>[0]): Promise<DecisionGrant> {
-  if (req.by !== 'pm') return {...await ctx.ports.scheduler.grant(req), records: []};
+  if (req.by !== 'pm' && !(req.by === 'secretary' && ctx.ports.resident?.())) return {...await ctx.ports.scheduler.grant(req), records: []};
   if (!Number.isSafeInteger(req.extra) || req.extra < 1) return {granted: false, why: 'extra must be positive', records: []};
-  const reason = ctx.ports.ledger.content.put(canonicalJson({format: 'mp4.loop-grant-reason.v2', reason: req.reason, by: 'pm'}));
-  return {granted: true, records: [{kind: 'loop.grant', lineage: req.lineage, loop: req.loop, by: 'pm', extra: req.extra, reason}]};
+  if (req.by === 'secretary' && req.extra > 2) return {granted: false, why: 'too-many', records: []};
+  if (req.by === 'secretary' && (await ctx.ports.ledger.loop(req.lineage, req.loop)).secretaryGrantUsed) return {granted: false, why: 'secretary-already-granted', records: []};
+  const reason = ctx.ports.ledger.content.put(canonicalJson({format: 'mp4.loop-grant-reason.v2', reason: req.reason, by: req.by}));
+  return {granted: true, records: [{kind: 'loop.grant', lineage: req.lineage, loop: req.loop, by: req.by, extra: req.extra, reason}]};
 }
 
-/** The attempt admitted by a PM grant belongs to that same application write. */
+/** The attempt admitted by a prepared grant belongs to that same application write. */
 export async function grantedAttempt(ctx: FlowCtx, grant: DecisionGrant, req: {op: string; lineage: string; loop: LoopKind; signature: string}): Promise<void> {
   if (grant.records.length === 0) {await ctx.ports.ledger.loopAttempt(req); return;}
   grant.records.push({kind: 'loop.attempt', lineage: req.lineage, loop: req.loop, signature: req.signature, failureClass: null});

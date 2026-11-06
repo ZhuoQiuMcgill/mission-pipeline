@@ -106,6 +106,8 @@ export interface FlowNotice {
  * recorded once another one was carried out).
  */
 export interface AppendGuard {
+  /** The latest event of each input stream must still be the one read when preparing the effect. */
+  readonly latest?: readonly {readonly mission: string; readonly line: string; readonly event: string; readonly revision: number | null}[];
   readonly openMissions?: readonly string[];
   readonly words?: readonly {readonly id: string; readonly fingerprint: string; readonly mission: string}[];
   readonly absent: ReadonlyArray<{ readonly mission: string; readonly line: string; readonly event: string; readonly key: string }>;

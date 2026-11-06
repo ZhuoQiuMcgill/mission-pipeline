@@ -42,7 +42,7 @@ import { canonicalJson, sha256 } from '../../common/hash.ts';
 import type { BaseRecord } from '../../common/records.ts';
 import type { MissionId } from '../../common/ids.ts';
 import type { JudgmentRecord } from '../../common/records.ts';
-import { idPart, missionClosed, safeId, type FlowCtx } from '../context.ts';
+import { missionClosed, safeId, type FlowCtx } from '../context.ts';
 import { registerFlowStep } from '../engine.ts';
 import { EXPLORATION_SETTLED, PLAN_LINE, PM_PLAN_EFFECTIVE, PmPlanDoc, explorationLine, type ExplorationSettledBody, type PmPlanEffectiveBody } from '../plandoc.ts';
 import { handleFailure } from '../failures.ts';
@@ -50,6 +50,7 @@ import type { FlowEventInput, FlowTaskStatus } from '../ports.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, decisionFor, deciderJudgment, deciderOf, escalateToUser, escalation, isApplied, openEscalations, raiseEscalation, rulingJudgmentId, type Carry, type Decider } from '../secretary.ts';
 import type { DecisionOption } from '../../seat/cards/secretary.ts';
 import { explorationDefinition, xid, type ExplorationDefinition } from './definition.ts';
+import { explorationEscalation as escId, authorQuestionEscalation, findingQuestionEscalation } from './questionIds.ts';
 import { advanceExploration, buildHandoff, defineExploration, explorationState, explorationStateAfter, recordExplorationRerun, redefineExploration, rulingEvent, type ExplorationHandoff } from './flow.ts';
 import { versionEvidence } from './cards.ts';
 import { allowedRounds, currentEvidence, directionPending, effectiveSeverity, lastPass, pendingTasks, phaseFindings, settleKey, settleSince, type QueuedBody, type RulingBody, type SettleRecord, type StopReason, type XState } from './machine.ts';
@@ -80,7 +81,6 @@ function sameDefinition(a: ExplorationDefinition, b: ExplorationDefinition): boo
   return canonicalJson(strip(a)) === canonicalJson(strip(b));
 }
 
-const escId = (mission: string, x: string, what: string): string => safeId(`xp.${mission}.${idPart(x)}.${what}`);
 
 /** One pass of the exploration flow for the mission (registered with the flow engine). */
 export async function explorationStep(ctx: FlowCtx): Promise<void> {
@@ -510,7 +510,7 @@ async function routeStop(ctx: FlowCtx, x: string): Promise<boolean> {
 
 /** The escalation of an escalated finding (one per escalation: rulings on it so far make it distinct). */
 function findingEscalation(mission: string, x: string, s: XState, finding: string): string {
-  return escId(mission, x, `q.${finding.slice(8, 24)}.${s.rulings.filter((r) => r.findings.includes(finding)).length}`);
+  return findingQuestionEscalation(mission, x, finding, s.rulings);
 }
 
 /** The escalation of a drifting round (one per drift ruled so far). */
@@ -535,7 +535,7 @@ async function routeQuestions(ctx: FlowCtx, x: string): Promise<boolean> {
   if (s.settled !== null) return false;
   for (const q of questionTasks(s)) {
     await raiseEscalation(ctx, {
-      id: escId(ctx.mission, x, `dq.${q.task.split('.').at(-2) ?? q.task}`),
+      id: authorQuestionEscalation(ctx.mission, x, q.task),
       source: 'exploration-direction',
       lineage: xid.lineage(ctx.mission, x),
       subject: explorationLine(x),
@@ -687,7 +687,7 @@ async function applyDecisions(ctx: FlowCtx, x: string): Promise<boolean> {
   }
   // free-standing direction questions: the answer goes to the author and the attacker
   for (const q of questionTasks(s)) {
-    const id = escId(ctx.mission, x, `dq.${q.task.split('.').at(-2) ?? q.task}`);
+    const id = authorQuestionEscalation(ctx.mission, x, q.task);
     if (await isApplied(ctx, id)) continue;
     const d = await decisionFor(ctx, id);
     if (d === null || d.option === 'ask-user') continue;

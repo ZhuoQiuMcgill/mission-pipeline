@@ -44,6 +44,8 @@ export type ResidentEvent =
   | { readonly kind: 'pm.note'; readonly id: string; readonly text: string; readonly words: string | null; readonly acknowledged: boolean }
   | { readonly kind: 'pm.question'; readonly id: string; readonly text: string }
   | { readonly kind: 'sec.reply'; readonly id: string; readonly text: string; readonly generation: string }
+  | { readonly kind: 'sec.question'; readonly id: string; readonly text: string; readonly about: string | null; readonly generation: string }
+  | { readonly kind: 'pm.reply'; readonly id: string; readonly text: string; readonly words: string | null }
   | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null }
   | { readonly kind: 'words.summary'; readonly id: string; readonly text: string; readonly covers: readonly { readonly id: string; readonly fingerprint: string }[] };
 

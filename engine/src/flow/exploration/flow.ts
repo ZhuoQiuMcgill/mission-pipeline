@@ -30,6 +30,7 @@ import {
 import type { AnyCard, AppendGuard, FlowEventInput, FlowLedgerPort, FlowNotice, FlowSchedulerPort, FlowTask, FlowTaskStatus } from '../ports.ts';
 import { attackerCard, authorCard, cardAtClaim, checkedData, evidenceSummary, executorCard, interpreterCard, parseEvidenceRequest, requestExecutor, stabilizerCard, type EvidenceRequestDoc, type Resume } from './cards.ts';
 import { ExplorationDefinitionSchema, xid, type ExplorationDefinition } from './definition.ts';
+import { authorQuestionEscalation, findingQuestionEscalation } from './questionIds.ts';
 import { predecessorsOf } from './predecessors.ts';
 import {
   allowedRounds,
@@ -529,6 +530,8 @@ async function notifyConsumption(p: ExplorationPorts, mission: MissionId, x: str
     detail: {
       exploration: x,
       round: s.rounds,
+      task: q.task,
+      escalations: [...(questions.length === 0 ? [] : [authorQuestionEscalation(mission, x, q.task)]), ...escalated.map((d) => findingQuestionEscalation(mission, x, d.finding, s.rulings))],
       questions,
       escalated: escalated.map((d) => ({ finding: d.finding, title: s.findings.get(d.finding)?.title ?? null, question: d.question, note: d.note })),
     },

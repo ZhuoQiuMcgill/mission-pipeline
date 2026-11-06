@@ -1942,7 +1942,7 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       const carry = await carryOut(ctx, e.id, { option: 'grant' }, g.records);
       await commit(ctx, `flow:rework:${ctx.mission}:${e.id}:apply-grant`, {
         events: [...(next === null ? [ev(ctx, lineName, 'rework', String(k + 1), body)] : []), ...carry.events], records: carry.records,
-        guard: { words: carry.words, openMissions: carry.openMissions, absent: [...carry.absent, ...(next === null ? [{ mission: ctx.mission, line: lineName, event: 'rework', key: String(k + 1) }] : [])],
+        guard: { latest: carry.latest, words: carry.words, openMissions: carry.openMissions, absent: [...carry.absent, ...(next === null ? [{ mission: ctx.mission, line: lineName, event: 'rework', key: String(k + 1) }] : [])],
           code: 'STALE_REQUEST', message: 'the grant or next attempt was recorded meanwhile; retry from the task line' },
       });
       await carried(ctx, [carry]);

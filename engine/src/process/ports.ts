@@ -305,11 +305,15 @@ export class MemoryFlowLedger implements FlowLedgerPort {
       if (guard?.openMissions?.some((m) => tx.stmt("SELECT 1 FROM missions WHERE mission = ? AND state = 'closed'").get(m) !== undefined)) throw Object.assign(new Error('the mission closed before this PM decision could take effect'), {name: 'ProcessError', code: 'NOT_READY'});
       if (guard?.words?.some((w) => wordsAuthority(tx, tx.data, w.id, w.mission) !== w.fingerprint)) throw Object.assign(new Error('the words this answer rested on changed before application'), {name: 'ProcessError', code: 'NOT_READY'});
       // the append's precondition, inside its own write (nothing is written when it fails)
+      if (guard?.latest?.some((g) => {
+        const row = tx.stmt('SELECT MAX(revision) AS revision FROM flow_events WHERE mission = ? AND line = ? AND event = ?').get(g.mission, g.line, g.event) as {revision: number | null};
+        return row.revision !== g.revision;
+      })) throw Object.assign(new Error(guard.message), {code: guard.code});
       if (guard !== undefined && guard.absent.some((g) => flowEventExists(tx, g))) throw Object.assign(new Error(guard.message), { code: guard.code });
       appendRecords(tx, [...events.map((e) => flowRecord(tx.data, e)), ...records.filter((r) => r.kind !== 'notice.delivery')]);
       for (const r of records) {
         if (r.kind === 'notice.delivery') markNotice(tx, r);
-        if (r.kind === 'loop.grant' && r.by === 'pm') requeueGrantedDispatches(tx, r.lineage, r.loop);
+        if (r.kind === 'loop.grant') requeueGrantedDispatches(tx, r.lineage, r.loop);
       }
       leavesOf(tx, events);
       planLeaves(tx, records);
