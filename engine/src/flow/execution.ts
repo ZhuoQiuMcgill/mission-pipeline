@@ -51,6 +51,7 @@ import {
   eventsOf,
   idPart,
   notify,
+  noticeAlertId,
   objectRecord,
   safeId,
   shortHash,
@@ -65,7 +66,7 @@ import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, p
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
-import { cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
+import { cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalation, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 
 interface SpecBody {
@@ -1184,6 +1185,68 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   );
 }
 
+/** The latest review reopen whose integration still waits at its undispatched rebuild. */
+async function waitingReopenRisk(ctx: FlowCtx, dependency: string, attempt: number, source?: ReopenSource) {
+  const all = await ctx.ports.ledger.events<ReopenBody>({ mission: ctx.mission, event: 'reopen' });
+  for (const event of [...all].reverse()) {
+    if (!event.line.startsWith('task:')) continue;
+    const integration = event.line.slice('task:'.length);
+    if (source !== undefined && (source.kind !== 'review' || source.integration !== integration || source.attempt !== event.body.k || source.review !== event.body.review)) continue;
+    const line = await readLine(ctx, integration);
+    const latest = line.all<ReopenBody>('reopen').at(-1);
+    const rw = line.one<ReworkBody>('rework', String(line.k));
+    if (latest?.key !== event.key || latest.revision <= (line.all('spec').at(-1)?.revision ?? 0) || line.abandoned ||
+        !latest.body.tasks.some((x) => x.task === dependency && x.attempt === attempt) ||
+        line.k !== latest.body.k + 1 || rw?.reason !== 'rebuild' ||
+        line.all<DispatchedBody>('dispatched').some((x) => x.body.k === line.k) ||
+        line.one('product', String(line.k)) !== null || line.one('accepted', String(line.k)) !== null) continue;
+    const product = await reviewedProduct(ctx, line, latest.body.k);
+    const review = line.one<ReviewBody>('review', latest.body.review);
+    if (product !== null && review !== null) return { integration, line, product, review };
+  }
+  return null;
+}
+
+/** A review-reopen ruling accepts the product actually reviewed, with that review's findings. */
+async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, dependency: DetailedTask, attempt: number, e: EscalationBody, d: DecisionBody): Promise<void> {
+  const waiting = await waitingReopenRisk(ctx, dependency.id, attempt, (e.facts as { reopen?: ReopenSource } | undefined)?.reopen);
+  const by = deciderOf(d.by);
+  if (waiting === null || !plan.tasks.some((t) => t.id === waiting.integration && t.kind === 'integration') || by === null || e.position?.target !== waiting.product.object || e.position.revokes !== waiting.review.judgment) {
+    await notify(ctx, { category: 'accept-risk-moot', wi: null, key: e.id,
+      trigger: `no integration waits for the review reopen of ${dependency.id} attempt ${attempt} on ${e.id}`,
+      defaultAction: 'nothing is accepted; the decision is closed', detail: { escalation: e.id } });
+    await markApplied(ctx, e.id, { option: 'accept-risk', moot: true });
+    return;
+  }
+  const { integration, line, product, review } = waiting;
+  const task = plan.tasks.find((t) => t.id === integration);
+  const record = await objectRecord(ctx, product.object);
+  const pins = record === null ? [] : ctx.ports.ledger.content.getList(record.prerequisites);
+  const missing: string[] = [];
+  if (task === undefined) missing.push(integration);
+  else {
+    const dependencies = new Set([...(await taskDependencies(ctx, plan, task)), ...reopenEntries(line).keys()]);
+    // The reviewed start includes the whole prerequisite closure, not just direct dependencies.
+    for (const dep of dependencies) {
+      const spec = plan.tasks.find((t) => t.id === dep);
+      for (const parent of spec?.dependsOn ?? []) dependencies.add(parent);
+      const accepted = await acceptedProduct(ctx, dep);
+      if (accepted === null || !pins.includes(accepted)) missing.push(dep);
+    }
+  }
+  if (missing.length > 0) {
+    await notify(ctx, { category: 'accept-risk-waits', wi: null, key: e.id,
+      trigger: `accept-risk on ${e.id} waits: ${missing.join(', ')} must still be accepted at the versions reviewed in ${product.object}`,
+      defaultAction: 'the decision is kept and checked on every pass', detail: { escalation: e.id, integration, dependencies: missing } });
+    return;
+  }
+  const words = by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
+  const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : 'the Secretary'} on ${e.id}: ${x}`);
+  await commitCarrying(ctx, `flow:accepted-risk:${ctx.mission}:task:${idPart(integration)}:${line.k}`,
+    [ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks })],
+    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);
+}
+
 /** The latest reopen of each dependency an integration review reopened under the task's current card. */
 function reopenEntries(line: Line): Map<string, { readonly task: string; readonly attempt: number; readonly product: string; readonly issue: string; readonly evidence?: string }> {
   const spec = line.all('spec').at(-1)?.revision ?? 0;
@@ -1273,7 +1336,8 @@ async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, a
   // it moved on (its new attempt is this one, or a re-plan restarted it), or it was given up: nothing to do
   if (line.abandoned || line.k !== attempt || line.one('accepted', String(attempt)) === null) return;
   const verdict = line.one<{ proceed: boolean }>('loop-verdict', key);
-  if (verdict !== null && !verdict.proceed) return; // its rework loop is used up: the escalation raised then decides
+  // A kept negative verdict can lack its escalation after a 4.1.3 id collision or a crash.
+  if (verdict?.proceed === false && await escalation(ctx, safeId(`exh.${taskLineage(ctx.mission, taskId)}.${attempt}.${idPart(key)}`)) !== null) return;
   await rework(ctx, t, attempt, [issue], [instruction], key, { reason: 'reopen', reopen: source });
 }
 
@@ -1759,29 +1823,30 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
     return;
   }
   const v = r.status;
-  const id = safeId(`exh.${lineage}.${k}`);
+  const id = safeId(o.reopen !== undefined ? `exh.${lineage}.${k}.${idPart(key)}` : `exh.${lineage}.${k}`);
   // 4.1.3 (#35, E-1): with a verified hand-back, the decision may accept the attempt's product with its open findings as risks
-  const risk = await riskAcceptable(ctx, t, k);
+  const reopenRisk = o.reopen?.kind === 'review' ? await waitingReopenRisk(ctx, t.id, k, o.reopen) : null;
+  const risk = reopenRisk === null ? await riskAcceptable(ctx, t, k) : { product: reopenRisk.product.object, judgment: reopenRisk.review.judgment };
   await raiseEscalation(ctx, {
     id,
     source: 'loop-exhausted',
     lineage,
     subject: `task:${t.id}`,
     summary: `Task ${t.id}: the reworks are used up (${v.attempts}/${v.allowed}${v.reason === 'no-progress' ? ', the same issues twice in a row' : ''}).`,
-    reasons: [...issues],
+    reasons: [...issues, ...(reopenRisk?.review.issues ?? [])],
     options: ['grant', 'replan', ...(risk !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
     ...(risk !== null ? { position: { target: risk.product, review: 'reviewer', revokes: risk.judgment } } : {}),
     items: t.requirementItems,
-    facts: { task: t.id, attempt: k, loop: 'rework', issues, attempts: v.attempts, allowed: v.allowed, reason: v.reason },
+    facts: { task: t.id, attempt: k, loop: 'rework', issues, attempts: v.attempts, allowed: v.allowed, reason: v.reason, ...(o.reopen !== undefined ? { reopen: o.reopen } : {}) },
     // the Reviewer whose rework used the loop up (or the Constructor whose candidate could not be recorded)
-    handover: await reworkHandover(ctx, t, k),
+    handover: reopenRisk !== null ? { from: reopenRisk.review.task, objects: [reopenRisk.product.object] } : await reworkHandover(ctx, t, k),
   });
   await notify(ctx, {
     category: 'loop-exhausted',
     wi: WI.loopExhausted,
     key: id,
     trigger: `rework on lineage ${lineage}: ${v.reason === 'no-progress' ? 'the same issues twice in a row (no progress)' : `${v.attempts} of ${v.allowed} reworks used`}`,
-    defaultAction: `only task ${t.id} stops at "exhausted"; the Secretary decides (one grant, re-plan, ${risk !== null ? 'accept its verified product with the open findings as risks, ' : ''}abandon, or the user); the rest of the mission continues`,
+    defaultAction: `only task ${t.id} stops at "exhausted"; the Secretary decides (one grant, re-plan, ${reopenRisk !== null ? `accept ${reopenRisk.integration}'s reviewed product with its findings as risks, ` : risk !== null ? 'accept its verified product with the open findings as risks, ' : ''}abandon, or the user); the rest of the mission continues`,
     detail: { task: t.id, lineage, attempt: k, issues },
   });
 }
@@ -1837,7 +1902,8 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       await requestReplan(ctx, eff, t, e.id, d);
       return true;
     case 'accept-risk':
-      await acceptWithRisk(ctx, eff, plan, t, k, e, d, waived);
+      if (line.one('accepted', String(k)) !== null) await acceptReopenWithRisk(ctx, plan, t, k, e, d);
+      else await acceptWithRisk(ctx, eff, plan, t, k, e, d, waived);
       return true;
     case 'abandon':
       await abandon(ctx, t, line.k, e.id, d.reason);
@@ -2053,9 +2119,10 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // version) it starts from that new snapshot with the previous version's whole change laid over it
   // (three-way, as a delivery lays it), so its worktree and its declared runs see the dependencies'
   // current work; the new snapshot is recorded as the attempt's origin, so its product's change is
-  // the task's own work only. A carried change that conflicts with the new snapshot builds nothing:
-  // the attempt waits with a notice (Appendix M).
+  // the task's own work only. A conflicting carry starts fresh, with the earlier work
+  // readable at its commit for the Constructor to carry over by hand (Appendix M).
   let snap: Awaited<ReturnType<typeof ctx.ports.scheduler.snapshot>>;
+  let carryDropped = false;
   const recorded = line.one<DispatchedBody>('dispatched', task);
   try {
     snap = recorded !== null ? { path: recorded.snapshot, commit: recorded.commit, products: recorded.prerequisites ?? [], ...(recorded.origin !== undefined ? { origin: recorded.origin } : {}) } : await ctx.ports.scheduler.snapshot(
@@ -2066,20 +2133,33 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     if (recorded === null && snap.products === undefined) snap = { ...snap, products: await ctx.ports.scheduler.composition(deps) };
   } catch (e) {
     if (prev !== null && (e as { code?: string }).code === 'conflict' && (e as { detail?: { carried?: unknown } }).detail?.carried === true) {
-      return notify(ctx, {
-        category: 'rework-start-conflict',
+      try {
+        const fresh = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: `constructor-${t.id}`, products: deps, writable: t.writeScope });
+        snap = { ...fresh, origin: fresh.commit, products: fresh.products ?? await ctx.ports.scheduler.composition(deps) };
+      } catch (freshError) {
+        return actionRefused(ctx, task, freshError);
+      }
+      carryDropped = true;
+      await notify(ctx, {
+        category: 'rework-carry-dropped',
         wi: null,
         key: `${task}:carry`,
-        trigger: `attempt ${k} of task ${t.id} cannot start: ${(e as Error).message}`,
-        defaultAction: `only task ${t.id} waits (tried again on every pass, so its dependencies' work accepted again can clear it); nothing is built on part of the earlier work. A re-plan that changes its card starts its next attempt from its dependencies' current work without the earlier attempts' change (it stays readable at ${prev.commit})`,
+        trigger: `attempt ${k} of task ${t.id} starts fresh: the change from ${prev.object} at ${prev.commit} conflicts with the current dependencies: ${(e as Error).message}`,
+        defaultAction: `the earlier change stays readable at ${prev.commit}; the Constructor carries over by hand what still applies to the current dependencies`,
         detail: { task: t.id, attempt: k, previous: prev.object, commit: prev.commit, dependencies: deps, conflicts: (e as { detail?: { conflicts?: unknown } }).detail?.conflicts ?? null },
       });
-    }
-    return actionRefused(ctx, task, e);
+    } else return actionRefused(ctx, task, e);
+  }
+  // A crash after the dispatch event must rebuild the same card. Read the existing
+  // notice rather than infer a dropped carry from an empty, non-conflicting change.
+  if (recorded !== null && prev !== null && snap.origin === snap.commit) {
+    const alert = noticeAlertId({ mission: ctx.mission, category: 'rework-carry-dropped', key: `${task}:carry` });
+    carryDropped = (await ctx.ports.ledger.records(['alert'])).some(({ record }) => record.alert === alert);
   }
   const items = await currentItems(ctx);
   const rw = line.one<ReworkBody>('rework', String(k));
   const duties = [
+    ...(prev !== null && carryDropped ? [`The earlier attempt's change is not in the tree; it stays readable at commit ${prev.commit}. Carry over by hand what still applies to the current dependencies.`] : []),
     `Implement task ${t.id} (${t.kind}${t.module !== null ? ` of module ${t.module}` : ''}) inside its writable paths, so that every acceptance standard is met.`,
     ...(rw !== null && rw.issues.length > 0 ? ['This is a rework. Fix exactly these issues from the review:', ...rw.issues.map((i) => `- ${i}`)] : []),
     ...(rw !== null && rw.instructions.length > 0 ? ['Instructions:', ...rw.instructions.map((i) => `- ${i}`)] : []),

@@ -6,6 +6,23 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.2.0] - unreleased
+
+### Fixed
+- #47: a review's or repair's reopen of a decided, used-up loop gets its own escalation;
+  a kept verdict whose escalation was lost is retried, and a grant starts the reopened attempt.
+- #48: a conflicting rework carry starts fresh on the current dependencies, with the earlier
+  version, commit and paths in notice `rework-carry-dropped` and a manual carry-over duty on the card.
+- #49: landing's clean checks accept LF or CRLF when the engine's supported eol/ident conversion
+  gives the recorded blob, including with `core.autocrlf=true`; real edits still differ.
+- #50: a review-reopen loop-exhausted escalation offers both deciders `accept-risk`: keep the
+  dependency's accepted product and accept the reviewed integration product with its findings as risks.
+
+### Changed
+- #48's fresh start is the default, with no config key. The earlier change stays readable at its commit.
+- No record or event format changes: 4.1.3 records fold without migration. The stuck reopen and
+  carry-conflict cases come unstuck on the next pass where the decision or fresh start allows it.
+
 ## [4.1.3] - unreleased
 
 4.1.3 raises the user's say and makes the process less rigid. Between 2026-10-25 and 2026-11-02 a

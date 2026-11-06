@@ -5,8 +5,8 @@
 // one was accepted again at a newer version), the next attempt starts from the snapshot a first
 // attempt would get now with the previous version's whole change laid over it, and that snapshot
 // is its product's origin. With no change of its dependencies it continues from the previous
-// candidate exactly as before. A carried change that conflicts with the new snapshot builds
-// nothing: the attempt waits with a notice, and a re-plan of its card starts it afresh.
+// candidate exactly as before. A conflicting carry starts fresh on the current dependencies;
+// the earlier change stays readable at its commit for manual carry-over.
 //
 // The scenario: base → impl → use (impl in lib/, use integrates); a re-plan adds `extra` as a
 // dependency of impl (in its own module, or on a file of impl's write scope).
@@ -155,6 +155,7 @@ async function decompose(pp: ProcessProject, detailed: unknown): Promise<void> {
 /** The mission planned (round 1: base → impl → use), base accepted, impl's first attempt handed back. */
 async function firstAttempt(baseCommon = false): Promise<{ pp: ProcessProject; words: string; first: { start: string; candidate: string } }> {
   const pp = processProject({ files: BASE_FILES });
+  pp.git('config', 'core.autocrlf', 'false');
   const words = await startAddMission(pp.ctx, M);
   await decompose(pp, plan({ baseCommon }));
   await construct(pp, 'base', { 'core/x.txt': 'x1\n' });
@@ -225,6 +226,7 @@ describe("a later attempt starts from its dependencies' current work", () => {
 
   it('hand-back pins the old dependency even when a new version is accepted while the attempt runs', async () => {
     p = processProject({ files: BASE_FILES });
+    p.git('config', 'core.autocrlf', 'false');
     const words = await startAddMission(p.ctx, M);
     await decompose(p, plan());
     await construct(p, 'base', { 'core/x.txt': 'x1\n' });
@@ -257,7 +259,7 @@ describe("a later attempt starts from its dependencies' current work", () => {
     assert.equal(record(p, prod('impl', 2)).source?.origin, s.first.start, "the first attempt's snapshot stays the origin");
   });
 
-  it('a carried change that conflicts with a new dependency builds nothing: the attempt waits with a notice; a re-plan of its card starts it afresh', async () => {
+  it('a conflicting carry starts fresh by default, records its origin and tells the Constructor what to recover', async () => {
     const s = await firstAttempt(true);
     p = s.pp;
     await replan(p, s.words, 2, plan({ baseCommon: true, baseGoal: 'Base with revised common' }));
@@ -265,14 +267,29 @@ describe("a later attempt starts from its dependencies' current work", () => {
     await reviewOf(p, 'base', 'pass');
     await reviewOf(p, 'impl', 'rework');
     const next = await pmNext(p.ctx);
-    assert.ok(!next.ready.some((r) => r.kind === 'constructor' && r.step.includes('.impl.')), 'no attempt of impl is ready');
-    const n = next.notices.find((x) => x.category === 'rework-start-conflict');
-    assert.ok(n !== undefined, `a notice: ${next.notices.map((x) => `${x.category}: ${x.trigger}`).join(' | ')}`);
-    assert.match(n.trigger, /lib\/common\.txt/);
-    // the way out: a re-plan that changes impl's card starts its next attempt from its dependencies' current work
-    await replan(p, s.words, 3, plan({ baseCommon: true, baseGoal: 'Base with revised common', implGoal: 'Task impl, on the shared file' }));
-    const third = await construct(p, 'impl', { 'lib/common.txt': 'common-extra and impl\n' });
-    assert.equal(third.start, (await p.ctx.actions().snapshot({ mission: M, purpose: 'test', products: [prod('base', 2)] })).commit);
-    assert.deepEqual(filesOf(p, third.start), files({ 'core/x.txt': 'x2\n', 'lib/common.txt': 'common-extra\n' }));
+    assert.ok(next.ready.some((r) => r.kind === 'constructor' && r.step.includes('.impl.2')));
+    assert.ok(!next.notices.some((n) => n.category === 'rework-start-conflict'));
+    const notice = next.notices.find((n) => n.category === 'rework-carry-dropped');
+    assert.ok(notice !== undefined);
+    assert.match(notice.trigger, /lib\/common\.txt/);
+    assert.ok(notice.trigger.includes(prod('impl', 1)) && notice.trigger.includes(s.first.candidate));
+    const con = await ready(p, 'constructor', 'impl');
+    const d = pmDispatch(p.ctx, con.step);
+    const card = dispatchView(p.ctx, d.dispatch).card;
+    assert.match(String(card.duties), /earlier attempt's change is not in the tree/);
+    assert.ok(String(card.duties).includes(s.first.candidate));
+    const fresh = (await p.ctx.actions().snapshot({ mission: M, purpose: 'test', products: [prod('base', 2)] })).commit;
+    const start = gitIn(join(p.dir, d.worktree!), 'rev-parse', 'HEAD');
+    assert.equal(start, fresh);
+    assert.deepEqual(filesOf(p, start), files({ 'core/x.txt': 'x2\n', 'lib/common.txt': 'common-extra\n' }));
+    const head = p.ctx.memory.head();
+    await pmNext(p.ctx);
+    assert.equal(p.ctx.memory.head(), head, 'a further pass writes nothing');
+    write(join(p.dir, d.worktree!), 'lib/b.txt', 'b2\n');
+    const back = await handBack(p.ctx, d.dispatch, { done: 'done', unmet_standards: [], unfixed_problems: [], decisions_needed: [] });
+    assert.equal(back.kind, 'recorded');
+    await reviewOf(p, 'impl', 'pass');
+    await pmNext(p.ctx);
+    assert.equal(record(p, prod('impl', 2)).source?.origin, fresh);
   });
 });

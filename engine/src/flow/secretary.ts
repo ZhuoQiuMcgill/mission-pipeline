@@ -143,6 +143,7 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
     const neg = await judgmentRecordOf(ctx, e.position.revokes);
     if (neg !== null) position = { target: e.position.target, review: e.position.review, revokes: e.position.revokes, binding: rulingBinding(neg, rulingJudgmentId(e.id, 'secretary')) };
   }
+  const reopen = (e.facts as { reopen?: { kind: string; integration?: string } } | undefined)?.reopen;
   return {
     ...cardBase(ctx, e.task, {
       duties: 'Decide this one escalation within the recorded authority, pick one option, classify it, and write the notice for the PM.',
@@ -150,7 +151,13 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
     seat: 'secretary',
     request: { id: e.id, source: e.source, lineage: e.lineage, subject: e.subject, summary: e.summary, original: e.original ?? '', changed: e.changed ?? '', reasons: [...e.reasons] },
     ...inputs,
-    options: e.options.map((o) => ({ id: o, ...OPTION_TEXT[o] })),
+    options: e.options.map((o) => ({
+      id: o,
+      ...OPTION_TEXT[o],
+      ...(o === 'accept-risk' && e.source === 'loop-exhausted' && reopen?.kind === 'review'
+        ? { outcome: `${taskId} keeps its accepted product; ${reopen.integration}'s reviewed attempt is accepted as it is, with the review's open findings quoted as risks; no further review round runs.` }
+        : {}),
+    })),
     position,
   };
 }
@@ -417,7 +424,7 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
   let ruling: string | null = null;
   const accepting = (o: unknown): boolean => o === 'accept' || o === 'accept-risk';
   const by = d === null ? null : deciderOf(d.by);
-  if (esc !== null && by !== null && esc.position && accepting(what['option']) && accepting(d!.option)) {
+  if (esc !== null && by !== null && esc.position && what['moot'] !== true && accepting(what['option']) && accepting(d!.option)) {
     const neg = await judgmentRecordOf(ctx, esc.position.revokes);
     const jid = rulingJudgmentId(esc.id, by);
     if (neg !== null && (await judgmentRecordOf(ctx, jid)) === null) {
