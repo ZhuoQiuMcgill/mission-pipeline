@@ -66,7 +66,8 @@ import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, p
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
-import { grantForDecision, grantedAttempt, cancelSecretarySteps, carryGuard, carried, carryOut, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
+import { isAskOption } from '../seat/cards/secretary.ts';
+import { grantForDecision, grantedAttempt, cancelSecretarySteps, carryGuard, carried, carryOut, closedEscalation, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 
 interface SpecBody {
@@ -1157,6 +1158,61 @@ async function riskAcceptable(ctx: FlowCtx, t: DetailedTask, k: number): Promise
 }
 
 /**
+ * #57: the re-bind under review of attempt k, when its Reviewer sent it back (on `key`, or any key when null)
+ * and its content is the attempt's product that an accept-risk decision accepted: it may be accepted with the
+ * review's open findings as risks again. Null otherwise.
+ */
+async function rebindRiskAcceptable(ctx: FlowCtx, t: DetailedTask, k: number, key: string | null): Promise<{ readonly product: string; readonly judgment: string; readonly rebind: string; readonly review: string } | null> {
+  const line = await readLine(ctx, t.id);
+  if (line.abandoned || line.k !== k) return null;
+  const acc = line.one<{ product: string; decision?: { option?: string } }>('accepted', String(k));
+  if (acc === null || acc.decision?.option !== 'accept-risk') return null;
+  const rb = line.all<RebindBody>('rebind').filter((r) => r.body.k === k && bySeat(r.body)).at(-1);
+  if (rb === undefined || line.one('rebound', rb.key) !== null) return null;
+  const rev = rebindReviewers(ctx, t.id, line, k, rb).at(-1)!;
+  if (key !== null && key !== `rework:${k}:${rev}`) return null;
+  const review = line.one<ReviewBody>('review', rev);
+  if (review === null || review.verdict === 'pass') return null;
+  const was = await objectRecord(ctx, acc.product);
+  const now = await objectRecord(ctx, rb.body.product);
+  if (was === null || now === null || was.content !== now.content) return null;
+  const judged = await judgmentRecordOf(ctx, review.judgment);
+  if (judged === null || judged.target !== rb.body.product) return null;
+  return { product: rb.body.product, judgment: review.judgment, rebind: rb.key, review: rev };
+}
+
+/** #57: "accept-risk" on a failed re-bind review accepts the re-bound version (event "rebound") with the decider's ruling and its risks. */
+async function acceptRebindWithRisk(ctx: FlowCtx, t: DetailedTask, k: number, e: EscalationBody, d: DecisionBody): Promise<void> {
+  const rebind = (e.facts as { rebind?: string } | undefined)?.rebind;
+  const risk = await rebindRiskAcceptable(ctx, t, k, null);
+  const by = deciderOf(d.by);
+  const line = await readLine(ctx, t.id);
+  const rb = rebind === undefined ? null : line.one<RebindBody>('rebind', rebind);
+  if (rebind === undefined || rb === null || risk === null || risk.rebind !== rebind || e.position?.target !== rb.product || by === null) {
+    await notify(ctx, {
+      category: 'accept-risk-moot',
+      wi: null,
+      key: e.id,
+      trigger: `the decision on ${e.id} accepts task ${t.id}'s re-bound version with its risks, but ${by === null ? 'no user, PM or Secretary decided it' : 'that re-bind is no longer the one under review'}`,
+      defaultAction: `nothing is accepted; the decision is closed. Task ${t.id} goes on from where it is now`,
+      detail: { task: t.id, attempt: k, escalation: e.id },
+    });
+    await markApplied(ctx, e.id, { option: 'accept-risk', moot: true });
+    return;
+  }
+  const words = by === 'pm' ? (d.words ?? []).map((w) => w.id).join(',') : by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
+  const ruling = rulingJudgmentId(e.id, by);
+  const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  const body: ReboundBody = { k, n: rb.n, product: rb.product, judgment: ruling, how: 'review', decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks };
+  await commitCarrying(
+    ctx,
+    `flow:rebound-risk:${ctx.mission}:task:${idPart(t.id)}:${rebind}`,
+    [ev(ctx, taskLine(t.id), 'rebound', rebind, body)],
+    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
+  );
+}
+
+/**
  * "accept-risk" on a task's escalation (4.1.3, #35, E-1): the decision accepts the attempt's verified
  * product; the open findings go to the risk list, quoted on the acceptance; the work goes on. The
  * decision is the user's or the Secretary's and is recorded as such: its ruling (the decider's pass that
@@ -1489,6 +1545,9 @@ interface ReboundBody {
   readonly product: string;
   readonly judgment: string;
   readonly how: 'review' | 'carried';
+  /** #57: accepted with its risks by a decision on a used-up loop, not by the Reviewer's pass. */
+  readonly decision?: { readonly escalation: string; readonly option: 'accept-risk'; readonly by: string; readonly words?: string };
+  readonly risks?: readonly string[];
 }
 
 /** What one pass re-bound, for the PM's notices. */
@@ -1879,10 +1938,22 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
   const v = r.status;
   // #51: only the attempt's own review keeps the base id; every other rework of the attempt (a reopen, a re-bind or
   // re-review, an export refusal, a Secretary rework) names its escalation by its key, so a decided base id never hides it
-  const id = safeId(key === `rework:${k}` ? `exh.${lineage}.${k}` : `exh.${lineage}.${k}.${idPart(key)}`);
+  let id = safeId(key === `rework:${k}` ? `exh.${lineage}.${k}` : `exh.${lineage}.${k}.${idPart(key)}`);
   // 4.1.3 (#35, E-1): with a verified hand-back, the decision may accept the attempt's product with its open findings as risks
   const reopenRisk = o.reopen?.kind === 'review' ? await waitingReopenRisk(ctx, t.id, k, o.reopen) : null;
-  const risk = reopenRisk === null ? await riskAcceptable(ctx, t, k) : { product: reopenRisk.product.object, judgment: reopenRisk.review.judgment };
+  // #57: a re-bound version whose content an accept-risk decision accepted may be accepted with its risks again
+  const rebindRisk = o.reopen === undefined ? await rebindRiskAcceptable(ctx, t, k, key) : null;
+  const risk = reopenRisk !== null ? { product: reopenRisk.product.object, judgment: reopenRisk.review.judgment } : rebindRisk ?? await riskAcceptable(ctx, t, k);
+  if (rebindRisk !== null) {
+    // an escalation raised before #57 for the same re-bind lacks the option: an open one is closed as superseded and a fresh one offers it
+    const old = await escalation(ctx, id);
+    if (old !== null && !old.options.includes('accept-risk')) {
+      if (!(await isApplied(ctx, id))) {
+        await commitCarrying(ctx, `flow:rebind-risk:${ctx.mission}:${id}`, [], [closing(ctx, [id], 'accept-risk is offered after a failed re-bind review now (#57): a fresh escalation offers it')], [id]);
+      }
+      if ((await closedEscalation(ctx, id)) !== null) id = safeId(`${id}.risk`);
+    }
+  }
   await raiseEscalation(ctx, {
     id,
     source: 'loop-exhausted',
@@ -1893,7 +1964,7 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
     options: ['grant', 'replan', ...(risk !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
     ...(risk !== null ? { position: { target: risk.product, review: 'reviewer', revokes: risk.judgment } } : {}),
     items: t.requirementItems,
-    facts: { task: t.id, attempt: k, loop: 'rework', issues, attempts: v.attempts, allowed: v.allowed, reason: v.reason, ...(o.reopen !== undefined ? { reopen: o.reopen } : {}) },
+    facts: { task: t.id, attempt: k, loop: 'rework', issues, attempts: v.attempts, allowed: v.allowed, reason: v.reason, ...(o.reopen !== undefined ? { reopen: o.reopen } : {}), ...(rebindRisk !== null ? { rebind: rebindRisk.rebind } : {}) },
     // the Reviewer whose rework used the loop up (or the Constructor whose candidate could not be recorded)
     handover: reopenRisk !== null ? { from: reopenRisk.review.task, objects: [reopenRisk.product.object] } : await reworkHandover(ctx, t, k),
   });
@@ -1927,6 +1998,17 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   if (e.source === 'needs-disposition' || (e.source === 'loop-exhausted' && facts.loop !== undefined && facts.loop !== 'rework')) return false;
   const blocking = e.source !== 'constructor-decision';
   const d = await decisionFor(ctx, e.id);
+  // #57: an open loop-exhausted escalation that a failed re-bind review raised before accept-risk was offered there
+  // (undecided, or waiting for the PM or the user) is closed as superseded; this pass's re-bind step raises a fresh
+  // one that offers it. A decision already taken on it is carried out as before.
+  if (e.source === 'loop-exhausted' && !e.options.includes('accept-risk') && (d === null || isAskOption(d.option)) && !(await isApplied(ctx, e.id))) {
+    const k0 = facts.attempt ?? line.k;
+    const rr = await rebindRiskAcceptable(ctx, t, k0, null);
+    if (rr !== null && e.id === safeId(`exh.${lineage}.${k0}.${idPart(`rework:${k0}:${rr.review}`)}`)) {
+      await commitCarrying(ctx, `flow:rebind-risk:${ctx.mission}:${e.id}`, [], [closing(ctx, [e.id], 'accept-risk is offered after a failed re-bind review now (#57): a fresh escalation offers it')], [e.id]);
+      return false;
+    }
+  }
   if (d === null) return blocking;
   const k = facts.attempt ?? line.k;
   const raised = (await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).find((x) => x.key === e.id);
@@ -1968,7 +2050,8 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       await requestReplan(ctx, eff, t, e.id, d, !reopen || line.k === k);
       return !reopen || line.k === k;
     case 'accept-risk':
-      if (line.one('accepted', String(k)) !== null) await acceptReopenWithRisk(ctx, plan, t, k, e, d);
+      if ((e.facts as { rebind?: string } | undefined)?.rebind !== undefined) await acceptRebindWithRisk(ctx, t, k, e, d);
+      else if (line.one('accepted', String(k)) !== null) await acceptReopenWithRisk(ctx, plan, t, k, e, d);
       else await acceptWithRisk(ctx, eff, plan, t, k, e, d, waived);
       return !reopen || line.k === k;
     case 'abandon':
