@@ -1332,11 +1332,16 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);
 }
 
-/** The latest reopen of each dependency an integration review reopened under the task's current card. */
+/**
+ * The latest reopen of each dependency an integration review reopened under the task's current card and
+ * since the task was last accepted: an acceptance after a reopen (its rebuild, or a ruling that accepted the
+ * reviewed attempt with the reopen's risks) settles it, so a later attempt (a repair's) does not wait for it.
+ */
 function reopenEntries(line: Line): Map<string, { readonly task: string; readonly attempt: number; readonly product: string; readonly issue: string; readonly evidence?: string }> {
   const spec = line.all('spec').at(-1)?.revision ?? 0;
+  const settled = line.all('accepted').at(-1)?.revision ?? 0;
   const out = new Map<string, { readonly task: string; readonly attempt: number; readonly product: string; readonly issue: string; readonly evidence?: string }>();
-  for (const e of line.all<ReopenBody>('reopen')) if (e.revision > spec) for (const x of e.body.tasks) out.set(x.task, x);
+  for (const e of line.all<ReopenBody>('reopen')) if (e.revision > spec && e.revision > settled) for (const x of e.body.tasks) out.set(x.task, x);
   return out;
 }
 
