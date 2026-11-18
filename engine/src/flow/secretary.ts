@@ -41,6 +41,11 @@ export interface EscalationSpec {
   readonly changed?: string;
   readonly reasons: readonly string[];
   readonly options: readonly DecisionOption[];
+  /**
+   * Options of `options` that only the PM or the user may choose: they are left off the Secretary seat's card
+   * (accept-risk on an attempt whose program runs did not all pass). Absent: every option is the Secretary's too.
+   */
+  readonly pmOnly?: readonly DecisionOption[];
   /** Requirement item lines involved. */
   readonly items?: readonly string[];
   /** A negated review position the decision rules on (accept → a pass revoking the negation). */
@@ -97,7 +102,8 @@ const OPTION_TEXT: Readonly<Record<DecisionOption, { label: string; outcome: str
 export function secretaryOptions(e: EscalationBody, resident = false): SecretaryCard['options'] {
   const taskId = e.subject.startsWith('task:') ? e.subject.slice('task:'.length) : null;
   const reopen = (e.facts as { reopen?: { kind: string; integration?: string } } | undefined)?.reopen;
-  return e.options.map((o) => ({
+  // an option only the PM or the user may choose is not offered on the Secretary seat's card
+  return e.options.filter((o) => !(e.pmOnly ?? []).includes(o)).map((o) => ({
     id: resident && isAskOption(o) ? 'ask-pm' as const : o,
     ...OPTION_TEXT[resident && isAskOption(o) ? 'ask-pm' : o],
     ...(resident && o === 'grant' ? {outcome: 'the exhausted loop runs again; after your one grant, further grants belong to the PM or the user'} : {}),

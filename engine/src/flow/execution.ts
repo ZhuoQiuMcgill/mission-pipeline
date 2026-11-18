@@ -1158,6 +1158,25 @@ async function riskAcceptable(ctx: FlowCtx, t: DetailedTask, k: number): Promise
 }
 
 /**
+ * Attempt k whose hand-back is recorded but whose program runs did not all pass, and whose last Reviewer judged
+ * that product without a pass: the product, that judgment and the failed runs. Only the PM or the user may accept
+ * it with its risks (the escalation lists accept-risk as pmOnly; the Secretary's accept-risk stays with verified
+ * hand-backs, riskAcceptable). Null otherwise, and whenever the hand-back is verified.
+ */
+async function failedRunsRisk(ctx: FlowCtx, t: DetailedTask, k: number): Promise<{ readonly product: string; readonly judgment: string; readonly failed: readonly string[] } | null> {
+  const line = await readLine(ctx, t.id);
+  if (line.abandoned || line.k !== k || line.one('accepted', String(k)) !== null) return null;
+  const product = line.one<ProductBody>('product', String(k));
+  const runs = line.one<{ runs: VerificationRun[] }>('verified', String(k))?.runs;
+  if (product === null || runs === undefined || !runs.some((r) => !r.passed)) return null;
+  const review = line.all<ReviewBody>('review').filter((r) => r.body.k === k).at(-1);
+  if (review === undefined || review.body.verdict === 'pass') return null;
+  const judged = await judgmentRecordOf(ctx, review.body.judgment);
+  if (judged === null || judged.target !== product.object) return null;
+  return { product: product.object, judgment: review.body.judgment, failed: runs.filter((r) => !r.passed).map((r) => `${r.command} (${r.summary}; evidence ${r.evidence})`) };
+}
+
+/**
  * #57: the re-bind under review of attempt k, when its Reviewer sent it back (on `key`, or any key when null)
  * and its content is the attempt's product that an accept-risk decision accepted: it may be accepted with the
  * review's open findings as risks again. Null otherwise.
@@ -1232,7 +1251,9 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
     });
     await markApplied(ctx, e.id, { option: 'accept-risk', moot: true });
   };
-  const risk = await riskAcceptable(ctx, t, k);
+  // a product whose program runs did not all pass is accepted only on the PM's or the user's decision (pmOnly)
+  const runsByPm = (e.pmOnly ?? []).includes('accept-risk') && (d.by === 'pm' || d.by === 'user');
+  const risk = (await riskAcceptable(ctx, t, k)) ?? (runsByPm ? await failedRunsRisk(ctx, t, k) : null);
   if (risk === null) return moot();
   // the decision accepts the product as it is, never ahead of the dependency gate a Reviewer's pass goes through:
   // each dependency accepted now (one reopened since waits to be accepted again, sol review P1 r2), stable
@@ -1949,12 +1970,18 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
   // #57: a re-bound version whose content an accept-risk decision accepted may be accepted with its risks again
   const rebindRisk = o.reopen === undefined ? await rebindRiskAcceptable(ctx, t, k, key) : null;
   const risk = reopenRisk !== null ? { product: reopenRisk.product.object, judgment: reopenRisk.review.judgment } : rebindRisk ?? await riskAcceptable(ctx, t, k);
-  if (rebindRisk !== null) {
-    // an escalation raised before #57 for the same re-bind lacks the option: an open one is closed as superseded and a fresh one offers it
+  // an attempt whose program runs did not all pass may be accepted with its risks by the PM or the user only
+  const runRisk = risk === null ? await failedRunsRisk(ctx, t, k) : null;
+  const offered = risk ?? runRisk;
+  if (rebindRisk !== null || runRisk !== null) {
+    // an escalation raised before the option was offered here lacks it: an open one is closed as superseded and a fresh one offers it
     const old = await escalation(ctx, id);
     if (old !== null && !old.options.includes('accept-risk')) {
       if (!(await isApplied(ctx, id))) {
-        await commitCarrying(ctx, `flow:rebind-risk:${ctx.mission}:${id}`, [], [closing(ctx, [id], 'accept-risk is offered after a failed re-bind review now (#57): a fresh escalation offers it')], [id]);
+        const why = rebindRisk !== null
+          ? 'accept-risk is offered after a failed re-bind review now (#57): a fresh escalation offers it'
+          : 'accept-risk is offered to the PM and the user on an attempt whose program runs did not all pass now: a fresh escalation offers it';
+        await commitCarrying(ctx, `flow:${rebindRisk !== null ? 'rebind' : 'runs'}-risk:${ctx.mission}:${id}`, [], [closing(ctx, [id], why)], [id]);
       }
       if ((await closedEscalation(ctx, id)) !== null) id = safeId(`${id}.risk`);
     }
@@ -1965,9 +1992,10 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
     lineage,
     subject: `task:${t.id}`,
     summary: `Task ${t.id}: the reworks are used up (${v.attempts}/${v.allowed}${v.reason === 'no-progress' ? ', the same issues twice in a row' : ''}).`,
-    reasons: [...issues, ...(reopenRisk?.review.issues ?? [])],
-    options: ['grant', 'replan', ...(risk !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
-    ...(risk !== null ? { position: { target: risk.product, review: 'reviewer', revokes: risk.judgment } } : {}),
+    reasons: [...issues, ...(reopenRisk?.review.issues ?? []), ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
+    options: ['grant', 'replan', ...(offered !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
+    ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
+    ...(offered !== null ? { position: { target: offered.product, review: 'reviewer', revokes: offered.judgment } } : {}),
     items: t.requirementItems,
     facts: { task: t.id, attempt: k, loop: 'rework', issues, attempts: v.attempts, allowed: v.allowed, reason: v.reason, ...(o.reopen !== undefined ? { reopen: o.reopen } : {}), ...(rebindRisk !== null ? { rebind: rebindRisk.rebind } : {}) },
     // the Reviewer whose rework used the loop up (or the Constructor whose candidate could not be recorded)
