@@ -2041,6 +2041,12 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       await commitCarrying(ctx, `flow:rebind-risk:${ctx.mission}:${e.id}`, [], [closing(ctx, [e.id], 'accept-risk is offered after a failed re-bind review now (#57): a fresh escalation offers it')], [e.id]);
       return false;
     }
+    // the same for the attempt's own review on a hand-back whose program runs did not all pass: this pass's step
+    // raises a fresh escalation that offers accept-risk to the PM and the user
+    if (rr === null && e.id === safeId(`exh.${lineage}.${k0}`) && (await riskAcceptable(ctx, t, k0)) === null && (await failedRunsRisk(ctx, t, k0)) !== null) {
+      await commitCarrying(ctx, `flow:runs-risk:${ctx.mission}:${e.id}`, [], [closing(ctx, [e.id], 'accept-risk is offered to the PM and the user on an attempt whose program runs did not all pass now: a fresh escalation offers it')], [e.id]);
+      return false;
+    }
   }
   if (d === null) return blocking;
   const k = facts.attempt ?? line.k;
