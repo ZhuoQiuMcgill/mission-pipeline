@@ -200,7 +200,9 @@ function rulingBinding(neg: JudgmentRecord, judgment: string): CardBinding {
 }
 
 async function secretaryRound(ctx: FlowCtx, esc: EscalationBody): Promise<{ esc: EscalationBody; key: string; round: number }> {
-  return secretaryRoundInputs(esc, await ctx.ports.ledger.events({ mission: ctx.mission }));
+  // secretaryRoundInputs looks only at the secretary line's secretary-retry events: read just those
+  // (the same events, in the same commit order), not the mission's whole flow once per escalation
+  return secretaryRoundInputs(esc, await ctx.ports.ledger.events({ mission: ctx.mission, line: SECRETARY_LINE, event: 'secretary-retry' }));
 }
 
 /** Process every open escalation of the mission: start its Secretary, record its decision, tell the PM. */
