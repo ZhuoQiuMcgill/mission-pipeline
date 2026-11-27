@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { flagBool, flagList, flagStr, positional } from '../args.ts';
+import { flagBool, flagList, flagStr, GLOBAL_FLAGS, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { refused, usage } from '../errors.ts';
 import { INSTALLED_PLUGIN } from '../init.ts';
@@ -82,12 +82,18 @@ const ack: Command = {group: 'sec', name: ['ack-note'], summary: 'acknowledge a 
 const note: Command = {
   group: 'pm', name: ['note'], summary: 'record a new instruction of the user as a note to the Secretary (an answer to an escalation is mp pm answer); --replaces takes an earlier note off the Secretary\'s list',
   usage: 'mp pm note "<text>" | mp pm note --file <file>   [--words W-n] [--replaces N-x]', flags: {words: 'string', replaces: 'string', file: 'string'},
-  identity: (a) => ({positionals: a.positionals, flags: a.flags, file: typeof a.flags['file'] === 'string' && existsSync(String(a.flags['file'])) ? readFileSync(String(a.flags['file']), 'utf8') : null}),
+  // 4.4 (G8): the identity 4.3 computed (positionals and the command's own flags), and the file's text only for a note from a file, so an operation id replays across the upgrade
+  identity: (a) => {
+    const flags = Object.fromEntries(Object.entries(a.flags).filter(([k]) => !(k in GLOBAL_FLAGS) && k !== 'filled-by'));
+    const file = typeof a.flags['file'] === 'string' ? String(a.flags['file']) : null;
+    return file === null ? {positionals: a.positionals, flags} : {positionals: a.positionals, flags, file: existsSync(file) ? readFileSync(file, 'utf8') : null};
+  },
   async run(c, a) {
     const p = P(c); const file = flagStr(a, 'file'), replaces = flagStr(a, 'replaces');
     if (file !== null && a.positionals.length > 0) throw usage('give the note as text or with --file, not both');
     const text = file === null ? a.positionals.join(' ') : readFileSync(file, 'utf8');
-    const id = pmNote(p.ctx, {op: op(c), text, words: flagStr(a, 'words'), replaces});
+    // the write's payload is 4.3's when --replaces is absent
+    const id = pmNote(p.ctx, {op: op(c), text, words: flagStr(a, 'words'), ...(replaces !== null ? {replaces} : {})});
     // 4.4 (G8): a note that names an open escalation warns; it is still recorded
     const named = escalationsNamedIn(p.ctx.memory, text);
     const warnings = named.map((e) => `Warning: this note names the open escalation ${e.mission}/${e.escalation}. An answer in a note reaches no card and is not an answer record: answer it with mp pm answer ${e.mission} ${e.escalation} --option <option> --by pm|user.`);
@@ -102,11 +108,14 @@ const inbox: Command = {
 // 4.4 (G7): tag and retag take --supersedes too; what rests on the changed entries and is not named is kept and listed
 const tag: Command = {
   group: 'pm', name: ['tag'], summary: 'give an untyped legacy entry its first tags, or name the tags an entry supersedes (its own tags unchanged)', usage: 'mp pm tag W-n --tag <type[@mission][:"quote"]> … [--supersedes W-m#k,…] [--withdraw-items <ids>] [--keep-items <ids>]\n       mp pm tag W-n --supersedes W-m#k,… [--withdraw-items <ids>] [--keep-items <ids>]   (an entry that has its tags)', flags: {tag: 'repeat', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list'},
-  async run(c, a) {const r = tagWords(P(c).ctx.memory, {op: op(c), words: positional(a, 0, 'words'), tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items')}); return ok([...r.tags.map((t) => `[${t.id}] ${t.type}`), ...tagsReportLines(r)].join('\n'), r);},
+  // the write's payload is 4.3's ({op, words, tags}) when the new flags are absent, so an operation id replays across the upgrade
+  async run(c, a) {const r = tagWords(P(c).ctx.memory, {op: op(c), words: positional(a, 0, 'words'), tags: flagList(a, 'tag'), ...given('supersedes', flagList(a, 'supersedes')), ...given('withdraw', flagList(a, 'withdraw-items')), ...given('keep', flagList(a, 'keep-items'))}); return ok([...r.tags.map((t) => `[${t.id}] ${t.type}`), ...tagsReportLines(r)].join('\n'), r);},
 };
+/** A new option enters a write's payload only when it is given (4.4: a 4.3 payload stays as 4.3 hashed it). */
+function given<K extends string>(key: K, list: readonly string[]): Partial<Record<K, readonly string[]>> {return list.length > 0 ? {[key]: list} as Record<K, readonly string[]> : {};}
 const retag: Command = {
   group: 'pm', name: ['retag'], summary: 'change a tag with the user’s authorization', usage: 'mp pm retag W-n#k --tag <type> --words W-m [--supersedes W-j#k,…] [--withdraw-items <ids>] [--keep-items <ids>]', flags: {tag: 'repeat', words: 'string', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list'},
-  async run(c, a) {const id = positional(a, 0, 'tag id'), auth = flagStr(a, 'words'); if (auth === null) throw usage('retag requires --words W-m'); const r = tagWords(P(c).ctx.memory, {op: op(c), words: id.split('#')[0]!, retag: id, authorizedBy: auth, tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items')}); return ok([`Re-tagged ${id} on ${auth}.`, ...tagsReportLines(r)].join('\n'), r);},
+  async run(c, a) {const id = positional(a, 0, 'tag id'), auth = flagStr(a, 'words'); if (auth === null) throw usage('retag requires --words W-m'); const r = tagWords(P(c).ctx.memory, {op: op(c), words: id.split('#')[0]!, retag: id, authorizedBy: auth, tags: flagList(a, 'tag'), ...given('supersedes', flagList(a, 'supersedes')), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items')}); return ok([`Re-tagged ${id} on ${auth}.`, ...tagsReportLines(r)].join('\n'), r);},
 };
 const summary: Command = {
   group: 'pm', name: ['summary'], summary: 'record PM prose summarizing every covered tag', usage: 'mp pm summary "<text>" --covers W-n#k[,W-m#k] [--file <file>]', flags: {covers: 'list', file: 'string'},

@@ -80,7 +80,7 @@ For a message already recorded with its tags: `mp pm tag W-<m> --supersedes W-<n
 The dependency is on the whole entry W-<n>, not its individual tag; a re-tag changes the entry the same way.
 A requirement item or constraint resting on it that you do not name is kept: the command lists it and reads mark it "rests on words that were superseded".
 `--withdraw-items <ids>` withdraws; `--keep-items <ids>` keeps explicitly; nothing is withdrawn implicitly.
-An authorization or an active waiver gives power: name each in `--withdraw-items` or `--keep-items`, or the command refuses and lists them.
+An authorization or an active waiver gives power (a waiver granted under an authorization on the entry too): name each in `--withdraw-items` or `--keep-items`, or the command refuses and lists them.
 Historical provenance and completed proof stay recorded.
 A mission's tags leave layer 1 when it closes; its items and history remain.
 A waiver whose words lost force cannot apply to a plan not yet in effect; a plan already in effect keeps its record.

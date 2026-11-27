@@ -40,8 +40,10 @@ export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolea
 export function shellQuote(text: string): string { return `'${text.replace(/'/g, `'"'"'`)}'`; }
 
 export function channel(ctx: ProcessContext) {
-  const notes = new Map(residentRecords(ctx.memory, 'pm.note').map((n) => [n.id, n]));
-  const replaced = replacedNotes(ctx.memory);
+  // 4.4 (G8): the notes and their replacements come from one read of the records, so a note committed in between cannot hide both
+  const rows = residentRecords(ctx.memory, 'pm.note');
+  const notes = new Map(rows.map((n) => [n.id, n]));
+  const replaced = replacedNotes(rows);
   const replied = new Set(residentRecords(ctx.memory, 'sec.reply').map((r) => r.id));
   const questions = new Map(residentRecords(ctx.memory, 'sec.question').map((q) => [q.id, q]));
   // 4.4 (G8): a replaced note is no longer a current instruction for the Secretary
@@ -49,18 +51,19 @@ export function channel(ctx: ProcessContext) {
 }
 
 /** 4.4 (G8): each replaced note and the note that replaced it first. A 4.3 note replaces nothing. */
-function replacedNotes(db: Db): Map<string, string> {
+function replacedNotes(rows: ReturnType<typeof residentRecords<'pm.note'>>): Map<string, string> {
   const out = new Map<string, string>();
-  for (const n of residentRecords(db, 'pm.note')) if (n.replaces !== undefined && !out.has(n.replaces)) out.set(n.replaces, n.id);
+  for (const n of rows) if (n.replaces !== undefined && !out.has(n.replaces)) out.set(n.replaces, n.id);
   return out;
 }
 
 export interface NoteView {readonly id: string; readonly text: string; readonly words: string | null; readonly replaces: string | null; readonly state: 'current' | 'acknowledged' | 'replaced'; readonly replacedBy: string | null; readonly acknowledged: boolean}
 /** 4.4 (G8): every note with its state, oldest first: replaced (by a later note), acknowledged by the Secretary, or current. */
 export function pmNotes(db: Db): NoteView[] {
-  // an acknowledgement appends a copy of the note: the last record of an id is its state
-  const latest = new Map(residentRecords(db, 'pm.note').map((n) => [n.id, n]));
-  const replaced = replacedNotes(db);
+  // an acknowledgement appends a copy of the note: the last record of an id is its state; one read gives both
+  const rows = residentRecords(db, 'pm.note');
+  const latest = new Map(rows.map((n) => [n.id, n]));
+  const replaced = replacedNotes(rows);
   return [...latest.values()].map((n) => {
     const by = replaced.get(n.id) ?? null;
     return {id: n.id, text: n.text, words: n.words, replaces: n.replaces ?? null, state: by !== null ? 'replaced' as const : n.acknowledged ? 'acknowledged' as const : 'current' as const, replacedBy: by, acknowledged: n.acknowledged};
@@ -89,7 +92,7 @@ export function pmNote(ctx: ProcessContext, o: {op: string; text: string; words?
     if (o.replaces != null) {
       // 4.4 (G8): a note replaces one current note; a replaced one points to its replacement
       if (!residentRecords(tx, 'pm.note').some((n) => n.id === o.replaces)) notAllowed(`no PM note ${o.replaces}`);
-      const by = replacedNotes(tx).get(o.replaces);
+      const by = replacedNotes(residentRecords(tx, 'pm.note')).get(o.replaces);
       if (by !== undefined) notAllowed(`${o.replaces} was already replaced by ${by}; replace ${by} instead`);
     }
     const id = `N-${new Set(residentRecords(tx, 'pm.note').map((n) => n.id)).size + 1}`;

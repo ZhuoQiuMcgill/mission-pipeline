@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { runCli } from '../src/cli/main.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { closeEscalations } from '../src/flow/secretary.ts';
-import { channel } from '../src/process/secretary.ts';
+import { channel, pmNotes } from '../src/process/secretary.ts';
+import { beginAction, endAction } from '../src/cli/project.ts';
 import type { MissionId } from '../src/common/ids.ts';
 import { ENV_A, type ProcessProject } from './process-fixtures.ts';
 import { project43, command43, done43, live43, escalation43 } from './p43-fixtures.ts';
@@ -89,4 +90,43 @@ test('G8 compatibility: a note in the 4.3 shape (no replaces) reads as current a
     const n2 = await done43(p, ['pm','note','a 4.4 instruction','--replaces','N-1']);
     assert.equal((await done43(p, ['read','notes','--all'])).notes.find((n: any) => n.id === 'N-1').replacedBy, n2.id);
   } finally {p.cleanup();}
+});
+
+// ---- review round 1 of p4
+
+test('G8 (review p4-5): an inline note recorded by 4.3 replays in 4.4 with the same operation id, done or interrupted', async () => {
+  const p = project43();
+  try {
+    // what 4.3 recorded for `mp pm note "Hold builds" --op hold1`: its action arguments and its write payload
+    const args43 = {positionals: ['Hold builds'], flags: {}};
+    const record43 = (op: string, id: string) => p.ctx.memory.write({op: `note:${op}`, payload: {op, text: 'Hold builds', words: null}, command: 'note'}, (tx) => {tx.append({kind: 'pm.note', id, text: 'Hold builds', words: null, acknowledged: false}); return id;});
+    beginAction(p.ctx.memory, {op: 'hold1', command: 'note', args: args43, filler: null});
+    record43('hold1', 'N-1');
+    endAction(p.ctx.memory, {op: 'hold1', command: 'note', args: args43}, {exitCode: 0, text: 'Note N-1 recorded.', json: {id: 'N-1'}}, false);
+    const done = await command43(p, ['pm','note','Hold builds','--op','hold1']);
+    assert.equal(done.code, 0, JSON.stringify(done));
+    assert.equal(done.replayed, true);
+    // interrupted after the note's write, before the action was marked done: the write's receipt answers
+    beginAction(p.ctx.memory, {op: 'hold2', command: 'note', args: args43, filler: null});
+    record43('hold2', 'N-2');
+    const resumed = await command43(p, ['pm','note','Hold builds','--op','hold2']);
+    assert.equal(resumed.code, 0, JSON.stringify(resumed));
+    assert.equal(resumed.result.id, 'N-2');
+    assert.deepEqual((await done43(p, ['read','notes'])).notes.map((n: any) => n.id), ['N-1', 'N-2'], 'nothing was recorded twice');
+    // a note from a file is identified by its text too: the same id with another text is another operation
+    const file = join(p.dir, 'note.local');
+    writeFileSync(file, 'first text');
+    await done43(p, ['pm','note','--file',file,'--op','file1']);
+    writeFileSync(file, 'second text');
+    assert.equal((await command43(p, ['pm','note','--file',file,'--op','file1'])).error.code, 'OP_CONFLICT');
+  } finally {p.cleanup();}
+});
+
+test('G8 (review p4-6): a read derives the notes and their replacements from one read of the records', () => {
+  const n1 = {kind: 'pm.note', id: 'N-1', text: 'hold the release', words: null, acknowledged: false};
+  const n2 = {kind: 'pm.note', id: 'N-2', text: 'hold the release until Friday', words: null, acknowledged: false, replaces: 'N-1'};
+  // a memory in which N-2 is committed between a reader's first and second query
+  const racing = () => {let reads = 0; return {stmt: () => ({all: (kind: string) => (kind !== 'pm.note' ? [] : reads++ === 0 ? [n1] : [n1, n2]).map((r) => ({record: JSON.stringify(r)}))})};};
+  assert.deepEqual(pmNotes(racing() as never).map((n) => [n.id, n.state, n.replacedBy]), [['N-1', 'current', null]]);
+  assert.deepEqual(channel({memory: racing()} as never).notes.map((n) => n.id), ['N-1'], 'the Secretary still sees one current note');
 });

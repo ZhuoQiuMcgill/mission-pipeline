@@ -44,7 +44,7 @@ import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
 import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
-import { planReviewsWaiverIn, REVIEWS_WAIVER, waiverLabel, waiversInForce } from '../flow/waivers.ts';
+import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverEnds, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { pmNotes } from '../process/secretary.ts';
 import { keptMark, keptOnChangedWords, wordsAuthority } from '../memory/words.ts';
@@ -277,11 +277,21 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           node('words', b['words'], null, 0);
           edge(n.key, `words:${b['words']}`, 'cites');
         }
+      } else if (f.event === 'constraint-withdrawn' && typeof b['line'] === 'string') {
+        // 4.4 (G7): a withdrawn constraint reads so, and the words it was withdrawn on reach it
+        const n = typeof b['version'] === 'string' ? nodes.get(`constraint:${b['version']}`) : latestConstraint.get(b['line']);
+        if (n !== undefined) {
+          n.state = `withdrawn${typeof b['words'] === 'string' ? ` on ${b['words']}` : ''}`;
+          if (typeof b['words'] === 'string') {
+            node('words', b['words'], null, 0);
+            edge(n.key, `words:${b['words']}`, 'was withdrawn on');
+          }
+        }
       }
     }
-    // 4.4 (G7): what a supersession or a re-tag kept, marked on the version in force
+    // 4.4 (G7): what a supersession or a re-tag kept, marked on the version that rests on the changed words
     const kept = keptOnChangedWords(db, data);
-    for (const [line, n] of latestConstraint) {const k = kept.get(line); if (k !== undefined) n.state = `${n.state}; ${keptMark(k)}`;}
+    for (const k of kept.values()) {const n = k.version === null ? undefined : nodes.get(`constraint:${k.version}`); if (n !== undefined) n.state = `${n.state}; ${keptMark(k)}`;}
     // contested items (Calibrator ① asked the user; released when a later plan passes): the last event per line wins
     const contested = new Map<string, boolean>();
     for (const f of flows) if (f.line === REQUIREMENTS_LINE && f.event === 'contested' && typeof f.body['line'] === 'string') contested.set(`${f.mission}\n${f.body['line']}`, f.body['contested'] === true);
@@ -290,8 +300,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         const n = nodes.get(`requirement:${x.version}`);
         if (n === undefined) return;
         n.state = i < xs.length - 1 ? 'superseded' : withdrawn.has(line) ? 'withdrawn' : contested.get(`${n.mission}\n${line}`) === true ? 'contested' : 'in force';
-        const k = i === xs.length - 1 ? kept.get(line) : undefined;
-        if (k !== undefined) n.state = `${n.state}; ${keptMark(k)}`;
+        const k = kept.get(line);
+        if (k !== undefined && k.version === x.version) n.state = `${n.state}; ${keptMark(k)}`;
       });
     }
 
@@ -876,10 +886,21 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       const b = f.body;
       const id = `${f.mission}:${f.key}`;
       const n = node('waiver', id, f.mission, f.rev, `plan reviews waived for ${typeof b['dplan'] === 'string' ? `detailed plan ${b['dplan']}` : `every plan of mission ${f.mission} not in effect yet`}${typeof b['reason'] === 'string' && b['reason'] !== '' ? `; reason: ${clip(b['reason'], 80)}` : ''}`);
-      const inForce = waiversInForce(planOf.get(f.mission) ?? []).some((w) => w.n === b['n'] && w.dplan === (b['dplan'] ?? null));
-      const outOfForce = inForce && b['by'] === 'words' && wordsAuthority(db, data, String(b['ref']), f.mission) === null;
-      n.state = !inForce ? 'withdrawn or replaced' : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect' : 'in force';
-      const k = inForce ? kept.get(`waiver:${id}`) : undefined;
+      const events = planOf.get(f.mission) ?? [];
+      // "in force" is the planner's own choice (flow/waivers.ts) for its plan, or for a plan of the mission no plan-specific waiver names
+      const applied = selectedWaiver(eventsWithWaiversInForce(events, f.mission, (w, m) => wordsAuthority(db, data, w, m)), typeof b['dplan'] === 'string' ? b['dplan'] : '').waiver?.n === b['n'];
+      const end = waiverEnds(events).get(Number(b['n']));
+      const outOfForce = b['by'] === 'words' && wordsAuthority(db, data, String(b['ref']), f.mission) === null;
+      n.state = applied ? 'in force'
+        : end !== undefined ? (end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`)
+          : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
+            : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan';
+      // 4.4 (G7): the words a waiver was withdrawn on reach it
+      if (end?.action === 'withdraw' && end.by === 'words') {
+        node('words', end.ref, null, 0);
+        edge(n.key, `words:${end.ref}`, 'was withdrawn on');
+      }
+      const k = end === undefined ? kept.get(`waiver:${id}`) : undefined;
       if (k !== undefined) n.state = `${n.state}; ${keptMark(k)}`;
       n.by = `the PM via \`mp pm waive\` ${b['by'] === 'words' ? `on ${String(b['ref'])}` : `under authorization ${String(b['ref'])}`}`;
       if (b['by'] === 'words' && typeof b['ref'] === 'string') {
@@ -967,6 +988,7 @@ const REL_ORDER: readonly string[] = [
   'based on',
   'serves',
   'cites',
+  'was withdrawn on',
   'involves',
 ];
 
