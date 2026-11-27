@@ -7,7 +7,7 @@ import { INSTALLED_PLUGIN } from '../init.ts';
 import { parseFiller } from '../../process/pm.ts';
 import { seatRead } from '../../process/seat.ts';
 import { claimSecretary, generations, notAllowed, requirePm, startSecretary, writeGeneration } from '../../memory/resident.ts';
-import { assignTags, summarizeWords, taggedWords } from '../../memory/words.ts';
+import { summarizeWords, tagWords, tagsReportLines, taggedWords } from '../../memory/words.ts';
 import { escalationsNamedIn, pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary } from '../../process/secretary.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
 import { renderNext, PM_COMMANDS } from './pm.ts';
@@ -99,13 +99,14 @@ const inbox: Command = {
   group: 'pm', name: ['inbox'], summary: 'pending PM decisions, notices and Secretary replies', usage: 'mp pm inbox [--asked-user <item>] [--ack <item>]', flags: {'asked-user': 'string', ack: 'string'},
   async run(c, a) {const p = P(c); const asked = flagStr(a, 'asked-user'), ack = flagStr(a, 'ack'); if (asked !== null || ack !== null) markInbox(p.ctx, {op: op(c), id: (asked ?? ack)!, asked: asked !== null}); const items = pmInbox(p.ctx); return ok(items.length ? items.map((i) => `[${i.id}] ${i.state}: ${i.text}${i.about ? ` (about ${i.about})` : ''}${i.options?.length ? ` (options: ${i.options.join(' / ')})` : ''}\n  Action: ${i.action}; resolved when ${i.resolution}`).join('\n') : 'PM inbox: empty.', {items});},
 };
+// 4.4 (G7): tag and retag take --supersedes too; what rests on the changed entries and is not named is kept and listed
 const tag: Command = {
-  group: 'pm', name: ['tag'], summary: 'give an untyped legacy entry its first tags', usage: 'mp pm tag W-n --tag <type[@mission][:"quote"]> …', flags: {tag: 'repeat'},
-  async run(c, a) {const tags = assignTags(P(c).ctx.memory, {op: op(c), words: positional(a, 0, 'words'), tags: flagList(a, 'tag')}); return ok(tags.map((t) => `[${t.id}] ${t.type}`).join('\n'), {tags});},
+  group: 'pm', name: ['tag'], summary: 'give an untyped legacy entry its first tags, or name the tags an entry supersedes (its own tags unchanged)', usage: 'mp pm tag W-n --tag <type[@mission][:"quote"]> … [--supersedes W-m#k,…] [--withdraw-items <ids>] [--keep-items <ids>]\n       mp pm tag W-n --supersedes W-m#k,… [--withdraw-items <ids>] [--keep-items <ids>]   (an entry that has its tags)', flags: {tag: 'repeat', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list'},
+  async run(c, a) {const r = tagWords(P(c).ctx.memory, {op: op(c), words: positional(a, 0, 'words'), tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items')}); return ok([...r.tags.map((t) => `[${t.id}] ${t.type}`), ...tagsReportLines(r)].join('\n'), r);},
 };
 const retag: Command = {
-  group: 'pm', name: ['retag'], summary: 'change a tag with the user’s authorization', usage: 'mp pm retag W-n#k --tag <type> --words W-m [--withdraw-items <ids>] [--keep-items <ids>]', flags: {tag: 'repeat', words: 'string', 'withdraw-items': 'list', 'keep-items': 'list'},
-  async run(c, a) {const id = positional(a, 0, 'tag id'), auth = flagStr(a, 'words'); if (auth === null) throw usage('retag requires --words W-m'); const tags = assignTags(P(c).ctx.memory, {op: op(c), words: id.split('#')[0]!, retag: id, authorizedBy: auth, tags: flagList(a, 'tag'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items')}); return ok(`Re-tagged ${id} on ${auth}.`, {tags});},
+  group: 'pm', name: ['retag'], summary: 'change a tag with the user’s authorization', usage: 'mp pm retag W-n#k --tag <type> --words W-m [--supersedes W-j#k,…] [--withdraw-items <ids>] [--keep-items <ids>]', flags: {tag: 'repeat', words: 'string', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list'},
+  async run(c, a) {const id = positional(a, 0, 'tag id'), auth = flagStr(a, 'words'); if (auth === null) throw usage('retag requires --words W-m'); const r = tagWords(P(c).ctx.memory, {op: op(c), words: id.split('#')[0]!, retag: id, authorizedBy: auth, tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items')}); return ok([`Re-tagged ${id} on ${auth}.`, ...tagsReportLines(r)].join('\n'), r);},
 };
 const summary: Command = {
   group: 'pm', name: ['summary'], summary: 'record PM prose summarizing every covered tag', usage: 'mp pm summary "<text>" --covers W-n#k[,W-m#k] [--file <file>]', flags: {covers: 'list', file: 'string'},

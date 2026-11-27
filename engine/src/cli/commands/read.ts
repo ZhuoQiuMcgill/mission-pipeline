@@ -121,7 +121,7 @@ const why: Command = {
 const from: Command = {
   group: 'read',
   name: ['from'],
-  summary: 'walk forward: everything that rests on a node (what a withdrawn requirement or a refuted version affects)',
+  summary: 'walk forward: everything that rests on a node (what a withdrawn requirement or a refuted version affects); from a words entry W-n, also the constraints, waivers and notes that cite it',
   usage: 'mp read from <id>',
   flags: {},
   async run(c, args) {

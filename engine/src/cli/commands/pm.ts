@@ -4,7 +4,7 @@
 // The words a command rests on are named as words entries (`--words W-<n>`, decision 1).
 
 import { pmLayer1 } from '../pmMemory.ts';
-import { taggedWords, wordsAuthority } from '../../memory/words.ts';
+import { tagsReportLines, taggedWords, wordsAuthority } from '../../memory/words.ts';
 import { liveSecretary } from '../../memory/resident.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
@@ -161,9 +161,9 @@ const say: Command = {
     if (flagList(args, 'supersedes').length && !flagList(args, 'tag').length) throw usage('--supersedes requires the new message’s --tag');
     const r = pmSay(p.ctx, text, {op: c.op!, tags: flagList(args, 'tag'), supersedes: flagList(args, 'supersedes'), withdraw: flagList(args, 'withdraw-items'), keep: flagList(args, 'keep-items')});
     const stop = detectStop(text);
-    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`];
+    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`, ...tagsReportLines(r)];
     if (stop.detected) lines.push(`These words look like a stop (${stop.triggers.join(', ')}): if the user means it, at once \`mp pm stop "<the words>" --words ${r.words}\`.`);
-    return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected });
+    return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected, kept: r.kept, withdrawn: r.withdrawn });
   },
 };
 

@@ -28,6 +28,8 @@
 Read this core, then `mp pm session --filled-by "<harness>/<model>"`.
 Layer 1 lists principles, project decisions and constraints in force; each open mission's plan, requirement items and decisions; your inbox, unconfirmed seats, what waits on the user, and status layer 0.
 It is bounded to 8 KiB, with principles first, newest confirmed first.
+After them one line always counts your inbox items; inbox entries and unconfirmed seats follow as they fit, then the rest.
+Constraints whose missions are all closed take no line.
 Overflow is counted with a command to read it; read all principles in force before any PM-class decision and consolidate when asked.
 Read `mp pm inbox` and handle the PM actions it names.
 While a Secretary is live, your commands record changes and wake it; your commands and reads do no operational recovery or reconciliation.
@@ -73,11 +75,12 @@ To change an assigned tag: `mp pm retag W-<n>#<k> --tag <type>[@<mission>] --wor
 Earlier tags remain history.
 
 Words lose force by supersession, scope end or being one-off, never by calendar time.
-`mp pm say --file <file> --tag <type> --supersedes W-<n>#<k>,...` names the tags replaced.
-Supersession lists requirement items, constraints, authorizations and active waivers resting on the whole entry W-<n>.
-In the same command, account for each with `--withdraw-items <ids>` or `--keep-items <ids>`; nothing is withdrawn implicitly.
-A re-tag that removes a tag on which those items rest needs the same accounting.
-The dependency is on the entry, not its individual tag; decide each item's disposition.
+`mp pm say --file <file> --tag <type> --supersedes W-<n>#<k>,...` names the tags replaced; `tag` and `retag` take `--supersedes` too.
+For a message already recorded with its tags: `mp pm tag W-<m> --supersedes W-<n>#<k>`; its own tags stay as they are.
+The dependency is on the whole entry W-<n>, not its individual tag; a re-tag changes the entry the same way.
+A requirement item or constraint resting on it that you do not name is kept: the command lists it and reads mark it "rests on words that were superseded".
+`--withdraw-items <ids>` withdraws; `--keep-items <ids>` keeps explicitly; nothing is withdrawn implicitly.
+An authorization or an active waiver gives power: name each in `--withdraw-items` or `--keep-items`, or the command refuses and lists them.
 Historical provenance and completed proof stay recorded.
 A mission's tags leave layer 1 when it closes; its items and history remain.
 A waiver whose words lost force cannot apply to a plan not yet in effect; a plan already in effect keeps its record.
@@ -221,6 +224,7 @@ Every stop has an exit their words can take: accept, change, run again or drop.
 "Why is it not done?": `mp read blocked`, with reasons and next steps.
 "The details of X": `mp read show <kind> <id>`, only X; evidence: `mp read leaf <id>`.
 "Why was this done?": `mp read why <id>`; what rests on it: `mp read from <id>`; one dispatch: `mp read chain <dispatch>`; a mission: `mp read tree <mission>`.
+`mp read from W-<n>` also lists the constraints, waivers and notes that cite the entry.
 "Did the data behind this conclusion change?": `mp read show evidence <id> --check-data` (or show dispatch); it says unchanged, changed or missing and writes nothing.
 The evidence remains a record of what was read; a rerun follows the user's decision.
 For progress details beyond the read, use `mp pm ask-secretary`.
