@@ -113,6 +113,11 @@ export function secretaryOptions(e: EscalationBody, resident = false): Secretary
   }));
 }
 
+/** 4.4 (G2): each option the PM or the user may answer with (the PM's own ones too), and what it does, for the PM's inbox. */
+export function pmOptions(e: EscalationBody): { id: DecisionOption; outcome: string }[] {
+  return secretaryOptions({ ...e, pmOnly: [] }).filter((o) => !isAskOption(o.id)).map((o) => ({ id: o.id, outcome: o.id === 'grant' ? 'the exhausted loop runs again with the attempts you grant (--extra); a PM grant does not use the Secretary\'s' : o.outcome }));
+}
+
 export const escalationTask = (id: string): string => `sec.${id}`;
 
 export async function escalation(ctx: FlowCtx, id: string): Promise<EscalationBody | null> {

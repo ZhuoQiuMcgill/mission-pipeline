@@ -28,7 +28,7 @@
 // "verified" event of that attempt in the same process (4.1.2: the flow reads it and never runs
 // them again); the first writer of that event wins, the other adopts it.
 
-import { requireSecretary } from '../memory/resident.ts';
+import { liveSecretary, requireSecretary } from '../memory/resident.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -84,6 +84,7 @@ import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
 import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
+import { decisionOutcome, type DecisionOutcome } from './decisions.ts';
 
 // ---------------------------------------------------------------- the dispatch's card and materials
 
@@ -536,6 +537,8 @@ export type HandBackAnswer =
       readonly verification: readonly VerificationRun[] | null;
       /** A note for the seat (e.g. the verification could not run now; the flow runs it later). */
       readonly notes: readonly string[];
+      /** 4.4 (F9): an accepted Secretary decision: what became of it in this command. */
+      readonly decision?: DecisionOutcome;
     };
 
 export interface HandBackInput {
@@ -767,8 +770,14 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       notes.push(`the worktree of ${dispatch} could not be removed now (${(e as Error).message}); mp pm next tries again`);
     }
   }
-  if (input.advance !== false) await advanceQuietly(ctx, v, notes);
-  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes };
+  let decision: DecisionOutcome | undefined;
+  if (input.advance !== false) {
+    const why = await advanceQuietly(ctx, v, notes);
+    // 4.4 (F9): a Secretary decision says what became of it, read from the record after the pass
+    const escalation = (v.card as { request?: { id?: unknown } }).request?.id;
+    if (v.card.seat === 'secretary' && out.accepted && typeof escalation === 'string') decision = ctx.memory.read((db) => decisionOutcome(db, data, { mission: v.info.mission, escalation, task: v.info.task, fields: input.fields, why }));
+  }
+  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(decision !== undefined ? { decision } : {}) };
 }
 
 /**
@@ -954,12 +963,29 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
  * the seat's. A seat-side pass (4.1.2): what the seat's sandbox could not write is left to the PM's next
  * step with a note, and raises no WI-20 notice; any other error still does.
  */
-async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<void> {
+async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<string | null> {
+  // 4.4 (F9, issue 62): a Secretary decision handed back under the live generation's identity runs the
+  // flow step `mp sec decide` runs, so it takes effect when it is made; any other hand-back keeps the
+  // seat-side pass, which a live Secretary leaves to its own next pass
+  const live = liveSecretary(ctx.memory);
+  const decision = v.card.seat === 'secretary' && live !== null && ctx.secretary === live.generation;
+  // a seat's process skips the recovery of a moved folder while a Secretary is live (memory.ts): such a pass is the Secretary's
+  if (decision && movedSinceRecovery(ctx)) return 'the project folder moved since its last recovery; the Secretary\'s next pass recovers it';
   try {
     // the work this hand-back hands over is recorded as handed over by it (§3.2, U-13)
-    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, { seatSide: true });
+    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, decision ? {} : { seatSide: true });
     for (const r of reports) for (const e of r.errors) if (e.sandbox !== undefined) notes.push(`left to the PM: this seat's sandbox could not write ${e.sandbox}`);
+    if (live !== null && !decision) return 'this command ran without the live Secretary\'s identity (MP_SECRETARY), and only the Secretary\'s commands reconcile while it is live';
+    const error = reports.flatMap((r) => r.errors).at(0);
+    return error === undefined ? null : `the ${error.step} step stopped (${error.message})`;
   } catch (e) {
     notes.push(`the process will advance on the PM's next step (${(e as Error).message})`);
+    return `the pass failed (${(e as Error).message})`;
   }
+}
+
+/** The folder was moved or copied and its recovery has not run (memory/move.ts needsRecovery). */
+function movedSinceRecovery(ctx: ProcessContext): boolean {
+  const m = ctx.memory;
+  return m.getMeta('move') !== null || m.getMeta('project_path') !== m.paths.project || m.getMeta('machine') !== m.machine;
 }

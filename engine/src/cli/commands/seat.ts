@@ -41,6 +41,8 @@ function answerResult(a: HandBackAnswer, p?: Project): CommandResult {
     ...(a.candidate !== null ? [`Candidate commit ${a.candidate.commit} on base ${a.candidate.base}: ${a.candidate.changedPaths.join(', ') || 'no changes'}`] : []),
     ...(a.candidate !== null && a.candidate.ignored.length > 0 ? [`Ignored files inside your write paths were not collected: ${a.candidate.ignored.join(', ')}${a.candidate.ignoredTotal > a.candidate.ignored.length ? ` (and ${a.candidate.ignoredTotal - a.candidate.ignored.length} more)` : ''}`] : []),
     ...(a.verification !== null ? a.verification.map((v) => `Verification ${v.evidence}: ${v.passed ? 'passed' : 'failed'} — ${v.summary}`) : []),
+    // 4.4 (F9): a Secretary decision says what became of it
+    ...(a.decision !== undefined ? [`Decision on ${a.decision.mission}/${a.decision.escalation}: ${a.decision.text}`] : []),
     ...a.notes,
     'You are done: end here.',
   ];

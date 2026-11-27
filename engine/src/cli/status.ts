@@ -10,7 +10,7 @@ import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import { attemptRecorded, olderSnapshotEvidence, type AttemptsAmendedBody, type XState } from '../flow/exploration/machine.ts';
-import { PLAN_LINE } from '../flow/plandoc.ts';
+import { PLAN_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
 import type { Project } from './project.ts';
@@ -294,6 +294,16 @@ export async function showItem(p: Project, kind: string, id: string, o: { readon
       extra.push(...section(`  mechanical checks of ${c.plan}: ${c.ok === true ? 'passed' : `failed (${(c.failures ?? []).length})`}`, [...(c.failures ?? []).map((f) => `  failed: ${f}`), ...(c.orderChanges ?? []).map((o) => `  order change (to the Secretary): ${o}`)]));
     }
     extraJson['mechanicalChecks'] = checks;
+  }
+  if (kind === 'escalation') {
+    // 4.4 (G2): the read the PM inbox names for the rest of an escalation's reasons
+    const bodies = ctx.memory.read((db) => found.filter((n) => n.mission !== null).flatMap((n) => flowEvents(db, { mission: n.mission as MissionId, line: SECRETARY_LINE, event: 'escalation', limit: 10_000 }).filter((e) => `${n.mission}/${e.key}` === n.id).map((e) => JSON.parse(ctx.memory.data.text(e.body)) as { reasons?: string[]; original?: string; changed?: string })));
+    for (const b of bodies) {
+      if (b.original) extra.push(`  original: ${b.original}`);
+      if (b.changed) extra.push(`  changed: ${b.changed}`);
+      extra.push(...section('  reasons (in full)', (b.reasons ?? []).map((r) => `- ${r}`)));
+    }
+    extraJson['escalations'] = bodies;
   }
   if (kind === 'dispatch' && found[0] !== undefined) {
     const d = found[0].id;

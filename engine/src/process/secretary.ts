@@ -2,12 +2,16 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MissionId, ContentHash } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
-import { activeStops, appendRecords, dispatchInfo, wordsEntry, flowEvents, listDispatches, type Db } from '../memory/index.ts';
+import { activeStops, appendRecords, dispatchInfo, factById, wordsEntry, flowEvents, listDispatches, type Db } from '../memory/index.ts';
+import type { ObjectVersionRecord } from '../common/records.ts';
+import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, type AmendmentEntry, type StoredDetailedPlan } from '../flow/plandoc.ts';
+import type { ItemVersionBody } from '../flow/requirements.ts';
+import { pmOptions } from '../flow/secretary.ts';
+import { taskStatus } from './ports.ts';
 import { generations, liveSecretary, notAllowed, requireSecretary, requirePm, touchSecretary, writeGeneration } from '../memory/resident.ts';
 import { residentRecords, wordsAuthority } from '../memory/words.ts';
 import { stopCovers } from '../memory/stopTypes.ts';
 import type { ProcessContext } from './context.ts';
-import { advance } from './advance.ts';
 import { pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
 import { dispatchView, seatCard, seatHandback } from './seat.ts';
 import { listNotices, markNotices } from './notices.ts';
@@ -108,14 +112,57 @@ export function secAckNote(ctx: ProcessContext, o: {op: string; id: string}): vo
   });
 }
 
-export interface InboxItem {id: string; kind: 'decision' | 'notice' | 'question' | 'reply'; mission: string | null; text: string; state: string; action: string; resolution: string; round?: number; options?: readonly string[]; facts?: unknown; about?: string | null; acknowledgeable?: boolean}
+/**
+ * 4.4 (G2): what reaches the PM with a decision item: the Secretary's notice in full, its reason, each
+ * option with what it does, the requirement items and words entries the work rests on (by id), and the
+ * escalation's reasons shortened, with the read that gives the rest. Nothing in it is checked.
+ */
+export interface InboxBrief {readonly by: string | null; readonly notice: string; readonly reason: string; readonly options: readonly {id: string; outcome: string}[]; readonly items: readonly string[]; readonly words: readonly string[]; readonly reasons: readonly string[]; readonly more: string}
+export interface InboxItem {id: string; kind: 'decision' | 'notice' | 'question' | 'reply'; mission: string | null; text: string; state: string; action: string; resolution: string; round?: number; options?: readonly string[]; facts?: unknown; about?: string | null; acknowledgeable?: boolean; brief?: InboxBrief}
 function allFlow(ctx: ProcessContext) {
   return (ctx.memory.stmt('SELECT mission, line, event, key, body, revision AS rev FROM flow_events ORDER BY revision').all() as {mission: string; line: string; event: string; key: string; body: string; rev: number}[]).map((e) => ({...e, revision: Number(e.rev), mission: e.mission as MissionId, body: JSON.parse(ctx.memory.data.text(e.body)) as any}));
+}
+type FlowRow = ReturnType<typeof allFlow>[number];
+
+/** 4.4 (F9, issue 62): a Secretary decision handed back before any pass recorded it, read from its accepted hand-back. */
+function handedBackDecision(ctx: ProcessContext, task: string): SecretaryResult | undefined {
+  const s = taskStatus(ctx.memory, ctx.memory.data, task);
+  return s?.state === 'done' && s.handBack !== null ? s.handBack.result as SecretaryResult : undefined;
+}
+
+/** 4.4 (G2): the requirement items an escalation's work rests on (its own, its task's in the plan in effect, and the authorizations they rest on) and their words entries. */
+function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationBody, plans: Map<string, DetailedPlanDoc | null>): {items: string[]; words: string[]} {
+  const items = new Set(esc.items ?? []);
+  const taskId = esc.subject.startsWith('task:') ? esc.subject.slice('task:'.length) : null;
+  const dplan = taskId === null ? undefined : mine.filter((e) => e.line === `task:${taskId}` && e.event === 'spec').at(-1)?.body.dplan as string | undefined;
+  if (dplan !== undefined && !plans.has(dplan)) {
+    const obj = factById(ctx.memory, 'object.version', dplan)?.record as ObjectVersionRecord | undefined;
+    plans.set(dplan, obj === undefined ? null : amendedPlan(DetailedPlanDoc.parse((JSON.parse(ctx.memory.data.text(obj.content)) as StoredDetailedPlan).plan), latestEffectiveOf<{dplan: string; amendments?: readonly AmendmentEntry[]}>(mine, dplan)?.amendments));
+  }
+  for (const line of (dplan === undefined ? null : plans.get(dplan))?.tasks.find((t) => t.id === taskId)?.requirementItems ?? []) items.add(line);
+  const latest = new Map<string, ItemVersionBody>();
+  for (const e of mine) if (e.line === 'requirements' && e.event === 'item') latest.set((e.body as ItemVersionBody).line, e.body as ItemVersionBody);
+  const words = new Set<string>();
+  for (const line of [...items]) {
+    const s = latest.get(line)?.source;
+    if (s?.kind === 'authorization') {items.add(s.line); const a = latest.get(s.line)?.source; if (a?.kind === 'words') words.add(a.words);}
+    else if (s?.kind === 'words') words.add(s.words);
+  }
+  return {items: [...items], words: [...words]};
+}
+
+const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
+
+function inboxBrief(ctx: ProcessContext, mission: string, mine: readonly FlowRow[], esc: EscalationBody, decided: {notice: string; reason: string} | undefined, by: string | null, plans: Map<string, DetailedPlanDoc | null>): InboxBrief {
+  const rest = restsOn(ctx, mine, esc, plans);
+  const shown = esc.reasons.slice(0, 5).map((r) => clip(r, 200));
+  return {by, notice: decided?.notice ?? '', reason: decided?.reason ?? '', options: pmOptions(esc), items: rest.items, words: rest.words, reasons: esc.reasons.length > shown.length ? [...shown, `(${esc.reasons.length - shown.length} more)`] : shown, more: `mp read show escalation ${mission}/${esc.id}`};
 }
 
 export function pmInbox(ctx: ProcessContext): InboxItem[] {
   const events = allFlow(ctx);
   const out: InboxItem[] = [];
+  const plans = new Map<string, DetailedPlanDoc | null>();
   const is = (mission: string, event: string, key: string) => events.some((e) => e.mission === mission && e.line === 'secretary' && e.event === event && e.key === key);
   const answered = (mission: string, id: string) => {
     if (is(mission, 'applied', id) || is(mission, 'user-answer', id)) return true;
@@ -129,13 +176,18 @@ export function pmInbox(ctx: ProcessContext): InboxItem[] {
     const pmRound = events.filter((r) => r.mission === e.mission && r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key.startsWith(`${esc.id}#`)).length + 1;
     const answer = events.find((a) => a.mission === e.mission && a.line === 'secretary' && a.event === 'pm-answer' && a.key === `${esc.id}#${pmRound}`);
     if (answer !== undefined && (answer.body.words ?? []).every((w: {id: string; fingerprint: string}) => wordsAuthority(ctx.memory, ctx.memory.data, w.id, e.mission) === w.fingerprint)) continue;
-    const round = secretaryRoundInputs(esc, events.filter((r) => r.mission === e.mission));
+    const mine = events.filter((r) => r.mission === e.mission);
+    const round = secretaryRoundInputs(esc, mine);
     const d = events.find((d) => d.mission === e.mission && d.line === 'secretary' && d.event === 'decision' && d.key === round.key)?.body as DecisionBody | undefined;
-    const routed = is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || d?.classification === 'needs-user' || d?.classification === 'needs-pm' || answer !== undefined || esc.source === 'plan-structure-change' || esc.source === 'plan-restarts-work';
+    // 4.4 (F9, issue 62): listed from the moment the hand-back is recorded, before a pass writes the decision
+    const handed = d === undefined ? handedBackDecision(ctx, round.esc.task) : undefined;
+    const decided = d ?? handed;
+    const routed = is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || esc.source === 'plan-structure-change' || esc.source === 'plan-restarts-work';
     if (!routed) continue;
     const id = `${e.mission}/${esc.id}`;
     const asked = is(e.mission, 'asked-user', esc.id);
-    out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${pmRound > 1 ? '; the words it rested on changed' : ''}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound});
+    out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${pmRound > 1 ? '; the words it rested on changed' : ''}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound,
+      brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans)});
   }
   for (const n of listNotices(ctx.memory, ctx.memory.data, {audience: 'pm'})) {
     const detail = n.detail as {escalation?: string | {id?: string}; escalations?: string[]} | null;
@@ -262,9 +314,8 @@ export async function secDecide(ctx: ProcessContext, id: string, result: Secreta
   mkdirSync(path, {recursive: true});
   writeFileSync(join(path, 'report.md'), `${result.reason}\n`);
   writeFileSync(join(path, 'result.json'), JSON.stringify(result));
-  const handback = await seatHandback(ctx, dispatch, {report: `.mission-pipeline/tmp/${dispatch}/report.md`, result: `.mission-pipeline/tmp/${dispatch}/result.json`, filler: ctx.filler});
-  if (handback.kind === 'recorded') await advance(ctx, currentSecretaryRound(ctx, id).mission);
-  return handback;
+  // 4.4 (F9): the hand-back runs the flow step itself (seat.ts advanceQuietly), as the seat way does under this identity
+  return seatHandback(ctx, dispatch, {report: `.mission-pipeline/tmp/${dispatch}/report.md`, result: `.mission-pipeline/tmp/${dispatch}/result.json`, filler: ctx.filler});
 }
 
 /** The F-3 gap default stays visible until the mission ends or the answer is rejected. */

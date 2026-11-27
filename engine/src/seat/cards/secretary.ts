@@ -88,7 +88,7 @@ export const SecretaryResultShape = {
     .array(z.string().min(1))
     .optional()
     .describe('For "grant" on an exploration (optional): the ids of the findings the granted round is for, general ones too, as the reasons list them. The author gets a turn on them. Omit otherwise.'),
-  notice: z.string().describe('What the PM is told (empty only for a detail).'),
+  notice: z.string().describe('What the PM is told: with needs-pm, the brief in four parts (see Classification). Empty only for a detail.'),
   mayMatter: z.boolean().describe('A detail that is clearly reversible but the user might care about: noted as "may matter".'),
 };
 const SecretaryResultSchema = z.object(SecretaryResultShape);
@@ -107,7 +107,8 @@ export function renderSecretary(c: SecretaryCard): string {
     list('Requirement items involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
     renderMaterials(c.materials) +
     list(`Earlier decisions on ${r.subject} (decide this one knowing them)`, (c.earlierDecisions ?? []).map((d) => `${d.escalation} (${d.source}): ${d.option} by ${d.by}${d.reason !== '' ? `: ${d.reason}` : ''} (${d.applied})`)) +
-    '## Classification\nNew decisions: detail (with mayMatter when relevant), or needs-pm with ask-pm. A replan that adds or drops deliverables, changes module interfaces, data formats or storage needs the PM.\n\n' +
+    // 4.4 (G2): the notice is what the PM decides from; nothing checks its form
+    '## Classification\nNew decisions: detail (with mayMatter when relevant), or needs-pm with ask-pm. A replan that adds or drops deliverables, changes module interfaces, data formats or storage needs the PM.\nWith needs-pm the notice is the PM\'s whole brief, in four parts: the question; the options and what each leads to; which words of the user bear on it; what you would choose and why.\n\n' +
     list('Options', c.options.map((o) => `${o.id}: ${o.label}. Outcome: ${o.outcome}`)) +
     `## Your extra grant on lineage ${r.lineage}\n${c.grantAvailable ? 'Available (once per lineage, at most 2 attempts).' : c.classifications !== undefined ? 'Already used: ask the PM for further grants (choose ask-pm).' : 'Already used: only the user can grant more (choose ask-user if more attempts are the only way).'}\n\n`
   );
