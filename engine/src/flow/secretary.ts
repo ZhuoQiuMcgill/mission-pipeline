@@ -98,24 +98,76 @@ const OPTION_TEXT: Readonly<Record<DecisionOption, { label: string; outcome: str
   'ask-user': { label: 'Ask the user', outcome: 'the related work waits; the PM asks the user' },
 };
 
+type Outcomes = Partial<Record<DecisionOption, string>>;
+/** The stop of an exploration that did not converge (exploration/step.ts stopEscalation, applyDecisions). */
+const EXPLORATION_STOP: Outcomes = {
+  grant: 'the exploration gets 1 or 2 more rounds (2 when none is given); the instructions and the findings named go to the next rounds',
+  accept: 'the latest version is accepted: the exploration settles as converged by this decision, with no risk list',
+  'accept-risk': 'the unresolved fatal and serious findings become residual risks and the exploration settles on the version the stop names, as a conclusion',
+  'send-back': 'the exploration goes on in the direction the instructions give, within the rounds left (none is added)',
+  replan: 'the exploration ends without a conclusion; the planner then routes the part that waited for it',
+  abandon: 'the exploration ends without a conclusion; the planner then routes the part that waited for it',
+};
+/** A direction question of the Stabilizer, or a drifting round (exploration/step.ts DIRECTION_OPTIONS). */
+const EXPLORATION_DIRECTION: Outcomes = {
+  answer: 'the direction stays as defined; the answer goes to the next round',
+  'send-back': 'the direction changes as the instructions say; the next round follows them',
+  abandon: 'the exploration ends without a conclusion',
+};
+/** A finding the author escalated as a direction question. */
+const EXPLORATION_FINDING: Outcomes = {
+  answer: 'the answer redirects the next round on this finding',
+  'send-back': 'the next round is redirected on this finding as the instructions say',
+  'accept-risk': 'the finding is accepted as a residual risk; the exploration goes on',
+};
+
+/**
+ * 4.4 (G2): what an option does for this kind of escalation where the general text would say something
+ * else, read from the flow that carries it out; null: the general text holds.
+ */
+export function sourceOutcome(e: EscalationBody, o: DecisionOption): string | null {
+  const facts = (e.facts ?? {}) as Record<string, unknown>;
+  if (e.subject.startsWith('exploration:')) {
+    // the planner's routing of a settled exploration (planning.ts roundsStep): its facts are the settle
+    if (facts['outcome'] !== undefined) return o === 'accept' ? 'the conclusion stands: the Architect plans the part that waited for it' : o === 'replan' ? 'nothing is re-planned here: the PM is told to re-plan the part that waited for it with the user (a changed plan on their words); the rest of the mission goes on' : null;
+    if (e.source === 'exploration-budget' || e.source === 'exploration-repeated-fatal') return EXPLORATION_STOP[o] ?? null;
+    if (e.source === 'exploration-direction') {
+      if (facts['questions'] !== undefined) return o === 'answer' ? 'the answer goes to the author and the attacker; the exploration goes on' : null;
+      return (facts['finding'] !== undefined && facts['wi'] === undefined ? EXPLORATION_FINDING : EXPLORATION_DIRECTION)[o] ?? null;
+    }
+    // a turn whose seat task was given up (exploration/step.ts), or a seat task that failed (failures.ts)
+    if (facts['role'] !== undefined) return o === 'restart' ? 'the given-up turn runs again' : o === 'abandon' ? 'the exploration ends without a conclusion' : null;
+    return o === 'abandon' ? 'the failed seat task is given up: an evidence run is recorded as failed and the seat that asked goes on; a turn given up ends the exploration without a conclusion' : null;
+  }
+  if (e.subject.startsWith('audit:') && o === 'abandon') return 'the failed Auditor is given up and the legalization ends as not legalized';
+  if (e.source === 'feasibility-unresolved') return o === 'send-back' ? 'the Architect revises the plan per the instructions; that takes one more feasibility return, which needs a grant: the Secretary\'s one on this lineage, else the PM\'s or the user\'s' : o === 'accept-risk' ? 'the blocking findings are accepted as the plan\'s risks; the plan goes on to Calibrator ②' : null;
+  if (e.source === 'order-change' && o === 'accept') return 'the changed order stands; the plan goes on to its reviews';
+  if (e.source === 'loop-exhausted' && o === 'grant' && facts['loop'] === 'mechanical-return') return e.subject.startsWith('repair:') ? 'the repair\'s Architect gets more returns to fix its amendment' : 'the Architect gets more returns to fix the detailed plan';
+  return null;
+}
+
 /** Current option meanings, also used when an older queued card is dispatched. */
 export function secretaryOptions(e: EscalationBody, resident = false): SecretaryCard['options'] {
   const taskId = e.subject.startsWith('task:') ? e.subject.slice('task:'.length) : null;
   const reopen = (e.facts as { reopen?: { kind: string; integration?: string } } | undefined)?.reopen;
   // an option only the PM or the user may choose is not offered on the Secretary seat's card
-  return e.options.filter((o) => !(e.pmOnly ?? []).includes(o)).map((o) => ({
-    id: resident && isAskOption(o) ? 'ask-pm' as const : o,
-    ...OPTION_TEXT[resident && isAskOption(o) ? 'ask-pm' : o],
-    ...(resident && o === 'grant' ? {outcome: 'the exhausted loop runs again; after your one grant, further grants belong to the PM or the user'} : {}),
-    ...(o === 'accept-risk' && e.source === 'loop-exhausted' && reopen?.kind === 'review'
-      ? { outcome: `${taskId} keeps its accepted product; ${reopen.integration}'s reviewed attempt is accepted as it is, with the review's open findings quoted as risks; no further review round runs. If another grant has advanced ${taskId}, this older-start acceptance is moot.` }
-      : {}),
-  }));
+  return e.options.filter((o) => !(e.pmOnly ?? []).includes(o)).map((o) => {
+    const own = sourceOutcome(e, o);
+    return {
+      id: resident && isAskOption(o) ? 'ask-pm' as const : o,
+      ...OPTION_TEXT[resident && isAskOption(o) ? 'ask-pm' : o],
+      ...(resident && o === 'grant' ? {outcome: 'the exhausted loop runs again; after your one grant, further grants belong to the PM or the user'} : {}),
+      ...(o === 'accept-risk' && e.source === 'loop-exhausted' && reopen?.kind === 'review'
+        ? { outcome: `${taskId} keeps its accepted product; ${reopen.integration}'s reviewed attempt is accepted as it is, with the review's open findings quoted as risks; no further review round runs. If another grant has advanced ${taskId}, this older-start acceptance is moot.` }
+        : {}),
+      ...(own !== null ? { outcome: own } : {}),
+    };
+  });
 }
 
-/** 4.4 (G2): each option the PM or the user may answer with (the PM's own ones too), and what it does, for the PM's inbox. */
+/** 4.4 (G2): each option the PM or the user may answer with (the PM's own ones too), and what it does for this kind of escalation, for the PM's inbox. */
 export function pmOptions(e: EscalationBody): { id: DecisionOption; outcome: string }[] {
-  return secretaryOptions({ ...e, pmOnly: [] }).filter((o) => !isAskOption(o.id)).map((o) => ({ id: o.id, outcome: o.id === 'grant' ? 'the exhausted loop runs again with the attempts you grant (--extra); a PM grant does not use the Secretary\'s' : o.outcome }));
+  return secretaryOptions({ ...e, pmOnly: [] }).filter((o) => !isAskOption(o.id)).map((o) => ({ id: o.id, outcome: o.id === 'grant' ? `${sourceOutcome(e, 'grant') ?? 'the exhausted loop runs again with the attempts you grant (--extra)'}; a PM grant does not use the Secretary's` : o.outcome }));
 }
 
 export const escalationTask = (id: string): string => `sec.${id}`;

@@ -4,10 +4,14 @@
 // rest. No format is checked; nothing tells the PM to contact the Secretary (F-4). After a PM answer the
 // command prints the principles in force and a count of the other tags.
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
 import { canonicalJson } from '../src/common/hash.ts';
 import type { ContentHash, MissionId } from '../src/common/ids.ts';
+import { flowCtx } from '../src/flow/context.ts';
+import { escalation, pmOptions, raiseEscalation, secretaryOptions, type EscalationBody } from '../src/flow/secretary.ts';
 import { appendRecords } from '../src/memory/index.ts';
 import { ENV_A, readAll, type ProcessProject } from './process-fixtures.ts';
 import { project43, done43, escalation43, live43, secretary43 } from './p43-fixtures.ts';
@@ -72,6 +76,42 @@ test('after a PM answer the command prints the principles in force and a count o
     assert.match(out, /1 other tag in force for m1 not cited: mp read words --in-force/);
     assert.doesNotMatch(out, /Prefer clear errors/, 'the other tags are counted, not printed');
   } finally { p.cleanup(); }
+});
+
+test('review p1-2: each option says what the flow does for that kind of escalation, on the inbox and on the Secretary card', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm', 'mission', 'open', 'm1']);
+    const ctx = flowCtx(p.ctx.ports(), 'm1' as MissionId);
+    await raiseEscalation(ctx, { id: 'stop', source: 'exploration-budget', lineage: 'x.m1.e1', subject: 'exploration:e1', summary: 'Exploration e1 stopped without converging', reasons: ['a finding'], options: ['grant', 'accept-risk', 'send-back', 'replan', 'abandon', 'ask-user'], facts: { handoff: 'h', reason: 'budget-exhausted', wi: 'WI-08', version: null, unresolved: [], decision: null, stabilizer: [] } });
+    const d = { escalation: 'stop', by: 'secretary', option: 'ask-pm', classification: 'needs-pm', authorization: null, reason: 'the PM decides', instructions: '', grantExtra: 0, notice: 'Stop or go on?', mayMatter: false };
+    p.ctx.memory.write({}, (tx) => appendRecords(tx, [{ kind: 'flow.event', mission: 'm1' as MissionId, line: 'secretary', event: 'decision', key: 'stop', body: tx.data.put(canonicalJson(d)) as ContentHash }]));
+    const out = await text43(p, ['pm', 'inbox']);
+    assert.match(out, /replan: the exploration ends without a conclusion/);
+    assert.match(out, /send-back: the exploration goes on in the direction the instructions give, within the rounds left/);
+    assert.match(out, /grant: the exploration gets 1 or 2 more rounds.*a PM grant does not use the Secretary's/);
+    assert.doesNotMatch(out, /Architect decomposes again|Architect revises the plan/, 'no plan option text for an exploration stop');
+    const card = secretaryOptions((await escalation(ctx, 'stop'))!, true);
+    assert.match(card.find((o) => o.id === 'replan')!.outcome, /ends without a conclusion/);
+  } finally { p.cleanup(); }
+  // every kind of escalation whose options do something else than the general text says
+  const esc = (o: Partial<EscalationBody>): EscalationBody => ({ id: 'x', task: 'sec.x', source: 'constructor-decision', lineage: 'L', subject: 'task:t', summary: 's', reasons: [], options: [], ...o } as EscalationBody);
+  const outcome = (e: EscalationBody, id: string) => pmOptions(e).find((o) => o.id === id)?.outcome ?? '';
+  const routing = esc({ source: 'exploration-budget', subject: 'exploration:e1', options: ['replan', 'ask-user'], facts: { outcome: 'no-conclusion', stop: 'budget' } });
+  assert.match(outcome(routing, 'replan'), /the PM is told to re-plan the part that waited for it with the user/);
+  assert.match(outcome(esc({ source: 'exploration-budget', subject: 'exploration:e1', options: ['accept', 'ask-user'], facts: { outcome: 'conclusion' } }), 'accept'), /the Architect plans the part that waited for it/);
+  const direction = esc({ source: 'exploration-direction', subject: 'exploration:e1', options: ['answer', 'send-back', 'abandon', 'ask-user'], facts: { finding: 'f1', wi: 'WI-33' } });
+  assert.match(outcome(direction, 'send-back'), /the direction changes/);
+  assert.match(outcome(direction, 'abandon'), /the exploration ends without a conclusion/);
+  assert.match(outcome(esc({ source: 'exploration-direction', subject: 'exploration:e1', options: ['answer', 'send-back', 'accept-risk', 'ask-user'], facts: { finding: 'f1' } }), 'accept-risk'), /residual risk/);
+  assert.match(outcome(esc({ source: 'exploration-direction', subject: 'exploration:e1', options: ['answer', 'ask-user'], facts: { questions: ['q'] } }), 'answer'), /author and the attacker/);
+  assert.match(outcome(esc({ source: 'needs-disposition', subject: 'exploration:e1', options: ['restart', 'abandon', 'ask-user'], facts: { role: 'author' } }), 'restart'), /given-up turn runs again/);
+  assert.match(outcome(esc({ source: 'feasibility-unresolved', subject: 'plan:pmplan.m1.1', options: ['accept-risk', 'send-back', 'ask-user'] }), 'send-back'), /one more feasibility return, which needs a grant/);
+  assert.match(outcome(esc({ source: 'order-change', subject: 'plan:pmplan.m1.1', options: ['accept', 'send-back', 'ask-user'] }), 'accept'), /changed order stands/);
+  assert.match(outcome(esc({ source: 'loop-exhausted', subject: 'plan:pmplan.m1.1', options: ['grant', 'ask-user'], facts: { loop: 'mechanical-return' } }), 'grant'), /the Architect gets more returns/);
+  assert.match(outcome(esc({ source: 'loop-exhausted', subject: 'audit:L1', options: ['grant', 'abandon', 'ask-user'], facts: { loop: 'quarantine-restart' } }), 'abandon'), /not legalized/);
+  // the general text still holds where the flow does what it says: a task's re-plan is the Architect's
+  assert.match(outcome(esc({ source: 'constructor-decision', options: ['answer', 'replan', 'ask-user'] }), 'replan'), /the Architect decomposes again/);
 });
 
 test('compatibility: a decision recorded in the 4.3 shape (needs-user, ask-user) reads with its brief, and an escalation with no task names no items', async () => {
