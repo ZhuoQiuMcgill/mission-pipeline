@@ -31,6 +31,7 @@ import {
   productObjectId,
   recordEvidenceRequest,
   recordSeatHandBack,
+  seatCard,
   seatRead,
   taskStatus,
   type GitActions,
@@ -356,6 +357,8 @@ export class HarnessScheduler extends MemoryFlowScheduler implements ScriptedSch
     const dispatch = this.dispatchOf(task);
     outcome.before?.(dispatch);
     if ('release' in outcome) {
+      // a seat that ended without a hand-back had started: it read its card (4.4, F5: an unstarted release costs nothing)
+      seatCard(this.hctx, dispatch);
       await pmRelease(this.hctx, dispatch, outcome.release);
       return [];
     }

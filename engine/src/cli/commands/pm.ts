@@ -69,6 +69,7 @@ import {
   pmStop,
   pmWaive,
   pmWithdrawRequirement,
+  UNSTARTED_ROW_NOTICE,
   wordsText,
   type NextReport,
   type ProcessContext,
@@ -241,7 +242,7 @@ const dispatch: Command = {
 const release: Command = {
   group: 'pm',
   name: ['release'],
-  summary: 'release a dispatch whose seat ended without a hand-back: --ended (confirmed) or --abandoned (not confirmed) (§5.4, WI-28)',
+  summary: 'release a dispatch whose seat ended without a hand-back: --ended (confirmed) or --abandoned (not confirmed); one that had not started costs no re-dispatch (§5.4, WI-28)',
   usage: 'mp pm release <dispatch> --ended | --abandoned',
   flags: { ended: 'boolean', abandoned: 'boolean' },
   async run(c, args) {
@@ -254,6 +255,8 @@ const release: Command = {
     const lines = [
       r.released ? `${d} released (${r.how}).` : `${d} was already handed back or released: nothing changed.`,
       `Worktree: ${r.worktree === 'none' ? 'none' : r.worktree === 'removed' ? 'removed' : 'kept (released as abandoned: it stays until --ended)'}.`,
+      // 4.4 (F5)
+      ...(r.unstarted !== undefined ? [`It had not started (no card served, nothing read, run or checked out, no refused hand-back, no change in a worktree): this release costs no re-dispatch${r.unstarted >= UNSTARTED_ROW_NOTICE ? `; it is the step's ${r.unstarted}th such release in a row, and a notice says so` : ''}.`] : []),
       ...(r.requeued ? [`The step is ready again (re-dispatches ${r.attempts}/${r.allowed}).`] : []),
       ...(r.exhausted ? [`The lineage's re-dispatches are used up (${r.attempts}/${r.allowed}): the Secretary decides. ${wiLine(p, 'WI-08').join('')}`] : []),
       ...(r.notes ?? []),

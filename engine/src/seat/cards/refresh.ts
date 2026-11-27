@@ -8,7 +8,9 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { productAttempt, taskCardHash, taskLineage } from '../../flow/execution.ts';
+import { lineAcceptance, ownersOfPaths, productAttempt, taskCardHash, taskLineage } from '../../flow/execution.ts';
+import { acceptedEntry } from '../../flow/repair.ts';
+import { repairPlanMaterial } from './architect.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
@@ -45,9 +47,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
   // Exploration definition inputs stay fixed. Its project constraints (§9.5) and the materials of the
   // explorations planned before it are selected below. Blind cards exclude intent (§4.3).
   switch (card.seat) {
-    // a repair's Architect step: its plan inputs are fixed at queue time; the flow discards a hand-back on a plan no longer in effect
     case 'architect-repair':
-      return spec;
     case 'researcher-author':
     case 'researcher-reader':
     case 'researcher-interpreter':
@@ -95,6 +95,31 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
     break;
   }
   switch (card.seat) {
+    case 'architect-repair': {
+      // 4.4 (F5, #53, #68): rebuilt from the planning inputs in force at the claim, by the queue-time
+      // builder's own derivations: the constraints, the plan in effect with the repairs decided since, the
+      // accepted work (with its commits) and the owners of the paths the repair is about. A new plan in
+      // effect is the flow's: it cancels this step and starts the repair's next attempt (flow/repair.ts).
+      const eff = planInEffect(events);
+      const stored = eff === undefined || eff.dplan !== card.dplan ? undefined : object(eff.dplan);
+      if (eff === undefined || stored === undefined) break;
+      const plan = amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
+      const lineOf = (id: string) => events.filter((e) => e.line === `task:${id}`);
+      const queued = new Set(card.accepted.map((a) => a.product));
+      card.constraints = planningConstraints(constraints, mission);
+      card.plan = plan;
+      card.accepted = plan.tasks.flatMap((t) => {
+        const sel = lineAcceptance(lineOf(t.id));
+        // a start without a pin is checked by the queue-time builder (git): one accepted since then is not added here
+        if (sel.product === null || (!sel.pinned && !queued.has(sel.product))) return [];
+        return [acceptedEntry(t.id, lineOf(t.id), sel.product, object(sel.product)?.source?.commit)];
+      });
+      const about = card.repair.about?.startsWith('task ') === true ? card.accepted.find((a) => a.task === card.repair.about!.slice('task '.length))?.changedPaths ?? [] : [];
+      const tasks = new Set(events.filter((e) => e.line === 'plan' && e.event === 'effective').flatMap((e) => (e.body as EffectiveBody).tasks));
+      card.owners = ownersOfPaths(new Map([...tasks].map((id) => [id, lineOf(id)])), about).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
+      card.materials = [repairPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')];
+      break;
+    }
     case 'researcher-author':
     case 'researcher-interpreter':
     case 'researcher-reader':

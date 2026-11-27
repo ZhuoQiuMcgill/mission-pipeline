@@ -21,7 +21,7 @@ import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
 import { DetailedPlanDoc, DetailedTask, TaskProvenance, elementsOf, feasibilityRequired, planIdProblems, taskCardHash, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import { MECHANICAL_RULES } from '../../flow/mechanical.ts';
-import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
+import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, type MaterialRef } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
@@ -459,6 +459,12 @@ export const ArchitectRepairCardSchema = z.object({
   materials: z.array(Material).optional(),
 });
 export type ArchitectRepairCard = z.infer<typeof ArchitectRepairCardSchema>;
+
+/** The repair card's plan material, built alike when the step is queued and when it is claimed (4.4, F5). */
+export function repairPlanMaterial(put: (doc: string) => string, dplan: string, plan: DetailedPlanDoc): MaterialRef {
+  const text = previousPlanText(dplan, plan);
+  return { id: 'plan', title: `Detailed plan ${dplan} as it is in effect (with earlier repairs), in full`, ref: put(text), pages: materialPageCount(text), mustRead: true, role: 'plan' };
+}
 
 export const ArchitectRepairResultShape = {
   reopen: z.array(z.object({ task: z.string().min(1).describe('A task with an accepted product, listed on the card.'), issue: z.string().min(1).describe('What its work must fix for this repair.') })).describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),

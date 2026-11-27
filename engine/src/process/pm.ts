@@ -98,7 +98,7 @@ import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
-import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, taskStatus, type TaskSpecDoc } from './ports.ts';
+import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, raiseNotice, taskStatus, type TaskSpecDoc } from './ports.ts';
 import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { fullRunLine, heldByClose } from './close.ts';
 import { authorizationInForce, fullRunStatus } from './fullRuns.ts';
@@ -520,12 +520,52 @@ export interface Released {
   readonly worktree: 'removed' | 'kept' | 'none';
   /** What could not be removed now (the dispatch's tmp/ directory, a checkout it held); mp pm next tries again. */
   readonly notes?: readonly string[];
+  /** 4.4 (F5): the dispatch had not started, so its release cost no re-dispatch; how many such releases of the step in a row. Absent: it had started. */
+  readonly unstarted?: number;
+}
+
+/** 4.4 (F5): the flow event (line "dispatch:<id>") of a release that found the dispatch unstarted, and so cost nothing. */
+export const UNSTARTED_RELEASE = 'released-unstarted';
+/** 4.4 (F5): this many unstarted releases of one step in a row raise a notice. */
+export const UNSTARTED_ROW_NOTICE = 3;
+
+/**
+ * 4.4 (F5): a dispatch that had not started. Its dispatch line holds its claim and nothing else: no
+ * served card, no material read, no run, no checkout, no refused hand-back (any trace counts as a
+ * start). A Constructor's worktree is checked apart (worktreeClean).
+ */
+function untouched(db: Db, d: Pick<DispatchInfo, 'mission' | 'dispatch'>): boolean {
+  return flowEvents(db, { mission: d.mission, line: DISPATCH_LINE(d.dispatch), limit: 10_000 }).every((e) => e.event === 'claimed');
+}
+
+/** A Constructor's worktree with nothing in it but its checkout (no change, no untracked or ignored file); one not there is clean, one git cannot read is not. */
+function worktreeClean(ctx: ProcessContext, dispatch: string): boolean {
+  const dir = workspaceDir(ctx.memory.paths, dispatch);
+  if (!existsSync(dir)) return true;
+  try {
+    const r = ctx.git.runSync(['status', '--porcelain', '-z', '--untracked-files=all', '--ignored'], { cwd: dir });
+    return r.code === 0 && r.stdout.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** How many of a step's dispatches, newest first, were released unstarted in a row. */
+function unstartedRow(db: Db, d: Pick<DispatchInfo, 'mission' | 'task'>): string[] {
+  const row: string[] = [];
+  for (const x of listDispatches(db, { task: d.task, limit: 1000 }).sort((a, b) => b.claimedRevision - a.claimedRevision)) {
+    if (!flowEventExists(db, { mission: x.mission, line: DISPATCH_LINE(x.dispatch), event: UNSTARTED_RELEASE, key: 'release' })) break;
+    row.push(x.dispatch);
+  }
+  return row;
 }
 
 /** `mp pm release <id> --ended | --abandoned` (§5.4, WI-28). */
 async function driver_pmRelease(ctx: ProcessContext, dispatch: string, how: 'ended' | 'abandoned', o: { readonly filler?: Filler | null } = {}): Promise<Released> {
   const d = ctx.memory.read((db) => dispatchInfo(db, dispatch));
   if (d === null) throw new LedgerError('UNKNOWN_DISPATCH', `no dispatch ${dispatch}`);
+  // read before the write (git runs outside it); the dispatch line's traces are read again inside it
+  const clean = d.state !== 'in-flight' || d.worktree === null || worktreeClean(ctx, dispatch);
   const r = pmWrite(
     ctx,
     'release',
@@ -545,6 +585,26 @@ async function driver_pmRelease(ctx: ProcessContext, dispatch: string, how: 'end
         const rel = releaseDispatch(tx, { dispatch, how, requeue: true });
         const l = loopState(tx, cur.lineage, REDISPATCH_LOOP);
         return { released: rel.released, requeued: rel.requeued, exhausted: false, attempts: l.attempts, allowed: l.allowed };
+      }
+      // 4.4 (F5): a dispatch that had not started costs nothing: its release is counted apart, on its
+      // dispatch line, and the step is ready again whatever the loop says; a row of them raises a notice
+      if (clean && untouched(tx, cur)) {
+        appendRecords(tx, [{ kind: 'flow.event', mission: cur.mission, line: DISPATCH_LINE(dispatch), event: UNSTARTED_RELEASE, key: 'release', body: tx.data.put(canonicalJson({ dispatch, how })) as ContentHash }]);
+        const rel = releaseDispatch(tx, { dispatch, how, requeue: true });
+        const row = unstartedRow(tx, cur);
+        if (row.length >= UNSTARTED_ROW_NOTICE) {
+          raiseNotice(tx, {
+            mission: cur.mission,
+            category: 'unstarted-releases',
+            wi: 'WI-28',
+            key: `${cur.task}:${row.at(-1)!}`,
+            trigger: `step ${cur.task} was released ${row.length} times in a row before its seat started (${[...row].reverse().join(', ')}): none of these releases counted against its re-dispatches`,
+            defaultAction: 'nothing changes: the step is ready again; when no seat takes it up, read its card (mp read chain <dispatch>) and try another filler, or follow WI-28',
+            detail: { task: cur.task, dispatches: [...row].reverse() },
+          });
+        }
+        const l = loopState(tx, cur.lineage, REDISPATCH_LOOP);
+        return { released: rel.released, requeued: rel.requeued, exhausted: false, attempts: l.attempts, allowed: l.allowed, unstarted: row.length };
       }
       // decision 15: a re-dispatch counts against the lineage's loop (checked before it is counted)
       const pre = loopState(tx, cur.lineage, REDISPATCH_LOOP);

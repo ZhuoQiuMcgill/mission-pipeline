@@ -9,7 +9,7 @@ import { stopCovers } from '../memory/stopTypes.ts';
 import type { ProcessContext } from './context.ts';
 import { advance } from './advance.ts';
 import { pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
-import { dispatchView, seatCard, seatHandback } from './seat.ts';
+import { dispatchView, recordServed, seatCard, seatHandback } from './seat.ts';
 import { listNotices, markNotices } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
 import type { DecisionBody, EscalationBody } from '../flow/secretary.ts';
@@ -243,7 +243,10 @@ export function secCard(ctx: ProcessContext, id: string): Dispatched {
     const v = seatCard(ctx, existing.dispatch);
     return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: existing.cardLeaf ?? '', worktree: null, files: handBackFiles(existing.dispatch), prompt: ''};
   }
-  return pmDispatch(ctx, task, {filledBy: g.filler});
+  // 4.4 (F5): this claim prints the card to the Secretary, so it is served
+  const d = pmDispatch(ctx, task, {filledBy: g.filler});
+  recordServed(ctx, d);
+  return d;
 }
 
 export function secDecisionDispatch(ctx: ProcessContext, id: string): string {

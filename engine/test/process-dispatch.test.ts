@@ -12,7 +12,7 @@ import type { MissionId, ObjectVersionId, StopId } from '../src/common/ids.ts';
 import { cal1Pass } from '../src/flow/scripted.ts';
 import { decisionLabels } from '../src/evaluator/index.ts';
 import { dispatchInfo, LedgerError, loopState } from '../src/memory/index.ts';
-import { pmDispatch, pmNext, pmRelease, pmRenew, pmStop, seatRerun } from '../src/process/index.ts';
+import { pmDispatch, pmNext, pmRelease, pmRenew, pmStop, seatCard, seatRerun } from '../src/process/index.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import type { ReviewerCard } from '../src/seat/card.ts';
 import { addDetailedPlan, addMissionToReview, ENV_B, handBack, processProject, readAll, readyOf, reviewerPass, startAddMission, step, type ProcessProject } from './process-fixtures.ts';
@@ -37,7 +37,8 @@ describe('process: interrupted dispatches (§5.4, WI-28, decision 15)', () => {
     assert.ok(next.inFlight[0]!.ageMs >= 0);
     assert.equal(next.ready.length, 0, 'a step is claimed once');
     assert.throws(() => pmDispatch(ctx, s.step), (e: unknown) => e instanceof LedgerError && e.code === 'NOT_QUEUED');
-    // the harness lost the seat; nobody knows whether it still runs
+    // the seat read its card (4.4, F5: so it had started); then the harness lost it; nobody knows whether it still runs
+    seatCard(ctx, d1.dispatch);
     const rel = await pmRelease(ctx, d1.dispatch, 'abandoned');
     assert.equal(rel.requeued, true);
     assert.equal(rel.attempts, 1, 'the re-dispatch counts against the lineage loop');
@@ -63,12 +64,15 @@ describe('process: interrupted dispatches (§5.4, WI-28, decision 15)', () => {
     const ctx = p.ctx;
     await startAddMission(ctx, M);
     const s = await readyOf(ctx, 'calibrator-1');
+    // each seat read its card before it ended (4.4, F5: an unstarted release would cost nothing)
     for (let i = 1; i <= 2; i++) {
       const d = pmDispatch(ctx, s.step);
+      seatCard(ctx, d.dispatch);
       const r = await pmRelease(ctx, d.dispatch, 'ended');
       assert.equal(r.requeued, true, `re-dispatch ${i} allowed`);
     }
     const d3 = pmDispatch(ctx, s.step);
+    seatCard(ctx, d3.dispatch);
     const r3 = await pmRelease(ctx, d3.dispatch, 'ended');
     assert.equal(r3.requeued, false);
     assert.equal(r3.exhausted, true);

@@ -128,6 +128,7 @@ Harness confirmed it ended: `mp sec release <id> --ended`.
 Not confirmed: `mp sec release <id> --abandoned`; the step may be dispatched again at once, while the old worktree and leases remain until ended.
 A late hand-back is recorded and not accepted; see WI-28.
 Never use abandoned as evidence that the seat stopped.
+A release of a dispatch that had not started (no card served, nothing read, run or checked out, no refused hand-back, a clean worktree) costs no re-dispatch; three in a row on one step raise a notice (WI-28).
 
 A detached run (`mp seat <id> rerun --detach`) outlives its seat; its worker records the result against the dispatch.
 Next lists ended or lost detached runs whose dispatch is still in flight.

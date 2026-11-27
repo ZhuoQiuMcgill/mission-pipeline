@@ -2641,12 +2641,21 @@ async function dependencyProducts(ctx: FlowCtx, plan: DetailedPlanDoc, t: Detail
  * review's and the repair's tracing aid): from the paths recorded with each product, through the
  * task lines' acceptances (current or earlier). A path ending in "/" or "/**" names a directory.
  */
-export async function pathOwners(ctx: FlowCtx, paths: readonly string[]): Promise<Array<{ readonly path: string; readonly owners: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly current: boolean; readonly paths: readonly string[] }> }>> {
+export async function pathOwners(ctx: FlowCtx, paths: readonly string[]): Promise<PathOwners> {
   const tasks = new Set<string>();
   for (const e of await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')) for (const t of e.body.tasks) tasks.add(t);
+  const lines = new Map<string, Line['events']>();
+  for (const id of tasks) lines.set(id, (await readLine(ctx, id)).events);
+  return ownersOfPaths(lines, paths);
+}
+
+type PathOwners = Array<{ readonly path: string; readonly owners: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly current: boolean; readonly paths: readonly string[] }> }>;
+
+/** pathOwners over task lines already read (4.4, F5: the repair card's claim-time rebuild reads them from the memory). */
+export function ownersOfPaths(lines: ReadonlyMap<string, Line['events']>, paths: readonly string[]): PathOwners {
   const accepted: Array<{ task: string; attempt: number; product: string; current: boolean; changed: readonly string[] }> = [];
-  for (const id of tasks) {
-    const line = await readLine(ctx, id);
+  for (const [id, events] of lines) {
+    const line = new Line(events);
     const now = lineAcceptance(line.events).product;
     for (const a of line.all<{ k: number; product: string }>('accepted')) accepted.push({ task: id, attempt: a.body.k, product: a.body.product, current: a.body.product === now, changed: changedPathsOf(line, a.body.product) });
     for (const r of line.all<ReboundBody>('rebound')) accepted.push({ task: id, attempt: r.body.k, product: r.body.product, current: r.body.product === now, changed: changedPathsOf(line, r.body.product) });

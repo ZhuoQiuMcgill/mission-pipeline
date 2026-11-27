@@ -114,6 +114,9 @@ export function materialLeaf(mission: string, ref: string): string {
   return `missions/${mission}/materials/${ref}.md`;
 }
 
+/** 4.4 (F5): the flow event (line "dispatch:<id>", key "card") that records the first time a dispatch's card was served. */
+export const SERVED_EVENT = 'served';
+
 /** `mp seat <id> card`: the card as the seat received it, hash-checked (§5.2, §3.3). */
 export function seatCard(ctx: ProcessContext, dispatch: string): { readonly dispatch: string; readonly text: string; readonly leaf: string } {
   const v = dispatchView(ctx, dispatch);
@@ -121,7 +124,22 @@ export function seatCard(ctx: ProcessContext, dispatch: string): { readonly disp
   const r = ctx.memory.readLeaf(leaf);
   if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `the card of dispatch ${dispatch} (${leaf}) is missing; the PM follows WI-30`, { wi: 'WI-30' });
   if (r.status === 'edited') throw new ProcessError('LEAF_EDITED', `the card of dispatch ${dispatch} (${leaf}) was edited after it was recorded; the PM follows WI-30`, { wi: 'WI-30' });
+  if (v.info.state === 'in-flight') recordServed(ctx, v.info);
   return { dispatch, text: r.text, leaf };
+}
+
+/** The served receipt of a dispatch in flight (4.4, F5): written once, best effort; a failure to record it never refuses the card. */
+export function recordServed(ctx: ProcessContext, d: Pick<DispatchInfo, 'mission' | 'dispatch'>): void {
+  const at = { mission: d.mission, line: DISPATCH_LINE(d.dispatch), event: SERVED_EVENT, key: 'card' };
+  try {
+    if (ctx.memory.read((db) => flowEventExists(db, at))) return;
+    ctx.memory.write({ op: `served:${d.dispatch}`, payload: { dispatch: d.dispatch } }, (tx) => {
+      if (flowEventExists(tx, at)) return;
+      appendRecords(tx, [{ kind: 'flow.event', ...at, body: tx.data.put(canonicalJson({ dispatch: d.dispatch })) as ContentHash }]);
+    });
+  } catch {
+    /* the card is served all the same; a release then judges the dispatch by its other traces */
+  }
 }
 
 function inFlight(v: DispatchView, what: string): void {
