@@ -253,6 +253,31 @@ function conflicts(a: TaskSpecDoc, b: TaskSpecDoc): boolean {
   return a.writeScope !== undefined && b.writeScope !== undefined && scopesOverlap(a.writeScope, b.writeScope).length > 0;
 }
 
+/**
+ * 4.4 (F14, #54): stable production that waits because the plan's deciding passes do not cover a current
+ * object constraint (flow/plan-constraints.ts, its open gap) is a held line with WI-34; no step is queued
+ * for it, so nothing else shows it. Fast mode goes on and holds nothing.
+ */
+function constraintGapHolds(db: Db, data: { text(h: string): string }): HeldStep[] {
+  const out: HeldStep[] = [];
+  for (const { mission } of db.stmt("SELECT DISTINCT mission FROM flow_events WHERE line = ? AND event = 'plan-constraint-gap'").all(PLAN_LINE) as Array<{ mission: string }>) {
+    const m = mission as MissionId;
+    if (missionClosedIn(db, m)) continue;
+    const eff = flowEvents(db, { mission: m, line: PLAN_LINE, event: 'effective', limit: 10_000 }).filter((e) => !e.key.includes('#')).at(-1);
+    if (eff === undefined || (JSON.parse(data.text(eff.body)) as { mode?: string }).mode !== 'stable') continue;
+    const closed = new Set(flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap-closed', limit: 10_000 }).map((e) => e.key));
+    for (const g of flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap', limit: 10_000 }).filter((e) => !closed.has(e.key))) {
+      const gap = JSON.parse(data.text(g.body)) as { plan: string; uncovered: Array<{ line: string; version: string }> };
+      out.push({ step: gap.plan, seat: 'production', kind: 'plan-constraint-gap', mission: m, purpose: `stable production of ${m}`, why: `stable production waits: plan ${gap.plan} has current deciding passes that do not cover the object constraint(s) ${gap.uncovered.map((c) => `${c.line} (${c.version})`).join(', ')}; the PM takes an exit of WI-34 with the user's words`, wi: 'WI-34' });
+    }
+  }
+  return out;
+}
+
+function missionClosedIn(db: Db, mission: MissionId): boolean {
+  return db.stmt("SELECT 1 FROM missions WHERE mission = ? AND state = 'closed'").get(mission) !== undefined;
+}
+
 /** The ready and held steps, the dispatches in flight and what waits on the user, in one read. */
 export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held' | 'inFlight' | 'waitingOnUser'> {
   const now = ctx.now();
@@ -299,6 +324,7 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
       const dispatches = listDispatches(db, { task: q.task, limit: 1000 }).length;
       candidates.push({ spec, step: { ...base, parallel: true, priority: spec.priority, dispatches } });
     }
+    held.push(...constraintGapHolds(db, ctx.memory.data));
     candidates.sort((a, b) => b.step.priority - a.step.priority);
     const ready = candidates.map((c, i) => {
       const others = [...flightSpecs, ...candidates.filter((_, j) => j !== i).map((x) => x.spec)];
@@ -584,12 +610,32 @@ export interface Renewed {
   readonly skipped: ReadonlyArray<{ readonly evidence: string; readonly why: string }>;
   /** Judgments handed to their flow for a new judgment of the same position (a Reviewer step in `mp pm next`). */
   readonly reviewSteps: number;
+  /** 4.4 (F14): the missions covered: the one named, or the open ones. */
+  readonly missions: readonly string[];
+  /** 4.4 (F14): runs from older environments left out, because their missions are not covered. */
+  readonly leftOut: number;
 }
 
-/** `mp pm renew` (§6.5): rerun the declared commands of the affected runs on clean checkouts; equal outputs renew the evidence. */
-async function driver_pmRenew(ctx: ProcessContext): Promise<Renewed> {
+/**
+ * 4.4 (F14): what a renewal covers: the named mission, or every mission that is not closed. A run counts for
+ * the missions of the versions its judgments decide and of its candidate; one whose mission cannot be told
+ * is covered.
+ */
+function renewCovers(ctx: ProcessContext, mission: string | null): { readonly missions: readonly string[]; readonly covers: (missions: readonly (string | null)[]) => boolean } {
+  const closed = new Set((ctx.memory.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
+  const missions = mission !== null ? [mission] : (ctx.memory.stmt("SELECT mission FROM missions WHERE state = 'open' ORDER BY mission").all() as Array<{ mission: string }>).map((r) => r.mission);
+  const inScope = (m: string): boolean => (mission !== null ? m === mission : !closed.has(m));
+  return { missions, covers: (ms) => { const known = ms.filter((m): m is string => m !== null && m !== 'project'); return known.length === 0 || known.some(inScope); } };
+}
+
+/** `mp pm renew [--mission <m>]` (§6.5): rerun the declared commands of the affected runs on clean checkouts; equal outputs renew the evidence. */
+async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: string | null } = {}): Promise<Renewed> {
   const env = ctx.environment();
-  const c = ctx.memory.read((db) => renewalCandidates(db));
+  const all = ctx.memory.read((db) => renewalCandidates(db));
+  const scope = renewCovers(ctx, o.mission ?? null);
+  const covered = all.candidates.filter((cand) => scope.covers([...cand.judgments.map((j) => missionOfObject(ctx, j.target)), missionOfEvidence(ctx, cand.evidence)]));
+  const c = { ...all, candidates: covered, reviews: all.reviews.filter((j) => scope.covers([missionOfObject(ctx, j.target)])) };
+  const leftOut = all.candidates.length - covered.length + all.reviews.length - c.reviews.length;
   const reruns: Array<Renewed['reruns'][number]> = [];
   const skipped: Array<{ evidence: string; why: string }> = [];
   // The log, rather than evidence-id order, preserves legacy command groups and
@@ -714,7 +760,7 @@ async function driver_pmRenew(ctx: ProcessContext): Promise<Renewed> {
     });
   }
   await advance(ctx, undefined, { dispatch: null, task: null, step: `mp pm renew (environment ${env.identity.slice(0, 16)})` });
-  return { environment: c.environment, reruns, reviews: c.reviews, skipped, reviewSteps: needed.length };
+  return { environment: c.environment, reruns, reviews: c.reviews, skipped, reviewSteps: needed.length, missions: scope.missions, leftOut };
 }
 
 /**

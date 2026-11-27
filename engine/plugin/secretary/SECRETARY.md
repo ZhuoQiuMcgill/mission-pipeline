@@ -142,7 +142,7 @@ Check for surviving command processes when a worker is lost; a worker on another
 
 A move or toolchain change removes no proof; earlier runs still count, marked "older environment".
 There is no automatic renew step.
-Next gives `environment-older-runs` once per environment; when the change matters, `mp sec renew` reruns the declared commands.
+Next gives `environment-older-runs` once per environment; when the change matters, `mp sec renew` reruns the declared commands of the missions that are not closed (`--mission <m>` for one, a closed one too).
 Equal results renew evidence without a seat; different results become Reviewer steps.
 A settled exploration stays settled (`exploration-older-environment`).
 When an environment change matters to its question, `mp pm reopen-exploration <mission> <exploration>` repeats its experiments and attacker check (`exploration-reopened`); decide within the plan or send a direction change to the PM.
@@ -199,12 +199,13 @@ A new plan version can retain accepted task products under unchanged cards.
 Stable mode creates re-bound versions and Reviewer steps (`kept-products-rebind-review`), holding dependents until judged.
 Fast mode keeps the old binding (`kept-product-not-rebound`), marks proof short and continues dependent work.
 Stale or missing versions in that notice mean a dependency was rebuilt rather than re-bound; a re-plan that changes the task card rebuilds it.
+One such notice stands per product and plan: a new stale set replaces it, and it closes when the product is re-bound or superseded.
 
 A revised detailed plan carries unchanged tasks over; the Architect receives the earlier plan in full.
 Structural changes are held for PM approval as described above, including changes with no accepted work.
 After approval, changed or dropped tasks can restart or stop; keep prior work in the memory.
 If a repair's added tasks were dropped, send that to the PM to record its repair again once the revision takes effect.
-A plan-constraint gap (WI-34) is a PM inbox item because both exits need the user's new words.
+A plan-constraint gap (WI-34) is a PM inbox item because both exits need the user's new words; in stable mode next lists it as held.
 Once the PM submits the plan, dispatch its checks and continuation.
 
 Config `startOnHandback` permits listed missions' tasks to start on verified hand-backs during dependency review.

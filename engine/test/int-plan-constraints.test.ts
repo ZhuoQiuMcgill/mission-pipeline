@@ -7,6 +7,8 @@ import { recordConstraint } from '../src/flow/requirements.ts';
 import { cal1Pass, drive, happyScript, pmPlan, seedMission, SEED_TEXT } from '../src/flow/scripted.ts';
 import { withdrawConstraint } from '../src/memory/domain/constraints.ts';
 import { listNotices } from '../src/process/notices.ts';
+import { readSteps } from '../src/process/pm.ts';
+import { resolveSubtasks } from '../src/cli/layers.ts';
 import type { Calibrator1Card } from '../src/seat/cards/calibrator.ts';
 import { memoryPorts, say } from './flow-memory-fixtures.ts';
 
@@ -129,4 +131,28 @@ test('WI-34 Stabilizer INT r1: an uncovered set A, then A+B, then A again tells 
   const head = w.ledger.head; await engine.reconcile(M);
   assert.equal(w.ledger.head, head);
   assert.equal((await w.evaluator.labels(['pmplan.m1.1'])).labels['pmplan.m1.1'], 'not-fully-proven');
+});
+
+test('4.4 (F14, #54): an open gap holds stable production as a held line with WI-34, and mp read blocked names it', async () => {
+  const { w, engine } = await setup();
+  await add(w, ['plans/pm-plan.json']);
+  await engine.reconcile(M);
+  const gap = () => readSteps(w.ctx).held.filter((h) => h.kind === 'plan-constraint-gap');
+  assert.equal(gap().length, 1, '4.3 listed nothing held');
+  assert.equal(gap()[0]!.wi, 'WI-34');
+  assert.match(gap()[0]!.why, /stable production waits: plan pmplan\.m1\.1 .*constraint\.late/);
+  const blocked = (await resolveSubtasks(w.ctx)).blocked;
+  assert.ok(blocked.some((e) => e.kind === 'plan' && e.id === 'pmplan.m1.1' && e.blocked?.wi === 'WI-34'), JSON.stringify(blocked));
+  // the exit closes the gap, and the held line goes with it
+  await submitPmBatch(w, { mission: M, plan: pmPlan(M), userWords: [say(w, 'Check this same plan against the new constraint.')], changedItems: [] });
+  await drive(engine, w.scheduler, happyScript(M));
+  assert.deepEqual(gap(), []);
+});
+
+test('4.4 (F14, #54): fast mode goes on with an open gap and holds nothing', async () => {
+  const { w, engine } = await setup('fast');
+  await add(w, ['**']);
+  await engine.reconcile(M);
+  assert.equal(open(w).length, 1);
+  assert.deepEqual(readSteps(w.ctx).held.filter((h) => h.kind === 'plan-constraint-gap'), []);
 });

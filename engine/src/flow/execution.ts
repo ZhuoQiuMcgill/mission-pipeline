@@ -353,6 +353,7 @@ export async function executionStep(ctx: FlowCtx): Promise<void> {
     // what this pass re-bound is told even when a later task's step failed
     await keptNotices(ctx, eff, kept);
   }
+  await keptSweep(ctx, eff);
   await droppedStep(ctx, eff, stored.plan);
   await supersededStep(ctx, eff);
   await withdrawnStep(ctx, stored.plan);
@@ -1767,31 +1768,39 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   }
   const have = await ctx.ports.scheduler.composition(mapped);
   const want = await ctx.ports.scheduler.composition([...deps]);
-  const stale = have.filter((x) => !want.includes(x)).sort();
-  const missing = want.filter((x) => !have.includes(x)).sort();
+  // 4.4 (F14, #66): both closures are read through the re-bound successors, so a prerequisite re-bound
+  // to a successor of the same content is not stale (the dependencies' closures record older versions)
+  const succ = prerequisites.length === 0 && deps.size > 0 ? (kept.successors ??= await reboundSuccessors(ctx)) : successor;
+  const through = (xs: readonly string[]): string[] => [...new Set(xs.map((x) => latestOf(succ, x)))];
+  const haveNow = through(have);
+  const wantNow = through(want);
+  const stale = haveNow.filter((x) => !wantNow.includes(x)).sort();
+  const missing = wantNow.filter((x) => !haveNow.includes(x)).sort();
   if (stale.length > 0 || missing.length > 0) {
-    await notify(ctx, {
-      category: 'kept-product-not-rebound',
-      wi: null,
+    await keptNotice(ctx, t, line, {
       key: `${t.id}:${cur.product}:${eff.dplan}:prerequisites:${shortHash({ stale, missing })}`,
+      product: cur.product,
+      dplan: eff.dplan,
       trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} has stale prerequisites [${stale.join(', ')}] and missing prerequisites [${missing.join(', ')}] compared with its dependencies' accepted closure: it cannot be re-bound to the plan`,
-      defaultAction: `task ${t.id} stays accepted with a product that is not fully proven (stable mode holds the work that depends on it); a re-plan that changes its card rebuilds it on its dependencies' current work`,
+      defaultAction: `task ${t.id} stays accepted with a product that is not fully proven${eff.mode === 'stable' ? ' (stable mode holds the work that depends on it)' : ''}; a re-plan that changes its card rebuilds it on its dependencies' current work`,
       detail: { task: t.id, product: cur.product, dplan: eff.dplan, stale, missing },
     });
     return 'none';
   }
   // fast mode: told once, then the re-review paths run (an environment re-review is still answered)
   if (eff.mode !== 'stable') {
-    await notify(ctx, {
-      category: 'kept-product-not-rebound',
-      wi: null,
+    await keptNotice(ctx, t, line, {
       key: `${t.id}:${cur.product}:${eff.dplan}:fast`,
+      product: cur.product,
+      dplan: eff.dplan,
       trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} lost its proof with the plan it was recorded under`,
       defaultAction: 'fast mode: the task stays accepted and the work that depends on it goes on; the product is "not fully proven" until a Reviewer judges it under the plan in effect (stable mode, or a re-plan that changes its card)',
       detail: { task: t.id, product: cur.product, dplan: eff.dplan },
     });
     return 'none';
   }
+  // 4.4 (F14): the product is re-bound now; an open notice about it closes
+  await closeKeptNotices(ctx, t.id, line, () => true, 're-bound');
   // every prerequisite is re-bound to the plan in effect, or proven, before this version is (stable mode only)
   for (const x of mapped) if (await awaitsPlan(ctx, eff, labels, x)) return 'held';
   // a re-review of this version that a Reviewer is judging now ends first (its hand-back is preserved)
@@ -1910,6 +1919,58 @@ async function rebindReview(
       break;
   }
   return 'held';
+}
+
+/** 4.4 (F14): a `kept-product-not-rebound` notice the flow keeps track of, on the task's line. */
+interface KeptNoticeBody {
+  readonly product: string;
+  readonly dplan: string;
+}
+const KEPT_NOTICE = 'kept-notice';
+const KEPT_NOTICE_CLOSED = 'kept-notice-closed';
+const KEPT_CATEGORY = 'kept-product-not-rebound';
+
+function openKeptNotices(line: Line): Array<{ readonly key: string; readonly body: KeptNoticeBody }> {
+  return line.all<KeptNoticeBody>(KEPT_NOTICE).filter((e) => line.one(KEPT_NOTICE_CLOSED, e.key) === null);
+}
+
+/** Close the open notices of a task that `which` selects: the lifecycle event and the notice's acknowledgement in one write. */
+async function closeKeptNotices(ctx: FlowCtx, task: string, line: Line, which: (e: { readonly key: string; readonly body: KeptNoticeBody }) => boolean, why: string): Promise<void> {
+  for (const e of openKeptNotices(line).filter(which)) {
+    await commit(ctx, `flow:${KEPT_NOTICE_CLOSED}:${ctx.mission}:task:${idPart(task)}:${e.key}`, {
+      events: [ev(ctx, taskLine(task), KEPT_NOTICE_CLOSED, e.key, { why })],
+      records: [{ kind: 'notice.delivery', notice: noticeAlertId({ mission: ctx.mission, category: KEPT_CATEGORY, key: e.key }), state: 'acknowledged' }],
+    });
+  }
+}
+
+/**
+ * 4.4 (F14): one open `kept-product-not-rebound` notice per product and plan. A new stale set replaces
+ * the open one (closed, and a notice with the new set raised); it closes when the product is re-bound
+ * or superseded (keptSweep). Remembered before it is raised, so an interrupted notice is raised again.
+ */
+async function keptNotice(ctx: FlowCtx, t: DetailedTask, line: Line, n: { readonly key: string; readonly product: string; readonly dplan: string; readonly trigger: string; readonly defaultAction: string; readonly detail: unknown }): Promise<void> {
+  // the same set again after its notice closed is a notice of its own (a closed notice stays acknowledged)
+  const same = line.all<KeptNoticeBody>(KEPT_NOTICE).filter((e) => e.key === n.key || e.key.startsWith(`${n.key}:`));
+  const key = same.find((e) => line.one(KEPT_NOTICE_CLOSED, e.key) === null)?.key ?? (same.length === 0 ? n.key : `${n.key}:${same.length + 1}`);
+  const replaced = openKeptNotices(line).some((e) => e.key !== key && e.body.product === n.product && e.body.dplan === n.dplan);
+  await closeKeptNotices(ctx, t.id, line, (e) => e.key !== key, 'superseded by a later notice');
+  if (line.one(KEPT_NOTICE, key) === null) {
+    await commit(ctx, `flow:${KEPT_NOTICE}:${ctx.mission}:task:${idPart(t.id)}:${key}`, { events: [ev(ctx, taskLine(t.id), KEPT_NOTICE, key, { product: n.product, dplan: n.dplan } satisfies KeptNoticeBody)] });
+  }
+  await notify(ctx, { category: KEPT_CATEGORY, wi: null, key, trigger: `${n.trigger}${replaced ? ' (updated: it replaces the notice of the earlier set)' : ''}`, defaultAction: n.defaultAction, detail: n.detail });
+}
+
+/** 4.4 (F14): after a pass, a tracked notice closes once its plan is no longer in effect or its product is no longer the task's accepted one. */
+async function keptSweep(ctx: FlowCtx, eff: EffectiveBody): Promise<void> {
+  const raised = await ctx.ports.ledger.events<KeptNoticeBody>({ mission: ctx.mission, event: KEPT_NOTICE });
+  if (raised.length === 0) return;
+  const closed = new Set((await ctx.ports.ledger.events({ mission: ctx.mission, event: KEPT_NOTICE_CLOSED })).map((e) => `${e.line}\n${e.key}`));
+  for (const task of new Set(raised.filter((e) => !closed.has(`${e.line}\n${e.key}`)).map((e) => e.line.slice('task:'.length)))) {
+    const line = await readLine(ctx, task);
+    const product = line.abandoned ? null : currentAcceptance(line, line.k)?.product ?? null;
+    await closeKeptNotices(ctx, task, line, (e) => e.body.dplan !== eff.dplan || e.body.product !== product, 'superseded');
+  }
 }
 
 /** The PM's notices of one pass's re-binds (3.9; normal branch: nothing for the PM to decide). */
