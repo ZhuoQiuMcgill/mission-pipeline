@@ -29,7 +29,7 @@ Alignment: `mp pm mission`, `mp pm requirement`, `mp pm constraint`, `mp pm plan
 Answers: `mp pm answer --by pm --words`, or `--no-words --reason`; the user's own choice uses `--by user --words`; `mp pm inbox --asked-user <item>` marks a pending question without words.
 Decisions and completion: `mp pm grant`, `mp pm repair`, `mp pm full-run`, `mp pm finish`, `mp pm legalize`.
 Stops: `mp pm stop`, `mp pm stop-narrow`, `mp pm stop-release`; follow the handbook's fallback before any PM release.
-Secretary: `mp pm secretary start`, `mp pm secretary handle`, `mp pm secretary stop`, `mp read secretary`.
+Secretary: `mp pm secretary start`, `mp pm secretary handle`, `mp pm secretary stop [--gone | --idle]`, `mp read secretary`.
 Contact only for a new instruction (`mp pm note`) or the user's progress details (`mp pm ask-secretary`).
 Read progress only at the user's request: `mp read status`, `mp read blocked`, `mp read show`, `mp read leaf`; use tree reads for the requested provenance.
 

@@ -31,6 +31,8 @@ export function liveSecretary(db: Db): SecretaryGeneration | null {
 export function requireSecretary(db: Db, identity: string | null, pending = false): SecretaryGeneration {
   const g = generations(db).find((g) => g.generation === identity);
   if (identity === null || g === undefined || (g.state !== 'live' && !(pending && g.state === 'pending'))) {
+    // 4.4 (F19): a pending generation is told what comes first
+    if (g?.state === 'pending') notAllowed(`${g.generation} is pending: run mp sec session first, which makes it live; then mp sec handbook and mp sec next`);
     notAllowed(`MP_SECRETARY must name the ${pending ? 'pending or live' : 'live'} Secretary generation; ${identity ?? 'unset'} cannot operate this project`);
   }
   return g;

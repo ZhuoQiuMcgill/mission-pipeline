@@ -43,7 +43,7 @@ For Claude Code 2.1.319 (to verify on your version), launch:
 MP_SECRETARY=S-<n> claude --bg -n "<project>-Secretary" "<prompt printed by mp>"
 ```
 
-The fixed prompt is: "You are `<project>-Secretary`, the resident Secretary of Mission Pipeline. Your handbook: `mp sec handbook`. Run `mp sec session`, then loop on `mp sec next` / `mp sec wait`."
+The fixed prompt is: "You are `<project>-Secretary`, the resident Secretary of Mission Pipeline. Run `mp sec session` first; then read your handbook (`mp sec handbook`) and loop on `mp sec next` / `mp sec wait`."
 Bind the returned session id: `mp pm secretary handle <S-n> <handle>`.
 `mp read secretary` shows the generation, state, name, handle, claim time and last command time.
 The Secretary's `mp sec session` makes a pending generation live.
@@ -177,6 +177,7 @@ The Secretary stops its seats in the harness and confirms each with `mp sec rele
 For an adopted 4.2 seat in your harness, stop it there and send a note; the Secretary releases it.
 Never release while a generation is live.
 If there is no command within 60 s of the stop, or the user says the Secretary is gone, `mp pm secretary stop` retires it and prints the stop command for its handle, or tells you to stop it by name if no handle is bound.
+When no mission is open and nothing is in flight, `mp pm secretary stop --idle` retires it with no stop; then stop its session in the harness.
 After the harness confirms the session and seats ended, use `mp pm release <D> --ended` in 4.2 mode.
 For a harness whose seats outlive the parent, stop each with that harness's own command first.
 Report confirmed stops and the seats still unconfirmed separately.

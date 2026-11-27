@@ -1,7 +1,8 @@
 // Program refs (design 4.1 §6.7; 4.0 6.1 "git：程序只创建自己命名空间里的引用").
 //
 // The program only ever creates refs under refs/mission-pipeline/ (the delivery
-// ref, delivery.ts), with plain git: `git update-ref <ref> <D> ""`, which
+// ref, delivery.ts; 4.4: the kept ref of each recorded candidate, process/actions.ts),
+// with plain git: `git update-ref <ref> <D> ""`, which
 // creates the ref only if it is absent, judged by reading the ref back.
 // Landing (land.ts) is the one place that moves a branch.
 //
@@ -32,6 +33,11 @@ export function programRef(...components: readonly string[]): ProgramRefName {
 /** refs/mission-pipeline/delivered/<mission>/<op> (6.1, 6.6 step 6). */
 export function deliveryRef(mission: MissionId, op: OpId): ProgramRefName {
   return programRef('delivered', mission, op);
+}
+
+/** 4.4 (F19, #64): refs/mission-pipeline/kept/<mission>/<commit>: holds a candidate commit from when it is recorded (process/actions.ts anchorCommit). */
+export function keptRef(mission: MissionId, commit: string): ProgramRefName {
+  return programRef('kept', mission, commit);
 }
 
 /** Accepts only names this module could have produced. */

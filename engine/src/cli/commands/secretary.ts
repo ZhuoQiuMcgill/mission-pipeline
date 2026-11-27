@@ -17,14 +17,14 @@ function op(c: RunContext): string {return c.op!;}
 
 const secretary: Command = {
   group: 'pm', name: ['secretary'], summary: 'start, bind a harness handle, or retire a resident Secretary',
-  usage: 'mp pm secretary start [--replace] [--handle <id>] | handle <S-n> <handle> | stop [--gone]',
-  flags: {replace: 'boolean', handle: 'string', gone: 'boolean'},
+  usage: 'mp pm secretary start [--replace] [--handle <id>] | handle <S-n> <handle> | stop [--gone | --idle]   (--idle: no mission open, nothing in flight)',
+  flags: {replace: 'boolean', handle: 'string', gone: 'boolean', idle: 'boolean'},
   async run(c, args) {
     const p = P(c); requirePm(p.ctx.secretary);
     const sub = positional(args, 0, 'start|handle|stop');
     if (sub === 'start') {
       const g = startSecretary(p.ctx.memory, {op: op(c), name: `${p.config.projectName ?? basename(p.dir)}-Secretary`, replace: flagBool(args, 'replace'), handle: flagStr(args, 'handle')});
-      const prompt = `You are ${g.name}, the resident Secretary of Mission Pipeline. Your handbook: mp sec handbook. Run mp sec session, then loop on mp sec next / mp sec wait.`;
+      const prompt = `You are ${g.name}, the resident Secretary of Mission Pipeline. Run mp sec session first; then read your handbook (mp sec handbook) and loop on mp sec next / mp sec wait.`;
       const launch = `MP_SECRETARY=${g.generation} claude --bg -n ${shellQuote(g.name)} ${shellQuote(prompt)}`;
       return ok(`${g.generation} pending: ${g.name}. Launch it in your harness with MP_SECRETARY=${g.generation}.\n${prompt}\nClaude Code launch hint: ${launch}\nRecord the handle: mp pm secretary handle ${g.generation} <handle>`, {generation: g.generation, state: g.state, name: g.name, env: {MP_SECRETARY: g.generation}, prompt, launchHint: launch});
     }
@@ -35,7 +35,7 @@ const secretary: Command = {
       });
       return ok(`${id}: harness handle ${handle} recorded.`, {generation: id, handle});
     }
-    if (sub === 'stop') {const r = stopSecretary(p.ctx, {op: op(c), gone: flagBool(args, 'gone')}); return ok(`${r.generation} retired; the PM’s 4.2 loop is available.\n${r.stopHint}`, r);}
+    if (sub === 'stop') {const r = stopSecretary(p.ctx, {op: op(c), gone: flagBool(args, 'gone'), ...(flagBool(args, 'idle') ? {idle: true} : {})}); return ok(`${r.generation} retired; the PM’s 4.2 loop is available.\n${r.stopHint}`, r);}
     throw usage('mp pm secretary start|handle|stop');
   },
 };

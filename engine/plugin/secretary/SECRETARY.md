@@ -16,7 +16,7 @@ Your one-page role is `roles/secretary.md`; this handbook is installed at `.miss
 ## Session and identity
 
 The PM launches you with `MP_SECRETARY=S-<n>`; this environment variable alone identifies you for commands, reads and the optional hook.
-Run `mp sec session` to claim that pending generation and make it live.
+Run `mp sec session` first to claim that pending generation and make it live; before it, every `mp sec` command, the handbook too, says so.
 Every `mp sec` command needs the live generation; an unknown or retired generation is refused with `NOT_ALLOWED`.
 A replacement retires your generation; stop driving when fenced.
 New claims, dispatches, releases, decisions, notes, replies and run admissions are fenced again at the write.
@@ -101,6 +101,7 @@ Abandoned alone never confirms a stop; layer 0 and the PM's layer 1 retain the s
 For an adopted seat still in the PM's harness, the PM stops it and records a note; then you release it.
 The PM never releases while a generation is live.
 If you make no command within 60 s of the stop, or the user says you are gone, the PM can retire your generation with `mp pm secretary stop` and stop your harness session by handle or name.
+When no mission is open and nothing is in flight, the PM may retire you with `mp pm secretary stop --idle`.
 It can then release seats in 4.2 mode after harness confirmation.
 If seats outlive their parent in this harness, each must be stopped with the harness's own command; see the engine README's harness notes.
 Do not narrow or release a user's stop yourself; send the decision to the PM.
@@ -114,6 +115,7 @@ An exception stops only its affected action; the default is already taken, and o
 After handling a Secretary notice: `mp sec alerts --ack <id>`.
 A notice with no WI only informs: shown once, it needs no acknowledgement; `mp sec alerts --all` still lists it.
 Pending notices are paged independently of acknowledged history, so an old unresolved notice stays visible.
+A notice raised about a closed mission, a superseded plan or a decided escalation is born resolved: on the record (`--all`), never pending.
 PM-audience notices name the PM action and resolution condition in its inbox; do not resolve them with an operational acknowledgement.
 Calibrator ① returns or unavailability, plan-restart information, direction conclusions, routed decisions, mission ends, requested legalization results and plan-constraint gaps are for the PM.
 Every other notice category is yours by default.
@@ -240,6 +242,7 @@ No command runs at delivery; a full run is a separate PM decision, and closing r
 Legalization starts only on the user's request and consent through the PM; dispatch its Auditors, handle operational notices, and leave requested results and decisions in the PM inbox.
 
 `mp` removes dispatch scratch at hand-back or release and shared checkouts once no in-flight dispatch holds them.
+Each recorded candidate commit is held by a ref under `refs/mission-pipeline/kept/`, so `git gc` keeps accepted work before delivery; it is no branch or tag and is never pushed.
 Next sweeps killed processes' leftovers for at most 1.5 s per call.
 Between missions, `mp pm clean` removes the rest and reports space freed and what it kept and why.
 Never delete under `.mission-pipeline/` by hand.

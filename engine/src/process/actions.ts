@@ -39,6 +39,7 @@ import { memoryProofView } from '../delivery/memoryView.ts';
 import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
+import { keptRef } from '../git/refs.ts';
 import { MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
 import { appendRecords, factById, LedgerError } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
@@ -58,6 +59,22 @@ export class ActionError extends Error {
 }
 
 export const productObjectId = (task: string): string => safeId(`prod.${task}`);
+
+/**
+ * 4.4 (F19, #64): a ref under refs/mission-pipeline/ holds a candidate commit from when it is recorded, so
+ * git's garbage collection cannot delete accepted work before delivery. Never a branch or a tag, never
+ * pushed. Best effort: created only when absent, nothing while git writes are held after a move; a
+ * failure refuses nothing.
+ */
+export function anchorCommit(ctx: ProcessContext, mission: string, commit: string): boolean {
+  try {
+    if (ctx.memory.gitHold() !== null) return false;
+    const r = ctx.git.runSync(['update-ref', '-m', `mission-pipeline: keep a candidate of ${mission}`, keptRef(mission as MissionId, commit), commit, ''], { cwd: ctx.projectDir });
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
 
 interface Shared {
   repo: Promise<RepoLayout> | null;
@@ -290,6 +307,8 @@ export function gitActions(ctx: ProcessContext): GitActions {
       };
       validateRecord(rec);
       ctx.memory.write({ op: `flow:product-version:${req.mission}:${object}`, payload: { object, commit: req.candidate } }, (tx) => appendRecords(tx, [rec]));
+      // 4.4 (F19, #64): a hand-back recorded before 4.4 has no anchor yet
+      anchorCommit(ctx, req.mission, req.candidate);
       return pv;
     },
 

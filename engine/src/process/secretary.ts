@@ -25,15 +25,24 @@ export function unconfirmedSeats(db: Db): {dispatch: string; mission: string; se
   });
 }
 
-export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolean}): {generation: string; stopHint: string} {
+export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolean; idle?: boolean}): {generation: string; stopHint: string} {
   return ctx.memory.write({op: `secretary:stop:${o.op}`, payload: o, stop: true, command: 'secretary stop'}, (tx) => {
     const g = generations(tx).filter((g) => g.state !== 'retired').at(-1);
     if (g === undefined) notAllowed('there is no pending or live Secretary to stop');
-    const stops = activeStops(tx);
-    const lastStop = stops.at(-1);
-    if (g.state === 'live' && o.gone !== true && (lastStop === undefined || ctx.now() < Math.max(Number(lastStop.committedAt), g.lastCommandAt ?? g.createdAt) + 60_000)) notAllowed('the Secretary has not exceeded the stop’s 60 s grace; --gone records that the user says the session is gone');
+    // 4.4 (F19): --idle retires a generation with no stop when no mission is open and no seat may still run
+    const idle = g.state === 'live' && o.idle === true && o.gone !== true;
+    if (idle) {
+      const open = (tx.stmt("SELECT mission FROM missions WHERE state = 'open' ORDER BY mission").all() as {mission: string}[]).map((r) => r.mission);
+      const flying = (tx.stmt("SELECT dispatch FROM dispatches WHERE state = 'in-flight' OR (state = 'released' AND released = 'abandoned') ORDER BY claimed_rev").all() as {dispatch: string}[]).map((r) => r.dispatch);
+      if (open.length > 0 || flying.length > 0) notAllowed(`--idle retires the Secretary only when no mission is open and nothing is in flight (open: ${open.join(', ') || 'none'}; in flight or not confirmed ended: ${flying.join(', ') || 'none'}); otherwise stop the work first and use the stop's grace or --gone`);
+    } else {
+      const stops = activeStops(tx);
+      const lastStop = stops.at(-1);
+      if (g.state === 'live' && o.gone !== true && (lastStop === undefined || ctx.now() < Math.max(Number(lastStop.committedAt), g.lastCommandAt ?? g.createdAt) + 60_000)) notAllowed('the Secretary has not exceeded the stop’s 60 s grace; --gone records that the user says the session is gone; --idle retires it when no mission is open and nothing is in flight');
+    }
     writeGeneration(tx, {...g, state: 'retired'});
-    return {generation: g.generation, stopHint: g.handle === null ? `Stop ${g.name} in your harness by name, confirm its seats ended, then mp pm release <D> --ended.` : `Stop the session with handle ${g.handle} in your harness (Claude Code hint: claude stop ${shellQuote(g.handle)}). Confirm its seats ended, then mp pm release <D> --ended.`};
+    const harness = g.handle === null ? `Stop ${g.name} in your harness by name` : `Stop the session with handle ${g.handle} in your harness (Claude Code hint: claude stop ${shellQuote(g.handle)})`;
+    return {generation: g.generation, stopHint: idle ? `${harness}; nothing was in flight.` : `${harness}${g.handle === null ? ', confirm its seats ended, then mp pm release <D> --ended.' : '. Confirm its seats ended, then mp pm release <D> --ended.'}`};
   });
 }
 
