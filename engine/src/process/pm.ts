@@ -207,6 +207,8 @@ export interface HeldStep {
   readonly purpose: string;
   readonly why: string;
   readonly wi: string | null;
+  /** 4.4 (F8): a production step of a closed mission (`mp sec next` counts these). */
+  readonly closedMission?: true;
 }
 
 export interface InFlight {
@@ -272,7 +274,7 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
       const entry = seatCardEntry(kind);
       const base = { step: q.task, seat: entry.seat, kind, mission: q.mission, purpose: purposeOf(spec.card) };
       if (heldByClose(db, spec)) {
-        held.push({ ...base, why: `mission ${q.mission} is closed (§6.7): its production steps wait until it is opened again (mp pm mission ${q.mission})`, wi: null });
+        held.push({ ...base, why: `mission ${q.mission} is closed (§6.7): its production steps wait until it is opened again (mp pm mission ${q.mission})`, wi: null, closedMission: true });
         continue;
       }
       if (stoppedFor(db, { mission: q.mission, capabilities: spec.capabilities })) {

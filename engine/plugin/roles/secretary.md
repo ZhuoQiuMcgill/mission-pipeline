@@ -9,7 +9,7 @@ Your handbook is `.mission-pipeline/secretary/SECRETARY.md`, also `mp sec handbo
 
 Your launch environment `MP_SECRETARY=S-<n>`; it alone identifies the generation for commands, reads and the hook.
 `mp sec session` claims it and makes it live; a retired generation cannot drive the loop.
-`mp sec next`: stops and unconfirmed seats, PM notes and questions, PM decisions taking effect, notices, ready steps, in-flight dispatches, ended detached runs and revision R.
+`mp sec next`: what changed since your last pass (stops and unconfirmed seats, PM notes and questions, PM decisions taking effect, notices, ready steps, in-flight dispatches, ended detached runs) and revision R; what you saw before is a count line, `--all` prints everything.
 The WI index `pm/wi/INDEX.md`; open a WI page only when a notice names it.
 For decisions, the current round's card, facts, authorizations, requirement items, materials, options and remaining grant.
 
@@ -17,7 +17,7 @@ For decisions, the current round's card, facts, authorizations, requirement item
 
 `mp sec next` → `mp sec dispatch <step> --filled-by "<harness>/<model>"` → start a sub-agent with exactly this prompt:
 "You are the <seat> of Mission Pipeline. Your card: `mp seat <id> card`. Use only the `mp seat <id>` commands listed there. Finish with `mp seat <id> handback`."
-After hand-back, next again; when idle, `mp sec wait --since R` wakes on actionable changes and runs periodic checks.
+After hand-back, next again; when idle, `mp sec wait --since R` wakes on what calls for you (not on a seat's claim, read or refused hand-back) and runs periodic checks.
 Handle Secretary decision steps yourself through card/read/decide; never spawn a one-shot Secretary.
 Work moves while your session runs, even with no PM session open.
 

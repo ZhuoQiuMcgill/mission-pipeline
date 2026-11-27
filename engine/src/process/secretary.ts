@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MissionId, ContentHash } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
-import { activeStops, appendRecords, dispatchInfo, wordsEntry, flowEvents, listDispatches, type Db } from '../memory/index.ts';
+import { activeStops, appendRecords, cursor, dispatchInfo, wordsEntry, flowEvents, listDispatches, setCursor, type Db } from '../memory/index.ts';
 import { generations, liveSecretary, notAllowed, requireSecretary, requirePm, touchSecretary, writeGeneration } from '../memory/resident.ts';
 import { residentRecords, wordsAuthority } from '../memory/words.ts';
 import { stopCovers } from '../memory/stopTypes.ts';
@@ -10,7 +10,7 @@ import type { ProcessContext } from './context.ts';
 import { advance } from './advance.ts';
 import { pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
 import { dispatchView, seatCard, seatHandback } from './seat.ts';
-import { listNotices, markNotices } from './notices.ts';
+import { listNotices, markNotices, onlyInforms } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
 import type { DecisionBody, EscalationBody } from '../flow/secretary.ts';
 import { secretaryRoundInputs } from '../seat/cards/dynamic.ts';
@@ -196,30 +196,104 @@ import { markNotice } from '../memory/domain/pm.ts';
 import type { WriteTx } from '../memory/memory.ts';
 function markNoticesInTx(tx: WriteTx, id: string): void {markNotice(tx, {notice: id, state: 'acknowledged'});}
 
-export interface SecretaryNext extends NextReport {stops: ReturnType<typeof activeStops>; revision: number; unconfirmed: ReturnType<typeof unconfirmedSeats>; notes: ReturnType<typeof channel>['notes']; questions: ReturnType<typeof channel>['questions']; replies: ReturnType<typeof channel>['replies']; decisions: unknown[]}
-export async function secNext(ctx: ProcessContext): Promise<SecretaryNext> {
-  requireSecretary(ctx.memory, ctx.secretary);
-  touchSecretary(ctx.memory, ctx.secretary);
-  const r = await pmNext(ctx);
-  const decisions = allFlow(ctx).filter((e) => e.line === 'secretary' && e.event === 'applied' && (e.body.by === 'pm' || e.body.by === 'user'));
-  return {...r, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => pmInbox(ctx).some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...channel(ctx), decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: Number(ctx.memory.head())};
+/** 4.4 (F8): what a pass reduced to count lines, because the caller saw it before (`mp sec next --all` prints it). */
+export interface EarlierCounts {readonly notices: number; readonly replies: number; readonly decisions: number; readonly closedMissionSteps: number}
+export interface SecretaryNext extends NextReport {stops: ReturnType<typeof activeStops>; revision: number; unconfirmed: ReturnType<typeof unconfirmedSeats>; notes: ReturnType<typeof channel>['notes']; questions: ReturnType<typeof channel>['questions']; replies: ReturnType<typeof channel>['replies']; decisions: unknown[]; since: number | null; all: boolean; earlier: EarlierCounts}
+
+/** 4.4 (F8): the cursor of one Secretary generation: the revision its last pass that a caller saw was built from. */
+export function secCursorName(generation: string): string {return `sec-next.${generation.toLowerCase()}`;}
+
+/** The revision of each PM reply (residentRecords carries none). */
+function replyRevisions(db: Db): Map<string, number> {
+  return new Map((db.stmt("SELECT rev, record FROM log WHERE kind = 'pm.reply' ORDER BY rev").all() as {rev: number; record: string}[]).map((r) => [String((JSON.parse(r.record) as {id: string}).id), Number(r.rev)]));
 }
 
-/** Business revisions exclude our own action receipts, delivery marks and generation heartbeat. */
-export function actionableRevision(db: Db): number {
-  return Number((db.stmt("SELECT COALESCE(MAX(rev), 0) AS rev FROM log WHERE kind NOT IN ('pm.action','op.receipt','secretary.generation','cursor.set','leaf.recorded','notice.delivery')").get() as {rev: number}).rev);
+/**
+ * `mp sec next`: reconcile, then what changed since the caller's last pass (4.4, F8). Notices delivered
+ * before, PM replies and applied decisions at or before the cursor, and the steps of closed missions are
+ * counted, not printed; a delivered notice that only informs is not pending. The first pass of a
+ * generation, `all` and nothing else print everything. Only this pass, whose report reaches its caller,
+ * marks notices delivered and moves the cursor; `since` replaces the cursor for one pass.
+ */
+export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; readonly since?: number | null} = {}): Promise<SecretaryNext> {
+  const g = requireSecretary(ctx.memory, ctx.secretary);
+  touchSecretary(ctx.memory, ctx.secretary);
+  const r = await pmNext(ctx, {markDelivered: false});
+  // the revision the report is built from: what lands later is the next pass's
+  const built = Number(ctx.memory.head());
+  const since = o.since ?? cursor(ctx.memory, secCursorName(g.generation))?.rev ?? null;
+  const full = o.all === true || since === null;
+  const deliveredAfter = (id: string): boolean => o.since != null && Number((ctx.memory.stmt("SELECT rev FROM notice_deliveries WHERE notice = ? AND state = 'delivered'").get(id) as {rev: number} | undefined)?.rev ?? 0) > o.since;
+  const notices = full ? r.notices : r.notices.filter((n) => n.state === 'undelivered' || deliveredAfter(n.id));
+  const ch = channel(ctx);
+  const revs = replyRevisions(ctx.memory);
+  const fresh = (rev: number): boolean => rev <= built && (full || rev > since!);
+  const replies = ch.replies.filter((x) => fresh(revs.get(x.id) ?? 0));
+  const applied = allFlow(ctx).filter((e) => e.line === 'secretary' && e.event === 'applied' && (e.body.by === 'pm' || e.body.by === 'user'));
+  const decisions = applied.filter((e) => fresh(e.revision));
+  const held = full ? r.held : r.held.filter((h) => h.closedMission !== true);
+  const earlier: EarlierCounts = full ? {notices: 0, replies: 0, decisions: 0, closedMissionSteps: 0} : {
+    notices: r.notices.filter((n) => !notices.includes(n) && !onlyInforms(n)).length,
+    replies: ch.replies.filter((x) => (revs.get(x.id) ?? 0) <= since!).length,
+    decisions: applied.filter((e) => e.revision <= since!).length,
+    closedMissionSteps: r.held.length - held.length,
+  };
+  const inbox = pmInbox(ctx);
+  const out: SecretaryNext = {...r, notices, held, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => inbox.some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...ch, replies, decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: built, since, all: o.all === true, earlier};
+  markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
+  ctx.memory.write({}, (tx) => setCursor(tx, {cursor: secCursorName(g.generation), rev: built}));
+  return out;
+}
+
+/** 4.4 (F8): the pass inside `mp sec wait`: it reconciles; its report reaches nobody, so it marks nothing delivered and leaves the cursor. */
+async function secReconcile(ctx: ProcessContext): Promise<void> {
+  requireSecretary(ctx.memory, ctx.secretary);
+  touchSecretary(ctx.memory, ctx.secretary);
+  await pmNext(ctx, {markDelivered: false});
+}
+
+/**
+ * 4.4 (F8): what calls for the Secretary, the one list `mp sec wait` wakes on: a hand-back, a release,
+ * new work queued, a mission opened, git writes allowed again, a decision, an answer or its application,
+ * a note, a question or a reply of the PM, a change of constraint or stop, a notice that calls for an
+ * action, a detached run that ended (its seat may be gone), and an unconfirmed seat (checked apart).
+ * Not on it: a seat's own claim, read, checkout or refused hand-back, and the other writes of a pass.
+ * The holds of 4.4 (G6) add their record kinds (a change of hold) and a check by time (a hold's time) here.
+ */
+export const SECRETARY_WAKE: {
+  readonly kinds: readonly string[];
+  readonly flow: ReadonlyArray<{readonly line: string; readonly prefix?: true; readonly events: readonly string[]}>;
+  readonly checks: ReadonlyArray<(db: Db, now: number) => boolean>;
+} = {
+  kinds: ['dispatch.handback', 'dispatch.released', 'task.queued', 'mission.state', 'memory.git-confirmed', 'pm.note', 'pm.question', 'pm.reply', 'stop.committed', 'stop.released'],
+  flow: [
+    {line: 'secretary', events: ['decision', 'pm-answer', 'user-answer', 'applied']},
+    {line: 'requirements', events: ['constraint', 'constraint-scope', 'constraint-withdrawn']},
+    {line: 'dispatch:', prefix: true, events: ['detached-end']},
+  ],
+  checks: [],
+};
+
+/** Whether something on SECRETARY_WAKE was recorded after `since` (a notice calls for an action unless it says it only informs). */
+export function secretaryWakes(db: Db, since: number, now = Date.now()): boolean {
+  const flow = SECRETARY_WAKE.flow.map((f) => `(json_extract(record, '$.line') ${f.prefix === true ? 'LIKE ?' : '= ?'} AND json_extract(record, '$.event') IN (${f.events.map(() => '?').join(', ')}))`).join(' OR ');
+  const args = [since, ...SECRETARY_WAKE.kinds, ...SECRETARY_WAKE.flow.flatMap((f) => [f.prefix === true ? `${f.line}%` : f.line, ...f.events])];
+  const hit = db.stmt(`SELECT 1 FROM log WHERE rev > ? AND (kind IN (${SECRETARY_WAKE.kinds.map(() => '?').join(', ')}) OR (kind = 'alert' AND json_extract(record, '$.informational') IS NULL) OR (kind = 'flow.event' AND (${flow}))) LIMIT 1`).get(...args);
+  return hit !== undefined || SECRETARY_WAKE.checks.some((c) => c(db, now));
 }
 
 export async function secWait(ctx: ProcessContext, o: {since: number; timeout?: number; pollMs?: number; periodicMs?: number}): Promise<{revision: number; timedOut: boolean; unconfirmed: ReturnType<typeof unconfirmedSeats>; replies: ReturnType<typeof channel>['replies']}> {
   requireSecretary(ctx.memory, ctx.secretary);
   const deadline = Date.now() + (o.timeout ?? 300) * 1000;
   let nextCheck = 0;
+  // 4.4 (F8): the PM replies recorded after --since, not every reply again
+  const replies = () => {const revs = replyRevisions(ctx.memory); return channel(ctx).replies.filter((x) => (revs.get(x.id) ?? 0) > o.since);};
   while (true) {
     requireSecretary(ctx.memory, ctx.secretary);
-    if (Date.now() >= nextCheck) {await secNext(ctx); nextCheck = Date.now() + (o.periodicMs ?? 30_000);}
+    if (Date.now() >= nextCheck) {await secReconcile(ctx); nextCheck = Date.now() + (o.periodicMs ?? 30_000);}
     const unconfirmed = unconfirmedSeats(ctx.memory);
-    if (unconfirmed.length > 0 || actionableRevision(ctx.memory) > o.since) return {revision: Number(ctx.memory.head()), timedOut: false, unconfirmed, replies: channel(ctx).replies};
-    if (Date.now() >= deadline) return {revision: Number(ctx.memory.head()), timedOut: true, unconfirmed, replies: channel(ctx).replies};
+    if (unconfirmed.length > 0 || secretaryWakes(ctx.memory, o.since)) return {revision: Number(ctx.memory.head()), timedOut: false, unconfirmed, replies: replies()};
+    if (Date.now() >= deadline) return {revision: Number(ctx.memory.head()), timedOut: true, unconfirmed, replies: replies()};
     await new Promise((resolve) => setTimeout(resolve, Math.min(o.pollMs ?? 100, Math.max(1, deadline - Date.now()))));
   }
 }

@@ -27,7 +27,8 @@ Your reads use your own cursor (`asked.sec`), separate from the PM's.
 
 ## The dispatch loop
 
-1. Run `mp sec next`: stops and unconfirmed seats first, then PM notes and questions, PM decisions taking effect, notices, ready steps, in-flight dispatches, ended detached runs, and `rev R`.
+1. Run `mp sec next`: what changed since your last pass: stops and unconfirmed seats first, then PM notes and questions, PM decisions taking effect, notices, ready steps, in-flight dispatches, ended detached runs, and `rev R`.
+   What you saw before is one count line each; `--all` prints everything, `--since <R>` everything after R.
 2. Handle stops first; answer PM questions, acknowledge handled notes, apply decisions and handle notices before their affected work.
 3. `mp sec dispatch <step> --filled-by "<harness>/<model>"` claims once and prints the dispatch id and card.
 4. Start a sub-agent with exactly this prompt and nothing else: "You are the <seat> of Mission Pipeline. Your card: `mp seat <id> card`. Use only the `mp seat <id>` commands listed there. Finish with `mp seat <id> handback`."
@@ -35,9 +36,9 @@ Your reads use your own cursor (`asked.sec`), separate from the PM's.
 6. With no immediate action, `mp sec wait --since R [--timeout <s>]`, then next again using the revision read.
 
 For a Secretary decision step, use your own card/read/decide lifecycle below; never spawn a one-shot Secretary.
-Wait returns at once on an actionable change after R; otherwise it waits up to 300 s by default.
-A hand-back, ready step, notice, note, question, PM decision or stop wakes it.
-Every 30 s while waiting, it checks detached workers, label batches and landing recovery too.
+Wait returns at once on a change after R that calls for you; otherwise it waits up to 300 s by default.
+A hand-back, release, queued step, PM decision or answer, note, question, reply, constraint change, stop, notice that names a WI, ended detached run or unconfirmed seat wakes it; a seat's claim, read or refused hand-back does not.
+Every 30 s while waiting, it checks detached workers, label batches and landing recovery too; these checks mark no notice delivered and move no cursor.
 Work moves while your Secretary session runs; closing the PM conversation does not end your work.
 
 Every command prints its operation id; `--op <id>` returns a completed result on retry.
@@ -89,7 +90,7 @@ The PM answers `mp pm reply <id> "<text>" [--words W-n]`; `mp sec next` and `mp 
 For example, WI-19's transform alert needs `mp sec ask-pm "Was the transform change intentional?" --about <notice id>`.
 Do not turn a question into an instruction or send routine progress messages.
 A harness wake-up never substitutes for a note, question, answer or decision in memory.
-PM commands in resident mode record and wake you without reconciling; next and wait do the operational work.
+PM commands in resident mode record without reconciling; next and wait do the operational work, and wait wakes on what calls for you.
 
 ## Stops and confirmations
 
@@ -111,6 +112,7 @@ Read only the index `pm/wi/INDEX.md` at start; open a WI page only when a notice
 The ids and paths stay under `pm/wi/` for compatibility; you are their operator.
 An exception stops only its affected action; the default is already taken, and other work goes on.
 After handling a Secretary notice: `mp sec alerts --ack <id>`.
+A notice with no WI only informs: shown once, it needs no acknowledgement; `mp sec alerts --all` still lists it.
 Pending notices are paged independently of acknowledged history, so an old unresolved notice stays visible.
 PM-audience notices name the PM action and resolution condition in its inbox; do not resolve them with an operational acknowledgement.
 Calibrator ① returns or unavailability, plan-restart information, direction conclusions, routed decisions, mission ends, requested legalization results and plan-constraint gaps are for the PM.

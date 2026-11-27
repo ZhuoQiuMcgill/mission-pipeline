@@ -49,16 +49,21 @@ const handbook: Command = {
   async run(c) {const p = P(c); const local = join(p.dir, '.mission-pipeline', 'secretary', 'SECRETARY.md'); const path = existsSync(local) ? local : join(INSTALLED_PLUGIN, 'secretary', 'SECRETARY.md'); const text = readFileSync(path, 'utf8'); return ok(text, {path, text});},
 };
 const next: Command = {
-  group: 'sec', name: ['next'], summary: 'reconcile; stops, PM exchanges, notices, ready work and dispatches', usage: 'mp sec next', flags: {}, decides: true,
-  async run(c) {const p = P(c); const r = await secNext(p.ctx); const lines = [
+  group: 'sec', name: ['next'], summary: 'reconcile; what changed since your last pass: stops, PM exchanges, notices, ready work and dispatches (--all: everything)', usage: 'mp sec next [--all] [--since <R>]', flags: {all: 'boolean', since: 'string'}, decides: true,
+  async run(c, a) {const p = P(c); const s = flagStr(a, 'since'); const since = s === null ? null : Number(s); if (since !== null && (!Number.isSafeInteger(since) || since < 0)) throw usage('--since is a nonnegative revision');
+    const r = await secNext(p.ctx, {all: flagBool(a, 'all'), since}); const e = r.earlier;
+    // 4.4 (F8): what the caller saw before is one count line each
+    const earlier = [e.notices > 0 ? `${e.notices} earlier notice(s) still open (mp sec alerts)` : '', e.replies > 0 ? `${e.replies} earlier PM repl${e.replies === 1 ? 'y' : 'ies'}` : '', e.decisions > 0 ? `${e.decisions} earlier PM or user decision(s) in effect` : '', e.closedMissionSteps > 0 ? `${e.closedMissionSteps} queued step(s) of closed missions held` : ''].filter((x) => x !== '');
+    const lines = [
     `Stops: ${r.stops.map((s) => `${s.stop} (${JSON.stringify(s.scope)})`).join(', ') || 'none'}`,
     `Unconfirmed seats: ${r.unconfirmed.map((d) => `${d.dispatch} (${d.mission}; ${d.stops.join(', ')})`).join(', ') || 'none'}`,
     ...r.notes.map((n) => `[${n.id}] PM note: ${n.text}; mp sec ack-note ${n.id}`), ...r.questions.map((q) => `[${q.id}] PM question: ${q.text}; mp sec reply ${q.id} "<answer>"`),
     ...r.replies.map((r) => `[${r.id}] PM reply to ${JSON.stringify(r.question)}${r.about ? ` (about ${r.about})` : ''}: ${r.text}${r.words ? ` (${r.words})` : ''}`),
-    ...r.decisions.map((e: any) => `[${e.mission}/${e.key}] ${e.body.by} decision in effect: ${e.body.what?.option ?? ''}`), renderNext(p, r, p.config.fillers).replaceAll('mp pm ', 'mp sec '), `rev ${r.revision}`]; return ok(lines.join('\n'), r);},
+    ...r.decisions.map((e: any) => `[${e.mission}/${e.key}] ${e.body.by} decision in effect: ${e.body.what?.option ?? ''}`), renderNext(p, r, p.config.fillers).replaceAll('mp pm ', 'mp sec '),
+    ...(earlier.length > 0 ? [`Seen before (${r.since === null ? '' : `up to rev ${r.since}; `}mp sec next --all prints them): ${earlier.join('; ')}`] : []), `rev ${r.revision}`]; return ok(lines.join('\n'), r);},
 };
 const wait: Command = {
-  group: 'sec', name: ['wait'], summary: 'wait for an actionable revision, checking liveness every 30 s', usage: 'mp sec wait --since <R> [--timeout <seconds>]', flags: {since: 'string', timeout: 'string'},
+  group: 'sec', name: ['wait'], summary: 'wait for a change after R that calls for the Secretary (not a seat’s claim, read or refused hand-back), reconciling every 30 s', usage: 'mp sec wait --since <R> [--timeout <seconds>]', flags: {since: 'string', timeout: 'string'},
   async run(c, a) {const since = Number(flagStr(a, 'since') ?? 'NaN'), timeout = Number(flagStr(a, 'timeout') ?? '300'); if (!Number.isSafeInteger(since) || since < 0 || !Number.isFinite(timeout) || timeout < 0) throw usage('--since is a nonnegative revision; --timeout is nonnegative seconds'); const r = await secWait(P(c).ctx, {since, timeout}); return ok([`rev ${r.revision}${r.timedOut ? ' (timeout)' : ''}${r.unconfirmed.length ? `; unconfirmed seats: ${r.unconfirmed.map((d) => d.dispatch).join(', ')}` : ''}`, ...r.replies.map((r) => `[${r.id}] PM reply: ${r.text}${r.words ? ` (${r.words})` : ''}`)].join('\n'), r);},
 };
 const card: Command = {

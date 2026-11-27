@@ -1251,7 +1251,8 @@ const alerts: Command = {
       const r = pmAck(p.ctx, ids);
       return ok(`${r.acknowledged} notice(s) acknowledged.`, { acknowledged: r.acknowledged, ids });
     }
-    const xs = p.ctx.memory.read((db) => listNotices(db, p.ctx.memory.data, { includeAcknowledged: flagBool(args, 'all'), ...(p.ctx.secretary !== null ? {audience: 'secretary' as const} : {}) }));
+    // 4.4 (F8): for the Secretary a delivered notice that only informs is done; --all lists it
+    const xs = p.ctx.memory.read((db) => listNotices(db, p.ctx.memory.data, { includeAcknowledged: flagBool(args, 'all'), ...(p.ctx.secretary !== null ? {audience: 'secretary' as const, informOnce: !flagBool(args, 'all')} : {}) }));
     return ok(xs.length === 0 ? 'No notices.' : xs.map((n) => `[${n.state}] ${n.id}: ${clip(n.trigger, 200)}${n.wi !== null ? ` [${wiText(n.wi, p.dir)}]` : ''}`).join('\n'), { notices: xs });
   },
 };
