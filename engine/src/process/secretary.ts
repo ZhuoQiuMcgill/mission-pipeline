@@ -12,7 +12,7 @@ import { generations, liveSecretary, notAllowed, requireSecretary, requirePm, to
 import { residentRecords, wordsAuthority } from '../memory/words.ts';
 import { stopCovers } from '../memory/stopTypes.ts';
 import type { ProcessContext } from './context.ts';
-import { pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
+import { cardSizeReport, pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
 import { dispatchView, seatCard, seatHandback } from './seat.ts';
 import { listNotices, markNotices } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
@@ -293,7 +293,7 @@ export function secCard(ctx: ProcessContext, id: string): Dispatched {
     const claimed = allFlow(ctx).find((e) => e.line === `dispatch:${existing.dispatch}` && e.event === 'claimed' && e.key === 'spec');
     if (claimed?.body.generation !== g.generation) notAllowed(`${existing.dispatch} belongs to an earlier generation; release it --ended before claiming the current round`);
     const v = seatCard(ctx, existing.dispatch);
-    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: existing.cardLeaf ?? '', worktree: null, files: handBackFiles(existing.dispatch), prompt: ''};
+    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: existing.cardLeaf ?? '', worktree: null, files: handBackFiles(existing.dispatch), prompt: '', size: cardSizeReport(ctx, dispatchView(ctx, existing.dispatch).card)};
   }
   return pmDispatch(ctx, task, {filledBy: g.filler});
 }

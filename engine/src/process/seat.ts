@@ -154,7 +154,7 @@ export function seatRead(ctx: ProcessContext, dispatch: string, material: string
       appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'read', key, body: tx.data.put(canonicalJson({ material, page })) as ContentHash }]);
     });
   }
-  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read)' : ''}\n${materialPage(r.text, page)}` };
+  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read; this fetch is recorded)' : ''}\n${materialPage(r.text, page)}` };
 }
 
 /**
@@ -678,7 +678,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const snapFiles = snap !== null && COMMIT.test(snap) ? (ctx.snapshotFiles !== null ? ctx.snapshotFiles(snap) : commitFiles(ctx, snap)) : null;
     dataChecks = await handBackDataChecks(v, input.fields);
     const problems = [
-      ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not read (mp seat ${dispatch} read <material> --page <n>)`),
+      // 4.4 (F16): the receipt records a fetch; mp cannot see reading, and says so
+      ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not fetched (mp seat ${dispatch} read <material> --page <n>)`),
       ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}), ...(dataChecks !== undefined ? { data: dataChecks } : {}) }),
       ...integrationPassProblems(ctx, v, input.fields),
       ...attemptCommandProblems(ctx, v, input.fields),

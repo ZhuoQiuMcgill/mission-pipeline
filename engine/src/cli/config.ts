@@ -31,6 +31,8 @@
 //   commit                  { author?, committer? } as "Name <email>": the identity of the commits
 //                           `mp` writes (4.1.2); default Mission Pipeline <mp@localhost>; the
 //                           committer defaults to the author
+//   mustReadWarnPages       (4.4) a dispatch whose must-read material has more pages warns whoever
+//                           dispatches it; default 6; it refuses nothing
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -85,6 +87,8 @@ export const ConfigSchema = z
     // missions whose tasks start on their dependencies' verified hand-backs, while those are still in review (a project
     // setting: it removes no check; the dependent's acceptance waits for the dependency's; never an integration task)
     startOnHandback: z.array(z.string().min(1).max(200)).max(200).optional(),
+    // 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (the Secretary while one is live); default 6
+    mustReadWarnPages: z.number().int().min(1).max(10_000).optional(),
   })
   .strict();
 

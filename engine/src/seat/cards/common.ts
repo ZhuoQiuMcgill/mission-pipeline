@@ -182,7 +182,8 @@ export function renderCommon(c: { duties: string; constraints: readonly { id: st
 
 export function renderMaterials(materials: readonly MaterialRef[]): string {
   return list(
-    'Materials (read each page with the read command below; read every page of the "must read" ones)',
+    // 4.4 (F16): mp records that a page was fetched; it cannot see reading
+    'Materials (fetch each page with the read command below and read it; the hand-back waits until every page of the "must read" ones was fetched)',
     materials.map((m) => `[${m.id}] ${m.title}: ${m.pages} page${m.pages === 1 ? '' : 's'}${m.mustRead ? ' (must read)' : ''}`),
   );
 }

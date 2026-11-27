@@ -231,11 +231,14 @@ const dispatch: Command = {
       `Card: .mission-pipeline/${d.cardLeaf} (the seat reads it with mp seat ${d.dispatch} card)`,
       ...(d.worktree !== null ? [`Worktree: ${d.worktree}`] : []),
       `Hand-back files: ${d.files.report}, ${d.files.result}`,
+      // 4.4 (F16): the size of what the seat must fetch, to whoever dispatches (nothing waits on it)
+      ...(d.size.mustReadPages > 0 ? [`Must-read: ${d.size.mustReadPages} page${d.size.mustReadPages === 1 ? '' : 's'}`] : []),
+      ...d.size.warnings.map((w) => `Warning: ${w}`),
       '',
       'Start a sub-agent in your harness with exactly this prompt:',
       d.prompt,
     ];
-    return ok(lines.join('\n'), { dispatch: d.dispatch, step: d.step, seat: d.seat, kind: d.kind, mission: d.mission, card: d.cardLeaf, worktree: d.worktree, files: d.files, prompt: d.prompt });
+    return ok(lines.join('\n'), { dispatch: d.dispatch, step: d.step, seat: d.seat, kind: d.kind, mission: d.mission, card: d.cardLeaf, worktree: d.worktree, files: d.files, prompt: d.prompt, size: d.size });
   },
 };
 

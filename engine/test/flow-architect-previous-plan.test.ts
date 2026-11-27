@@ -94,7 +94,7 @@ describe('flow: the Architect revision card gives the previous detailed plan in 
     assert.deepEqual(card.revision?.instructions, ['The PM plan changed to version pmplan.m1.2; revise the previous detailed plan to it. Elements against pmplan.m1.1: changed e1; every other element is unchanged.']);
     // the must-read list is enforced: a hand-back before reading the plan is refused
     const refused = await ports.scheduler.run('arch.m1.2.1', { handBack: architect(detailedPlan(M)), materialsRead: new Set() });
-    assert.ok(refused.some((p) => p.startsWith('must-read page plan-old#1 was not read')), refused.join('; '));
+    assert.ok(refused.some((p) => p.startsWith('must-read page plan-old#1 was not fetched')), refused.join('; '));
     // a card queued before the material existed shows the plan inline, in full
     const { materials: _m, ...old } = card;
     const inline = renderArchitectDecompose(old as ArchitectDecomposeCard);

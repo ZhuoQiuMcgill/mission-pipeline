@@ -104,7 +104,8 @@ export function renderSecretary(c: SecretaryCard): string {
     (r.changed !== '' ? `## Changed\n${r.changed}\n\n` : '') +
     list("The escalating party's reasons", r.reasons) +
     list('Authorizations (verbatim)', c.authorizations.map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition !== null ? ` (tell the user when: ${a.notifyCondition})` : ''}`)) +
-    list('Requirement items involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
+    // 4.4 (F16): each decision once on the card, here with its id (not again as a verbatim quote)
+    list('Requirement items and decisions involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
     renderMaterials(c.materials) +
     list(`Earlier decisions on ${r.subject} (decide this one knowing them)`, (c.earlierDecisions ?? []).map((d) => `${d.escalation} (${d.source}): ${d.option} by ${d.by}${d.reason !== '' ? `: ${d.reason}` : ''} (${d.applied})`)) +
     // 4.4 (G2): the notice is what the PM decides from; nothing checks its form
@@ -115,7 +116,7 @@ export function renderSecretary(c: SecretaryCard): string {
 }
 
 export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: ReadonlySet<string> | undefined): string[] {
-  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not read`);
+  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not fetched`);
   if (c.classifications !== undefined && r.classification === 'important-within-authority') out.push('classification: new decisions use detail or needs-pm; PM-class questions go to the PM');
   if (c.classifications !== undefined && (c.request.source === 'plan-structure-change' || c.request.source === 'plan-restarts-work') && !isAskOption(r.option)) out.push('plan structure is the PM’s decision');
   if (!c.options.some((o) => sameDecisionOption(o.id, r.option))) out.push(`option: "${r.option}" is not an option on the card (${c.options.map((o) => o.id).join(', ')})`);

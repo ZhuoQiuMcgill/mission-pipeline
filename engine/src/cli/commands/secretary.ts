@@ -63,10 +63,10 @@ const wait: Command = {
 };
 const card: Command = {
   group: 'sec', name: ['card'], summary: 'claim the current decision round and read its card', usage: 'mp sec card <escalation>', flags: {},
-  async run(c, a) {const r = secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok(r.card, r);},
+  async run(c, a) {const r = secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok([r.card, ...r.size.warnings.map((w) => `\nWarning: this card's ${w.replace(/^its /, '')}`)].join('\n'), r);},
 };
 const read: Command = {
-  group: 'sec', name: ['read'], summary: 'record a material read against this round’s decision dispatch', usage: 'mp sec read <escalation> <material> [--page n]', flags: {page: 'string'},
+  group: 'sec', name: ['read'], summary: 'fetch one page of a material; the fetch is recorded against this round’s decision dispatch', usage: 'mp sec read <escalation> <material> [--page n]', flags: {page: 'string'},
   async run(c, a) {const p = P(c); const page = Number(flagStr(a, 'page') ?? '1'); if (!Number.isSafeInteger(page) || page < 1) throw usage('--page is a positive integer'); const r = seatRead(p.ctx, secDecisionDispatch(p.ctx, positional(a, 0, 'escalation')), positional(a, 1, 'material'), page); return ok(r.text, r);},
 };
 const decide: Command = {

@@ -64,7 +64,7 @@ const card: Command = {
 const read: Command = {
   group: 'seat',
   name: ['read'],
-  summary: 'one page of a material on your card (hash-checked; a missing or edited material is reported, never served)',
+  summary: 'fetch one page of a material on your card (hash-checked; the fetch is recorded; a missing or edited material is reported, never served)',
   usage: 'mp seat <dispatch> read <material> [--page <n>]',
   flags: { page: 'string' },
   async run(c, args) {

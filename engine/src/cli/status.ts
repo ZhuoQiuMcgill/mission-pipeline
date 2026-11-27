@@ -311,7 +311,8 @@ export async function showItem(p: Project, kind: string, id: string, o: { readon
       const info = db.stmt('SELECT mission FROM dispatches WHERE dispatch = ?').get(d) as { mission: string } | undefined;
       return info === undefined ? [] : flowEvents(db, { mission: info.mission as MissionId, line: `dispatch:${d}`, event: 'read', limit: 10_000 }).map((e) => e.key);
     });
-    if (reads.length > 0) extra.push(`  material pages read: ${reads.join(', ')}`);
+    // 4.4 (F16): a receipt shows a page was fetched, not that it was read
+    if (reads.length > 0) extra.push(`  material pages fetched: ${reads.join(', ')}`);
     extraJson['reads'] = reads;
     // 4.1.3: the data outside the commit its hand-back cites, as checked at hand-back (--check-data: again, read-only)
     const dd = await dispatchDataLines(p, d, o);

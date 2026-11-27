@@ -84,6 +84,8 @@ export interface ProcessOptions {
   readonly planReviewsWaived?: readonly string[];
   /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). Default: none. */
   readonly startOnHandback?: readonly string[];
+  /** 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (config.json `mustReadWarnPages`). Default 6. */
+  readonly mustReadWarnPages?: number;
 }
 
 export interface ProcessContext {
@@ -124,6 +126,8 @@ export interface ProcessContext {
   readonly planReviewsWaived: readonly string[];
   /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). */
   readonly startOnHandback: readonly string[];
+  /** 4.4 (F16): the must-read pages above which a dispatch warns (config.json `mustReadWarnPages`, default 6). */
+  readonly mustReadWarnPages: number;
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -139,6 +143,9 @@ export interface ProcessContext {
 }
 
 const DEFAULT_IDENT: Ident = { name: 'Mission Pipeline', email: 'mp@localhost' };
+
+/** 4.4 (F16): the default of config.json `mustReadWarnPages`. */
+export const MUST_READ_WARN_PAGES = 6;
 
 /** A context over an open memory (the caller closes the memory). */
 export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessContext {
@@ -174,6 +181,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     localCommands: o.localCommands ?? [],
     planReviewsWaived: o.planReviewsWaived ?? [],
     startOnHandback: o.startOnHandback ?? [],
+    mustReadWarnPages: o.mustReadWarnPages ?? MUST_READ_WARN_PAGES,
     cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);

@@ -288,7 +288,7 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         lines.push(`\`mp seat ${dispatch} card\`: this card.`);
         break;
       case 'read':
-        lines.push(`\`mp seat ${dispatch} read <material> [--page <n>]\`: one page of a material (page 1 by default); it reports a missing or edited material instead of serving it.`);
+        lines.push(`\`mp seat ${dispatch} read <material> [--page <n>]\`: fetches one page of a material (page 1 by default) and records the fetch; it reports a missing or edited material instead of serving it.`);
         break;
       case 'checkout':
         lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
