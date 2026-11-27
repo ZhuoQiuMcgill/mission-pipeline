@@ -64,18 +64,55 @@ test('the inbox item carries the brief: the notice in full, its reason, the opti
   } finally { p.cleanup(); }
 });
 
-test('after a PM answer the command prints the principles in force and a count of the other tags, not every entry', async () => {
+test('after a PM answer the command prints each principle in force in full and a count of every other tag in force, with the read that lists them', async () => {
   const p = project43();
   try {
     const s = await sentToPm(p);
-    await done43(p, ['pm', 'say', 'Keep the public API stable', '--tag', 'principle']);
+    const principle = `Keep the public API stable ${'for every caller we know of, '.repeat(6)}except where the user names a break.`;
+    assert.ok(principle.indexOf('except') > 160);
+    await done43(p, ['pm', 'say', principle, '--tag', 'principle']);
     await done43(p, ['pm', 'say', 'Prefer clear errors over silent coercion', '--tag', 'decision@m1']);
     const w = await done43(p, ['pm', 'say', 'Numbers only', '--tag', 'decision@m1']);
     const out = await text43(p, ['pm', 'answer', 'm1', s.escalation, '--by', 'pm', '--words', w.words, '--reason', 'the words say so', '--option', 'answer', '--instructions', 'numbers only']);
-    assert.match(out, /Principles in force:\n- \[W-\d+#1\] Keep the public API stable/);
-    assert.match(out, /1 other tag in force for m1 not cited: mp read words --in-force/);
+    assert.ok(out.includes(`Principles in force:\n- [`) && out.includes(principle), 'a principle is printed in full, never cut');
+    // two decision tags in force for m1, the cited one counted too
+    assert.match(out, /Other tags in force for m1: 2 \(mp read words --in-force lists them\)/);
     assert.doesNotMatch(out, /Prefer clear errors/, 'the other tags are counted, not printed');
+    const none = project43();
+    try {
+      const t = await sentToPm(none);
+      const quiet = await text43(none, ['pm', 'answer', 'm1', t.escalation, '--by', 'pm', '--no-words', '--reason', 'minor', '--option', 'answer', '--instructions', 'numbers only']);
+      assert.match(quiet, /Other tags in force for m1: 0 \(mp read words --in-force lists them\)/, 'the read is named also when the count is zero');
+    } finally { none.cleanup(); }
   } finally { p.cleanup(); }
+});
+
+test('review p1-6: the brief names the authorization the Secretary cited and its words entry, from the hand-back and from the decision event alike', async () => {
+  for (const way of ['decide', 'hand-back'] as const) {
+    const p = project43();
+    try {
+      await constructorAsks(p, ['May add accept strings?']);
+      const w = await done43(p, ['pm', 'say', 'Error types are yours to choose', '--tag', 'decision@m1']);
+      await done43(p, ['pm', 'requirement', 'add', 'm1', 'a2', '--type', 'authorization', '--text', 'error types are the PM\'s', '--quote', 'Error types are yours to choose', '--words', w.words]);
+      const s = await liveWithEscalation(p);
+      const d = await done43(p, ['sec', 'card', s.escalation], s.id);
+      const sec = secretary43(p, s.id);
+      try { readAll(sec, d.dispatch); } finally { sec.memory.close(); }
+      if (way === 'decide') await done43(p, ['sec', 'decide', s.escalation, '--option', 'ask-pm', '--reason', 'it changes what the user gets', '--authorization', 'item.m1.a2'], s.id);
+      else {
+        // the seat way outside the live identity: no pass runs, the inbox reads the hand-back
+        const dir = join(p.ctx.memory.paths.tmp, d.dispatch);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'report.md'), '# Decision\n');
+        writeFileSync(join(dir, 'result.json'), JSON.stringify({ option: 'ask-pm', classification: 'needs-pm', authorization: 'item.m1.a2', reason: 'it changes what the user gets', instructions: '', grantExtra: 0, notice: 'Strings?', mayMatter: false }));
+        await done43(p, ['seat', d.dispatch, 'handback', '--report', `.mission-pipeline/tmp/${d.dispatch}/report.md`, '--result', `.mission-pipeline/tmp/${d.dispatch}/result.json`]);
+        assert.equal(p.ctx.memory.stmt("SELECT 1 FROM flow_events WHERE event = 'decision' AND key = ?").get(s.escalation), undefined);
+      }
+      const item = (await done43(p, ['pm', 'inbox'])).items.find((i: any) => i.id === `m1/${s.escalation}`);
+      assert.ok(item.brief.items.includes('item.m1.a2'), `${way}: ${JSON.stringify(item.brief.items)}`);
+      assert.ok(item.brief.words.includes(w.words), `${way}: ${JSON.stringify(item.brief.words)}`);
+    } finally { p.cleanup(); }
+  }
 });
 
 test('review p1-2: each option says what the flow does for that kind of escalation, on the inbox and on the Secretary card', async () => {

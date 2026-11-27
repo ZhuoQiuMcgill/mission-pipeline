@@ -95,6 +95,7 @@ function briefLines(b: InboxBrief): string[] {
   return [
     ...(b.notice.trim() !== '' ? [`  ${b.by === 'program' ? 'The program' : 'The Secretary'}'s notice:\n    ${indent(b.notice)}`] : []),
     ...(b.reason.trim() !== '' ? [`  Its reason: ${indent(b.reason)}`] : []),
+    ...(b.handedOver !== undefined ? [`  Handed to you by the flow: ${indent(b.handedOver)}`] : []),
     ...(b.options.length > 0 ? ['  Options:', ...b.options.map((o) => `    ${o.id}: ${o.outcome}`)] : []),
     `  Rests on: items ${b.items.join(', ') || 'none named'}; words ${b.words.join(', ') || 'none named'}`,
     ...(b.reasons.length > 0 ? [`  The escalation's reasons, shortened (in full: ${b.more}):`, ...b.reasons.map((r) => `    - ${r}`)] : []),

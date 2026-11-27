@@ -183,6 +183,39 @@ test('review p1-1: a Secretary retired during a seat-way hand-back applies nothi
   } finally { p.cleanup(); }
 });
 
+test('review p1-4: a decision the flow hands to the PM says so, with the recorded reason', async () => {
+  const p = project43();
+  try {
+    const s = await exhausted(p);
+    // the Secretary's one grant on the lineage is spent after this card was claimed (another escalation of the lineage)
+    const sec = secretary43(p, s.id);
+    try { await sec.ports().scheduler.grant({ op: 'other-escalation', lineage: 'plan.m1.1', loop: 'env-retry', extra: 1, by: 'secretary', reason: 'another escalation of the lineage' }); } finally { sec.memory.close(); }
+    const r = await seatWay(p, s.dispatch, grant, s.id);
+    assert.equal(r.code, 0, JSON.stringify(r));
+    assert.equal(r.result.decision.state, 'to-pm');
+    assert.match(r.result.decision.text, /the flow handed it to the PM \(mp pm inbox lists it\): .*refused/);
+    assert.ok((await done43(p, ['pm', 'inbox'])).items.some((i: any) => i.id === `m1/${s.escalation}` && /refused/.test(i.brief.handedOver)));
+  } finally { p.cleanup(); }
+});
+
+test('review p1-3: mp pm answer names the answer that was carried out: a user answer recorded first wins, and the PM answer is not called applied', async () => {
+  const p = project43();
+  try {
+    await startAddMission(p.ctx, 'm1');
+    const first = await readyOf(p.ctx, 'calibrator-1');
+    for (let i = 0; i < 3; i++) { const d = pmDispatch(p.ctx, first.step); await pmRelease(p.ctx, d.dispatch, 'ended'); }
+    const esc = (await readyOf(p.ctx, 'secretary')).step.slice('sec.'.length);
+    const user = await done43(p, ['pm', 'say', 'Run it once more', '--tag', 'instruction']);
+    // the user's answer is recorded by another process and not carried out yet
+    await answerEscalation(p.ctx.ports(), { mission: 'm1' as MissionId, escalation: esc, option: 'grant', grantExtra: 1, words: `Run it once more (${user.words})` });
+    const w = await done43(p, ['pm', 'say', 'Two more tries are fine', '--tag', 'decision@m1']);
+    const out = await text43(p, ['pm', 'answer', 'm1', esc, '--by', 'pm', '--words', w.words, '--reason', 'the words allow it', '--option', 'grant', '--extra', '2']);
+    assert.doesNotMatch(out, /; applied\./);
+    assert.match(out, /not carried out: the user's answer \(grant\) was carried out instead/);
+    assert.equal((p.ctx.memory.stmt("SELECT COUNT(*) AS n FROM flow_events WHERE line = 'secretary' AND event = 'applied' AND key = ?").get(esc) as { n: number }).n, 1);
+  } finally { p.cleanup(); }
+});
+
 test('review p1-5: a decision queued under a live Secretary and claimed by the PM after it retired gets the seat commands', async () => {
   const p = project43();
   try {
@@ -199,4 +232,34 @@ test('review p1-5: a decision queued under a live Secretary and claimed by the P
     assert.doesNotMatch(commands, /mp sec (decide|read|card)/, 'no command that needs a live generation');
     assert.ok(id);
   } finally { p.cleanup(); }
+});
+
+test('a retried mp sec decide, mp pm answer and mp pm dispatch with the same --op replay their receipt', async () => {
+  const p = project43();
+  try {
+    await escalation43(p);
+    const id = await live43(p);
+    const card = await done43(p, ['sec', 'card', 'choice', '--op', 'card-1'], id);
+    const sec = secretary43(p, id);
+    try { readAll(sec, card.dispatch); } finally { sec.memory.close(); }
+    const decide = ['sec', 'decide', 'choice', '--option', 'ask-pm', '--reason', 'the PM decides', '--op', 'decide-1'];
+    const first = await command43(p, decide, id);
+    const again = await command43(p, decide, id);
+    assert.equal(again.replayed, true, JSON.stringify(again));
+    assert.deepEqual(again.result, first.result);
+    const w = await done43(p, ['pm', 'say', 'Answer simply', '--tag', 'decision@m1']);
+    const answer = ['pm', 'answer', 'm1', 'choice', '--by', 'pm', '--words', w.words, '--reason', 'the words say so', '--option', 'answer', '--instructions', 'simply', '--op', 'answer-1'];
+    await done43(p, answer);
+    assert.equal((await command43(p, answer)).replayed, true);
+  } finally { p.cleanup(); }
+  const q = project43();
+  try {
+    await startAddMission(q.ctx, 'm1');
+    const step = (await readyOf(q.ctx, 'calibrator-1')).step;
+    const dispatch = ['pm', 'dispatch', step, '--filled-by', 'h/m', '--op', 'dispatch-1'];
+    const first = await command43(q, dispatch);
+    const again = await command43(q, dispatch);
+    assert.equal(again.replayed, true);
+    assert.equal(again.result.dispatch, first.result.dispatch);
+  } finally { q.cleanup(); }
 });

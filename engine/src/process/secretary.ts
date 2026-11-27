@@ -117,7 +117,7 @@ export function secAckNote(ctx: ProcessContext, o: {op: string; id: string}): vo
  * option with what it does, the requirement items and words entries the work rests on (by id), and the
  * escalation's reasons shortened, with the read that gives the rest. Nothing in it is checked.
  */
-export interface InboxBrief {readonly by: string | null; readonly notice: string; readonly reason: string; readonly options: readonly {id: string; outcome: string}[]; readonly items: readonly string[]; readonly words: readonly string[]; readonly reasons: readonly string[]; readonly more: string}
+export interface InboxBrief {readonly by: string | null; readonly notice: string; readonly reason: string; readonly handedOver?: string; readonly options: readonly {id: string; outcome: string}[]; readonly items: readonly string[]; readonly words: readonly string[]; readonly reasons: readonly string[]; readonly more: string}
 export interface InboxItem {id: string; kind: 'decision' | 'notice' | 'question' | 'reply'; mission: string | null; text: string; state: string; action: string; resolution: string; round?: number; options?: readonly string[]; facts?: unknown; about?: string | null; acknowledgeable?: boolean; brief?: InboxBrief}
 function allFlow(ctx: ProcessContext) {
   return (ctx.memory.stmt('SELECT mission, line, event, key, body, revision AS rev FROM flow_events ORDER BY revision').all() as {mission: string; line: string; event: string; key: string; body: string; rev: number}[]).map((e) => ({...e, revision: Number(e.rev), mission: e.mission as MissionId, body: JSON.parse(ctx.memory.data.text(e.body)) as any}));
@@ -130,9 +130,12 @@ function handedBackDecision(ctx: ProcessContext, task: string): SecretaryResult 
   return s?.state === 'done' && s.handBack !== null ? s.handBack.result as SecretaryResult : undefined;
 }
 
-/** 4.4 (G2): the requirement items an escalation's work rests on (its own, its task's in the plan in effect, and the authorizations they rest on) and their words entries. */
-function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationBody, plans: Map<string, DetailedPlanDoc | null>): {items: string[]; words: string[]} {
-  const items = new Set(esc.items ?? []);
+/**
+ * 4.4 (G2): the requirement items an escalation's work rests on (its own, its task's in the plan in effect,
+ * the authorization the decision cites, and the authorizations they rest on) and their words entries.
+ */
+function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationBody, plans: Map<string, DetailedPlanDoc | null>, cited: readonly string[]): {items: string[]; words: string[]} {
+  const items = new Set([...(esc.items ?? []), ...cited]);
   const taskId = esc.subject.startsWith('task:') ? esc.subject.slice('task:'.length) : null;
   const dplan = taskId === null ? undefined : mine.filter((e) => e.line === `task:${taskId}` && e.event === 'spec').at(-1)?.body.dplan as string | undefined;
   if (dplan !== undefined && !plans.has(dplan)) {
@@ -153,13 +156,19 @@ function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationB
 
 const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
 
-function inboxBrief(ctx: ProcessContext, mission: string, mine: readonly FlowRow[], esc: EscalationBody, decided: {notice: string; reason: string} | undefined, by: string | null, plans: Map<string, DetailedPlanDoc | null>): InboxBrief {
-  const rest = restsOn(ctx, mine, esc, plans);
+function inboxBrief(ctx: ProcessContext, mission: string, mine: readonly FlowRow[], esc: EscalationBody, decided: {notice: string; reason: string; authorization?: string | null} | undefined, by: string | null, plans: Map<string, DetailedPlanDoc | null>, handedOver: string | null): InboxBrief {
+  // the hand-back and the decision event carry the same `authorization` field: one rule for both
+  const rest = restsOn(ctx, mine, esc, plans, typeof decided?.authorization === 'string' ? [decided.authorization] : []);
   const shown = esc.reasons.slice(0, 5).map((r) => clip(r, 200));
-  return {by, notice: decided?.notice ?? '', reason: decided?.reason ?? '', options: pmOptions(esc), items: rest.items, words: rest.words, reasons: esc.reasons.length > shown.length ? [...shown, `(${esc.reasons.length - shown.length} more)`] : shown, more: `mp read show escalation ${mission}/${esc.id}`};
+  return {by, notice: decided?.notice ?? '', reason: decided?.reason ?? '', ...(handedOver !== null ? {handedOver} : {}), options: pmOptions(esc), items: rest.items, words: rest.words, reasons: esc.reasons.length > shown.length ? [...shown, `(${esc.reasons.length - shown.length} more)`] : shown, more: `mp read show escalation ${mission}/${esc.id}`};
 }
 
+/** The PM inbox, read in one snapshot of the memory (4.4: its items and their briefs never mix two states). */
 export function pmInbox(ctx: ProcessContext): InboxItem[] {
+  return ctx.memory.read(() => inboxItems(ctx));
+}
+
+function inboxItems(ctx: ProcessContext): InboxItem[] {
   const events = allFlow(ctx);
   const out: InboxItem[] = [];
   const plans = new Map<string, DetailedPlanDoc | null>();
@@ -187,7 +196,7 @@ export function pmInbox(ctx: ProcessContext): InboxItem[] {
     const id = `${e.mission}/${esc.id}`;
     const asked = is(e.mission, 'asked-user', esc.id);
     out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${pmRound > 1 ? '; the words it rested on changed' : ''}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound,
-      brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans)});
+      brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans, mine.find((t) => t.line === 'secretary' && t.event === 'to-user' && t.key === esc.id)?.body.why ?? null)});
   }
   for (const n of listNotices(ctx.memory, ctx.memory.data, {audience: 'pm'})) {
     const detail = n.detail as {escalation?: string | {id?: string}; escalations?: string[]} | null;

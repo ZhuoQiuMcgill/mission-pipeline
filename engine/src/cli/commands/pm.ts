@@ -6,6 +6,7 @@
 import { pmLayer1 } from '../pmMemory.ts';
 import { taggedWords, wordsAuthority } from '../../memory/words.ts';
 import { liveSecretary } from '../../memory/resident.ts';
+import { answerOutcome } from '../../process/decisions.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
@@ -795,19 +796,17 @@ const answer: Command = {
     await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
     // 4.4 (F9): say what happened; while a Secretary is live a PM command records and does not reconcile
     const resident = liveSecretary(p.ctx.memory) !== null;
-    const carried = p.ctx.memory.stmt("SELECT 1 FROM flow_events WHERE mission = ? AND line = 'secretary' AND event = 'applied' AND key = ?").get(m, esc) !== undefined;
-    const effect = resident ? 'the Secretary’s next pass applies it' : carried ? 'applied' : 'the flow applies it when its work can move (mp pm next)';
-    // 4.4 (G2): the principles in force, and only a count of the other tags in force with the read that lists them
-    const cited = new Set(w.split(',').map((x) => x.trim()));
-    const inForce = by === 'pm' ? taggedWords(p.ctx.memory, p.ctx.memory.data).flatMap((entry) => entry.tags.filter((t) => t.inForce && (t.mission === null || t.mission === m)).map((t) => ({ id: t.id, type: t.type, words: entry.words, text: t.quote ?? entry.text }))) : [];
-    const principles = inForce.filter((t) => t.type === 'principle').map((t) => `[${t.id}] ${clip(t.text.replace(/\s+/g, ' '), 160)}`);
-    const otherTags = inForce.filter((t) => t.type !== 'principle' && !cited.has(t.words)).length;
+    // the applied event's decider and answer round say whose answer was carried out (a user answer wins before application)
+    const effect = p.ctx.memory.read((db) => answerOutcome(db, p.ctx.memory.data, { mission: m, escalation: esc, by, resident }));
+    // 4.4 (G2): the principles in force, each in full (a principle is never cut), and a count of every other tag in force with the read that lists them
+    const inForce = by === 'pm' ? taggedWords(p.ctx.memory, p.ctx.memory.data).flatMap((entry) => entry.tags.filter((t) => t.inForce && (t.mission === null || t.mission === m)).map((t) => ({ id: t.id, type: t.type, text: t.quote ?? entry.text }))) : [];
+    const principles = inForce.filter((t) => t.type === 'principle').map((t) => `[${t.id}] ${t.text.trim().split('\n').join('\n  ')}`);
+    const otherTags = inForce.filter((t) => t.type !== 'principle').length;
     const lines = [
-      `${by === 'pm' ? 'The PM’s' : 'The user’s'} answer to ${esc} recorded (${option}, ${w || 'no words'}); ${effect}.`,
-      ...(principles.length > 0 ? ['Principles in force:', ...principles.map((x) => `- ${x}`)] : []),
-      ...(otherTags > 0 ? [`${otherTags} other tag${otherTags === 1 ? '' : 's'} in force for ${m} not cited: mp read words --in-force`] : []),
+      `${by === 'pm' ? 'The PM’s' : 'The user’s'} answer to ${esc} recorded (${option}, ${w || 'no words'}); ${effect.text}.`,
+      ...(by === 'pm' ? [...(principles.length > 0 ? ['Principles in force:', ...principles.map((x) => `- ${x}`)] : ['Principles in force: none']), `Other tags in force for ${m}: ${otherTags} (mp read words --in-force lists them)`] : []),
     ];
-    return ok(lines.join('\n'), { mission: m, escalation: esc, option, words: w, by, applied: carried, resident, principles, otherTags });
+    return ok(lines.join('\n'), { mission: m, escalation: esc, option, words: w, by, applied: effect.applied, resident, ...(by === 'pm' ? { principles, otherTags } : {}) });
   },
 };
 
