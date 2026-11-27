@@ -140,14 +140,14 @@ function event(tx: WriteTx, mission: string, line: string, name: string, key: st
 /** Entry-level disposition and tags are one append. Completed proof is never rewritten. */
 export interface AssignTagsOptions {op: string; words: string; tags: readonly string[]; supersedes?: readonly string[]; retag?: string; authorizedBy?: string; withdraw?: readonly string[]; keep?: readonly string[]}
 /** What a tagging wrote (4.4, G7): its tags, and the dependents of the changed entries it kept or withdrew. */
-export interface TagsReport {readonly tags: WordsTag[]; readonly kept: readonly WordsDependency[]; readonly withdrawn: readonly WordsDependency[]; readonly how: 'superseded' | 're-tagged' | null}
+export interface TagsReport {readonly tags: WordsTag[]; readonly kept: readonly WordsDependency[]; readonly withdrawn: readonly WordsDependency[]; readonly retagged: string | null}
 export function assignTags(memory: Memory, o: AssignTagsOptions): WordsTag[] {
   return tagWords(memory, o).tags;
 }
 export function tagWords(memory: Memory, o: AssignTagsOptions): TagsReport {
   const r = memory.write({op: `words:tags:${o.op}`, payload: o, command: o.retag === undefined ? 'tag' : 'retag'}, (tx) => tagWordsInTx(tx, o)) as TagsReport | WordsTag[];
   // an operation recorded by 4.3 answered with its tags alone
-  return Array.isArray(r) ? {tags: r, kept: [], withdrawn: [], how: null} : r;
+  return Array.isArray(r) ? {tags: r, kept: [], withdrawn: [], retagged: null} : r;
 }
 export function assignTagsInTx(tx: WriteTx, o: AssignTagsOptions): WordsTag[] {
   return tagWordsInTx(tx, o).tags;
@@ -165,7 +165,7 @@ export function tagWordsInTx(tx: WriteTx, o: AssignTagsOptions): TagsReport {
       if (!same) notAllowed(`${o.words} already has tags; retag requires the user's authorization`);
       const already = new Set(residentRecords(tx, 'user.words-tags').filter((r) => r.words === o.words).flatMap((r) => r.supersedes));
       supersedes = supersedes.filter((id) => !already.has(id));
-      if (supersedes.length === 0) return {tags: [...old.tags], kept: [], withdrawn: [], how: null};
+      if (supersedes.length === 0) return {tags: [...old.tags], kept: [], withdrawn: [], retagged: null};
     }
     if (o.retag !== undefined && (o.authorizedBy === undefined || wordsEntry(tx, o.authorizedBy) === null)) notAllowed('retag requires --words W-n with the user’s authorization');
     if (o.retag !== undefined && !old.tags.some((t) => t.id === o.retag)) notAllowed(`no tag ${o.retag}`);
@@ -204,14 +204,17 @@ export function tagWordsInTx(tx: WriteTx, o: AssignTagsOptions): TagsReport {
       }
     }
     tx.append({kind: 'user.words-tags', words: o.words, tags, supersedes, authorizedBy: o.authorizedBy ?? null, ...(kept.length > 0 ? {kept: kept.map((d) => d.id)} : {})});
-    return {tags, kept, withdrawn: deps.filter((d) => withdraw.has(d.id)), how: o.retag !== undefined ? 're-tagged' : supersedes.length > 0 ? 'superseded' : null};
+    return {tags, kept, withdrawn: deps.filter((d) => withdraw.has(d.id)), retagged: o.retag !== undefined ? o.words : null};
 }
 
 /** The lines a tagging command prints about what it kept and withdrew (4.4, G7). */
-export function tagsReportLines(r: Pick<TagsReport, 'kept' | 'withdrawn' | 'how'>): string[] {
+export function tagsReportLines(r: Pick<TagsReport, 'kept' | 'withdrawn' | 'retagged'>): string[] {
   const label = (d: WordsDependency) => `${d.id}${d.kind === 'waiver' ? ' (waiver)' : d.itemType === 'authorization' ? ' (authorization)' : ''}`;
+  const kept = (how: string, ds: readonly WordsDependency[]) => ds.length === 0 ? [] : [`Kept, resting on words that were ${how} (reads mark them): ${ds.map(label).join(', ')}.`];
   return [
-    ...(r.kept.length > 0 ? [`Kept, resting on words that were ${r.how === 're-tagged' ? 're-tagged' : 'superseded'} (reads mark them): ${r.kept.map(label).join(', ')}. To withdraw one later: mp pm requirement withdraw or mp pm constraint withdraw, on the user's words.`] : []),
+    ...kept('superseded', r.kept.filter((d) => d.words !== r.retagged)),
+    ...kept('re-tagged', r.kept.filter((d) => r.retagged != null && d.words === r.retagged)),
+    ...(r.kept.length > 0 ? ['To withdraw one later: mp pm requirement withdraw or mp pm constraint withdraw, on the user\'s words.'] : []),
     ...(r.withdrawn.length > 0 ? [`Withdrawn: ${r.withdrawn.map(label).join(', ')}.`] : []),
   ];
 }

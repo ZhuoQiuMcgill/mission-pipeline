@@ -142,7 +142,7 @@ const say: Command = {
   group: 'pm',
   name: ['say'],
   summary: 'record the user\'s message verbatim as a words entry W-<n>, before anything else (§6.1; the same text again is the same entry, decision 9)',
-  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin\n       [--tag <type[@mission][:"quote"]>] … [--supersedes W-n#k,…] [--withdraw-items <ids>] [--keep-items <ids>]',
+  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin\n       [--tag <type[@mission][:"quote"]>] … [--supersedes W-n#k,…] [--withdraw-items <ids>] [--keep-items <ids>]\n       (an item or constraint on the superseded entry that is not named is kept and listed; name each authorization and waiver)',
   flags: { file: 'string', stdin: 'boolean', tag: 'repeat', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list' },
   identity: (a) => ({ text: a.positionals.join(' '), file: flagStr(a, 'file'), stdin: flagBool(a, 'stdin'), tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items') }),
   async run(c, args) {

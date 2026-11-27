@@ -777,10 +777,10 @@ export function pmStop(ctx: ProcessContext, req: { readonly stop: string; readon
  * words entry W-<n> before anything else. The same text as the latest entry returns that entry
  * (a hook adapter and the PM's own `say` record once).
  */
-export function pmSay(ctx: ProcessContext, text: string, o: { readonly session?: string; readonly at?: number; readonly op?: string; readonly tags?: readonly string[]; readonly supersedes?: readonly string[]; readonly withdraw?: readonly string[]; readonly keep?: readonly string[] } = {}): { readonly words: string; readonly repeated: boolean; readonly kept: readonly WordsDependency[]; readonly withdrawn: readonly WordsDependency[]; readonly how: TagsReport['how'] } {
+export function pmSay(ctx: ProcessContext, text: string, o: { readonly session?: string; readonly at?: number; readonly op?: string; readonly tags?: readonly string[]; readonly supersedes?: readonly string[]; readonly withdraw?: readonly string[]; readonly keep?: readonly string[] } = {}): { readonly words: string; readonly repeated: boolean; readonly kept: readonly WordsDependency[]; readonly withdrawn: readonly WordsDependency[]; readonly retagged: string | null } {
   requirePm(ctx.secretary);
   // 4.4 (G7): what a supersession kept or withdrew is printed; a response recorded by 4.3 carries neither
-  const report = (t: Partial<TagsReport> | WordsTag[] | undefined): Pick<TagsReport, 'kept' | 'withdrawn' | 'how'> => (t === undefined || Array.isArray(t) ? { kept: [], withdrawn: [], how: null } : { kept: t.kept ?? [], withdrawn: t.withdrawn ?? [], how: t.how ?? null });
+  const report = (t: Partial<TagsReport> | WordsTag[] | undefined): Pick<TagsReport, 'kept' | 'withdrawn' | 'retagged'> => (t === undefined || Array.isArray(t) ? { kept: [], withdrawn: [], retagged: null } : { kept: t.kept ?? [], withdrawn: t.withdrawn ?? [], retagged: t.retagged ?? null });
   const latest = ctx.memory.read((db) => latestUserWords(db, 1)[0] ?? null);
   if (latest !== null && latest.text === sha256(text)) {
     const w = ctx.memory.read((db) => wordsOfMessage(db, latest.message));
