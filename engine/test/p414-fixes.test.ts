@@ -741,3 +741,23 @@ test('T1 post-landing normalization accepts untouched LF paths but requires exac
     assert.equal((await compareWorktree(f.ctx, f.dir, 'main', base, delivery)).relation, 'consistent');
   } finally { f.cleanup(); }
 });
+
+test('a review reopen settled by accept-risk does not hold the integration attempt a later repair starts', async () => {
+  const { w, engine } = await reviewedReopen();
+  const esc = (await escalations(w))[1]!;
+  assert.ok(esc.options.includes('accept-risk'), 'the review reopen offers accept-risk');
+  const words = say(w, 'Accept the dependency risk.');
+  await answerEscalation(w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept it. (${words})` });
+  await drive(engine, w.scheduler, script({ secretary: () => null }));
+  const settled = await acceptedProduct(flowCtx(w, M), 'integ');
+  assert.ok(settled, 'the integration is accepted with the reopen risk');
+  // a repair then reopens the integration itself: its next attempt must not wait for the settled reopen
+  const words2 = say(w, 'Fix the integration timing.');
+  await pmRepair(w.ctx, { mission: M, words: words2, kind: 'defect', text: 'Fix the integration timing.' });
+  await drive(engine, w.scheduler, script({ secretary: () => null,
+    'architect-repair': () => ({ handBack: { reopen: [{ task: 'integ', issue: 'integration timing' }], add: [], note: 'integ owns it' } }),
+  }));
+  const now = await acceptedProduct(flowCtx(w, M), 'integ');
+  assert.ok(now !== null && now !== settled, `the repair's integration attempt ran and was accepted (now ${now}, settled ${settled})`);
+  await unchanged(w, engine);
+});

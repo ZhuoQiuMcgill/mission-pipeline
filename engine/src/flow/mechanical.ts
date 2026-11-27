@@ -37,7 +37,7 @@ export const MECHANICAL_RULES: ReadonlyArray<{ readonly id: string; readonly tex
   { id: 'write scopes', text: 'Tasks that can run in parallel (neither depends on the other) have write scopes that do not overlap; the integration task is exempt.' },
   { id: 'dependencies', text: 'Every task a task depends on exists, and the dependencies have no cycle.' },
   { id: 'interfaces', text: 'Every interface a task implements or calls is reused (found in the named file of the snapshot) or defined by an interface task, and the task comes after its definition task.' },
-  { id: 'integration', text: 'With more than one implementation task there is exactly one integration task, and it depends on every implementation task.' },
+  { id: 'integration', text: 'With more than one implementation task there is exactly one integration task, and it depends on every implementation task, except one that itself depends on the integration task (work on top of the integrated tree).' },
   { id: 'writes', text: 'Every task writes something, except an integration task (with nothing to write it gets no Constructor: its Reviewer judges its dependencies\' work laid together) or an experiment. A read-only "check" task is refused: checks belong in the acceptance standards of the task whose change they check.' },
   { id: 'full suite', text: 'No task lists a full-suite command as a verification command, the integration task included: the project\'s full suite is run only by the integration task\'s Reviewer (`mp seat <id> full-run`, last), never at hand-back. Give tasks the project\'s local commands.' },
   { id: 'order', text: 'A change to an element order the user specified is not a failure: it goes to the Secretary.' },
@@ -204,8 +204,13 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
   // rule 4 is evaluated on the plan's own tasks: implementation tasks any repair added (earlier ones, or this
   // amendment's) are outside it in every check; the PM's full run at the end checks them (D-7)
   const outside = (t: DetailedTask): boolean => (i.amendment?.added.has(t.id) ?? false) || (i.amended?.has(t.id) ?? false);
-  const impl = plan.tasks.filter((t) => t.kind === 'implementation' && !outside(t));
   const integ = plan.tasks.filter((t) => t.kind === 'integration');
+  // an implementation task that itself depends on the integration task comes after it (a later plan's
+  // work on top of the integrated tree): the integration task cannot depend on it without a cycle, so it
+  // is outside rule 4 too, as execution's taskDependencies leaves such a task out of the integration's
+  // dependencies; the PM's full run at the end checks it (D-7)
+  const afterIntegration = (t: DetailedTask): boolean => integ.some((g) => dependsOn(t.id, g.id));
+  const impl = plan.tasks.filter((t) => t.kind === 'implementation' && !outside(t) && !afterIntegration(t));
   if (impl.length > 1) {
     if (integ.length !== 1) failures.push(`integration: ${impl.length} implementation tasks need exactly one integration task (found ${integ.length})`);
     for (const g of integ) for (const m of impl) if (!dependsOn(g.id, m.id)) failures.push(`integration: integration task ${g.id} does not depend on module task ${m.id}`);

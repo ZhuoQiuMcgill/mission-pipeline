@@ -30,8 +30,9 @@ import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 // tree; no command runs, 4.1.2 D-7), the WI-05 rebuild and the landing.
 // Every write of an `mp pm` command carries the command and the PM's filler (§3.2 item 13).
 
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { workspaceDir } from '../git/workspace.ts';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, EvidenceId, MissionId, StopId } from '../common/ids.ts';
 import type { EvidenceRecord, LoopKind } from '../common/records.ts';
@@ -332,6 +333,8 @@ function tidyWorktrees(ctx: ProcessContext): void {
   const done = ctx.memory.read((db) => [...listDispatches(db, { state: 'handed-back', limit: 10_000 }), ...listDispatches(db, { state: 'released', limit: 10_000 }).filter((d) => d.released === 'ended')].filter((d) => d.worktree !== null));
   for (const d of done) {
     try {
+      // as mp pm clean: no folder, nothing to remove (a removal asks git for its worktree list every time)
+      if (!existsSync(workspaceDir(ctx.memory.paths, d.dispatch))) continue;
       ctx.workspaces().remove(d.dispatch);
     } catch {
       /* kept: tried again next time */

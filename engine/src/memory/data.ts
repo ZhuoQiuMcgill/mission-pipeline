@@ -27,6 +27,13 @@ export const MAX_LIST_BYTES = 64 * 1024 * 1024;
 /** One value, in bytes. */
 export const MAX_DATA_BYTES = 64 * 1024 * 1024;
 
+/**
+ * What text() keeps, in estimated bytes (2 per UTF-16 code unit plus 128 per entry, at least what
+ * V8 holds): at most this much in all, and no single text above TEXT_KEEP_MAX_VALUE.
+ */
+const TEXT_KEEP_BYTES = 128 * 1024 * 1024;
+const TEXT_KEEP_MAX_VALUE = 8 * 1024 * 1024;
+
 export interface DataHost {
   readonly db: Db;
   /** True while this connection is inside a write transaction. */
@@ -41,6 +48,9 @@ export class DataStore {
   private readonly host: DataHost;
   /** Values put outside a write, by hash: inserted by the next write. */
   private readonly staged = new Map<string, Buffer>();
+  /** Texts of committed values, by hash (text()); their estimated size in textBytes. */
+  private readonly texts = new Map<string, string>();
+  private textBytes = 0;
 
   constructor(host: DataHost) {
     this.host = host;
@@ -83,8 +93,26 @@ export class DataStore {
     return buf;
   }
 
+  /**
+   * The value as UTF-8 text. A value's row is only ever inserted (INSERT OR IGNORE: never updated
+   * or deleted) and get() checks its bytes against the hash, so the text of a hash, once read from
+   * a committed row, is what every later read returns: such texts are kept and served again
+   * without the query and the hash (a mission's flow events are read in full many times in one
+   * process). A string cannot be changed, so a kept one is safe to hand to every caller. Not kept:
+   * a staged value, or one read inside a write (its row may still roll back). Bounded by
+   * TEXT_KEEP_BYTES: once that is used up, further texts are read each time, as before.
+   */
   text(hash: string): string {
-    return this.get(hash).toString('utf8');
+    const kept = this.texts.get(hash);
+    if (kept !== undefined) return kept;
+    const committed = !this.host.inWrite() && !this.staged.has(hash);
+    const text = this.get(hash).toString('utf8');
+    const size = text.length * 2 + 128;
+    if (committed && size <= TEXT_KEEP_MAX_VALUE && this.textBytes + size <= TEXT_KEEP_BYTES) {
+      this.texts.set(hash, text);
+      this.textBytes += size;
+    }
+    return text;
   }
 
   /** Store an id list (dependency lists, evidence lists...), as the 4.0 content store did. */
