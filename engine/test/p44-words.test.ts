@@ -4,14 +4,19 @@
 // constraints, waivers and notes; layer 1 keeps principles first and always counts the inbox.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { runCli } from '../src/cli/main.ts';
+import { COMMANDS, runCli } from '../src/cli/main.ts';
 import { pmLayer1, constraintTakesLayer1Line } from '../src/cli/pmMemory.ts';
-import { residentRecords, taggedWords } from '../src/memory/words.ts';
-import { beginAction } from '../src/cli/project.ts';
+import { residentRecords, taggedWords, tagWords } from '../src/memory/words.ts';
+import { actionArgs, beginAction } from '../src/cli/project.ts';
+import { GLOBAL_FLAGS, parseArgs } from '../src/cli/args.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { planReviewsWaiver } from '../src/flow/waivers.ts';
-import type { MissionId } from '../src/common/ids.ts';
-import { ENV_A, type ProcessProject } from './process-fixtures.ts';
+import { cal1Pass } from '../src/flow/scripted.ts';
+import { pmSay } from '../src/process/pm.ts';
+import { appendRecords } from '../src/memory/index.ts';
+import { canonicalJson } from '../src/common/hash.ts';
+import type { BasisLineId, ContentHash, MissionId } from '../src/common/ids.ts';
+import { ENV_A, addDetailedPlan, startAddMission, step, type ProcessProject } from './process-fixtures.ts';
 import { project43, command43, done43 } from './p43-fixtures.ts';
 
 async function text44(p: ProcessProject, args: string[]): Promise<string> {
@@ -316,5 +321,129 @@ test('G7 (review p4-8): a mission tree marks only the constraint version that re
     await done43(p, ['pm','say','Format C.','--tag','decision@m2','--supersedes',`${b.words}#1`]);
     assert.doesNotMatch(await text44(p, ['read','tree','m1']), /constraint\.fmt[^\n]*superseded/, 'the m1 version cites W-1, which nothing superseded');
     assert.match(await text44(p, ['read','tree','m2']), new RegExp(`${v2.version.replace(/\./g, '\\.')}[^\\n]*rests on words that were superseded \\(${b.words}#1`));
+  } finally {p.cleanup();}
+});
+
+// ---- review round 2 of p4
+
+/** The action identity the CLI records for a PM command line (as cli/main.ts computes it). */
+function identityOf(argv: string[]): unknown {
+  const cmd = COMMANDS.find((c) => c.group === 'pm' && c.name[0] === argv[1])!;
+  const args = parseArgs(argv.slice(2), {...cmd.flags, 'filled-by': 'string'});
+  return actionArgs(cmd.identity !== undefined ? cmd.identity(args) : {positionals: args.positionals, flags: Object.fromEntries(Object.entries(args.flags).filter(([k]) => !(k in GLOBAL_FLAGS) && k !== 'filled-by'))});
+}
+
+test('G7 (review p4-r2-1): an interrupted say, tag or retag retried unchanged accepts the withdrawal it recorded and returns it', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    const w = await done43(p, ['pm','say','Use tabs.','--tag','decision@m1']);
+    await done43(p, ['pm','constraint','add','c','--kind','instruction','--text','tabs','--words',w.words]);
+    // `mp pm say … --op drop-c`, interrupted after its words and its withdrawal committed, before its action was done
+    const say = ['pm','say','Drop C.','--tag','decision@m1','--supersedes',`${w.words}#1`,'--withdraw-items','constraint.c','--op','drop-c'];
+    beginAction(p.ctx.memory, {op: 'drop-c', command: 'say', args: identityOf(say), filler: null});
+    pmSay(p.ctx, 'Drop C.', {op: 'drop-c', tags: ['decision@m1'], supersedes: [`${w.words}#1`], withdraw: ['constraint.c'], keep: []});
+    assert.equal(withdrawn(p, 'constraint.c'), true);
+    const retried = await command43(p, say);
+    assert.equal(retried.code, 0, JSON.stringify(retried));
+    assert.deepEqual(retried.result.withdrawn.map((d: any) => d.id), ['constraint.c']);
+    // the same for tag and retag: the retry finds the write's receipt
+    const a = await done43(p, ['pm','say','Use two spaces.','--tag','decision@m1']);
+    await done43(p, ['pm','constraint','add','e','--kind','instruction','--text','two spaces','--words',a.words]);
+    const b = await done43(p, ['pm','say','Use four spaces.','--tag','decision@m1']);
+    const tag = ['pm','tag',b.words,'--supersedes',`${a.words}#1`,'--withdraw-items','constraint.e','--op','tag-e'];
+    beginAction(p.ctx.memory, {op: 'tag-e', command: 'tag', args: identityOf(tag), filler: null});
+    tagWords(p.ctx.memory, {op: 'tag-e', words: b.words, tags: [], supersedes: [`${a.words}#1`], withdraw: ['constraint.e']});
+    const tagged = await command43(p, tag);
+    assert.equal(tagged.code, 0, JSON.stringify(tagged));
+    assert.deepEqual(tagged.result.withdrawn.map((d: any) => d.id), ['constraint.e']);
+    const c = await done43(p, ['pm','say','Tabs, again.','--tag','decision@m1']);
+    await done43(p, ['pm','constraint','add','f','--kind','instruction','--text','tabs again','--words',c.words]);
+    const auth = await done43(p, ['pm','say','Make that a principle and drop rule f.','--tag','instruction']);
+    const retag = ['pm','retag',`${c.words}#1`,'--tag','principle','--words',auth.words,'--withdraw-items','constraint.f','--op','retag-f'];
+    beginAction(p.ctx.memory, {op: 'retag-f', command: 'retag', args: identityOf(retag), filler: null});
+    tagWords(p.ctx.memory, {op: 'retag-f', words: c.words, retag: `${c.words}#1`, authorizedBy: auth.words, tags: ['principle'], withdraw: ['constraint.f'], keep: []});
+    const retagged = await command43(p, retag);
+    assert.equal(retagged.code, 0, JSON.stringify(retagged));
+    assert.deepEqual(retagged.result.withdrawn.map((d: any) => d.id), ['constraint.f']);
+  } finally {p.cleanup();}
+});
+
+test('G7 (review p4-r2-2): repeating a supersession with a new one asks about what gives power and came since, reports only what it names, and records a named keep', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    const w1 = await done43(p, ['pm','say','Skip the reviews. Keep it small.','--tag','decision@m1:"Skip the reviews."','--tag','decision@m1:"Keep it small."']);
+    await done43(p, ['pm','constraint','add','small','--kind','instruction','--text','small','--words',w1.words]);
+    const w2 = await done43(p, ['pm','say','Use the old parser.','--tag','decision@m1']);
+    const w3 = await done43(p, ['pm','say','Use the new parser.','--tag','decision@m1']);
+    assert.deepEqual((await done43(p, ['pm','tag',w3.words,'--supersedes',`${w1.words}#1`])).kept.map((d: any) => d.id), ['constraint.small']);
+    // granted and recorded on W-1 after its first supersession (W-1#2 keeps W-1 in force)
+    await done43(p, ['pm','waive','m1','plan-reviews','--words',w1.words]);
+    await done43(p, ['pm','constraint','add','later','--kind','instruction','--text','later','--words',w1.words]);
+    const base = ['pm','tag',w3.words,'--supersedes',`${w1.words}#1,${w2.words}#1`];
+    const refused = await command43(p, base);
+    assert.equal(refused.error.code, 'NOT_ALLOWED', 'a waiver that came to rest on the repeated entry is asked about');
+    assert.deepEqual(refused.error.detail.toName, ['waiver:m1:plan-reviews#1']);
+    const r = await done43(p, [...base, '--keep-items','waiver:m1:plan-reviews#1,constraint.later']);
+    assert.deepEqual(r.kept.map((d: any) => d.id).sort(), ['constraint.later', 'waiver:m1:plan-reviews#1'], 'an unmentioned dependent of the repeated entry is not reported as kept');
+    const nodes = (await done43(p, ['read','from',w1.words])).nodes;
+    const mark = `rests on words that were superseded (${w1.words}#1, by ${w3.words})`;
+    assert.equal(nodes.find((n: any) => n.key === 'waiver:m1:plan-reviews#1').state, `in force; ${mark}`, 'the named keep is recorded and read');
+    assert.match(nodes.find((n: any) => n.kind === 'constraint' && n.id.startsWith('constraint.later')).state, new RegExp(mark.replace(/[()#.]/g, '\\$&')));
+    assert.equal(residentRecords(p.ctx.memory, 'user.words-tags').filter((x) => x.supersedes.includes(`${w1.words}#1`)).length, 1, 'the supersession is still recorded once');
+  } finally {p.cleanup();}
+});
+
+test('G7 (review p4-r2-3): for a plan in effect the waiver read shows the outcome recorded with that plan', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    const w = await done43(p, ['pm','say','Skip the reviews of the first plan.','--tag','decision@m1']);
+    await done43(p, ['pm','waive','m1','plan-reviews','--plan','dplan.m1.1.1','--words',w.words]);
+    await startAddMission(p.ctx, 'm1');
+    await step(p.ctx, 'calibrator-1', (c) => cal1Pass(c));
+    await step(p.ctx, 'architect-decompose', () => addDetailedPlan('m1'));
+    assert.ok(p.ctx.memory.stmt("SELECT 1 FROM flow_events WHERE event = 'effective' AND key = 'dplan.m1.1.1'").get());
+    const later = await done43(p, ['pm','say','Skip the reviews of later plans too.','--tag','decision@m1']);
+    await done43(p, ['pm','waive','m1','plan-reviews','--words',later.words]);
+    const state = async (words: string, key: string) => (await done43(p, ['read','from',words])).nodes.find((n: any) => n.key === key)?.state;
+    assert.equal(await state(w.words, 'waiver:m1:plan-reviews#1'), 'dplan.m1.1.1 took effect on it');
+    assert.equal(await state(later.words, 'waiver:m1:plan-reviews#2'), 'in force', 'a mission-wide waiver is read for the plans not in effect yet');
+  } finally {p.cleanup();}
+});
+
+test('G7 (review p4-2): a waiver granted under an authorization withdrawn on its own is still asked about when the entry changes', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    const w = await done43(p, ['pm','say','The details are yours.','--tag','decision@m1']);
+    await done43(p, ['pm','requirement','add','m1','auth','--type','authorization','--text','details','--quote','The details are yours','--words',w.words]);
+    await done43(p, ['pm','waive','m1','plan-reviews','--authority','auth']);
+    const drop = await done43(p, ['pm','say','Take that authorization back.','--tag','instruction']);
+    await done43(p, ['pm','requirement','withdraw','m1','auth','--words',drop.words]);
+    const ctx = flowCtx(p.ctx.ports(), 'm1' as MissionId);
+    assert.equal((await planReviewsWaiver(ctx, 'dplan.m1.1.1'))?.by, 'authority', '4.3: the planner still applies it');
+    const base = ['pm','say','Fewer details are yours now.','--tag','decision@m1','--supersedes',`${w.words}#1`];
+    const refused = await command43(p, base);
+    assert.equal(refused.error.code, 'NOT_ALLOWED');
+    assert.deepEqual(refused.error.detail.toName, ['waiver:m1:plan-reviews#1']);
+    await done43(p, [...base, '--withdraw-items','waiver:m1:plan-reviews#1']);
+    assert.equal(await planReviewsWaiver(ctx, 'dplan.m1.1.1'), null);
+  } finally {p.cleanup();}
+});
+
+test('G7 (review p4-7): a constraint withdrawal a 4.3 tagging recorded in its reason is reached from those words', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    const w = await done43(p, ['pm','say','Use tabs.','--tag','decision@m1']);
+    const c = await done43(p, ['pm','constraint','add','c','--kind','instruction','--text','tabs','--words',w.words]);
+    const by = await done43(p, ['pm','say','Use spaces.','--tag','decision@m1']);
+    // what 4.3 wrote for `mp pm say … --supersedes W-1#1 --withdraw-items constraint.c`: the words only in the reason
+    p.ctx.memory.write({op: 'legacy-withdrawal', payload: {}}, (tx) => {
+      appendRecords(tx, [{kind: 'basis.withdrawn', line: 'constraint.c' as BasisLineId}, {kind: 'flow.event', mission: 'project' as MissionId, line: 'requirements', event: 'constraint-withdrawn', key: 'constraint.c', body: tx.data.put(canonicalJson({line: 'constraint.c', reason: `withdrawn with words tags by ${by.words}`})) as ContentHash}]);
+    });
+    assert.equal((await done43(p, ['read','from',by.words])).nodes.find((n: any) => n.key === `constraint:${c.version}`)?.state, `withdrawn on ${by.words}`);
   } finally {p.cleanup();}
 });

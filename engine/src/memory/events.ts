@@ -47,8 +47,13 @@ export type ResidentEvent =
   | { readonly kind: 'sec.reply'; readonly id: string; readonly text: string; readonly generation: string }
   | { readonly kind: 'sec.question'; readonly id: string; readonly text: string; readonly about: string | null; readonly generation: string }
   | { readonly kind: 'pm.reply'; readonly id: string; readonly text: string; readonly words: string | null }
-  /** 4.4 (G7): `kept` lists the dependents of the changed entries that this write kept (named or by default); a 4.3 record has none. */
-  | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null; readonly kept?: readonly string[] }
+  /**
+   * 4.4 (G7), all optional, absent from a 4.3 record: `kept` and `withdrew` list the dependents of the
+   * changed entries this write kept (named or by default) and withdrew; `confirms` names supersessions
+   * this entry recorded before, for which this write records further dispositions (they are not
+   * superseded again).
+   */
+  | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null; readonly kept?: readonly string[]; readonly withdrew?: readonly string[]; readonly confirms?: readonly string[] }
   | { readonly kind: 'words.summary'; readonly id: string; readonly text: string; readonly covers: readonly { readonly id: string; readonly fingerprint: string }[] };
 
 export interface WordsTag {

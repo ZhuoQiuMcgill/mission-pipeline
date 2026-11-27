@@ -44,7 +44,7 @@ import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
 import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
-import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverEnds, waiverLabel } from '../flow/waivers.ts';
+import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverBy, waiverEnds, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { pmNotes } from '../process/secretary.ts';
 import { keptMark, keptOnChangedWords, wordsAuthority } from '../memory/words.ts';
@@ -280,11 +280,13 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       } else if (f.event === 'constraint-withdrawn' && typeof b['line'] === 'string') {
         // 4.4 (G7): a withdrawn constraint reads so, and the words it was withdrawn on reach it
         const n = typeof b['version'] === 'string' ? nodes.get(`constraint:${b['version']}`) : latestConstraint.get(b['line']);
+        // a 4.3 tagging wrote the words into its fixed reason only ("withdrawn with words tags by W-n")
+        const words = typeof b['words'] === 'string' ? b['words'] : /^withdrawn with words tags by (W-[0-9]+)$/.exec(String(b['reason'] ?? ''))?.[1];
         if (n !== undefined) {
-          n.state = `withdrawn${typeof b['words'] === 'string' ? ` on ${b['words']}` : ''}`;
-          if (typeof b['words'] === 'string') {
-            node('words', b['words'], null, 0);
-            edge(n.key, `words:${b['words']}`, 'was withdrawn on');
+          n.state = `withdrawn${words !== undefined ? ` on ${words}` : ''}`;
+          if (words !== undefined) {
+            node('words', words, null, 0);
+            edge(n.key, `words:${words}`, 'was withdrawn on');
           }
         }
       }
@@ -879,22 +881,32 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
     }
 
     // ---- 4.4 (G7): plan-review waivers and the PM's notes, so `mp read from W-n` reaches what cites the entry
-    const planOf = new Map<string, Array<{ event: string; key: string; body: unknown }>>();
-    for (const f of flows) if (f.line === PLAN_LINE) planOf.set(f.mission, [...(planOf.get(f.mission) ?? []), { event: f.event, key: f.key, body: f.body }]);
+    const planOf = new Map<string, Array<{ event: string; key: string; body: Json; rev: number }>>();
+    for (const f of flows) if (f.line === PLAN_LINE) planOf.set(f.mission, [...(planOf.get(f.mission) ?? []), { event: f.event, key: f.key, body: f.body, rev: f.rev }]);
     for (const f of flows) {
       if (f.line !== PLAN_LINE || f.event !== REVIEWS_WAIVER || f.body['action'] === 'withdraw') continue;
       const b = f.body;
       const id = `${f.mission}:${f.key}`;
       const n = node('waiver', id, f.mission, f.rev, `plan reviews waived for ${typeof b['dplan'] === 'string' ? `detailed plan ${b['dplan']}` : `every plan of mission ${f.mission} not in effect yet`}${typeof b['reason'] === 'string' && b['reason'] !== '' ? `; reason: ${clip(b['reason'], 80)}` : ''}`);
       const events = planOf.get(f.mission) ?? [];
-      // "in force" is the planner's own choice (flow/waivers.ts) for its plan, or for a plan of the mission no plan-specific waiver names
-      const applied = selectedWaiver(eventsWithWaiversInForce(events, f.mission, (w, m) => wordsAuthority(db, data, w, m)), typeof b['dplan'] === 'string' ? b['dplan'] : '').waiver?.n === b['n'];
+      const dplan = typeof b['dplan'] === 'string' ? b['dplan'] : null;
+      const effective = dplan === null ? undefined : events.find((e) => e.event === 'effective' && e.key === dplan);
       const end = waiverEnds(events).get(Number(b['n']));
-      const outOfForce = b['by'] === 'words' && wordsAuthority(db, data, String(b['ref']), f.mission) === null;
-      n.state = applied ? 'in force'
-        : end !== undefined ? (end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`)
-          : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
-            : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan';
+      if (effective !== undefined && dplan !== null) {
+        // its plan is in effect: the outcome recorded with that plan (flow/waivers.ts), and whether this is the waiver it took effect on
+        const recorded = planReviewsWaiverIn(events, f.mission, dplan, ctx.planReviewsWaived, ((objects.get(dplan)?.['reviews'] ?? null) as Json[] | null)?.map((r) => String(r['review'])) ?? null);
+        const same = (x: Json) => x['action'] !== 'withdraw' && (x['dplan'] === dplan || x['dplan'] === null) && x['by'] === recorded?.by && x['ref'] === recorded?.ref && (x['reason'] ?? null) === (recorded?.reason ?? null);
+        const used = recorded !== null && events.filter((e) => e.event === REVIEWS_WAIVER && e.rev < effective.rev && same(e.body)).at(-1)?.body['n'] === b['n'];
+        n.state = used ? `${dplan} took effect on it` : `${dplan} took effect without it (${recorded === null ? 'with its reviews' : waiverBy(recorded)})`;
+      } else {
+        // "in force" is the planner's own choice (flow/waivers.ts) for its plan, or for a plan of the mission no plan-specific waiver names
+        const applied = selectedWaiver(eventsWithWaiversInForce(events, f.mission, (w, m) => wordsAuthority(db, data, w, m)), dplan ?? '').waiver?.n === b['n'];
+        const outOfForce = b['by'] === 'words' && wordsAuthority(db, data, String(b['ref']), f.mission) === null;
+        n.state = applied ? 'in force'
+          : end !== undefined ? (end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`)
+            : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
+              : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan';
+      }
       // 4.4 (G7): the words a waiver was withdrawn on reach it
       if (end?.action === 'withdraw' && end.by === 'words') {
         node('words', end.ref, null, 0);
