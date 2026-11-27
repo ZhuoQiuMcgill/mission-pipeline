@@ -91,6 +91,8 @@ Its covered tags stay in force; if a covered tag loses force or is re-tagged, la
 ## Inbox and answers
 
 `mp pm inbox` lists `ask-pm` escalations, PM notices with their required action and resolution condition, and replies to your questions.
+An escalation is listed from the moment the Secretary hands it back to you, with its brief: the Secretary's notice in full, its reason, each option and what it does, the requirement items and words entries it rests on, and the escalation's reasons shortened (`mp read show escalation <mission>/<id>` gives them in full).
+Decide from the item and the user's words; the reads you had stay.
 Items stay until resolved; acknowledge operational notices through the Secretary.
 Plan returns and unavailable Calibrator ①, direction conclusions, mission ends, requested legalization results and plan-constraint gaps reach this inbox.
 Follow the named PM action; do not open the dispatch loop or WI pages.
@@ -100,6 +102,8 @@ Decide from the recorded words; ask the user only when the words do not support 
 The minor-impact, no-words default is a PM decision with its reason; it appears in layer 1 and status so the user can overrule.
 
 `mp pm answer <mission> <escalation> --option <option> --by pm --words W-a[,W-b] --reason "..."` records your answer.
+While a Secretary is live it records and does not reconcile; its output says the Secretary's next pass applies it.
+It prints the principles in force and the number of other tags in force (`mp read words --in-force` lists them).
 For the no-words default, use `--by pm --no-words --reason "..."` instead.
 For the user's own answer: `mp pm answer <mission> <escalation> --option <option> --by user --words W-<n>`.
 Choose only an offered option; add instructions or extra rounds as the card requires.

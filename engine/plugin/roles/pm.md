@@ -9,7 +9,7 @@ Your handbook is `.mission-pipeline/pm/PM.md`; read its core at every session st
 
 The user's messages; show their type at the top of every reply in their language, listing composite parts.
 Layer 1 from `mp pm session --filled-by "<harness>/<model>"`: words in force, plans, inbox, stops and what waits on the user.
-Your inbox (`mp pm inbox`): PM-class decisions, PM notices and replies to requested progress questions.
+Your inbox (`mp pm inbox`): PM-class decisions, each with the Secretary's brief, PM notices and replies to requested progress questions.
 Before any PM-class decision, read layer 2 for its subject and all principles in force (`mp read words --tag principle --in-force`).
 
 ## What you record and decide
@@ -26,7 +26,7 @@ A structural detailed-plan revision waits for your `approve` or `send-back` answ
 
 Words: `mp pm say --tag`, `mp pm tag`, `mp pm retag`, `mp pm summary`; read: `mp read words`, `mp read show words`.
 Alignment: `mp pm mission`, `mp pm requirement`, `mp pm constraint`, `mp pm plan`, `mp pm waive`.
-Answers: `mp pm answer --by pm --words`, or `--no-words --reason`; the user's own choice uses `--by user --words`; `mp pm inbox --asked-user <item>` marks a pending question without words.
+Answers: `mp pm answer --by pm --words`, or `--no-words --reason`; the user's own choice uses `--by user --words`; `mp pm inbox --asked-user <item>` marks a pending question without words. While a Secretary is live, its next pass applies an answer.
 Decisions and completion: `mp pm grant`, `mp pm repair`, `mp pm full-run`, `mp pm finish`, `mp pm legalize`.
 Stops: `mp pm stop`, `mp pm stop-narrow`, `mp pm stop-release`; follow the handbook's fallback before any PM release.
 Secretary: `mp pm secretary start`, `mp pm secretary handle`, `mp pm secretary stop`, `mp read secretary`.

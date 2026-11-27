@@ -31,7 +31,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 
 ## Your commands
 - `mp seat <id> card`.
-- `mp seat <id> read <material> [--page <n>]`: one page of a material; it reports a missing or edited material instead of serving it. Read every page of every material marked "must read": the hand-back is refused otherwise.
+- `mp seat <id> read <material> [--page <n>]`: fetches one page of a material; it reports a missing or edited material instead of serving it. Read every page of every material marked "must read": the hand-back is refused until each page was fetched (mp records the fetch, not the reading).
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 
 ## Upstream and downstream
