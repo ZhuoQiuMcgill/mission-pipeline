@@ -62,30 +62,87 @@ export function parseTag(raw: string, text: string): Omit<WordsTag, 'id'> {
   return {type, mission, quote};
 }
 
-export interface WordsDependency {id: string; mission: string; kind: 'item' | 'constraint' | 'waiver'; line: string; key?: string}
+/**
+ * `words` (the entry it rests on), `itemType`, `version` (an item's or a constraint's version in force)
+ * `via` (the authorization item a waiver was granted under) and `rev` (the revision that made it a
+ * dependent) are 4.4 additions (G7); older callers read the rest as before.
+ */
+export interface WordsDependency {id: string; mission: string; kind: 'item' | 'constraint' | 'waiver'; line: string; key?: string; words?: string; itemType?: string; version?: string; via?: string; rev?: number}
 export function wordsDependencies(db: Db, data: Texts, entries: readonly string[]): WordsDependency[] {
   const wanted = new Set(entries);
   const out = new Map<string, WordsDependency>();
-  const events = db.stmt("SELECT mission, event, key, body FROM flow_events WHERE line IN ('requirements', 'plan') ORDER BY revision").all() as {mission: string; event: string; key: string; body: string}[];
+  // every waiver in force by its scope, whoever granted it: a withdrawal ends those of its scope (all, unless scope-only), a new grant replaces its scope's
+  const waivers = new Map<string, {mission: string; line: string; key: string; by: string; ref: string; rev: number}>();
+  // the authorization items whose version in force rests on the entries, withdrawn ones too: the planner applies a waiver granted under one either way
+  const authorizations = new Map<string, string>();
+  const events = db.stmt("SELECT mission, event, key, body, revision FROM flow_events WHERE line IN ('requirements', 'plan') ORDER BY revision").all() as {mission: string; event: string; key: string; body: string; revision: number}[];
   for (const e of events) {
     const b = JSON.parse(data.text(e.body)) as Record<string, any>;
     if (e.event === 'item' || e.event === 'constraint') {
       const id = String(b.line);
       out.delete(id);
+      authorizations.delete(id);
       const words = b.source?.kind === 'words' ? b.source.words : b.words;
-      if (wanted.has(words) && db.stmt("SELECT 1 FROM log WHERE kind = 'basis.withdrawn' AND json_extract(record, '$.line') = ?").get(id) === undefined && (e.event === 'constraint' || db.stmt("SELECT 1 FROM missions WHERE mission = ? AND state = 'closed'").get(e.mission) === undefined)) out.set(id, {id, mission: e.mission, kind: e.event, line: id});
+      const open = e.event === 'constraint' || db.stmt("SELECT 1 FROM missions WHERE mission = ? AND state = 'closed'").get(e.mission) === undefined;
+      if (wanted.has(words) && open && e.event === 'item' && b.type === 'authorization') authorizations.set(id, words);
+      if (wanted.has(words) && db.stmt("SELECT 1 FROM log WHERE kind = 'basis.withdrawn' AND json_extract(record, '$.line') = ?").get(id) === undefined && open) out.set(id, {id, mission: e.mission, kind: e.event, line: id, words, version: String(b.version), rev: Number(e.revision), ...(e.event === 'item' ? {itemType: String(b.type)} : {})});
     } else if (e.event === 'reviews-waiver') {
-      if (b.action === 'withdraw') { for (const [id, d] of out) if (d.kind === 'waiver' && d.mission === e.mission && (b.scopeOnly !== true || d.line === String(b.dplan ?? 'mission'))) out.delete(id); }
-      else {
-        for (const [id, d] of out) if (d.kind === 'waiver' && d.mission === e.mission && d.line === String(b.dplan ?? 'mission')) out.delete(id);
-        if (b.by === 'words' && wanted.has(b.ref)) {
-          const id = `waiver:${e.mission}:${e.key}`;
-          out.set(id, {id, mission: e.mission, kind: 'waiver', line: String(b.dplan ?? 'mission'), key: e.key});
-        }
-      }
+      const scope = String(b.dplan ?? 'mission');
+      for (const [id, w] of waivers) if (w.mission === e.mission && (b.action === 'withdraw' ? b.scopeOnly !== true || w.line === scope : w.line === scope)) waivers.delete(id);
+      if (b.action !== 'withdraw') waivers.set(`waiver:${e.mission}:${e.key}`, {mission: e.mission, line: scope, key: e.key, by: String(b.by), ref: String(b.ref), rev: Number(e.revision)});
     }
   }
+  for (const [id, w] of waivers) {
+    // 4.4 (G7): a waiver rests on the entry on its words, or through the authorization item it was granted under
+    const auth = w.by === 'authority' ? authorizations.get(w.ref) : undefined;
+    if (w.by === 'words' && wanted.has(w.ref)) out.set(id, {id, mission: w.mission, kind: 'waiver', line: w.line, key: w.key, words: w.ref, rev: w.rev});
+    else if (auth !== undefined) out.set(id, {id, mission: w.mission, kind: 'waiver', line: w.line, key: w.key, words: auth, via: w.ref, rev: w.rev});
+  }
   return [...out.values()];
+}
+
+/**
+ * 4.4 (G7): what gives power is accounted for one by one. An authorization item and a waiver must
+ * be named withdrawn or kept, as in 4.3 (Appendix B.3 of the 4.3 design): a waiver for a whole
+ * mission applies to the next plan while any tag of its entry is in force.
+ */
+export function givesPower(d: WordsDependency): boolean {
+  return d.kind === 'waiver' || d.itemType === 'authorization';
+}
+
+/** What a supersession or a re-tag kept, while it still rests on the entry it named (4.4, G7). */
+export interface KeptOnChangedWords {readonly id: string; readonly words: string; readonly how: 'superseded' | 're-tagged'; readonly tags: readonly string[]; readonly by: string; readonly version: string | null}
+
+/** The changed entries of one tags record: the superseded (or confirmed) tags' entries, and the entry itself when it was re-tagged. */
+function changedEntries(r: Extract<ResidentEvent, {kind: 'user.words-tags'}>): Set<string> {
+  return new Set([...r.supersedes, ...(r.confirms ?? [])].map((id) => id.split('#')[0]!).concat(r.authorizedBy !== null ? [r.words] : []));
+}
+
+/**
+ * 4.4 (G7): the dependents a supersession or a re-tag kept, by id, while each still rests on the entry
+ * that changed and is not withdrawn. Reads mark them "rests on words that were superseded". A 4.3
+ * record names nothing it kept, so it marks nothing, as 4.3 did.
+ */
+export function keptOnChangedWords(db: Db, data: Texts): Map<string, KeptOnChangedWords> {
+  const records = residentRecords(db, 'user.words-tags').filter((r) => (r.kept?.length ?? 0) > 0);
+  const out = new Map<string, KeptOnChangedWords>();
+  if (records.length === 0) return out;
+  const deps = new Map(wordsDependencies(db, data, [...new Set(records.flatMap((r) => [...changedEntries(r)]))]).map((d) => [d.id, d]));
+  for (const r of records) {
+    const entries = changedEntries(r);
+    for (const id of r.kept!) {
+      const d = deps.get(id);
+      if (d?.words === undefined || !entries.has(d.words)) continue;
+      const retagged = r.authorizedBy !== null && d.words === r.words;
+      out.set(id, {id, words: d.words, how: retagged ? 're-tagged' : 'superseded', tags: retagged ? [] : [...r.supersedes, ...(r.confirms ?? [])].filter((t) => t.startsWith(`${d.words}#`)), by: retagged ? r.authorizedBy! : r.words, version: d.version ?? null});
+    }
+  }
+  return out;
+}
+
+/** The mark a read prints on a kept dependent. */
+export function keptMark(k: KeptOnChangedWords): string {
+  return k.how === 'superseded' ? `rests on words that were superseded (${k.tags.join(', ')}, by ${k.by})` : `rests on words that were re-tagged (${k.words}, on ${k.by})`;
 }
 
 function event(tx: WriteTx, mission: string, line: string, name: string, key: string, body: unknown): void {
@@ -94,30 +151,79 @@ function event(tx: WriteTx, mission: string, line: string, name: string, key: st
 
 /** Entry-level disposition and tags are one append. Completed proof is never rewritten. */
 export interface AssignTagsOptions {op: string; words: string; tags: readonly string[]; supersedes?: readonly string[]; retag?: string; authorizedBy?: string; withdraw?: readonly string[]; keep?: readonly string[]}
+/** What a tagging wrote (4.4, G7): its tags, and the dependents of the changed entries it kept or withdrew. */
+export interface TagsReport {readonly tags: WordsTag[]; readonly kept: readonly WordsDependency[]; readonly withdrawn: readonly WordsDependency[]; readonly retagged: string | null}
 export function assignTags(memory: Memory, o: AssignTagsOptions): WordsTag[] {
-  return memory.write({op: `words:tags:${o.op}`, payload: o, command: o.retag === undefined ? 'tag' : 'retag'}, (tx) => assignTagsInTx(tx, o));
+  return tagWords(memory, o).tags;
+}
+export function tagWords(memory: Memory, o: AssignTagsOptions): TagsReport {
+  const r = memory.write({op: `words:tags:${o.op}`, payload: o, command: o.retag === undefined ? 'tag' : 'retag'}, (tx) => tagWordsInTx(tx, o)) as TagsReport | WordsTag[];
+  // an operation recorded by 4.3 answered with its tags alone
+  return Array.isArray(r) ? {tags: r, kept: [], withdrawn: [], retagged: null} : r;
 }
 export function assignTagsInTx(tx: WriteTx, o: AssignTagsOptions): WordsTag[] {
+  return tagWordsInTx(tx, o).tags;
+}
+export function tagWordsInTx(tx: WriteTx, o: AssignTagsOptions): TagsReport {
     const entry = wordsEntry(tx, o.words);
     if (entry === null) notAllowed(`no words entry ${o.words}`);
     const before = taggedWords(tx, tx.data);
     const old = before.find((w) => w.words === o.words)!;
-    if (o.retag === undefined && old.tags.length !== 0 && canonicalJson(old.tags.map((t) => ({type: t.type, mission: t.mission, quote: t.quote}))) === canonicalJson(o.tags.map((t) => parseTag(t, old.text))) && (o.supersedes ?? []).length === 0) return [...old.tags];
-    if (o.retag === undefined && old.tags.length !== 0) notAllowed(`${o.words} already has tags; retag requires the user's authorization`);
+    let supersedes = [...new Set(o.supersedes ?? [])];
+    const withdraw = new Set(o.withdraw ?? []), keep = new Set(o.keep ?? []);
+    // 4.4 (G7): an entry that has its tags takes --supersedes later, its tags unchanged (no --tag, or the same tags)
+    const later = o.retag === undefined && old.tags.length !== 0;
+    let repeated: string[] = [];
+    // the earlier records of this entry that recorded a repeated supersession, by the entry superseded: when it was first recorded, and what was kept or withdrawn for it
+    const earlier = new Map<string, {rev: number; accounted: Set<string>; withdrew: Set<string>}>();
+    if (later) {
+      const same = o.tags.length === 0 || canonicalJson(old.tags.map((t) => ({type: t.type, mission: t.mission, quote: t.quote}))) === canonicalJson(o.tags.map((t) => parseTag(t, old.text)));
+      if (!same) notAllowed(`${o.words} already has tags; retag requires the user's authorization`);
+      const records = tagsRecords(tx).filter((x) => x.r.words === o.words);
+      const already = new Set(records.flatMap((x) => x.r.supersedes));
+      // a supersession already recorded is not recorded again; an explicit disposition named with it is still carried out
+      repeated = supersedes.filter((id) => already.has(id));
+      supersedes = supersedes.filter((id) => !already.has(id));
+      if (supersedes.length === 0 && withdraw.size === 0 && keep.size === 0) return {tags: [...old.tags], kept: [], withdrawn: [], retagged: null};
+      for (const id of repeated) {
+        const e = id.split('#')[0]!;
+        const first = records.find((x) => x.r.supersedes.includes(id))!;
+        const info = earlier.get(e) ?? {rev: first.rev, accounted: new Set<string>(), withdrew: new Set<string>()};
+        info.rev = Math.min(info.rev, first.rev);
+        for (const x of records) if ([...x.r.supersedes, ...(x.r.confirms ?? [])].some((t) => t.split('#')[0] === e)) {
+          for (const k of [...(x.r.kept ?? []), ...(x.r.withdrew ?? [])]) info.accounted.add(k);
+          for (const k of x.r.withdrew ?? []) info.withdrew.add(k);
+        }
+        earlier.set(e, info);
+      }
+    }
     if (o.retag !== undefined && (o.authorizedBy === undefined || wordsEntry(tx, o.authorizedBy) === null)) notAllowed('retag requires --words W-n with the user’s authorization');
     if (o.retag !== undefined && !old.tags.some((t) => t.id === o.retag)) notAllowed(`no tag ${o.retag}`);
-    const supersedes = [...new Set(o.supersedes ?? [])];
     for (const id of supersedes) if (!before.some((w) => w.tags.some((t) => t.id === id && t.inForce))) notAllowed(`no tag in force ${id}`);
-    const dependentEntries = [...new Set([...supersedes.map((id) => id.split('#')[0]!), ...(o.retag === undefined ? [] : [o.words])])];
+    const changed = [...new Set([...supersedes.map((id) => id.split('#')[0]!), ...(o.retag === undefined ? [] : [o.words])])];
+    const dependentEntries = [...new Set([...changed, ...repeated.map((id) => id.split('#')[0]!)])];
     const deps = wordsDependencies(tx, tx.data, dependentEntries);
-    const withdraw = new Set(o.withdraw ?? []), keep = new Set(o.keep ?? []);
-    const missing = deps.filter((d) => withdraw.has(d.id) === keep.has(d.id));
+    // what rests on an entry changed by this command; what rests only on a repeated supersession's entry was accounted for when it was recorded
+    const fresh = (d: WordsDependency) => d.words !== undefined && changed.includes(d.words);
+    const prior = (d: WordsDependency) => fresh(d) || d.words === undefined ? undefined : earlier.get(d.words);
+    // ... except what gives power and came to rest on that entry since: it is asked about one by one too
+    const newPower = (d: WordsDependency) => {const p = prior(d); return givesPower(d) && p !== undefined && (d.rev ?? 0) > p.rev && !p.accounted.has(d.id);};
+    // a withdrawal that repeated supersession recorded is done already (an interrupted command retried unchanged)
+    const done = [...withdraw].filter((id) => !deps.some((d) => d.id === id) && [...earlier.values()].some((p) => p.withdrew.has(id))).map((id): WordsDependency => ({id, mission: '', kind: id.startsWith('waiver:') ? 'waiver' : id.startsWith('constraint.') ? 'constraint' : 'item', line: id}));
+    for (const d of done) withdraw.delete(d.id);
+    if (later && supersedes.length === 0 && withdraw.size === 0 && keep.size === 0) return {tags: [...old.tags], kept: [], withdrawn: done, retagged: null};
+    const ask = (d: WordsDependency) => givesPower(d) && (fresh(d) || newPower(d));
+    // 4.4 (G7): a requirement item or a constraint the command does not name is kept; nothing is withdrawn
+    // implicitly. An authorization or a waiver gives power and is still named withdrawn or kept, as in 4.3.
+    const missing = deps.filter((d) => (ask(d) && withdraw.has(d.id) === keep.has(d.id)) || (withdraw.has(d.id) && keep.has(d.id)));
     const unknown = [...withdraw, ...keep].filter((id) => !deps.some((d) => d.id === id));
-    if (missing.length > 0 || unknown.length > 0) throw Object.assign(new Error(`choose --withdraw-items or --keep-items for every dependency: ${deps.map((d) => d.id).join(', ')}${unknown.length ? `; unknown: ${unknown.join(', ')}` : ''}`), {code: 'NOT_ALLOWED', detail: {dependencies: deps}});
-    const parsed = o.tags.map((t) => parseTag(t, old.text));
+    if (missing.length > 0 || unknown.length > 0) throw Object.assign(new Error(`choose --withdraw-items or --keep-items for each authorization and waiver resting on ${dependentEntries.join(', ')}: ${missing.map((d) => d.id).join(', ') || 'none'}${unknown.length ? `; unknown: ${unknown.join(', ')}` : ''}. Requirement items and constraints not named are kept`), {code: 'NOT_ALLOWED', detail: {dependencies: deps, toName: deps.filter(ask).map((d) => d.id)}});
+    const parsed = later ? old.tags.map((t) => ({type: t.type, mission: t.mission, quote: t.quote})) : o.tags.map((t) => parseTag(t, old.text));
     if (parsed.length === 0) notAllowed('at least one --tag is required');
     for (const t of parsed) if (t.mission !== null && tx.stmt('SELECT 1 FROM missions WHERE mission = ?').get(t.mission) === undefined) notAllowed(`no mission ${t.mission}`);
-    const tags: WordsTag[] = o.retag === undefined ? parsed.map((t, i) => ({...t, id: `${o.words}#${i + 1}`})) : old.tags.flatMap((t) => t.id === o.retag ? parsed.map((p, i) => ({...p, id: i === 0 ? t.id : `${o.words}#${old.tags.length + i}`})) : [{id: t.id, type: t.type, mission: t.mission, quote: t.quote}]);
+    const tags: WordsTag[] = later ? old.tags.map((t) => ({id: t.id, type: t.type, mission: t.mission, quote: t.quote})) : o.retag === undefined ? parsed.map((t, i) => ({...t, id: `${o.words}#${i + 1}`})) : old.tags.flatMap((t) => t.id === o.retag ? parsed.map((p, i) => ({...p, id: i === 0 ? t.id : `${o.words}#${old.tags.length + i}`})) : [{id: t.id, type: t.type, mission: t.mission, quote: t.quote}]);
+    // kept: what rests on an entry this command changes and is not withdrawn; on a repeated supersession's entry, only what it names
+    const kept = deps.filter((d) => !withdraw.has(d.id) && (fresh(d) || keep.has(d.id)));
     for (const dep of deps.filter((d) => withdraw.has(d.id))) {
       if (dep.kind === 'waiver') {
         // Scope-specific withdrawal; other active waivers remain in force.
@@ -126,7 +232,8 @@ export function assignTagsInTx(tx: WriteTx, o: AssignTagsOptions): WordsTag[] {
         event(tx, dep.mission, 'plan', 'reviews-waiver', `plan-reviews#${n}`, {check: 'plan-reviews', n, action: 'withdraw', dplan: dep.line === 'mission' ? null : dep.line, by: 'words', ref: o.authorizedBy ?? o.words, reason: `withdrawn with ${dependentEntries.join(', ')}`, scopeOnly: true});
       } else {
         appendRecords(tx, [{kind: 'basis.withdrawn', line: dep.line as BasisLineId}]);
-        event(tx, dep.mission, 'requirements', dep.kind === 'item' ? 'withdrawn' : 'constraint-withdrawn', dep.line, {line: dep.line, reason: `withdrawn with words tags by ${o.authorizedBy ?? o.words}`});
+        // 4.4 (G7): a constraint's withdrawal names the words it was withdrawn on, so `mp read from` reaches it
+        event(tx, dep.mission, 'requirements', dep.kind === 'item' ? 'withdrawn' : 'constraint-withdrawn', dep.line, {line: dep.line, reason: `withdrawn with words tags by ${o.authorizedBy ?? o.words}`, ...(dep.kind === 'constraint' ? {version: dep.version, words: o.authorizedBy ?? o.words} : {})});
         if (dep.kind === 'item') {
           const line = `reqset.${dep.mission}`;
           const baseRows = (tx.stmt("SELECT record FROM log WHERE kind = 'basis.version' ORDER BY rev").all() as {record: string}[]).map((r) => JSON.parse(r.record) as {line: string; version: string});
@@ -138,8 +245,33 @@ export function assignTagsInTx(tx: WriteTx, o: AssignTagsOptions): WordsTag[] {
         }
       }
     }
-    tx.append({kind: 'user.words-tags', words: o.words, tags, supersedes, authorizedBy: o.authorizedBy ?? null});
-    return tags;
+    const withdrewHere = deps.filter((d) => withdraw.has(d.id));
+    const withdrawn = [...withdrewHere, ...done];
+    // a disposition named for a repeated supersession is recorded against it (`confirms`), so reads mark what it keeps
+    const repeatedKept = kept.filter((d) => !fresh(d) && !(prior(d)?.accounted.has(d.id) ?? false));
+    const recordedFor = new Set([...repeatedKept, ...withdrewHere.filter((d) => !fresh(d))].map((d) => d.words));
+    const confirms = repeated.filter((id) => recordedFor.has(id.split('#')[0]!));
+    if (later && supersedes.length === 0 && confirms.length === 0) return {tags: [...old.tags], kept, withdrawn, retagged: null};
+    const keptHere = [...kept.filter(fresh), ...repeatedKept];
+    tx.append({kind: 'user.words-tags', words: o.words, tags, supersedes, authorizedBy: o.authorizedBy ?? null, ...(keptHere.length > 0 ? {kept: keptHere.map((d) => d.id)} : {}), ...(withdrewHere.length > 0 ? {withdrew: withdrewHere.map((d) => d.id)} : {}), ...(confirms.length > 0 ? {confirms} : {})});
+    return {tags, kept, withdrawn, retagged: o.retag !== undefined ? o.words : null};
+}
+
+/** The tags records with their revisions, oldest first. */
+function tagsRecords(db: Db): {rev: number; r: Extract<ResidentEvent, {kind: 'user.words-tags'}>}[] {
+  return (db.stmt("SELECT rev, record FROM log WHERE kind = 'user.words-tags' ORDER BY rev").all() as {rev: number; record: string}[]).map((x) => ({rev: Number(x.rev), r: JSON.parse(x.record) as Extract<ResidentEvent, {kind: 'user.words-tags'}>}));
+}
+
+/** The lines a tagging command prints about what it kept and withdrew (4.4, G7). */
+export function tagsReportLines(r: Pick<TagsReport, 'kept' | 'withdrawn' | 'retagged'>): string[] {
+  const label = (d: WordsDependency) => `${d.id}${d.kind === 'waiver' ? (d.via !== undefined ? ` (waiver under ${d.via})` : ' (waiver)') : d.itemType === 'authorization' ? ' (authorization)' : ''}`;
+  const kept = (how: string, ds: readonly WordsDependency[]) => ds.length === 0 ? [] : [`Kept, resting on words that were ${how} (reads mark them): ${ds.map(label).join(', ')}.`];
+  return [
+    ...kept('superseded', r.kept.filter((d) => d.words !== r.retagged)),
+    ...kept('re-tagged', r.kept.filter((d) => r.retagged != null && d.words === r.retagged)),
+    ...(r.kept.length > 0 ? ['To withdraw one later: mp pm requirement withdraw or mp pm constraint withdraw, on the user\'s words.'] : []),
+    ...(r.withdrawn.length > 0 ? [`Withdrawn: ${r.withdrawn.map(label).join(', ')}.`] : []),
+  ];
 }
 
 export function summarizeWords(memory: Memory, o: {op: string; text: string; covers: readonly string[]}): string {

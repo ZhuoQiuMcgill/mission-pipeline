@@ -1,5 +1,6 @@
 import { requireDriver, liveSecretary, requirePm } from '../memory/resident.ts';
-import { wordsAuthority, assignTagsInTx } from '../memory/words.ts';
+import { wordsAuthority, tagWordsInTx, type TagsReport, type WordsDependency } from '../memory/words.ts';
+import type { WordsTag } from '../memory/events.ts';
 import { constraintApplies, constraintPatternProblem, CONSTRAINT_PATTERN_FORMS, withdrawConstraint } from '../memory/domain/constraints.ts';
 import { refreshDispatchCard } from '../seat/cards/refresh.ts';
 // The PM's dispatch loop and commands (design 4.1 §5.1, §5.4, §6.5, §6.6; decisions 8, 15, 18).
@@ -776,22 +777,24 @@ export function pmStop(ctx: ProcessContext, req: { readonly stop: string; readon
  * words entry W-<n> before anything else. The same text as the latest entry returns that entry
  * (a hook adapter and the PM's own `say` record once).
  */
-export function pmSay(ctx: ProcessContext, text: string, o: { readonly session?: string; readonly at?: number; readonly op?: string; readonly tags?: readonly string[]; readonly supersedes?: readonly string[]; readonly withdraw?: readonly string[]; readonly keep?: readonly string[] } = {}): { readonly words: string; readonly repeated: boolean } {
+export function pmSay(ctx: ProcessContext, text: string, o: { readonly session?: string; readonly at?: number; readonly op?: string; readonly tags?: readonly string[]; readonly supersedes?: readonly string[]; readonly withdraw?: readonly string[]; readonly keep?: readonly string[] } = {}): { readonly words: string; readonly repeated: boolean; readonly kept: readonly WordsDependency[]; readonly withdrawn: readonly WordsDependency[]; readonly retagged: string | null } {
   requirePm(ctx.secretary);
+  // 4.4 (G7): what a supersession kept or withdrew is printed; a response recorded by 4.3 carries neither
+  const report = (t: Partial<TagsReport> | WordsTag[] | undefined): Pick<TagsReport, 'kept' | 'withdrawn' | 'retagged'> => (t === undefined || Array.isArray(t) ? { kept: [], withdrawn: [], retagged: null } : { kept: t.kept ?? [], withdrawn: t.withdrawn ?? [], retagged: t.retagged ?? null });
   const latest = ctx.memory.read((db) => latestUserWords(db, 1)[0] ?? null);
   if (latest !== null && latest.text === sha256(text)) {
     const w = ctx.memory.read((db) => wordsOfMessage(db, latest.message));
     if (w !== null) {
-      if (o.tags?.length) ctx.memory.write({op: `say-tags:${o.op ?? sha256(canonicalJson({words: w.words, tags: o.tags}))}`, payload: o}, (tx) => assignTagsInTx(tx, {op: o.op ?? w.words, words: w.words, tags: o.tags!, supersedes: o.supersedes, withdraw: o.withdraw, keep: o.keep}));
-      return { words: w.words, repeated: true };
+      const t = o.tags?.length ? (ctx.memory.write({op: `say-tags:${o.op ?? sha256(canonicalJson({words: w.words, tags: o.tags}))}`, payload: o}, (tx) => tagWordsInTx(tx, {op: o.op ?? w.words, words: w.words, tags: o.tags!, supersedes: o.supersedes, withdraw: o.withdraw, keep: o.keep})) as TagsReport | WordsTag[]) : undefined;
+      return { words: w.words, repeated: true, ...report(t) };
     }
   }
   const at = o.at ?? ctx.now();
   const message = `say-${sha256(`${at}\n${text}`).slice(0, 24)}`;
   // the session the words were said in: the PM session `mp pm session` recorded last (decision 8), unless named
   const session = o.session ?? ctx.memory.read((db) => latestPmSession(db)) ?? 'pm';
-  const r = pmWrite(ctx, 'say', `say:${message}`, { message, text: sha256(text) }, (tx) => {const w = recordWords(tx, { message, session, at, text }); if (o.tags?.length) assignTagsInTx(tx, {op: o.op ?? message, words: w.words, tags: o.tags, supersedes: o.supersedes, withdraw: o.withdraw, keep: o.keep}); return w;});
-  return { words: r.words, repeated: r.repeated };
+  const r = pmWrite(ctx, 'say', `say:${message}`, { message, text: sha256(text) }, (tx) => {const w = recordWords(tx, { message, session, at, text }); const t = o.tags?.length ? tagWordsInTx(tx, {op: o.op ?? message, words: w.words, tags: o.tags, supersedes: o.supersedes, withdraw: o.withdraw, keep: o.keep}) : undefined; return {...w, ...report(t)};});
+  return { words: r.words, repeated: r.repeated, ...report(r as Partial<TagsReport>) };
 }
 
 /** The PM session `mp pm session` recorded last (its operation id, decision 8), or null. */
