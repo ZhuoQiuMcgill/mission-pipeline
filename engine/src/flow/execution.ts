@@ -61,6 +61,7 @@ import {
   type FlowCtx,
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
+import { constructorClaims, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
 import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
@@ -2290,6 +2291,11 @@ function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{
   });
 }
 
+/** 4.4 (F3): the plan's data formats and storage lists, for the Constructor and Reviewer cards of its tasks (absent when empty). */
+function planData(plan: DetailedPlanDoc): { dataFormats?: string[]; storage?: string[] } {
+  return { ...((plan.dataFormats ?? []).length > 0 ? { dataFormats: [...plan.dataFormats!] } : {}), ...((plan.storage ?? []).length > 0 ? { storage: [...plan.storage!] } : {}) };
+}
+
 /**
  * Verbatim decisions that bear on the task: decision items, and the answers carried out on its
  * escalations under its current card (an answer on an earlier card, or on an escalation closed as
@@ -2383,6 +2389,12 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // the Constructor's worktree is created at this commit when it is dispatched (§5.3); the write paths are the task's write scope
   const workspace = { snapshot: snap.commit, writablePaths: [...t.writeScope] };
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  // 4.4 (F3): a later attempt gets its past: the review of the attempt it carries on, and that attempt's own hand-back (optional)
+  const pastReview = prev === null ? undefined : line.all<ReviewBody>('review').filter((r) => r.body.k === prev.k).at(-1);
+  const past = prev === null ? [] : [
+    pastReview === undefined ? null : await previousReviewReport(ctx, { review: pastReview.body.task, attempt: prev.k }),
+    await previousHandBack(ctx, { constructor: prev.task, attempt: prev.k }),
+  ].filter((x) => x !== null);
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: await decisionQuotes(ctx, t), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(repairs.length > 0 ? { repairs } : {}),
@@ -2396,6 +2408,8 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     verificationCommands: t.verificationCommands.map((c) => ({ ...c })),
     interfaces: { implements: interfaceDefs(plan, t.implements), calls: interfaceDefs(plan, t.calls) },
     ...(t.exclusive.length > 0 ? { exclusive: [...t.exclusive] } : {}),
+    ...planData(plan),
+    ...(past.length > 0 ? { materials: past } : {}),
   };
   await commit(ctx, `flow:dispatched:${ctx.mission}:${task}`, {
     events: [ev(ctx, taskLine(t.id), 'dispatched', task, recorded ?? { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, prerequisites: [...(snap.products ?? deps)], predecessor: prev?.object ?? null, ...(snap.origin !== undefined ? { origin: snap.origin } : {}) } satisfies DispatchedBody)],
@@ -2514,6 +2528,8 @@ async function submitReviewer(
   const rw = await reworkAt(ctx, t, line, k);
   const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
+  const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
@@ -2535,6 +2551,8 @@ async function submitReviewer(
     ...(previousReview !== null ? { previousReview } : {}),
     ...(integration !== undefined ? { integration } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...planData(plan),
+    ...(claims !== null ? { materials: [claims] } : {}),
     binding: {
       judgment: `j.${task}`,
       bases: c.putList(currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')))),

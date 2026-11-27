@@ -14,9 +14,10 @@ Your card (`mp seat <id> card`); *required* marks a required input.
   - the requirement items the plan rests on *(required)*;
   - the user's goals beyond this round (do not plan them); the explorations that have not stood (no task may depend on them); conclusions of settled explorations to plan from;
   - the git history and the past run durations;
-  - on a revision: the previous detailed plan in full (a must-read material, written as the fields of your hand-back) and why it came back (mechanical check failures, feasibility findings, instructions, the PM plan elements that changed).
-- **Feasibility review**: the detailed plan version and its content *(required)*; the past run data *(required)*; the findings of an earlier review this revision answers.
-- **Repair**: the repair *(required)*: its kind, the user's reason verbatim and its words entry, and what it is about; the plan in effect in full, with earlier repairs' additions *(required)*; the PM plan elements an added task may trace to; the tasks with accepted work, each with its product, attempt and changed paths; the tasks with no accepted product, whose card a repair may change; who changed the paths the repair is about; on a return, the mechanical check failures to fix.
+  - on a revision: the previous detailed plan in full (a must-read material, written as the fields of your hand-back) and why it came back (mechanical check failures, feasibility findings, instructions, the PM plan elements that changed); after a feasibility return, that review's report (an optional material).
+- **Feasibility review**: the detailed plan version and its content *(required)*, each task with its standards, requirement items, files to read and interfaces; the past run data *(required)*; the findings of an earlier review this revision answers, and its report (an optional material).
+- **Repair**: the repair *(required)*: its kind, the user's reason verbatim and its words entry, and what it is about; the plan in effect in full, with earlier repairs' additions *(required)*; the PM plan elements an added task may trace to; the tasks with accepted work, each with its product, attempt, commit and changed paths; the tasks with no accepted product, whose card a repair may change; who changed the paths the repair is about; on a return, the mechanical check failures to fix.
+- Accepted products are the plan's state: a repair Architect may read one with `mp seat <id> checkout --product <task>`.
 - All: the project constraints in force (an instruction is labelled "Instruction (follow it; not a proof input)": follow it), the relevant decisions, materials.
 - Decomposition, revision and repair cards also carry the planning rules: how to cut tasks, the mechanical checks your plan must pass, the project's local commands and full suite, and what a Reviewer can see.
 
@@ -59,7 +60,7 @@ On a revision, fix exactly what the card says came back, and carry everything el
 
 ## Your commands
 - `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`, `mp seat <id> checkout`.
-- Repair only: `mp seat <id> owners <path>...`: which accepted products of this mission changed each path.
+- Repair only: `mp seat <id> owners <path>...`: which accepted products of this mission changed each path; `mp seat <id> checkout --product <task>`: a read-only directory holding that task's accepted product, shared like any checkout.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 
 ## Upstream and downstream

@@ -172,8 +172,15 @@ function constructorProblems(card: ConstructorCard, r: ConstructorResult): strin
 
 const FILE_POINTER = /^file:([^\s:]+)(?::(\d+)(?:-(\d+))?)?$/;
 
-/** Problems of one evidence pointer (empty: valid). */
+/**
+ * Problems of one evidence pointer (empty: valid). The one place a pointer is admitted: 4.4 (F3, E-4)
+ * gives the Reviewer the Constructor's hand-back as a material to read, and it is not evidence for a
+ * standard (F10 adds the `report` check, the only standard it may support, here).
+ */
 export function pointerProblems(card: ReviewerCard, pointer: string, ctx: ResultContext): string[] {
+  if (pointer === 'report' || pointer.startsWith('report:') || pointer.startsWith('material:')) {
+    return [`${pointer}: the Constructor's claims and other materials are read, not cited: cite a run (evidence:<id>) or a file of the candidate (file:<path>:<line>)`];
+  }
   if (pointer.startsWith('evidence:')) {
     const id = pointer.slice('evidence:'.length);
     if (card.verificationRuns.some((v) => v.evidence === id) || (ctx.runs ?? []).some((r) => r.run === id)) return [];

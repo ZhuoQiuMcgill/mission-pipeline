@@ -146,6 +146,8 @@ export const ArchitectFeasibilityCardSchema = z.object({
   /** Findings of an earlier review this plan answers (the Architect revised once). */
   earlierFindings: z.array(z.string()),
   binding: Binding,
+  /** 4.4 (F3): on a revision, the previous feasibility report (optional reading). Absent before 4.4. */
+  materials: z.array(Material).optional(),
 });
 export type ArchitectFeasibilityCard = z.infer<typeof ArchitectFeasibilityCardSchema>;
 
@@ -292,12 +294,24 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
       'Tasks',
       p.tasks.map(
         (t) =>
-          `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing (reads and runs only)'}; depends on ${t.dependsOn.join(', ') || 'nothing'}; exclusive ${t.exclusive.join(', ') || 'none'}; estimate ${t.estimate.durationMs} ms / ${t.estimate.costMicros} micro-dollars (${t.estimate.basis}); verification ${t.verificationCommands.map((v) => v.command).join(' && ') || 'none'} (${prov(t.provenance)})`,
+          `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing (reads and runs only)'}; depends on ${t.dependsOn.join(', ') || 'nothing'}; exclusive ${t.exclusive.join(', ') || 'none'}; estimate ${t.estimate.durationMs} ms / ${t.estimate.costMicros} micro-dollars (${t.estimate.basis}); verification ${t.verificationCommands.map((v) => v.command).join(' && ') || 'none'} (${prov(t.provenance)})` +
+          taskDetail(t),
       ),
     ) +
     list('Risks the Architect listed', p.risks) +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms`)) +
-    list('Findings of the earlier review this revision answers', c.earlierFindings)
+    list('Findings of the earlier review this revision answers', c.earlierFindings) +
+    renderMaterials(c.materials ?? [])
+  );
+}
+
+/** 4.4 (F3): what the feasibility review judges of a task besides its line: its standards, requirement items, files to read and interface links. */
+function taskDetail(t: z.infer<typeof DetailedTask>): string {
+  return (
+    `\n  standards: ${t.standards.map((s) => `[${s.id}] ${s.text}`).join('; ')}` +
+    `\n  requirement items: ${t.requirementItems.join(', ') || 'none'}` +
+    `\n  files to read: ${t.readableFiles.join(', ') || 'none'}` +
+    `\n  implements: ${t.implements.join(', ') || 'none'}; calls: ${t.calls.join(', ') || 'none'}`
   );
 }
 
@@ -434,8 +448,8 @@ export const ArchitectRepairCardSchema = z.object({
   elements: z.array(z.object({ id: z.string(), kind: z.string(), text: z.string() })),
   /** The plan in effect's tasks (with earlier repairs' additions), in full. */
   plan: DetailedPlanDoc,
-  /** The tasks with an accepted product: what a repair may reopen. */
-  accepted: z.array(z.object({ task: z.string().min(1), product: z.string().min(1), attempt: z.number().int().positive(), changedPaths: z.array(z.string()) })),
+  /** The tasks with an accepted product: what a repair may reopen. 4.4 (F3): with the product's commit (`mp seat <id> checkout --product <task>`; absent on cards queued before 4.4). */
+  accepted: z.array(z.object({ task: z.string().min(1), product: z.string().min(1), attempt: z.number().int().positive(), changedPaths: z.array(z.string()), commit: z.string().min(1).optional() })),
   /** Which accepted products changed the paths the repair is about. */
   owners: z.array(z.object({ path: z.string(), owners: z.array(z.object({ task: z.string(), product: z.string(), attempt: z.number().int().positive(), current: z.boolean() })) })),
   history: z.object({ gitLog: z.string(), runs: RunHistory }),
@@ -466,7 +480,7 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
     `## The plan in effect\nDetailed plan ${c.dplan} (PM plan ${c.pmPlan}), ${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'}${(c.materials ?? []).length > 0 ? `, in full in material ${(c.materials ?? [])[0]!.id}` : ''}.\n\n` +
     list('Tasks', p.tasks.map((t) => `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing'}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t.provenance)})`)) +
     list('PM plan elements an added task may trace to', c.elements.map((e) => `[${e.id}] (${e.kind}) ${e.text}`)) +
-    list('Accepted work a repair may reopen (task: product, attempt, paths it changed)', c.accepted.map((a) => `${a.task}: ${a.product} (attempt ${a.attempt}): ${a.changedPaths.join(', ') || 'no path'}`)) +
+    list('Accepted work a repair may reopen (task: product, attempt, commit, paths it changed; read one with checkout --product <task>)', c.accepted.map((a) => `${a.task}: ${a.product} (attempt ${a.attempt}${a.commit !== undefined ? `, commit ${a.commit}` : ''}): ${a.changedPaths.join(', ') || 'no path'}`)) +
     list('Tasks with no accepted product (a repair may change their card)', p.tasks.filter((t) => !c.accepted.some((a) => a.task === t.id)).map((t) => t.id)) +
     list('Who changed the paths the repair is about', c.owners.map((o) => `${o.path}: ${o.owners.map((x) => `${x.task} (${x.product}, attempt ${x.attempt}${x.current ? '' : ', an earlier version'})`).join('; ') || 'no accepted product'}`)) +
     '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. A task with an accepted product keeps its card. A task with no accepted product (not on the accepted list) may get a changed card under "change": the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs; it then starts a new attempt and carries its earlier work on. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect").\n\n' +

@@ -35,7 +35,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
-import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
+import type { BaseRecord, EvidenceRecord, ObjectVersionRecord } from '../common/records.ts';
 import type { Collection } from '../git/workspace.ts';
 import { continuationCheck, sampleRunId, type ContinuationRequest } from '../evaluator/index.ts';
 import {
@@ -44,6 +44,7 @@ import {
   recordContinuationCheck,
   dispatchInfo,
   dispatchLeaf,
+  factById,
   flowEventExists,
   flowEvents,
   LedgerError,
@@ -184,9 +185,10 @@ const COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
  * checkout the seats reading that commit share, `tmp/checkouts/<commit>/` (built once, atomically);
  * the path is printed. This dispatch holds it while in flight.
  */
-export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promise<{ readonly path: string; readonly commit: string | null }> {
+export async function seatCheckout(ctx: ProcessContext, dispatch: string, o: { readonly product?: string } = {}): Promise<{ readonly path: string; readonly commit: string | null; readonly product?: string }> {
   const v = dispatchView(ctx, dispatch);
   allows(ctx, v, 'checkout');
+  if (o.product !== undefined) return productCheckout(ctx, v, o.product);
   const snap = cardSnapshot(v);
   if (snap === null) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to read`);
   if (!COMMIT.test(snap)) return { path: join(ctx.projectDir, ...snap.split('/')), commit: null };
@@ -194,6 +196,24 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promi
   inFlight(v, 'a checkout');
   const c = await holdSharedCheckout(ctx, v.info, snap);
   return { path: c.path, commit: c.commit };
+}
+
+/**
+ * `mp seat <id> checkout --product <task>` (4.4, F3): a repair Architect reads an accepted product it
+ * may reopen, the plan's state, at its commit: the same shared read-only checkout, held by this
+ * dispatch and removed when no dispatch in flight holds it (4.1.2).
+ */
+async function productCheckout(ctx: ProcessContext, v: DispatchView, task: string): Promise<{ readonly path: string; readonly commit: string; readonly product: string }> {
+  const accepted = (v.card['accepted'] as Array<{ task: string; product: string; commit?: string }> | undefined) ?? null;
+  if (v.card.seat !== 'architect-repair' || accepted === null) throw new ProcessError('NOT_ALLOWED', `--product is for a repair Architect's card, which lists the accepted products it may reopen; this is a ${v.card.seat} card`);
+  const a = accepted.find((x) => x.task === task);
+  if (a === undefined) throw new ProcessError('NOT_ALLOWED', `task ${task} has no accepted product on the card (accepted: ${accepted.map((x) => x.task).join(', ') || 'none'})`);
+  // a card queued before 4.4 names no commit: the product's recorded one
+  const commit = a.commit ?? ((ctx.memory.read((db) => factById(db, 'object.version', a.product))?.record as ObjectVersionRecord | undefined)?.source?.commit ?? null);
+  if (commit === null || !COMMIT.test(commit)) throw new ProcessError('NOT_ALLOWED', `product ${a.product} of task ${task} has no recorded commit to read`);
+  inFlight(v, 'a checkout');
+  const c = await holdSharedCheckout(ctx, v.info, commit);
+  return { path: c.path, commit: c.commit, product: a.product };
 }
 
 /** What a rerun of a card's declared command runs on: the dispatch, the command, the card's commit (the checks of `mp seat <id> rerun`). */
