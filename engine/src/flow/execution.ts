@@ -1800,7 +1800,7 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     return 'none';
   }
   // 4.4 (F14): the product is re-bound now; an open notice about it closes
-  await closeKeptNotices(ctx, t.id, line, () => true, 're-bound');
+  await closeKeptNotices(ctx, t.id, line, () => true);
   // every prerequisite is re-bound to the plan in effect, or proven, before this version is (stable mode only)
   for (const x of mapped) if (await awaitsPlan(ctx, eff, labels, x)) return 'held';
   // a re-review of this version that a Reviewer is judging now ends first (its hand-back is preserved)
@@ -1935,10 +1935,11 @@ function openKeptNotices(line: Line): Array<{ readonly key: string; readonly bod
 }
 
 /** Close the open notices of a task that `which` selects: the lifecycle event and the notice's acknowledgement in one write. */
-async function closeKeptNotices(ctx: FlowCtx, task: string, line: Line, which: (e: { readonly key: string; readonly body: KeptNoticeBody }) => boolean, why: string): Promise<void> {
+async function closeKeptNotices(ctx: FlowCtx, task: string, line: Line, which: (e: { readonly key: string; readonly body: KeptNoticeBody }) => boolean): Promise<void> {
   for (const e of openKeptNotices(line).filter(which)) {
+    // the same body whoever closes it (re-bound, replaced, superseded), so two passes that close it at once agree
     await commit(ctx, `flow:${KEPT_NOTICE_CLOSED}:${ctx.mission}:task:${idPart(task)}:${e.key}`, {
-      events: [ev(ctx, taskLine(task), KEPT_NOTICE_CLOSED, e.key, { why })],
+      events: [ev(ctx, taskLine(task), KEPT_NOTICE_CLOSED, e.key, e.body)],
       records: [{ kind: 'notice.delivery', notice: noticeAlertId({ mission: ctx.mission, category: KEPT_CATEGORY, key: e.key }), state: 'acknowledged' }],
     });
   }
@@ -1954,7 +1955,7 @@ async function keptNotice(ctx: FlowCtx, t: DetailedTask, line: Line, n: { readon
   const same = line.all<KeptNoticeBody>(KEPT_NOTICE).filter((e) => e.key === n.key || e.key.startsWith(`${n.key}:`));
   const key = same.find((e) => line.one(KEPT_NOTICE_CLOSED, e.key) === null)?.key ?? (same.length === 0 ? n.key : `${n.key}:${same.length + 1}`);
   const replaced = openKeptNotices(line).some((e) => e.key !== key && e.body.product === n.product && e.body.dplan === n.dplan);
-  await closeKeptNotices(ctx, t.id, line, (e) => e.key !== key, 'superseded by a later notice');
+  await closeKeptNotices(ctx, t.id, line, (e) => e.key !== key);
   if (line.one(KEPT_NOTICE, key) === null) {
     await commit(ctx, `flow:${KEPT_NOTICE}:${ctx.mission}:task:${idPart(t.id)}:${key}`, { events: [ev(ctx, taskLine(t.id), KEPT_NOTICE, key, { product: n.product, dplan: n.dplan } satisfies KeptNoticeBody)] });
   }
@@ -1969,7 +1970,7 @@ async function keptSweep(ctx: FlowCtx, eff: EffectiveBody): Promise<void> {
   for (const task of new Set(raised.filter((e) => !closed.has(`${e.line}\n${e.key}`)).map((e) => e.line.slice('task:'.length)))) {
     const line = await readLine(ctx, task);
     const product = line.abandoned ? null : currentAcceptance(line, line.k)?.product ?? null;
-    await closeKeptNotices(ctx, task, line, (e) => e.body.dplan !== eff.dplan || e.body.product !== product, 'superseded');
+    await closeKeptNotices(ctx, task, line, (e) => e.body.dplan !== eff.dplan || e.body.product !== product);
   }
 }
 

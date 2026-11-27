@@ -228,29 +228,31 @@ export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; r
   const g = requireSecretary(ctx.memory, ctx.secretary);
   touchSecretary(ctx.memory, ctx.secretary);
   const r = await pmNext(ctx, {markDelivered: false});
-  // the revision the report is built from: what lands later is the next pass's
-  const built = Number(ctx.memory.head());
-  const since = o.since ?? cursor(ctx.memory, secCursorName(g.generation))?.rev ?? null;
-  const full = o.all === true || since === null;
-  const deliveredAfter = (id: string): boolean => o.since != null && Number((ctx.memory.stmt("SELECT rev FROM notice_deliveries WHERE notice = ? AND state = 'delivered'").get(id) as {rev: number} | undefined)?.rev ?? 0) > o.since;
-  const notices = full ? r.notices : r.notices.filter((n) => n.state === 'undelivered' || deliveredAfter(n.id));
-  const ch = channel(ctx);
-  const revs = replyRevisions(ctx.memory);
-  const fresh = (rev: number): boolean => rev <= built && (full || rev > since!);
-  const replies = ch.replies.filter((x) => fresh(revs.get(x.id) ?? 0));
-  const applied = allFlow(ctx).filter((e) => e.line === 'secretary' && e.event === 'applied' && (e.body.by === 'pm' || e.body.by === 'user'));
-  const decisions = applied.filter((e) => fresh(e.revision));
-  const held = full ? r.held : r.held.filter((h) => h.closedMission !== true);
-  const earlier: EarlierCounts = full ? {notices: 0, replies: 0, decisions: 0, closedMissionSteps: 0} : {
-    notices: r.notices.filter((n) => !notices.includes(n) && !onlyInforms(n)).length,
-    replies: ch.replies.filter((x) => (revs.get(x.id) ?? 0) <= since!).length,
-    decisions: applied.filter((e) => e.revision <= since!).length,
-    closedMissionSteps: r.held.length - held.length,
-  };
-  const inbox = pmInbox(ctx);
-  const out: SecretaryNext = {...r, notices, held, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => inbox.some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...ch, replies, decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: built, since, all: o.all === true, earlier};
-  markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
-  ctx.memory.write({}, (tx) => setCursor(tx, {cursor: secCursorName(g.generation), rev: built}));
+  // one read: the revision the report is built from and everything it prints (what lands later is the next pass's)
+  const out = ctx.memory.read((): SecretaryNext => {
+    const built = Number(ctx.memory.head());
+    const since = o.since ?? cursor(ctx.memory, secCursorName(g.generation))?.rev ?? null;
+    const full = o.all === true || since === null;
+    const deliveredAfter = (id: string): boolean => o.since != null && Number((ctx.memory.stmt("SELECT rev FROM notice_deliveries WHERE notice = ? AND state = 'delivered'").get(id) as {rev: number} | undefined)?.rev ?? 0) > o.since;
+    const notices = full ? r.notices : r.notices.filter((n) => n.state === 'undelivered' || deliveredAfter(n.id));
+    const ch = channel(ctx);
+    const revs = replyRevisions(ctx.memory);
+    const fresh = (rev: number): boolean => rev <= built && (full || rev > since!);
+    const replies = ch.replies.filter((x) => fresh(revs.get(x.id) ?? 0));
+    const applied = allFlow(ctx).filter((e) => e.line === 'secretary' && e.event === 'applied' && (e.body.by === 'pm' || e.body.by === 'user'));
+    const decisions = applied.filter((e) => fresh(e.revision));
+    const held = full ? r.held : r.held.filter((h) => h.closedMission !== true);
+    const earlier: EarlierCounts = full ? {notices: 0, replies: 0, decisions: 0, closedMissionSteps: 0} : {
+      notices: r.notices.filter((n) => !notices.includes(n) && !onlyInforms(n)).length,
+      replies: ch.replies.filter((x) => (revs.get(x.id) ?? 0) <= since!).length,
+      decisions: applied.filter((e) => e.revision <= since!).length,
+      closedMissionSteps: r.held.length - held.length,
+    };
+    const inbox = pmInbox(ctx);
+    return {...r, notices, held, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => inbox.some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...ch, replies, decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: built, since, all: o.all === true, earlier};
+  });
+  markNotices(ctx.memory, out.notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
+  ctx.memory.write({}, (tx) => setCursor(tx, {cursor: secCursorName(g.generation), rev: out.revision}));
   return out;
 }
 
@@ -296,7 +298,7 @@ export async function secWait(ctx: ProcessContext, o: {since: number; timeout?: 
   const deadline = Date.now() + (o.timeout ?? 300) * 1000;
   let nextCheck = 0;
   // 4.4 (F8): the PM replies recorded after --since, not every reply again
-  const replies = () => {const revs = replyRevisions(ctx.memory); return channel(ctx).replies.filter((x) => (revs.get(x.id) ?? 0) > o.since);};
+  const replies = () => ctx.memory.read(() => {const revs = replyRevisions(ctx.memory); return channel(ctx).replies.filter((x) => (revs.get(x.id) ?? 0) > o.since);});
   while (true) {
     requireSecretary(ctx.memory, ctx.secretary);
     if (Date.now() >= nextCheck) {await secReconcile(ctx); nextCheck = Date.now() + (o.periodicMs ?? 30_000);}

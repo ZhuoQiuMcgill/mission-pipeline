@@ -66,6 +66,7 @@ import {
   latestUserWords,
   recordWords,
   flowEvents,
+  flowMissions,
   flowEventExists,
   type Db,
   type DispatchInfo,
@@ -260,22 +261,20 @@ function conflicts(a: TaskSpecDoc, b: TaskSpecDoc): boolean {
  */
 function constraintGapHolds(db: Db, data: { text(h: string): string }): HeldStep[] {
   const out: HeldStep[] = [];
-  for (const { mission } of db.stmt("SELECT DISTINCT mission FROM flow_events WHERE line = ? AND event = 'plan-constraint-gap'").all(PLAN_LINE) as Array<{ mission: string }>) {
-    const m = mission as MissionId;
-    if (missionClosedIn(db, m)) continue;
+  // the missions the flows run, read by the (mission, line, event) index; a closed mission's production is held by its close
+  const closed = new Set((db.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
+  for (const m of flowMissions(db)) {
+    if (closed.has(m)) continue;
+    if (flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap', limit: 1 }).length === 0) continue;
     const eff = flowEvents(db, { mission: m, line: PLAN_LINE, event: 'effective', limit: 10_000 }).filter((e) => !e.key.includes('#')).at(-1);
     if (eff === undefined || (JSON.parse(data.text(eff.body)) as { mode?: string }).mode !== 'stable') continue;
-    const closed = new Set(flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap-closed', limit: 10_000 }).map((e) => e.key));
-    for (const g of flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap', limit: 10_000 }).filter((e) => !closed.has(e.key))) {
+    const closedGaps = new Set(flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap-closed', limit: 10_000 }).map((e) => e.key));
+    for (const g of flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap', limit: 10_000 }).filter((e) => !closedGaps.has(e.key))) {
       const gap = JSON.parse(data.text(g.body)) as { plan: string; uncovered: Array<{ line: string; version: string }> };
       out.push({ step: gap.plan, seat: 'production', kind: 'plan-constraint-gap', mission: m, purpose: `stable production of ${m}`, why: `stable production waits: plan ${gap.plan} has current deciding passes that do not cover the object constraint(s) ${gap.uncovered.map((c) => `${c.line} (${c.version})`).join(', ')}; the PM takes an exit of WI-34 with the user's words`, wi: 'WI-34' });
     }
   }
   return out;
-}
-
-function missionClosedIn(db: Db, mission: MissionId): boolean {
-  return db.stmt("SELECT 1 FROM missions WHERE mission = ? AND state = 'closed'").get(mission) !== undefined;
 }
 
 /** The ready and held steps, the dispatches in flight and what waits on the user, in one read. */
@@ -642,13 +641,15 @@ export interface Renewed {
 /**
  * 4.4 (F14): what a renewal covers: the named mission, or every mission that is not closed. A run counts for
  * the missions of the versions its judgments decide and of its candidate; one whose mission cannot be told
- * is covered.
+ * is covered unless a mission is named.
  */
 function renewCovers(ctx: ProcessContext, mission: string | null): { readonly missions: readonly string[]; readonly covers: (missions: readonly (string | null)[]) => boolean } {
-  const closed = new Set((ctx.memory.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
-  const missions = mission !== null ? [mission] : (ctx.memory.stmt("SELECT mission FROM missions WHERE state = 'open' ORDER BY mission").all() as Array<{ mission: string }>).map((r) => r.mission);
+  // one read of the missions' states
+  const states = ctx.memory.stmt('SELECT mission, state FROM missions ORDER BY mission').all() as Array<{ mission: string; state: string }>;
+  const closed = new Set(states.filter((r) => r.state === 'closed').map((r) => r.mission));
+  const missions = mission !== null ? [mission] : states.filter((r) => r.state === 'open').map((r) => r.mission);
   const inScope = (m: string): boolean => (mission !== null ? m === mission : !closed.has(m));
-  return { missions, covers: (ms) => { const known = ms.filter((m): m is string => m !== null && m !== 'project'); return known.length === 0 || known.some(inScope); } };
+  return { missions, covers: (ms) => { const known = ms.filter((m): m is string => m !== null && m !== 'project'); return known.length === 0 ? mission === null : known.some(inScope); } };
 }
 
 /** `mp pm renew [--mission <m>]` (§6.5): rerun the declared commands of the affected runs on clean checkouts; equal outputs renew the evidence. */

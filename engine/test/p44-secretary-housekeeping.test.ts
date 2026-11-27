@@ -3,6 +3,7 @@
 // to run the session first.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { hashJson } from '../src/common/hash.ts';
 import { liveSecretary } from '../src/memory/resident.ts';
 import { project43, command43, done43, live43, escalation43 } from './p43-fixtures.ts';
 
@@ -40,6 +41,19 @@ test('F19: mp pm secretary stop --idle retires a generation only when no mission
     assert.match(r.stopHint, /nothing was in flight/);
     assert.equal(liveSecretary(p.ctx.memory), null);
     assert.equal((await command43(p, ['pm', 'next'])).code, 0, 'the 4.2 loop is available again');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('F19 compatibility: without --idle the stop writes the payload 4.3 wrote, so a 4.3 operation retried under 4.4 replays', async () => {
+  const p = project43();
+  try {
+    await live43(p);
+    await done43(p, ['pm', 'secretary', 'stop', '--gone', '--op', 'stop-43']);
+    const receipt = JSON.parse((p.ctx.memory.stmt("SELECT record FROM log WHERE kind = 'op.receipt' AND json_extract(record, '$.op') = 'secretary:stop:stop-43'").get() as { record: string }).record) as { payloadHash: string };
+    assert.equal(receipt.payloadHash, hashJson({ op: 'stop-43', gone: true }));
+    assert.equal((await command43(p, ['pm', 'secretary', 'stop', '--gone', '--op', 'stop-43'])).replayed, true);
   } finally {
     p.cleanup();
   }

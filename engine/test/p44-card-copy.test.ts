@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { sha256 } from '../src/common/hash.ts';
 import { beginAction, endAction } from '../src/cli/project.ts';
-import { pmAction } from '../src/memory/index.ts';
+import { claimDispatch, dispatchLeaf, pmAction } from '../src/memory/index.ts';
+import type { MissionId } from '../src/common/ids.ts';
 import { openProcess } from '../src/process/context.ts';
 import { pmDispatch, pmNext, storedCard } from '../src/process/pm.ts';
 import { ENV_A, processProject, startAddMission } from './process-fixtures.ts';
@@ -55,6 +56,32 @@ test('F17: a concurrent claim with the same operation id reads the stored respon
     assert.equal(second.cardSha256, first.cardSha256);
   } finally {
     other.memory.close();
+    p.cleanup();
+  }
+});
+
+test('F17 compatibility: a claim retried across the upgrade gets its card from the response 4.3 stored', async () => {
+  const p = processProject();
+  try {
+    const step = await readyCalibrator(p);
+    const write = p.ctx.memory.write.bind(p.ctx.memory);
+    let once = false;
+    (p.ctx.memory as { write: typeof write }).write = ((req: Parameters<typeof write>[0], fn: Parameters<typeof write>[1]) => {
+      if (!once && typeof req.op === 'string' && req.op.startsWith('dispatch:')) {
+        once = true;
+        // what 4.3 committed under this operation id and payload: the response carries the card's text
+        write({ op: req.op, payload: req.payload, command: 'dispatch', filler: null }, (tx) => {
+          claimDispatch(tx, { dispatch: 'D-1', task: step, seat: 'calibrator-1', card: 'the card as 4.3 rendered it' });
+          return { dispatch: 'D-1', card: 'the card as 4.3 rendered it', cardLeaf: dispatchLeaf('m1' as MissionId, 'D-1', 'card'), worktree: null };
+        });
+      }
+      return write(req, fn);
+    }) as typeof write;
+    const d = pmDispatch(p.ctx, step);
+    assert.equal(d.dispatch, 'D-1', 'the same operation, no conflict');
+    assert.equal(d.card, 'the card as 4.3 rendered it');
+    assert.equal(d.cardSha256, sha256(d.card));
+  } finally {
     p.cleanup();
   }
 });
