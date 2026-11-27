@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MissionId, ContentHash } from '../common/ids.ts';
-import { canonicalJson } from '../common/hash.ts';
+import { canonicalJson, sha256 } from '../common/hash.ts';
 import { activeStops, appendRecords, cursor, dispatchInfo, wordsEntry, flowEvents, listDispatches, setCursor, type Db } from '../memory/index.ts';
 import { generations, liveSecretary, notAllowed, requireSecretary, requirePm, touchSecretary, writeGeneration } from '../memory/resident.ts';
 import { residentRecords, wordsAuthority } from '../memory/words.ts';
@@ -315,7 +315,7 @@ export function secCard(ctx: ProcessContext, id: string): Dispatched {
     const claimed = allFlow(ctx).find((e) => e.line === `dispatch:${existing.dispatch}` && e.event === 'claimed' && e.key === 'spec');
     if (claimed?.body.generation !== g.generation) notAllowed(`${existing.dispatch} belongs to an earlier generation; release it --ended before claiming the current round`);
     const v = seatCard(ctx, existing.dispatch);
-    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: existing.cardLeaf ?? '', worktree: null, files: handBackFiles(existing.dispatch), prompt: ''};
+    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: v.leaf, cardSha256: sha256(v.text), worktree: null, files: handBackFiles(existing.dispatch), prompt: ''};
   }
   return pmDispatch(ctx, task, {filledBy: g.filler});
 }

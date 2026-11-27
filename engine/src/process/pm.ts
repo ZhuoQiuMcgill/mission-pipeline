@@ -431,6 +431,8 @@ export interface Dispatched {
   /** The card as the seat receives it (`mp seat <id> card` prints the same). */
   readonly card: string;
   readonly cardLeaf: string;
+  /** 4.4 (F17): the sha256 of the card's text; what is stored of a claim is its leaf and this hash. */
+  readonly cardSha256: string;
   /** A Constructor's worktree, relative to the project folder. */
   readonly worktree: string | null;
   /** Where the seat writes its hand-back (decision 7). */
@@ -463,6 +465,24 @@ function claimOnceMore<T>(claim: () => T): T {
   }
 }
 
+/** What a claim's write returns and the memory stores (a concurrent claim with the same op reads it back); 4.3 stored the card's text. */
+export interface ClaimResponse {
+  readonly dispatch: string;
+  readonly cardLeaf: string;
+  readonly cardSha256?: string;
+  readonly card?: string;
+  readonly worktree: string | null;
+}
+
+/** 4.4 (F17): the card a claim's response names, read from its leaf and checked against its hash; a 4.3 response carries the text. */
+export function storedCard(ctx: ProcessContext, out: ClaimResponse): string {
+  if (typeof out.card === 'string') return out.card;
+  const r = ctx.memory.readLeaf(out.cardLeaf);
+  if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `the card of dispatch ${out.dispatch} (${out.cardLeaf}) is missing; the PM follows WI-30`, { wi: 'WI-30' });
+  if (r.status === 'edited' || (out.cardSha256 !== undefined && r.sha256 !== out.cardSha256)) throw new ProcessError('LEAF_EDITED', `the card of dispatch ${out.dispatch} (${out.cardLeaf}) was edited after it was recorded; the PM follows WI-30`, { wi: 'WI-30' });
+  return r.text;
+}
+
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
 function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Dispatched {
   settleLabels(ctx);
@@ -475,7 +495,7 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
   const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
   const queued = spec;
-  const claim = (): { dispatch: string; card: string; cardLeaf: string; worktree: string | null } => pmWrite(
+  const claim = (): ClaimResponse => pmWrite(
     ctx,
     'dispatch',
     `dispatch:${step}:${prior + 1}`,
@@ -504,11 +524,13 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       for (const r of spec.exclusive ?? []) acquireLease(tx, { resource: r, dispatch });
       // which step and which spec this dispatch took over (§3.2 item 1: the run chain)
       appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: refreshed, task: step, lineage: spec.lineage, dispatches: prior, generation: ctx.secretary })) as ContentHash }]);
-      return { dispatch, card, cardLeaf: claimed.card?.leaf ?? dispatchLeaf(task.mission, dispatch, 'card'), worktree: claimed.worktree };
+      // 4.4 (F17): the stored response names the card's leaf and hash; its text is in the leaf only
+      return { dispatch, cardLeaf: claimed.card?.leaf ?? dispatchLeaf(task.mission, dispatch, 'card'), cardSha256: claimed.card?.sha256 ?? sha256(card), worktree: claimed.worktree };
     },
     filler,
   );
   const out = claimOnceMore(claim);
+  const card = storedCard(ctx, out);
   mkdirSync(join(ctx.memory.paths.tmp, out.dispatch), { recursive: true });
   let worktree: string | null = null;
   if (entry.exportsProduct === true) {
@@ -524,8 +546,9 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     seat: entry.seat,
     kind: spec.card.seat,
     mission: task.mission as MissionId,
-    card: out.card,
+    card,
     cardLeaf: out.cardLeaf,
+    cardSha256: out.cardSha256 ?? sha256(card),
     worktree,
     files: handBackFiles(out.dispatch),
     prompt: `You are the ${title} of Mission Pipeline. Your card: \`mp seat ${out.dispatch} card\`. Use only the \`mp seat ${out.dispatch}\` commands listed there. Finish with \`mp seat ${out.dispatch} handback\`.`,

@@ -4,7 +4,7 @@ import { flagBool, flagList, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { refused, usage } from '../errors.ts';
 import { INSTALLED_PLUGIN } from '../init.ts';
-import { parseFiller } from '../../process/pm.ts';
+import { parseFiller, storedCard, type Dispatched } from '../../process/pm.ts';
 import { seatRead } from '../../process/seat.ts';
 import { claimSecretary, generations, notAllowed, requirePm, startSecretary, writeGeneration } from '../../memory/resident.ts';
 import { assignTags, summarizeWords, taggedWords } from '../../memory/words.ts';
@@ -69,6 +69,14 @@ const wait: Command = {
 const card: Command = {
   group: 'sec', name: ['card'], summary: 'claim the current decision round and read its card', usage: 'mp sec card <escalation>', flags: {},
   async run(c, a) {const r = secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok(r.card, r);},
+  // 4.4 (F17): the recorded result names the card's leaf and hash, not its text; a retry reads the leaf
+  recorded: (r) => {const {card: _text, ...rest} = r.json as Dispatched; return {exitCode: r.exitCode, text: `card ${rest.cardLeaf} (sha256 ${rest.cardSha256})`, json: rest};},
+  replay: (c, prior) => {
+    const j = prior.json as Partial<Dispatched> | null;
+    if (j === null || typeof j.card === 'string' || typeof j.cardLeaf !== 'string' || typeof j.dispatch !== 'string') return prior;
+    const text = storedCard(P(c).ctx, {dispatch: j.dispatch, cardLeaf: j.cardLeaf, worktree: null, ...(typeof j.cardSha256 === 'string' ? {cardSha256: j.cardSha256} : {})});
+    return ok(text, {...j, card: text});
+  },
 };
 const read: Command = {
   group: 'sec', name: ['read'], summary: 'record a material read against this round’s decision dispatch', usage: 'mp sec read <escalation> <material> [--page n]', flags: {page: 'string'},

@@ -172,7 +172,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
         const prior = beginAction(project.ctx.memory, { ...action, filler: project.ctx.filler });
         if (prior !== null) {
           replayed = true;
-          result = prior;
+          result = cmd.replay !== undefined ? cmd.replay(c, prior) : prior;
         } else {
           try {
             result = await cmd.run(c, args);
@@ -181,7 +181,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
             endAction(project.ctx.memory, action, { exitCode: err.exitCode, text: `Error (${err.code}): ${err.message}`, json: { error: { code: err.code, message: err.message, wi: err.wi } } }, true);
             throw err;
           }
-          endAction(project.ctx.memory, action, result, result.exitCode !== 0);
+          endAction(project.ctx.memory, action, cmd.recorded !== undefined ? cmd.recorded(result) : result, result.exitCode !== 0);
         }
       }
     } else {
