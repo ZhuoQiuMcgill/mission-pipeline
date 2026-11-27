@@ -104,7 +104,14 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       const stored = eff === undefined || eff.dplan !== card.dplan ? undefined : object(eff.dplan);
       if (eff === undefined || stored === undefined) break;
       const plan = amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
-      const lineOf = (id: string) => events.filter((e) => e.line === `task:${id}`);
+      const lines = new Map<string, FlowEvent[]>();
+      for (const e of events) {
+        if (!e.line.startsWith('task:')) continue;
+        const l = lines.get(e.line);
+        if (l === undefined) lines.set(e.line, [e]);
+        else l.push(e);
+      }
+      const lineOf = (id: string): FlowEvent[] => lines.get(`task:${id}`) ?? [];
       const queued = new Set(card.accepted.map((a) => a.product));
       card.constraints = planningConstraints(constraints, mission);
       card.plan = plan;
