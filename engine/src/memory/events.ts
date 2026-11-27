@@ -41,12 +41,14 @@ export type DispatchHandbackOutcome = 'accepted' | 'after-release' | 'after-stop
 
 export type ResidentEvent =
   | ({ readonly kind: 'secretary.generation' } & import('./resident.ts').SecretaryGeneration)
-  | { readonly kind: 'pm.note'; readonly id: string; readonly text: string; readonly words: string | null; readonly acknowledged: boolean }
+  /** 4.4 (G8): `replaces` names the note this one replaces; a 4.3 note has none. */
+  | { readonly kind: 'pm.note'; readonly id: string; readonly text: string; readonly words: string | null; readonly acknowledged: boolean; readonly replaces?: string }
   | { readonly kind: 'pm.question'; readonly id: string; readonly text: string }
   | { readonly kind: 'sec.reply'; readonly id: string; readonly text: string; readonly generation: string }
   | { readonly kind: 'sec.question'; readonly id: string; readonly text: string; readonly about: string | null; readonly generation: string }
   | { readonly kind: 'pm.reply'; readonly id: string; readonly text: string; readonly words: string | null }
-  | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null }
+  /** 4.4 (G7): `kept` lists the dependents of the changed entries that this write kept (named or by default); a 4.3 record has none. */
+  | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null; readonly kept?: readonly string[] }
   | { readonly kind: 'words.summary'; readonly id: string; readonly text: string; readonly covers: readonly { readonly id: string; readonly fingerprint: string }[] };
 
 export interface WordsTag {

@@ -83,6 +83,7 @@ For `accept-risk` and reopen decisions, see Reviews and reworks.
 ## Notes and questions from the PM
 
 `mp sec next` shows notes until `mp sec ack-note <id>`; acknowledge after taking the recorded instruction into account.
+A note the PM replaced leaves that list; its replacement is a new note in its place (`mp read notes --all` shows both).
 Answer a recorded progress question with `mp sec reply <id> "<text>"`; its state becomes answered and the reply reaches the PM inbox.
 For an operational question without an escalation, record `mp sec ask-pm "<question>" [--about <notice or item id>]`.
 The PM answers `mp pm reply <id> "<text>" [--words W-n]`; `mp sec next` and `mp sec wait` show the reply and its words reference.

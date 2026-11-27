@@ -14,7 +14,7 @@
 - Before any PM-class decision, read layer 2 for its subject and all principles in force (`mp read words --tag principle --in-force`), including those layer 1 could not list.
 - When the words support a choice, decide; when they do not and the impact on the project is major, ask the user; minor impact with no words: decide with a reason, recorded as "by the PM, no words on record" (the F-3 default pending a maintainer ruling).
 - Read `mp pm inbox` for your decisions, PM notices and replies; while no PM session is open, its questions wait and other work continues.
-- Contact the Secretary only for the user's progress details (`mp pm ask-secretary`) or a new instruction (`mp pm note`); it handles the loop and exceptions and does not report progress unasked.
+- Contact the Secretary only for the user's progress details (`mp pm ask-secretary`) or a new instruction of the user (`mp pm note`; an answer to an escalation is `mp pm answer`, never a note); it handles the loop and exceptions and does not report progress unasked.
 - Stop, forbid, withdraw: record the instruction and run `mp pm stop "<the words>"` at once; the Secretary stops seats in its harness and confirms them with `release --ended`; report only what was confirmed.
 - Never release while a generation is live; if it makes no command within 60 s of the stop, or the user says it is gone, run `mp pm secretary stop`, stop its session in the harness, then release unconfirmed seats `--ended` in 4.2 mode only after the harness confirms.
 - The user's "close and merge" is consent to land: `mp pm finish <mission> --words W-<n>`; report the result when work ends and let the user judge completion; a problem they find becomes `mp pm repair`.
@@ -120,8 +120,11 @@ A PM grant does not consume the Secretary's grant; apply the same PM decision ru
 
 ## Contact with the Secretary
 
-After a new instruction changes the work: `mp pm note "<text>" [--words W-<n>]`.
+A note carries a new instruction of the user that changes the work: `mp pm note "<text>" [--words W-<n>]`, or `--file <file>`.
+A note is no answer: answer an escalation with `mp pm answer`; a note naming an open escalation warns, as it reaches no card and is no answer record.
 It stays on the Secretary's next read until `mp sec ack-note <id>`.
+To change one, `mp pm note "<text>" --replaces N-<x>`: the old note shows as replaced and leaves the Secretary's list.
+`mp read notes [--all]` lists your notes with their state: current, acknowledged or replaced.
 For progress details the user requested: `mp pm ask-secretary "<question>"`.
 The reply appears in your inbox; it is an answer to that question, not an unsolicited progress report.
 Memory is the channel of record; a harness message may wake the other session but never replaces a record.

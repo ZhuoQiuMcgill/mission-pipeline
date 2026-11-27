@@ -8,7 +8,7 @@ import { parseFiller } from '../../process/pm.ts';
 import { seatRead } from '../../process/seat.ts';
 import { claimSecretary, generations, notAllowed, requirePm, startSecretary, writeGeneration } from '../../memory/resident.ts';
 import { assignTags, summarizeWords, taggedWords } from '../../memory/words.ts';
-import { pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary } from '../../process/secretary.ts';
+import { escalationsNamedIn, pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary } from '../../process/secretary.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
 import { renderNext, PM_COMMANDS } from './pm.ts';
 
@@ -79,7 +79,21 @@ const askPm: Command = {group: 'sec', name: ['ask-pm'], summary: 'ask the PM an 
 const pmReplyCommand: Command = {group: 'pm', name: ['reply'], summary: 'answer a Secretary question', usage: 'mp pm reply <SQ-n> "<text>" [--words W-n]', flags: {words: 'string'}, async run(c, a) {const id = positional(a, 0, 'question'); pmReply(P(c).ctx, {op: op(c), id, text: a.positionals.slice(1).join(' '), words: flagStr(a, 'words')}); return ok(`${id} answered; the Secretary sees it in next/wait.`, {id});}};
 const ack: Command = {group: 'sec', name: ['ack-note'], summary: 'acknowledge a PM instruction note', usage: 'mp sec ack-note <N-n>', flags: {}, async run(c, a) {const id = positional(a, 0, 'note'); secAckNote(P(c).ctx, {op: op(c), id}); return ok(`${id} acknowledged.`, {id});}};
 
-const note: Command = {group: 'pm', name: ['note'], summary: 'record an instruction note to the Secretary', usage: 'mp pm note "<text>" [--words W-n]', flags: {words: 'string'}, async run(c, a) {const id = pmNote(P(c).ctx, {op: op(c), text: a.positionals.join(' '), words: flagStr(a, 'words')}); return ok(`Note ${id} recorded.`, {id});}};
+const note: Command = {
+  group: 'pm', name: ['note'], summary: 'record a new instruction of the user as a note to the Secretary (an answer to an escalation is mp pm answer); --replaces takes an earlier note off the Secretary\'s list',
+  usage: 'mp pm note "<text>" | mp pm note --file <file>   [--words W-n] [--replaces N-x]', flags: {words: 'string', replaces: 'string', file: 'string'},
+  identity: (a) => ({positionals: a.positionals, flags: a.flags, file: typeof a.flags['file'] === 'string' && existsSync(String(a.flags['file'])) ? readFileSync(String(a.flags['file']), 'utf8') : null}),
+  async run(c, a) {
+    const p = P(c); const file = flagStr(a, 'file'), replaces = flagStr(a, 'replaces');
+    if (file !== null && a.positionals.length > 0) throw usage('give the note as text or with --file, not both');
+    const text = file === null ? a.positionals.join(' ') : readFileSync(file, 'utf8');
+    const id = pmNote(p.ctx, {op: op(c), text, words: flagStr(a, 'words'), replaces});
+    // 4.4 (G8): a note that names an open escalation warns; it is still recorded
+    const named = escalationsNamedIn(p.ctx.memory, text);
+    const warnings = named.map((e) => `Warning: this note names the open escalation ${e.mission}/${e.escalation}. An answer in a note reaches no card and is not an answer record: answer it with mp pm answer ${e.mission} ${e.escalation} --option <option> --by pm|user.`);
+    return ok([`Note ${id} recorded${replaces !== null ? `; it replaces ${replaces}, which the Secretary no longer sees as current` : ''}.`, ...warnings].join('\n'), {id, replaces, escalations: named, warnings});
+  },
+};
 const question: Command = {group: 'pm', name: ['ask-secretary'], summary: 'ask for progress details on the user’s request', usage: 'mp pm ask-secretary "<question>"', flags: {}, async run(c, a) {const id = pmQuestion(P(c).ctx, {op: op(c), text: a.positionals.join(' ')}); return ok(`Question ${id} recorded.`, {id});}};
 const inbox: Command = {
   group: 'pm', name: ['inbox'], summary: 'pending PM decisions, notices and Secretary replies', usage: 'mp pm inbox [--asked-user <item>] [--ack <item>]', flags: {'asked-user': 'string', ack: 'string'},
