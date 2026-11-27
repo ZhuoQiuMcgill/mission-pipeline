@@ -1,7 +1,9 @@
 import { requireDriver, liveSecretary, requirePm } from '../memory/resident.ts';
 import { wordsAuthority, assignTagsInTx } from '../memory/words.ts';
 import { constraintApplies, constraintPatternProblem, CONSTRAINT_PATTERN_FORMS, withdrawConstraint } from '../memory/domain/constraints.ts';
-import { refreshDispatchCard } from '../seat/cards/refresh.ts';
+import { refreshDispatchCard, STARTS_CHANGED } from '../seat/cards/refresh.ts';
+import { acceptedProduct, lineAcceptance } from '../flow/execution.ts';
+import { taskLine } from '../flow/plandoc.ts';
 // The PM's dispatch loop and commands (design 4.1 §5.1, §5.4, §6.5, §6.6; decisions 8, 15, 18).
 //
 //   pmNext      one bounded label batch (A2), the landing recovery (A4), worktrees of finished
@@ -79,7 +81,7 @@ import { constraintsForTask } from '../seat/cards/dynamic.ts';
 import { recordRepair } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
 import { answerEscalation, answerByPm, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
-import { flowCtx, missionClosed } from '../flow/context.ts';
+import { eventsOf, flowCtx, missionClosed } from '../flow/context.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import { pendingTasks } from '../flow/exploration/machine.ts';
 import { pmAmendAttempts, pmRerunAttempt, type AttemptsAmended, type AttemptsRerun } from './explorationAttempts.ts';
@@ -294,7 +296,7 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
         held.push({ ...base, why: `waits for ${busy.map((r) => `${r} (leased to ${leased.get(r)})`).join(', ')}`, wi: 'WI-28' });
         continue;
       }
-      const dispatches = listDispatches(db, { task: q.task, limit: 1000 }).length;
+      const dispatches = dispatchCount(db, q.task);
       candidates.push({ spec, step: { ...base, parallel: true, priority: spec.priority, dispatches } });
     }
     candidates.sort((a, b) => b.step.priority - a.step.priority);
@@ -436,14 +438,15 @@ function claimOnceMore<T>(claim: () => T): T {
 }
 
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
-function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Dispatched {
+function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null; readonly starts?: ReadonlyMap<string, boolean> } = {}): Dispatched {
   settleLabels(ctx);
   const filler = parseFiller(o.filledBy);
   const task = ctx.memory.read((db) => db.stmt('SELECT task, card, state, mission FROM tasks WHERE task = ?').get(step) as { task: string; card: string; state: string; mission: string } | undefined);
   if (task === undefined) throw new ProcessError('NOT_READY', `no step ${step} (mp pm next lists the ready steps)`);
   let spec = specOf(ctx, task.card);
   const entry = seatCardEntry(spec.card.seat);
-  const prior = ctx.memory.read((db) => listDispatches(db, { task: step, limit: 1000 }).length);
+  // 4.4 (F5): every claim of the step, uncapped (an unstarted release costs nothing, so a step can be claimed past any page)
+  const prior = ctx.memory.read((db) => dispatchCount(db, step));
   // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
   const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
   const queued = spec;
@@ -460,7 +463,15 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
       const after = heldByPredecessors(tx, tx.data, spec);
       if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
-      spec = refreshDispatchCard(tx, tx.data, spec);
+      // 4.4 (F3, F5): the recorded hand-backs fill in what a card queued by 4.3 lacks; a repair card's unpinned starts as checked before this write
+      spec = refreshDispatchCard(tx, tx.data, spec, {
+        handBack: (t) => taskStatus(tx, tx.data, t)?.handBack ?? null,
+        leaf: (path) => {
+          const r = ctx.memory.readLeaf(path);
+          return r !== null && r.status === 'ok' ? r.text : null;
+        },
+        ...(o.starts !== undefined ? { starts: o.starts } : {}),
+      });
       if (spec.card.seat === 'secretary' && liveSecretary(tx) !== null) spec = {...spec, card: {...spec.card, classifications: ['detail', 'needs-pm']}};
       // an exploration's step names the snapshot in force, taken again first when nothing of it ran yet and the branch moved
       spec = claimExplorationStep(tx, spec, head);
@@ -475,7 +486,8 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
       for (const r of spec.exclusive ?? []) acquireLease(tx, { resource: r, dispatch });
       // which step and which spec this dispatch took over (§3.2 item 1: the run chain)
-      appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: refreshed, task: step, lineage: spec.lineage, dispatches: prior, generation: ctx.secretary })) as ContentHash }]);
+      // 4.4 (F5): `servedReceipts`: this claim's card records a served receipt, so its release may be judged unstarted (absent: a 4.3 claim, released as 4.3 counted it)
+      appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: refreshed, task: step, lineage: spec.lineage, dispatches: prior, generation: ctx.secretary, servedReceipts: true })) as ContentHash }]);
       return { dispatch, card, cardLeaf: claimed.card?.leaf ?? dispatchLeaf(task.mission, dispatch, 'card'), worktree: claimed.worktree };
     },
     filler,
@@ -502,6 +514,44 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     files: handBackFiles(out.dispatch),
     prompt: `You are the ${title} of Mission Pipeline. Your card: \`mp seat ${out.dispatch} card\`. Use only the \`mp seat ${out.dispatch}\` commands listed there. Finish with \`mp seat ${out.dispatch} handback\`.`,
   };
+}
+
+/**
+ * 4.4 (F5, p3-3): the starts of a queued repair step's unpinned accepted products, checked by the flow's
+ * own resolver (acceptedProduct: git) before the claim's write. Undefined for any other step.
+ */
+async function repairStarts(ctx: ProcessContext, step: string): Promise<ReadonlyMap<string, boolean> | undefined> {
+  const t = ctx.memory.read((db) => taskInfo(db, step));
+  if (t === null || t.state !== 'queued' || specOf(ctx, t.card).card.seat !== 'architect-repair') return undefined;
+  const fctx = flowCtx(ctx.ports(), t.mission);
+  const pie = await planInEffect(fctx);
+  const out = new Map<string, boolean>();
+  for (const task of pie?.plan.tasks ?? []) {
+    const sel = lineAcceptance(await eventsOf(fctx, taskLine(task.id)));
+    if (sel.product === null || sel.pinned) continue;
+    try {
+      out.set(sel.product, (await acceptedProduct(fctx, task.id)) === sel.product);
+    } catch {
+      // a start that cannot be checked now is not taken (as the queue-time builder leaves it out)
+      out.set(sel.product, false);
+    }
+  }
+  return out;
+}
+
+/**
+ * `mp pm dispatch` as the CLI runs it (4.4, F5): for a repair step, the unpinned starts are checked
+ * before the claim, and checked again when the claim finds the accepted work changed meanwhile.
+ */
+export async function pmDispatchChecked(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Promise<Dispatched> {
+  for (let tries = 0; ; tries++) {
+    const starts = await repairStarts(ctx, step);
+    try {
+      return pmDispatch(ctx, step, { ...o, ...(starts !== undefined ? { starts } : {}) });
+    } catch (e) {
+      if (tries >= 2 || !(e instanceof ProcessError) || (e.detail as Record<string, unknown> | null)?.[STARTS_CHANGED] !== true) throw e;
+    }
+  }
 }
 
 // ---------------------------------------------------------------- mp pm release
@@ -531,11 +581,21 @@ export const UNSTARTED_ROW_NOTICE = 3;
 
 /**
  * 4.4 (F5): a dispatch that had not started. Its dispatch line holds its claim and nothing else: no
- * served card, no material read, no run, no checkout, no refused hand-back (any trace counts as a
- * start). A Constructor's worktree is checked apart (worktreeClean).
+ * served card, no material read, no run (a foreground run records its start when it is admitted), no
+ * checkout, no refused hand-back (any trace counts as a start). A claim written before 4.4 records no
+ * served receipt for its card, so its release counts as 4.3 counted it. One read of the line. A
+ * Constructor's worktree is checked apart (worktreeClean).
  */
-function untouched(db: Db, d: Pick<DispatchInfo, 'mission' | 'dispatch'>): boolean {
-  return flowEvents(db, { mission: d.mission, line: DISPATCH_LINE(d.dispatch), limit: 10_000 }).every((e) => e.event === 'claimed');
+function untouched(db: Db, data: { text(h: string): string }, d: Pick<DispatchInfo, 'mission' | 'dispatch'>): boolean {
+  const events = flowEvents(db, { mission: d.mission, line: DISPATCH_LINE(d.dispatch), limit: 10_000 });
+  const claim = events.find((e) => e.event === 'claimed' && e.key === 'spec');
+  if (claim === undefined || (JSON.parse(data.text(claim.body)) as { servedReceipts?: unknown }).servedReceipts !== true) return false;
+  return events.every((e) => e.event === 'claimed');
+}
+
+/** How many dispatches claimed a step, uncapped (the claim's ordinal: its operation id). */
+function dispatchCount(db: Db, task: string): number {
+  return Number((db.stmt('SELECT COUNT(*) AS n FROM dispatches WHERE task = ?').get(task) as { n: number }).n);
 }
 
 /** A Constructor's worktree with nothing in it but its checkout (no change, no untracked or ignored file); one not there is clean, one git cannot read is not. */
@@ -550,14 +610,18 @@ function worktreeClean(ctx: ProcessContext, dispatch: string): boolean {
   }
 }
 
-/** How many of a step's dispatches, newest first, were released unstarted in a row. */
-function unstartedRow(db: Db, d: Pick<DispatchInfo, 'mission' | 'task'>): string[] {
+/** A step's dispatches released unstarted in a row, newest first: read newest first and uncapped, until one that is not. */
+function unstartedRow(db: Db, d: Pick<DispatchInfo, 'task'>): string[] {
   const row: string[] = [];
-  for (const x of listDispatches(db, { task: d.task, limit: 1000 }).sort((a, b) => b.claimedRevision - a.claimedRevision)) {
-    if (!flowEventExists(db, { mission: x.mission, line: DISPATCH_LINE(x.dispatch), event: UNSTARTED_RELEASE, key: 'release' })) break;
-    row.push(x.dispatch);
+  for (let before = Number.MAX_SAFE_INTEGER; ; ) {
+    const page = db.stmt('SELECT dispatch, mission, claimed_rev FROM dispatches WHERE task = ? AND claimed_rev < ? ORDER BY claimed_rev DESC LIMIT 100').all(d.task, before) as Array<{ dispatch: string; mission: MissionId; claimed_rev: number }>;
+    for (const x of page) {
+      if (!flowEventExists(db, { mission: x.mission, line: DISPATCH_LINE(x.dispatch), event: UNSTARTED_RELEASE, key: 'release' })) return row;
+      row.push(x.dispatch);
+    }
+    if (page.length < 100) return row;
+    before = Number(page.at(-1)!.claimed_rev);
   }
-  return row;
 }
 
 /** `mp pm release <id> --ended | --abandoned` (§5.4, WI-28). */
@@ -588,7 +652,7 @@ async function driver_pmRelease(ctx: ProcessContext, dispatch: string, how: 'end
       }
       // 4.4 (F5): a dispatch that had not started costs nothing: its release is counted apart, on its
       // dispatch line, and the step is ready again whatever the loop says; a row of them raises a notice
-      if (clean && untouched(tx, cur)) {
+      if (clean && untouched(tx, tx.data, cur)) {
         appendRecords(tx, [{ kind: 'flow.event', mission: cur.mission, line: DISPATCH_LINE(dispatch), event: UNSTARTED_RELEASE, key: 'release', body: tx.data.put(canonicalJson({ dispatch, how })) as ContentHash }]);
         const rel = releaseDispatch(tx, { dispatch, how, requeue: true });
         const row = unstartedRow(tx, cur);

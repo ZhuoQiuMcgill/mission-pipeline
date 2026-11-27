@@ -8,9 +8,11 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { lineAcceptance, ownersOfPaths, productAttempt, taskCardHash, taskLineage } from '../../flow/execution.ts';
+import { attemptPast, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage } from '../../flow/execution.ts';
 import { acceptedEntry } from '../../flow/repair.ts';
+import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attemptOfPlan, claimsMaterial, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
 import { repairPlanMaterial } from './architect.ts';
+import type { MaterialRef } from './common.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
@@ -42,7 +44,20 @@ function pages<T extends { revision: number }>(read: (after: number) => readonly
   for (;;) { const rows = read(after); if (rows.length === 0) return out; out.push(...rows); after = rows.at(-1)!.revision; }
 }
 
-export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc): TaskSpecDoc {
+/**
+ * What a claim gives the refresh besides the memory (process/pm.ts, in the claim's write): the readers
+ * of the recorded hand-backs (4.4, F3: a material a card queued by 4.3 lacks is filled in from them), and
+ * the starts of a repair card's unpinned accepted products, checked by the flow's own resolver before
+ * the write (F5, p3-3: absent when the caller could not check them).
+ */
+export interface ClaimInputs extends Partial<HandBackReaders> {
+  readonly starts?: ReadonlyMap<string, boolean>;
+}
+
+/** 4.4 (F5): the refusal detail of a claim whose repair card found an unpinned accepted product its caller did not check: check again and claim again. */
+export const STARTS_CHANGED = 'starts-changed';
+
+export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, o: ClaimInputs = {}): TaskSpecDoc {
   const card = structuredClone(spec.card) as DispatchCard;
   // Exploration definition inputs stay fixed. Its project constraints (§9.5) and the materials of the
   // explorations planned before it are selected below. Blind cards exclude intent (§4.3).
@@ -77,6 +92,8 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
   const items = resolveItems(ix, events);
   const constraints = resolveConstraints(ix, constraintEvents);
   const object = (id: string) => factById(db, 'object.version', id)?.record as ObjectVersionRecord | undefined;
+  // the start resolver's rule that needs no git (delivery/candidate.ts startHolds): a version with no recorded prerequisite starts where it should
+  const noRecordedPrerequisites = (id: string): boolean => { const r = object(id); return r !== undefined && data.getList(r.prerequisites).length === 0; };
   // what the explorations planned before an exploration handed on, as they stand now (flow/exploration/predecessors.ts: the author must read them; never on a blind card)
   const predecessors = (x: string, mustRead: boolean) => predecessorMaterials(predecessorsFrom(events, (h) => data.text(h), x), { get: (h) => data.text(h), put: (d) => data.put(d) }, mustRead);
   // The task's card in force: its latest spec. A plan that keeps the card writes no newer spec, so the
@@ -94,31 +111,51 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
     cardHash = (e.body as { hash: string }).hash;
     break;
   }
+  const lines = new Map<string, FlowEvent[]>();
+  for (const e of events) {
+    if (!e.line.startsWith('task:')) continue;
+    const l = lines.get(e.line);
+    if (l === undefined) lines.set(e.line, [e]);
+    else l.push(e);
+  }
+  const lineOf = (id: string): FlowEvent[] => lines.get(`task:${id}`) ?? [];
+  // 4.4 (F3): a material the card lacks (it was queued by 4.3, or its hand-back was not readable then), from the recorded hand-backs
+  const put = (d: string): string => data.put(d);
+  const readers = o.handBack !== undefined && o.leaf !== undefined ? { handBack: o.handBack, leaf: o.leaf } : null;
+  const lacks = (materials: readonly MaterialRef[] | undefined, id: string): boolean => readers !== null && !(materials ?? []).some((m) => m.id === id);
+  const plus = (materials: MaterialRef[] | undefined, m: MaterialRef | null): MaterialRef[] | undefined => (m === null ? materials : [...(materials ?? []), m]);
+  const feasibility = (dplan: string): MaterialRef | null => {
+    const r = readers === null ? null : returnedFeasibilityOf(events, attemptOfPlan(events, dplan));
+    return r === null ? null : feasibilityReportMaterial(put, sourceAt(readers!, r.review), r);
+  };
   switch (card.seat) {
     case 'architect-repair': {
       // 4.4 (F5, #53, #68): rebuilt from the planning inputs in force at the claim, by the queue-time
       // builder's own derivations: the constraints, the plan in effect with the repairs decided since, the
-      // accepted work (with its commits) and the owners of the paths the repair is about. A new plan in
-      // effect is the flow's: it cancels this step and starts the repair's next attempt (flow/repair.ts).
+      // accepted work (with its commits) and the owners of the paths the repair is about.
       const eff = planInEffect(events);
-      const stored = eff === undefined || eff.dplan !== card.dplan ? undefined : object(eff.dplan);
-      if (eff === undefined || stored === undefined) break;
+      if (eff === undefined) break;
+      // a new plan in effect is the flow's (it cancels this step and starts the repair's next attempt): as a
+      // plan-review card whose inputs changed, the claim is refused and the flow's next pass rebuilds the step
+      if (eff.dplan !== card.dplan) throw new ProcessError('NOT_READY', `Repair step ${spec.task} was queued on ${card.dplan}, and ${eff.dplan} took effect since; run mp pm next to rebuild the step.`);
+      const stored = object(eff.dplan);
+      if (stored === undefined) break;
       const plan = amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
-      const lines = new Map<string, FlowEvent[]>();
-      for (const e of events) {
-        if (!e.line.startsWith('task:')) continue;
-        const l = lines.get(e.line);
-        if (l === undefined) lines.set(e.line, [e]);
-        else l.push(e);
-      }
-      const lineOf = (id: string): FlowEvent[] => lines.get(`task:${id}`) ?? [];
       const queued = new Set(card.accepted.map((a) => a.product));
       card.constraints = planningConstraints(constraints, mission);
       card.plan = plan;
       card.accepted = plan.tasks.flatMap((t) => {
         const sel = lineAcceptance(lineOf(t.id));
-        // a start without a pin is checked by the queue-time builder (git): one accepted since then is not added here
-        if (sel.product === null || (!sel.pinned && !queued.has(sel.product))) return [];
+        if (sel.product === null) return [];
+        // an unpinned start is the flow's resolver's to check (git): checked before this write (o.starts), or by
+        // the queue-time builder (on the card); without either, the resolver's own rule for a start with no
+        // recorded prerequisite (it holds); a product its caller did not check sends the claim back to check it
+        if (!sel.pinned) {
+          const checked = o.starts?.get(sel.product);
+          const holds = checked ?? (queued.has(sel.product) ? true : o.starts !== undefined ? undefined : noRecordedPrerequisites(sel.product));
+          if (holds === undefined) throw new ProcessError('NOT_READY', `the accepted work of ${t.id} changed while the claim of ${spec.task} checked it; claim it again`, { detail: { [STARTS_CHANGED]: true } });
+          if (!holds) return [];
+        }
         return [acceptedEntry(t.id, lineOf(t.id), sel.product, object(sel.product)?.source?.commit)];
       });
       const about = card.repair.about?.startsWith('task ') === true ? card.accepted.find((a) => a.task === card.repair.about!.slice('task '.length))?.changedPaths ?? [] : [];
@@ -172,6 +209,15 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       card.constraints = applicable.map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
       card.decisionQuotes = taskDecisionQuotes(items, events, task, applicable, taskReferencePlan(events));
       card.requirementItems = taskRequirementItems(items, task);
+      // 4.4 (F3): the data formats and storage of the plan in effect, which the card is built under
+      delete card.dataFormats;
+      delete card.storage;
+      Object.assign(card, planData(plan));
+      // 4.4 (F3): a later attempt's past, when the card lacks it
+      const k = (lineOf(task.id).find((e) => e.event === 'dispatched' && e.key === spec.task)?.body as { k?: number } | undefined)?.k;
+      const was = k === undefined ? null : attemptPast(lineOf(task.id), k);
+      if (was !== null && was.review !== null && lacks(card.materials, PREVIOUS_REVIEW_MATERIAL)) card.materials = plus(card.materials, previousReviewMaterial(put, sourceAt(readers!, was.review), { review: was.review, attempt: was.attempt }));
+      if (was !== null && lacks(card.materials, PREVIOUS_HANDBACK_MATERIAL)) card.materials = plus(card.materials, previousHandBackMaterial(put, sourceAt(readers!, was.constructor), { attempt: was.attempt }));
       break;
     }
     case 'reviewer': {
@@ -189,6 +235,15 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
         const attempt = productAttempt(events.filter((e) => e.line === `task:${task!.id}`), card.target);
         if (attempt !== null) card.decisionQuotes = reviewerDecisionQuotes(mission, items, events, task, constraints, attempt, taskReferencePlan(events, fixed));
       }
+      // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
+      const relied = taskReferencePlan(events, fixed);
+      const contract = relied === undefined ? undefined : object(relied);
+      delete card.dataFormats;
+      delete card.storage;
+      Object.assign(card, planData(contract === undefined ? null : (JSON.parse(data.text(contract.content)) as StoredDetailedPlan).plan));
+      // 4.4 (F3, E-4): the Constructor's claims, when the card lacks them
+      const made = task === undefined ? null : targetConstructor(lineOf(task.id), card.target);
+      if (made !== null && lacks(card.materials, CONSTRUCTOR_CLAIMS_MATERIAL)) card.materials = plus(card.materials, claimsMaterial(put, sourceAt(readers!, made.constructor), { task: task!.id, attempt: made.attempt }));
       break;
     }
     case 'secretary': {
@@ -212,6 +267,9 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc):
       const inputs = events.filter((e) => e.line === 'plan' && e.event === 'review-inputs' && (e.body as PlanningInputs).task === spec.task).at(-1)?.body as PlanningInputs | undefined;
       const boundChanged = 'binding' in card && changedBoundLines(ix, reviewInputVersions(data.getList(card.binding.bases as ListRef), data.getList(card.binding.constraints as ListRef))).length > 0;
       if (inputs === undefined || boundChanged || changedPlanningInputs(inputs, ix, items, constraints, obj).length > 0) throw new ProcessError('NOT_READY', `Review inputs changed for ${spec.task}; run mp pm next to rebuild the step.`);
+      // 4.4 (F3): a revision's and a re-review's previous feasibility report, when the card lacks it
+      if (card.seat === 'architect-feasibility' && lacks(card.materials, FEASIBILITY_REPORT_MATERIAL)) card.materials = plus(card.materials, feasibility(card.target));
+      if (card.seat === 'architect-decompose' && card.revision !== null && lacks(card.materials, FEASIBILITY_REPORT_MATERIAL)) card.materials = plus(card.materials, feasibility(card.output.object));
       break;
     }
     case 'auditor-node': {

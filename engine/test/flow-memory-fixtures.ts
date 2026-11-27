@@ -423,6 +423,12 @@ export function memoryPorts(o: { readonly now?: () => number } = {}): MemoryWorl
   return { ledger, scheduler, evaluator, now: ctx.now, ctx, memory, dir };
 }
 
+/** Another process on the same memory (its own ports: nothing a flow pass of the world memoized), with these fake actions. */
+export function anotherProcess(w: MemoryWorld, actions: FakeKnobs['actions']): ProcessContext {
+  const knobs: FakeKnobs = { ...w.scheduler.knobs, actions };
+  return processContext(w.memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null });
+}
+
 /** The user's words recorded as `mp pm say` does: their entry (W-<n>). */
 export function say(w: { readonly memory: Memory }, text: string, message = `msg-${sha256(text).slice(0, 12)}`): string {
   return w.memory.write({ op: `say:${message}`, payload: { text } }, (tx) => recordWords(tx, { message, session: 'pm-session', at: 1_000 + Number(tx.head()), text })).words;

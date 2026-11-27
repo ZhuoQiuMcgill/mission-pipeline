@@ -47,7 +47,7 @@ import { normalizeCommand } from '../common/fullSuite.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
 import type { MaterialRef } from '../seat/cards/common.ts';
-import { feasibilityReport } from './handbackMaterials.ts';
+import { feasibilityReport, returnedFeasibilityOf } from './handbackMaterials.ts';
 import {
   basisIndex,
   binding,
@@ -1517,11 +1517,14 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   ctx.progressed = true;
 }
 
-/** 4.4 (F3): the report of the feasibility review that returned the plan a revision revises, as a material (null: no such return). */
+/**
+ * 4.4 (F3): the report of the last feasibility return a revision answers, carried through the mechanical
+ * returns after it (one read of the plan line), as a material (null: no such return).
+ */
 async function returnedFeasibility(ctx: FlowCtx, a: AttemptBody): Promise<MaterialRef | null> {
-  if (a.previous === null || a.feasibilityFindings.length === 0) return null;
-  const fb = (await eventsOf<FeasBody>(ctx, PLAN_LINE, 'feasibility')).filter((e) => e.body.dplan === a.previous).at(-1)?.body;
-  return fb === undefined ? null : feasibilityReport(ctx, { review: fb.task, dplan: a.previous });
+  if (a.previous === null) return null;
+  const r = returnedFeasibilityOf(await eventsOf(ctx, PLAN_LINE), a);
+  return r === null ? null : feasibilityReport(ctx, r);
 }
 
 async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, dplan: string, plan: DetailedPlanDoc, task: string): Promise<void> {

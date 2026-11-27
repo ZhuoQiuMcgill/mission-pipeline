@@ -1,18 +1,21 @@
 // 4.4 (F3, problem P2): materials by need. What a seat handed back reaches the seat that needs it
 // next as an optional material: a pointer the seat reads page by page with `mp seat <id> read`, never
-// text inlined into the card. Each is built when its card is queued, from the accepted hand-back
-// (its structured fields, and its report leaf when the port reads leaves):
+// text inlined into the card. Each is built from the accepted hand-back (its structured fields, and
+// its report leaf when a leaf can be read), when the card is queued (the flow's ports) and again at
+// the claim when the card lacks it (process/pm.ts: a card queued by 4.3 gets its 4.4 materials):
 //   constructor-claims   the Reviewer's card: the Constructor's hand-back of the attempt under review,
 //                        as claims to check, never evidence (ruling E-4: what a seat is asked to record
 //                        reaches the seats that read it; seat/results.ts pointerProblems refuses it as a pointer)
 //   previous-review      a rework's Constructor card: the review that judged the attempt it carries on
 //   previous-handback    a rework's Constructor card: that attempt's own hand-back
-//   feasibility-report   a revision's Architect card and the next feasibility card: the previous review's report
+//   feasibility-report   a revision's Architect card and the next feasibility card: the report of the
+//                        last feasibility return, carried through the mechanical returns after it
 
 import type { ArchitectFeasibilityResult } from '../seat/cards/architect.ts';
-import type { MaterialRef } from '../seat/cards/common.ts';
+import { materialPageCount, type MaterialRef } from '../seat/cards/common.ts';
 import type { ConstructorResult, ReviewerResult } from '../seat/results.ts';
-import { material, type FlowCtx } from './context.ts';
+import type { FlowCtx } from './context.ts';
+import { PLAN_LINE } from './plandoc.ts';
 import type { AcceptedHandBack } from './ports.ts';
 
 export const CONSTRUCTOR_CLAIMS_MATERIAL = 'constructor-claims';
@@ -20,35 +23,63 @@ export const PREVIOUS_REVIEW_MATERIAL = 'previous-review';
 export const PREVIOUS_HANDBACK_MATERIAL = 'previous-handback';
 export const FEASIBILITY_REPORT_MATERIAL = 'feasibility-report';
 
-/** A task's accepted hand-back (its last dispatch's), or null. */
-async function handBackOf(ctx: FlowCtx, task: string): Promise<AcceptedHandBack | null> {
-  const s = await ctx.ports.scheduler.status(task);
-  return s?.handBack?.status === 'handed-back' ? s.handBack : null;
+/** What a material is built from: an accepted hand-back and its report's text (null: not readable). */
+export interface HandBackSource {
+  readonly hb: AcceptedHandBack;
+  readonly report: string | null;
 }
 
-/** A hand-back's report, as the seat filed it; a line saying so when it cannot be read. */
-async function reportOf(ctx: FlowCtx, hb: AcceptedHandBack): Promise<string> {
-  let text: string | null = null;
+/** The sync readers of the claim's write (process/pm.ts): a task's accepted hand-back, a leaf's text. */
+export interface HandBackReaders {
+  handBack(task: string): AcceptedHandBack | null;
+  leaf(path: string): string | null;
+}
+
+const accepted = (hb: AcceptedHandBack | null | undefined): AcceptedHandBack | null => (hb?.status === 'handed-back' ? hb : null);
+
+/** A task's hand-back as the flow reads it when it queues a card. */
+export async function sourceOf(ctx: FlowCtx, task: string): Promise<HandBackSource | null> {
+  const hb = accepted((await ctx.ports.scheduler.status(task))?.handBack);
+  if (hb === null) return null;
+  let report: string | null = null;
   if (hb.report !== null && ctx.ports.ledger.leaf !== undefined) {
     try {
-      text = await ctx.ports.ledger.leaf(hb.report);
+      report = await ctx.ports.ledger.leaf(hb.report);
     } catch {
-      text = null;
+      report = null;
     }
   }
-  return text === null ? '(the report could not be read)' : text.trim() === '' ? '(empty)' : text.trim();
+  return { hb, report };
 }
 
+/** A task's hand-back as the claim reads it, in its own write. */
+export function sourceAt(r: HandBackReaders, task: string): HandBackSource | null {
+  const hb = accepted(r.handBack(task));
+  if (hb === null) return null;
+  let report: string | null = null;
+  try {
+    report = hb.report === null ? null : r.leaf(hb.report);
+  } catch {
+    report = null;
+  }
+  return { hb, report };
+}
+
+/** A material as flow/context.ts `material` makes one (optional, the program's record), from any data store. */
+function optional(put: (doc: string) => string, id: string, title: string, doc: string): MaterialRef {
+  return { id, title, ref: put(doc), pages: materialPageCount(doc), mustRead: false, role: 'record' };
+}
+
+const reportText = (s: HandBackSource): string => (s.report === null ? '(the report could not be read)' : s.report.trim() === '' ? '(empty)' : s.report.trim());
 const items = (xs: readonly string[]): string => (xs.length === 0 ? 'None.' : xs.map((x) => `- ${x}`).join('\n'));
 
 /** The Reviewer's material: the Constructor's hand-back of the attempt under review (its report, `done`, `decisions_needed`). */
-export async function constructorClaims(ctx: FlowCtx, o: { readonly constructor: string; readonly task: string; readonly attempt: number }): Promise<MaterialRef | null> {
-  const hb = await handBackOf(ctx, o.constructor);
-  const r = (hb?.result ?? null) as Partial<ConstructorResult> | null;
-  if (hb === null || r === null || typeof r.done !== 'string') return null;
+export function claimsMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly task: string; readonly attempt: number }): MaterialRef | null {
+  const r = (s?.hb.result ?? null) as Partial<ConstructorResult> | null;
+  if (s === null || r === null || typeof r.done !== 'string') return null;
   const doc = [
     "# The Constructor's claims: to check, not proof",
-    `Task ${o.task}, attempt ${o.attempt}: what its Constructor handed back (dispatch ${hb.dispatch}). Check each claim against the candidate and the runs; none of it is evidence for a standard.`,
+    `Task ${o.task}, attempt ${o.attempt}: what its Constructor handed back (dispatch ${s.hb.dispatch}). Check each claim against the candidate and the runs; none of it is evidence for a standard.`,
     '',
     '## What it says it did',
     r.done,
@@ -57,20 +88,19 @@ export async function constructorClaims(ctx: FlowCtx, o: { readonly constructor:
     items(r.decisions_needed ?? []),
     '',
     '## Its report',
-    await reportOf(ctx, hb),
+    reportText(s),
     '',
   ].join('\n');
-  return material(ctx, CONSTRUCTOR_CLAIMS_MATERIAL, `The Constructor's claims: to check, not proof (attempt ${o.attempt})`, doc, false, 'record');
+  return optional(put, CONSTRUCTOR_CLAIMS_MATERIAL, `The Constructor's claims: to check, not proof (attempt ${o.attempt})`, doc);
 }
 
 /** A rework's material: the review that judged the attempt it carries on (its judgments, findings and report). */
-export async function previousReviewReport(ctx: FlowCtx, o: { readonly review: string; readonly attempt: number }): Promise<MaterialRef | null> {
-  const hb = await handBackOf(ctx, o.review);
-  const r = (hb?.result ?? null) as Partial<ReviewerResult> | null;
-  if (hb === null || r === null || !Array.isArray(r.judgments)) return null;
+export function previousReviewMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly review: string; readonly attempt: number }): MaterialRef | null {
+  const r = (s?.hb.result ?? null) as Partial<ReviewerResult> | null;
+  if (s === null || r === null || !Array.isArray(r.judgments)) return null;
   const doc = [
     `# The previous review of this task (attempt ${o.attempt})`,
-    `Review ${o.review} (dispatch ${hb.dispatch}) handed back "${r.verdict ?? '?'}".`,
+    `Review ${o.review} (dispatch ${s.hb.dispatch}) handed back "${r.verdict ?? '?'}".`,
     '',
     '## Its judgments',
     items(r.judgments.map((j) => `[${j.standard}] ${j.met === 'yes' ? 'met' : j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}${j.evidence.length > 0 ? ` (${j.evidence.join(', ')})` : ''}`)),
@@ -79,20 +109,19 @@ export async function previousReviewReport(ctx: FlowCtx, o: { readonly review: s
     items(r.findings ?? []),
     '',
     '## Its report',
-    await reportOf(ctx, hb),
+    reportText(s),
     '',
   ].join('\n');
-  return material(ctx, PREVIOUS_REVIEW_MATERIAL, `The previous review's report (attempt ${o.attempt})`, doc, false, 'record');
+  return optional(put, PREVIOUS_REVIEW_MATERIAL, `The previous review's report (attempt ${o.attempt})`, doc);
 }
 
 /** A rework's material: the earlier attempt's own Constructor hand-back. */
-export async function previousHandBack(ctx: FlowCtx, o: { readonly constructor: string; readonly attempt: number }): Promise<MaterialRef | null> {
-  const hb = await handBackOf(ctx, o.constructor);
-  const r = (hb?.result ?? null) as Partial<ConstructorResult> | null;
-  if (hb === null || r === null || typeof r.done !== 'string') return null;
+export function previousHandBackMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly attempt: number }): MaterialRef | null {
+  const r = (s?.hb.result ?? null) as Partial<ConstructorResult> | null;
+  if (s === null || r === null || typeof r.done !== 'string') return null;
   const doc = [
     `# Your earlier hand-back (attempt ${o.attempt})`,
-    `Dispatch ${hb.dispatch}.`,
+    `Dispatch ${s.hb.dispatch}.`,
     '',
     '## What it says it did',
     r.done,
@@ -107,20 +136,19 @@ export async function previousHandBack(ctx: FlowCtx, o: { readonly constructor: 
     items(r.decisions_needed ?? []),
     '',
     '## Its report',
-    await reportOf(ctx, hb),
+    reportText(s),
     '',
   ].join('\n');
-  return material(ctx, PREVIOUS_HANDBACK_MATERIAL, `Your earlier hand-back (attempt ${o.attempt})`, doc, false, 'record');
+  return optional(put, PREVIOUS_HANDBACK_MATERIAL, `Your earlier hand-back (attempt ${o.attempt})`, doc);
 }
 
-/** A revision's material: the feasibility review that returned the previous plan (its findings, critical path and report). */
-export async function feasibilityReport(ctx: FlowCtx, o: { readonly review: string; readonly dplan: string }): Promise<MaterialRef | null> {
-  const hb = await handBackOf(ctx, o.review);
-  const r = (hb?.result ?? null) as Partial<ArchitectFeasibilityResult> | null;
-  if (hb === null || r === null || !Array.isArray(r.findings)) return null;
+/** A revision's material: the feasibility review that returned the plan (its findings, critical path and report). */
+export function feasibilityReportMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly review: string; readonly dplan: string }): MaterialRef | null {
+  const r = (s?.hb.result ?? null) as Partial<ArchitectFeasibilityResult> | null;
+  if (s === null || r === null || !Array.isArray(r.findings)) return null;
   const doc = [
     `# The feasibility review of detailed plan ${o.dplan}`,
-    `Review ${o.review} (dispatch ${hb.dispatch}) handed back "${r.verdict ?? '?'}".`,
+    `Review ${o.review} (dispatch ${s.hb.dispatch}) handed back "${r.verdict ?? '?'}".`,
     '',
     '## Its findings',
     items(r.findings.map((f) => `[${f.id}] ${f.severity}, ${f.category}${f.tasks.length > 0 ? ` (${f.tasks.join(', ')})` : ''}: ${f.detail} — suggestion: ${f.suggestion}`)),
@@ -129,8 +157,64 @@ export async function feasibilityReport(ctx: FlowCtx, o: { readonly review: stri
     (r.criticalPath ?? []).length > 0 ? (r.criticalPath ?? []).join(' → ') : 'None given.',
     '',
     '## Its report',
-    await reportOf(ctx, hb),
+    reportText(s),
     '',
   ].join('\n');
-  return material(ctx, FEASIBILITY_REPORT_MATERIAL, `The previous feasibility report (${o.dplan})`, doc, false, 'record');
+  return optional(put, FEASIBILITY_REPORT_MATERIAL, `The previous feasibility report (${o.dplan})`, doc);
+}
+
+/** The fields of a decomposition attempt the walk reads (flow/planning.ts AttemptBody). */
+interface AttemptFields {
+  readonly reason: string;
+  readonly previous: string | null;
+  readonly feasibilityFindings: readonly string[];
+}
+
+/** The detailed plan an attempt (plan line event "attempt", key "<pm plan>#<k>") hands back, as flow/planning.ts names it (planAnswersReplan). */
+const attemptPlan = (key: string): string => `dplan.${key.slice('pmplan.'.length).replace('#', '.')}`;
+
+/**
+ * The feasibility review whose report a revision carries (4.4, F3): the one that returned the plan an
+ * attempt revises, or, through mechanical returns, the plan the first revision of the sequence revised.
+ * Pure, from the plan line's events (the flow's when it queues, the claim's when it fills a card in).
+ */
+export function returnedFeasibilityOf(events: ReadonlyArray<{ readonly line: string; readonly event: string; readonly key: string; readonly body: unknown }>, a: AttemptFields | undefined): { readonly review: string; readonly dplan: string } | null {
+  const plan = events.filter((e) => e.line === PLAN_LINE);
+  const attempts = new Map(plan.filter((e) => e.event === 'attempt').map((e) => [attemptPlan(e.key), e.body as AttemptFields]));
+  const seen = new Set<string>();
+  for (let at = a; at !== undefined && at.previous !== null && !seen.has(at.previous); at = attempts.get(at.previous)) {
+    if (at.feasibilityFindings.length > 0) {
+      const previous = at.previous;
+      const fb = plan.filter((e) => e.event === 'feasibility' && (e.body as { dplan?: string }).dplan === previous).at(-1)?.body as { task?: string } | undefined;
+      return fb?.task === undefined ? null : { review: fb.task, dplan: previous };
+    }
+    if (at.reason !== 'mechanical') return null;
+    seen.add(at.previous);
+  }
+  return null;
+}
+
+/** The attempt that hands back a detailed plan, from the plan line's events (null: none). */
+export function attemptOfPlan(events: ReadonlyArray<{ readonly line: string; readonly event: string; readonly key: string; readonly body: unknown }>, dplan: string): AttemptFields | undefined {
+  return events.filter((e) => e.line === PLAN_LINE && e.event === 'attempt' && attemptPlan(e.key) === dplan).at(-1)?.body as AttemptFields | undefined;
+}
+
+// ---------------------------------------------------------------- the flow's builders (queue time)
+
+const putOf = (ctx: FlowCtx) => (doc: string): string => ctx.ports.ledger.content.put(doc);
+
+export async function constructorClaims(ctx: FlowCtx, o: { readonly constructor: string; readonly task: string; readonly attempt: number }): Promise<MaterialRef | null> {
+  return claimsMaterial(putOf(ctx), await sourceOf(ctx, o.constructor), o);
+}
+
+export async function previousReviewReport(ctx: FlowCtx, o: { readonly review: string; readonly attempt: number }): Promise<MaterialRef | null> {
+  return previousReviewMaterial(putOf(ctx), await sourceOf(ctx, o.review), o);
+}
+
+export async function previousHandBack(ctx: FlowCtx, o: { readonly constructor: string; readonly attempt: number }): Promise<MaterialRef | null> {
+  return previousHandBackMaterial(putOf(ctx), await sourceOf(ctx, o.constructor), o);
+}
+
+export async function feasibilityReport(ctx: FlowCtx, o: { readonly review: string; readonly dplan: string }): Promise<MaterialRef | null> {
+  return feasibilityReportMaterial(putOf(ctx), await sourceOf(ctx, o.review), o);
 }

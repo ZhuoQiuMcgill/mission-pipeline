@@ -306,9 +306,29 @@ function rerunRequest(t: RerunTarget, extra: { readonly detached?: string; reado
  */
 export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<RerunResult> {
   const t = rerunTarget(ctx, dispatch, commandId);
-  const r = await runOnCommit(ctx, rerunRequest(t));
+  // 4.4 (F5): its start is recorded before it executes; its evidence when it ends, as before
+  const run = newRunId('rerun');
+  recordRunStart(ctx, t.v, run, { run, command: t.c.id });
+  const r = await runOnCommit(ctx, { ...rerunRequest(t), run });
   const x = r.runs[0]!;
   return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail };
+}
+
+/** 4.4 (F5): the flow event (line "dispatch:<id>", key: the run) a seat's foreground run records when it is admitted, before it executes. */
+export const RUN_STARTED_EVENT = 'run-started';
+
+/**
+ * A foreground run's start on its dispatch line (4.4, F5): while it executes the dispatch has started,
+ * so its release is counted. A dispatch released meanwhile runs nothing, as a detached run's worker checks.
+ */
+function recordRunStart(ctx: ProcessContext, v: DispatchView, key: string, body: Readonly<Record<string, unknown>>): void {
+  const at = { mission: v.info.mission, line: DISPATCH_LINE(v.info.dispatch), event: RUN_STARTED_EVENT, key };
+  ctx.memory.write({ op: `run-start:${v.info.dispatch}:${key}`, payload: { dispatch: v.info.dispatch, key } }, (tx) => {
+    if (ctx.secretary !== null) requireSecretary(tx, ctx.secretary);
+    if (dispatchInfo(tx, v.info.dispatch)?.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${v.info.dispatch} is no longer in flight: a run is for a dispatch in flight`);
+    if (flowEventExists(tx, at)) return;
+    appendRecords(tx, [{ kind: 'flow.event', ...at, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
+  });
 }
 
 /** A detached rerun as `mp seat <id> rerun --detach` answers: its run id and the evidence id its result is recorded under. */
@@ -451,6 +471,8 @@ export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promis
   allows(ctx, v, 'full-run');
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
+  // 4.4 (F5): a full run is a start too, recorded before it executes
+  recordRunStart(ctx, v, 'full-run', { fullRun: true });
   return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag) });
 }
 

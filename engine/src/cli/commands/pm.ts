@@ -42,7 +42,7 @@ import {
   pmConstraint,
   pmWithdrawConstraint,
   pmDeliver,
-  pmDispatch,
+  pmDispatchChecked,
   pmDrain,
   pmFullRun,
   pmReopenExploration,
@@ -225,7 +225,8 @@ const dispatch: Command = {
   async run(c, args) {
     const p = P(c);
     const step = positional(args, 0, 'step (mp pm next lists the ready steps)');
-    const d = pmDispatch(p.ctx, step, { filledBy: flagStr(args, 'filled-by') });
+    // 4.4 (F5): a repair step's unpinned starts are checked by the flow's resolver before its claim
+    const d = await pmDispatchChecked(p.ctx, step, { filledBy: flagStr(args, 'filled-by') });
     const lines = [
       `Dispatched ${d.dispatch}: ${d.seat} (${d.kind}) for step ${d.step} in ${d.mission}.`,
       `Card: .mission-pipeline/${d.cardLeaf} (the seat reads it with mp seat ${d.dispatch} card)`,

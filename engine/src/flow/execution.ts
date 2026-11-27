@@ -2291,9 +2291,45 @@ function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{
   });
 }
 
-/** 4.4 (F3): the plan's data formats and storage lists, for the Constructor and Reviewer cards of its tasks (absent when empty). */
-function planData(plan: DetailedPlanDoc): { dataFormats?: string[]; storage?: string[] } {
+/**
+ * 4.4 (F3): the plan's data formats and storage lists, for the Constructor and Reviewer cards of its
+ * tasks (absent when empty): a Constructor's from the plan in effect (again at its claim, refresh.ts), a
+ * Reviewer's from the plan its target's review contract relies on.
+ */
+export function planData(plan: Pick<DetailedPlanDoc, 'dataFormats' | 'storage'> | null | undefined): { dataFormats?: string[]; storage?: string[] } {
+  if (plan === null || plan === undefined) return {};
   return { ...((plan.dataFormats ?? []).length > 0 ? { dataFormats: [...plan.dataFormats!] } : {}), ...((plan.storage ?? []).length > 0 ? { storage: [...plan.storage!] } : {}) };
+}
+
+/**
+ * 4.4 (F3): the past a later attempt k carries on, from its task line: the Constructor task and attempt
+ * of the lineage's latest product under the current work (latestRecordedProduct), and the review that
+ * judged it. Null on a first attempt or a fresh start. Pure: the queue-time builder and the claim use it.
+ */
+export function attemptPast(events: Line['events'], k: number): { readonly constructor: string; readonly attempt: number; readonly review: string | null } | null {
+  const line = new Line(events);
+  const spec = workSpecRevision(line);
+  const p = line.all<ProductBody>('product').filter((e) => e.revision > spec && e.body.k < k).at(-1);
+  if (p === undefined) return null;
+  return { constructor: p.body.task, attempt: p.body.k, review: line.all<ReviewBody>('review').filter((r) => r.body.k === p.body.k).at(-1)?.body.task ?? null };
+}
+
+/**
+ * 4.4 (F3): the Constructor dispatch task and attempt whose candidate a Reviewer's target is (a re-bound
+ * version through the version it was re-bound from); null for an integration start with no Constructor.
+ */
+export function targetConstructor(events: Line['events'], target: string): { readonly constructor: string; readonly attempt: number } | null {
+  const line = new Line(events);
+  const seen = new Set<string>();
+  for (let at = target; !seen.has(at); ) {
+    seen.add(at);
+    const p = line.all<ProductBody>('product').find((e) => e.body.object === at);
+    if (p !== undefined) return startOnly(line, p.body) ? null : { constructor: p.body.task, attempt: p.body.k };
+    const rb = line.all<RebindBody>('rebind').find((r) => r.body.product === at);
+    if (rb === undefined) return null;
+    at = rb.body.from;
+  }
+  return null;
 }
 
 /**
@@ -2390,10 +2426,10 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const workspace = { snapshot: snap.commit, writablePaths: [...t.writeScope] };
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3): a later attempt gets its past: the review of the attempt it carries on, and that attempt's own hand-back (optional)
-  const pastReview = prev === null ? undefined : line.all<ReviewBody>('review').filter((r) => r.body.k === prev.k).at(-1);
-  const past = prev === null ? [] : [
-    pastReview === undefined ? null : await previousReviewReport(ctx, { review: pastReview.body.task, attempt: prev.k }),
-    await previousHandBack(ctx, { constructor: prev.task, attempt: prev.k }),
+  const was = attemptPast(line.events, k);
+  const past = was === null ? [] : [
+    was.review === null ? null : await previousReviewReport(ctx, { review: was.review, attempt: was.attempt }),
+    await previousHandBack(ctx, { constructor: was.constructor, attempt: was.attempt }),
   ].filter((x) => x !== null);
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: await decisionQuotes(ctx, t), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
@@ -2530,6 +2566,9 @@ async function submitReviewer(
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
   const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });
+  // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
+  const contractPlan = taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'));
+  const formats = contractPlan === undefined ? null : (await detailedPlanOf(ctx, contractPlan))?.plan;
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
@@ -2551,7 +2590,7 @@ async function submitReviewer(
     ...(previousReview !== null ? { previousReview } : {}),
     ...(integration !== undefined ? { integration } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
-    ...planData(plan),
+    ...planData(formats),
     ...(claims !== null ? { materials: [claims] } : {}),
     binding: {
       judgment: `j.${task}`,

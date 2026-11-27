@@ -25,6 +25,7 @@ export {
   pmWithdrawConstraint,
   pmDeliver,
   pmDispatch,
+  pmDispatchChecked,
   pmDrain,
   pmGrant,
   pmLand,
