@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { defaultConfig, parseConfig, writeConfig } from '../src/cli/config.ts';
 import { dispatchView, seatRead } from '../src/process/seat.ts';
-import { cardSizeReport } from '../src/process/pm.ts';
+import { cardSizeReport, pmDispatch, pmRelease } from '../src/process/pm.ts';
 import { processContext } from '../src/process/context.ts';
 import type { MaterialRef } from '../src/seat/cards/common.ts';
 import { readyOf, type ProcessProject } from './process-fixtures.ts';
@@ -105,5 +105,23 @@ test('compatibility: a config without mustReadWarnPages reads with the default 6
     const ctx = processContext(p.ctx.memory);
     assert.equal(ctx.mustReadWarnPages, 6);
     assert.deepEqual(cardSizeReport(ctx, { seat: 'constructor' }), { mustReadPages: 0, mustReadWarnPages: 6, warnings: [] });
+  } finally { p.cleanup(); }
+});
+
+test('review p1-8: a page of a dispatch that is over reads as history and claims no receipt', async () => {
+  const p = project43();
+  try {
+    await constructorAsks(p, ['Should add accept strings?']);
+    const step = (await readyOf(p.ctx, 'secretary')).step;
+    const d = pmDispatch(p.ctx, step, { filledBy: 'h/m' });
+    assert.match(seatRead(p.ctx, d.dispatch, 'request', 1).text, /\(must read; this fetch is recorded\)/);
+    await pmRelease(p.ctx, d.dispatch, 'ended');
+    const reads = () => Number((p.ctx.memory.stmt("SELECT COUNT(*) AS n FROM flow_events WHERE line = ? AND event = 'read'").get(`dispatch:${d.dispatch}`) as { n: number }).n);
+    const before = reads();
+    const page = seatRead(p.ctx, d.dispatch, 'current-facts', 1);
+    assert.doesNotMatch(page.text, /this fetch is recorded/);
+    assert.match(page.text, new RegExp(`dispatch ${d.dispatch} is over, so no fetch is recorded`));
+    assert.match(page.text, /Escalation /, 'the page itself stays readable');
+    assert.equal(reads(), before, 'nothing was recorded');
   } finally { p.cleanup(); }
 });

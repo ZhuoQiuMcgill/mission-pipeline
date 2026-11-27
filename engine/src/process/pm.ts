@@ -489,7 +489,8 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       const dispatch = `D-${n}`;
       // 4.1.3 (#30): a step dispatched again lists the runs its earlier dispatches made
       const carriedRuns = carriedRunLines(tx, tx.data, { mission: task.mission as MissionId, task: step, dispatch });
-      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite, carriedRuns });
+      // 4.4 (F9): the card's commands follow who claims it (the live Secretary's own, or the seat commands)
+      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite, carriedRuns, secretaryClaim: ctx.secretary !== null && liveSecretary(tx)?.generation === ctx.secretary });
       const claimed = claimDispatch(tx, { dispatch, task: step, seat: spec.card.seat, capabilities: spec.capabilities, filler, worktree: entry.exportsProduct === true, card });
       // the materials as leaves (§5.2): `mp seat <id> read` reads them, hash-checked
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));

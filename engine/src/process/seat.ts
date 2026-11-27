@@ -148,13 +148,16 @@ export function seatRead(ctx: ProcessContext, dispatch: string, material: string
   const r = ctx.memory.readLeaf(leaf);
   if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `material ${material} (${leaf}) is missing: hand back what you can and say so; the PM follows WI-30`, { wi: 'WI-30' });
   if (r.status === 'edited' || sha256(r.text) !== m.ref) throw new ProcessError('LEAF_EDITED', `material ${material} (${leaf}) was edited after it was recorded: hand back what you can and say so; the PM follows WI-30`, { wi: 'WI-30' });
-  if (v.info.state === 'in-flight') {
+  const recorded = v.info.state === 'in-flight';
+  if (recorded) {
     const key = `${material}#${page}`;
     ctx.memory.write({ op: `read:${dispatch}:${key}`, payload: { dispatch, key } }, (tx) => {
       appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'read', key, body: tx.data.put(canonicalJson({ material, page })) as ContentHash }]);
     });
   }
-  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read; this fetch is recorded)' : ''}\n${materialPage(r.text, page)}` };
+  // 4.4 (F16): the receipt is named only where one is written; a dispatch that is over reads as history
+  const mark = !m.mustRead ? '' : recorded ? ' (must read; this fetch is recorded)' : ` (must read; dispatch ${dispatch} is over, so no fetch is recorded)`;
+  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${mark}\n${materialPage(r.text, page)}` };
 }
 
 /**
@@ -970,18 +973,27 @@ async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: strin
   // seat-side pass, which a live Secretary leaves to its own next pass
   const live = liveSecretary(ctx.memory);
   const decision = v.card.seat === 'secretary' && live !== null && ctx.secretary === live.generation;
+  // a generation retired since the hand-back's own write: its seat-side pass does nothing (advance.ts), and says so
+  if (v.card.seat === 'secretary' && ctx.secretary !== null && live?.generation !== ctx.secretary) return `the Secretary generation ${ctx.secretary} was retired during this command, so it applies nothing; the live Secretary's next pass does`;
   // a seat's process skips the recovery of a moved folder while a Secretary is live (memory.ts): such a pass is the Secretary's
   if (decision && movedSinceRecovery(ctx)) return 'the project folder moved since its last recovery; the Secretary\'s next pass recovers it';
+  // 4.4 (F9; PM/Secretary B.1): every write of that pass is fenced to the live generation, as each write of
+  // `mp sec decide` is (process/context.ts writeGuard): a generation retired meanwhile applies nothing more
+  const guard = ctx.memory.writeGuard;
+  if (decision) ctx.memory.writeGuard = (tx, req) => { guard?.(tx, req); requireSecretary(tx, live.generation); };
   try {
     // the work this hand-back hands over is recorded as handed over by it (§3.2, U-13)
     const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, decision ? {} : { seatSide: true });
     for (const r of reports) for (const e of r.errors) if (e.sandbox !== undefined) notes.push(`left to the PM: this seat's sandbox could not write ${e.sandbox}`);
     if (live !== null && !decision) return 'this command ran without the live Secretary\'s identity (MP_SECRETARY), and only the Secretary\'s commands reconcile while it is live';
+    if (decision && liveSecretary(ctx.memory)?.generation !== live.generation) return `the Secretary generation ${live.generation} was retired during this command, so its pass wrote nothing more; the live Secretary's next pass applies the decision`;
     const error = reports.flatMap((r) => r.errors).at(0);
     return error === undefined ? null : `the ${error.step} step stopped (${error.message})`;
   } catch (e) {
     notes.push(`the process will advance on the PM's next step (${(e as Error).message})`);
     return `the pass failed (${(e as Error).message})`;
+  } finally {
+    ctx.memory.writeGuard = guard;
   }
 }
 

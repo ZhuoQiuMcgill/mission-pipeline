@@ -7,9 +7,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
+import type { MissionId } from '../src/common/ids.ts';
+import { answerEscalation } from '../src/flow/secretary.ts';
+import { openProcess } from '../src/process/context.ts';
 import { pmDispatch, pmRelease } from '../src/process/pm.ts';
-import { ENV_A, readAll, startAddMission, readyOf, type ProcessProject } from './process-fixtures.ts';
-import { secNext } from '../src/process/secretary.ts';
+import { ENV_A, handBack, readAll, startAddMission, readyOf, type ProcessProject } from './process-fixtures.ts';
+import { secNext, stopSecretary } from '../src/process/secretary.ts';
 import { project43, command43, done43, escalation43, live43, secretary43 } from './p43-fixtures.ts';
 
 /** The mission with its Calibrator ① re-dispatches used up: a loop-exhausted escalation (grant / ask-pm), its round claimed by the live Secretary and every page read. */
@@ -153,5 +156,47 @@ test('a grant handed back outside the live identity says the next pass applies i
     const ctx = secretary43(p, s.id);
     try { await secNext(ctx); } finally { ctx.memory.close(); }
     assert.ok(applied(p, s.escalation));
+  } finally { p.cleanup(); }
+});
+
+test('review p1-1: a Secretary retired during a seat-way hand-back applies nothing more: each write of its pass is fenced to the live generation', async () => {
+  const p = project43();
+  try {
+    const s = await exhausted(p);
+    // a seat command's process, as `mp seat <D> handback` opens it, under the live identity
+    const sec = openProcess(p.dir, { secretary: s.id, seatResult: true, observe: () => ENV_A });
+    try {
+      const write = sec.memory.write.bind(sec.memory);
+      let retired = false;
+      // the PM retires the generation once the pass has started: just before its first flow write
+      (sec.memory as { write: typeof write }).write = ((req: Parameters<typeof write>[0], fn: Parameters<typeof write>[1]) => {
+        if (!retired && String((req as { op?: unknown }).op ?? '').startsWith('flow:')) { retired = true; stopSecretary(p.ctx, { op: 'retire', gone: true }); }
+        return write(req, fn);
+      }) as typeof write;
+      const a = await handBack(sec, s.dispatch, grant);
+      assert.equal(a.kind, 'recorded');
+      assert.ok(retired);
+      assert.equal(applied(p, s.escalation), undefined, 'the retired generation applied nothing');
+      assert.equal(a.kind === 'recorded' ? a.decision?.state : null, 'pending');
+      assert.match(a.kind === 'recorded' ? a.decision?.text ?? '' : '', new RegExp(`generation ${s.id} was retired during this command`));
+    } finally { sec.memory.close(); }
+  } finally { p.cleanup(); }
+});
+
+test('review p1-5: a decision queued under a live Secretary and claimed by the PM after it retired gets the seat commands', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm', 'mission', 'open', 'm1']);
+    const id = await live43(p);
+    await escalation43(p);
+    const queued = p.ctx.memory.stmt("SELECT card FROM tasks WHERE task = 'sec.choice'").get() as { card: string } | undefined;
+    assert.ok(queued, 'queued while the Secretary is live');
+    await done43(p, ['pm', 'secretary', 'stop', '--gone']);
+    const d = pmDispatch(p.ctx, 'sec.choice', { filledBy: 'h/m' });
+    const commands = d.card.slice(d.card.indexOf('## Your commands'));
+    assert.match(commands, new RegExp(`mp seat ${d.dispatch} read <material>`));
+    assert.match(commands, new RegExp(`mp seat ${d.dispatch} handback --stdin`));
+    assert.doesNotMatch(commands, /mp sec (decide|read|card)/, 'no command that needs a live generation');
+    assert.ok(id);
   } finally { p.cleanup(); }
 });
