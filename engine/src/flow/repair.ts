@@ -416,6 +416,8 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   const reopen: Array<RepairDecidedBody['reopen'][number]> = [];
   const skipped: string[] = [];
   const notCarried: Array<{ readonly task: string; readonly attempt: number; readonly why: string }> = [];
+  // 4.4 (p7-r3-1): the card of each task a record "not carried out" relies on, as read (its latest spec): checked in the write
+  const specsRead: Array<{ readonly mission: string; readonly line: string; readonly event: string; readonly revision: number | null }> = [];
   for (const x of result.reopen) {
     const events = (await eventsOf(ctx, taskLine(x.task))).map((e) => ({ revision: e.revision, event: e.event, key: e.key, body: e.body }));
     const sel = lineAcceptance(events);
@@ -430,8 +432,17 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     // requested at the attempt it was last accepted at, its reopen waits for the open attempt's acceptance and then
     // opens the next attempt (execution, repairReopen)
     const last = events.filter((e) => e.event === 'accepted').at(-1)?.body as { k: number; product: string } | undefined;
-    if (!sel.abandoned && plan.tasks.some((t) => t.id === x.task) && last !== undefined) reopen.push({ task: x.task, issue: x.issue, attempt: last.k, product: last.product, ...extra });
-    else notCarried.push({ task: x.task, attempt: sel.k, why: sel.abandoned ? 'the task was given up' : 'the task has no accepted work to reopen' });
+    if (!sel.abandoned && plan.tasks.some((t) => t.id === x.task) && last !== undefined) {
+      reopen.push({ task: x.task, issue: x.issue, attempt: last.k, product: last.product, ...extra });
+      continue;
+    }
+    // a giving-up holds only under the card it was recorded under: a card of the plan in effect the task has not taken
+    // yet (another repair changed it) revives the task once execution lays it, so nothing is decided now (read again)
+    const spec = events.filter((e) => e.event === 'spec').at(-1);
+    const card = plan.tasks.find((t) => t.id === x.task);
+    if (sel.abandoned && card !== undefined && spec !== undefined && (spec.body as { hash?: string }).hash !== taskCardHash(card)) return;
+    specsRead.push({ mission: ctx.mission, line: taskLine(x.task), event: 'spec', revision: spec?.revision ?? null });
+    notCarried.push({ task: x.task, attempt: sel.k, why: sel.abandoned ? 'the task was given up' : 'the task has no accepted work to reopen' });
   }
   const added: readonly DetailedTask[] = result.add;
   // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now; 4.4: one accepted
@@ -471,8 +482,9 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   for (const x of notCarried) events.push(ev(ctx, REPAIRS_LINE, REOPEN_NOT_CARRIED, `${r.id}:${x.task}#1`, { repair: r.id, task: x.task, attempt: x.attempt, why: x.why } satisfies ReopenNotCarriedBody));
   // 4.4 (F13, p7-4): checked in the write: the plan in effect is still the one whose cards the decision was compared
   // with, and no other repair was decided since its waits were checked (a reopen-only decision leaves the plan as it
-  // is, and its waits could close a circle with these). Either one changed: read on the next pass, checked again
-  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records, guard: { latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.effective }, { mission: ctx.mission, line: REPAIRS_LINE, event: 'decided', revision: read.decided }], absent: [], code: 'STALE_REQUEST', message: `the plan in effect, or the repairs decided, changed while repair ${r.id}'s decision was being recorded; nothing was written (the next pass reads it again)` } });
+  // is, and its waits could close a circle with these), and (p7-r3-1) each task recorded as not carried out still has
+  // the card it was read under (a new card revives a task given up). Any one changed: read again on the next pass
+  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records, guard: { latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.effective }, { mission: ctx.mission, line: REPAIRS_LINE, event: 'decided', revision: read.decided }, ...specsRead], absent: [], code: 'STALE_REQUEST', message: `the plan in effect, the repairs decided, or the card of a task it reopens changed while repair ${r.id}'s decision was being recorded; nothing was written (the next pass reads it again)` } });
   await tellOnce(ctx, REPAIRS_LINE, {
     category: 'repair-decided',
     wi: null,

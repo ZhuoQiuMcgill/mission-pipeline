@@ -1067,11 +1067,19 @@ export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { read
   const added = new Set([...amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)), ...d.add.map((t) => t.id)]);
   const lines = new Map<string, Line>();
   for (const t of after.tasks) lines.set(t.id, await readLine(ctx, t.id));
+  // 4.4 (p7-r3-2): a task given up stays given up only under the card it was given up under: one whose card this
+  // decision changes (or the plan in effect changed, and execution has not laid yet) is open again under that card,
+  // both as a task that waits and as the end of a wait
+  const givenUp = (id: string): boolean => {
+    const l = lines.get(id);
+    const card = cards.get(id);
+    return l !== undefined && l.abandoned && card !== undefined && l.all<SpecBody>('spec').at(-1)?.body.hash === taskCardHash(card);
+  };
   const waits = new Map<string, string[]>();
   const afterWaits = new Map<string, string[]>();
   for (const t of after.tasks) {
     const line = lines.get(t.id)!;
-    if (line.abandoned) continue;
+    if (givenUp(t.id)) continue;
     const here = d.reopen.find((x) => x.task === t.id);
     // an added task has no line yet, a changed one no accepted product: both are open
     const open = lineAcceptance(line.events).product === null;
@@ -1079,7 +1087,7 @@ export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { read
     for (const q of requests) if (q.task === t.id && (await waitingRequest(ctx, line, q))) pending.push(q);
     if (!open && here === undefined && pending.length === 0) continue;
     const waitsAfter = [...(here?.after ?? []), ...(open ? afterOf(line, line.k) : []), ...pending.flatMap((q) => q.after)].filter((x) => x !== t.id);
-    waits.set(t.id, effectiveDependencies(after, t, added, (id) => lines.get(id)?.abandoned === true, waitsAfter));
+    waits.set(t.id, effectiveDependencies(after, t, added, givenUp, waitsAfter));
     if (waitsAfter.length > 0) afterWaits.set(t.id, waitsAfter);
   }
   const reaches = (from: string, to: string): boolean => {
@@ -1299,9 +1307,10 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
  * 4.4 (F12 b, #59): the repairs the task's current work answers: the one that added it, the one that changed its
  * card in force, and those that reopened an attempt under that card.
  */
-function causingRepairs(eff: EffectiveBody, t: DetailedTask, line: Line): Set<string> {
+function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t: DetailedTask, line: Line): Set<string> {
   const out = new Set<string>();
-  const added = repairOfTask(eff.amendments, t.id);
+  // the repair that added it, also once a later plan keeps the card it gave (that plan carries no amendment, p7-r3-3)
+  const added = repairOfTask(eff.amendments, t.id) ?? history.flatMap((e) => e.amendments ?? []).find((a) => a.tasks.some((x) => x.id === t.id && taskCardHash(x) === taskCardHash(t)))?.repair ?? null;
   if (added !== null) out.add(added);
   const spec = line.all<SpecBody>('spec').at(-1);
   if (spec?.body.repair !== undefined) out.add(spec.body.repair);
@@ -1318,7 +1327,7 @@ function causingRepairs(eff: EffectiveBody, t: DetailedTask, line: Line): Set<st
  */
 async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
   if (depIds.length === 0) return false;
-  const causing = causingRepairs(eff, t, line);
+  const causing = causingRepairs((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t, line);
   if (causing.size === 0) return false;
   for (const r of await reopenRequests(ctx)) {
     if (r.source.kind !== 'repair' || !causing.has(r.source.repair) || !depIds.includes(r.task)) continue;

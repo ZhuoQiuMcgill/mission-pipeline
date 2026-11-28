@@ -896,3 +896,93 @@ describe('4.4 F13: a reopen moves only from the state it was read in, on the pla
     await settled(w, engine);
   });
 });
+
+describe('4.4 F12, F13: a task given up is given up only under its card (review round 3)', () => {
+  it("p7-r3-1: a decision that reads its task as given up while another repair's new card for it waits to be laid records nothing; once the card revives the task, the reopen is decided and carried out", async () => {
+    const { w, engine, s1, s2 } = await bothClaimed();
+    // R-2 reopens impl, and that attempt is given up
+    assert.deepEqual(await w.scheduler.run(s2, reopenImpl('keep quoted commas in their field')), []);
+    await drive(engine, w.scheduler, script({ constructor: hold('con.m1.impl.2') }));
+    await w.ledger.append('test:impl-given-up', { events: [{ mission: M, line: 'task:impl', event: 'abandoned', key: 'abandoned', body: { escalation: 'x', reason: 'given up', attempt: 2 } }] });
+    await engine.reconcile();
+    // R-3 gives impl a new card: decided, not laid by execution yet
+    await repair(w, 'the parser is slow');
+    await engine.reconcile();
+    const impl = (await planInEffect(flowCtx(w, M)))!.plan.tasks.find((t) => t.id === 'impl')!;
+    assert.deepEqual(await w.scheduler.run(archStep(w, 'R-3'), { handBack: { reopen: [], add: [], change: [{ ...impl, standards: [...impl.standards, { id: 'S3', text: 'It parses a large file in a second' }] }], note: 'impl is fast' } }), []);
+    await repairStep(flowCtx(w, M));
+    assert.ok((await events(w, 'repairs', 'decided')).some((e) => e.key === 'R-3'));
+    // R-1's Architect saw impl accepted; its decision reads impl given up under the card R-3 replaced
+    assert.deepEqual(await w.scheduler.run(s1, reopenImpl('keep the header row')), []);
+    await repairStep(flowCtx(w, M));
+    assert.ok(!(await events(w, 'repairs', 'decided')).some((e) => e.key === 'R-1'), 'nothing is decided on a giving-up the plan in effect revokes');
+    await drive(engine, w.scheduler, script());
+    assert.deepEqual((await events(w, 'repairs', REOPEN_NOT_CARRIED)).map((e) => e.key), ['R-2:impl#2'], 'R-1 is not recorded as not carried out');
+    const rw = (await events(w, 'task:impl', 'rework')).find((e) => e.body.reopen?.repair === 'R-1')!.body;
+    assert.deepEqual([rw.k, rw.issues], [4, ['keep the header row']], "R-1 waits for the attempt R-3's card opened, then opens the next one");
+    assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.4');
+    await settled(w, engine);
+  });
+
+  it('p7-r3-1: the decision write checks the card of each task it records as not carried out: a card laid in between makes it read again', async () => {
+    const { w, engine, s1, s2 } = await bothClaimed();
+    assert.deepEqual(await w.scheduler.run(s2, reopenImpl('keep quoted commas in their field')), []);
+    await drive(engine, w.scheduler, script({ constructor: hold('con.m1.impl.2') }));
+    await w.ledger.append('test:impl-given-up', { events: [{ mission: M, line: 'task:impl', event: 'abandoned', key: 'abandoned', body: { escalation: 'x', reason: 'given up', attempt: 2 } }] });
+    await engine.reconcile();
+    assert.deepEqual(await w.scheduler.run(s1, reopenImpl('keep the header row')), []);
+    // between R-1's read (impl given up) and its write, another card is laid on impl (a new spec revives it)
+    const dplan = (await planInEffect(flowCtx(w, M)))!.eff.dplan;
+    const restore = before(w, 'flow:repair-decided:m1:R-1', async () => {
+      await w.ledger.append('test:impl-new-card', { events: [{ mission: M, line: 'task:impl', event: 'spec', key: `${dplan}#9`, body: { dplan, hash: 'another-card' } }] });
+    });
+    await assert.rejects(repairStep(flowCtx(w, M)), /the card of a task it reopens changed while repair R-1's decision was being recorded/);
+    restore();
+    assert.deepEqual((await events(w, 'repairs', REOPEN_NOT_CARRIED)).filter((e) => e.body.repair === 'R-1'), [], 'nothing is written on the card it read');
+    assert.ok(!(await events(w, 'repairs', 'decided')).some((e) => e.key === 'R-1'));
+  });
+
+  it('p7-r3-2: a task given up whose card the hand-back changes is open in the circle check: a reopen after it, with its new card waiting on the reopened task, goes back to the Architect', async () => {
+    const { w, engine } = await world();
+    await drive(engine, w.scheduler, script());
+    await repair(w, 'two readers are missing');
+    await drive(engine, w.scheduler, script({ 'architect-repair': () => ({ handBack: { reopen: [], add: [task({ id: 'a' }), task({ id: 'b' })], note: 'two readers' } }) }));
+    for (const t of ['a', 'b']) assert.ok(await acceptedProduct(flowCtx(w, M), t), t);
+    await w.ledger.append('test:b-given-up', { events: [{ mission: M, line: 'task:b', event: 'abandoned', key: 'abandoned', body: { escalation: 'x', reason: 'given up', attempt: 1 } }] });
+    await repair(w, 'a reads through b again');
+    await engine.reconcile();
+    const b = (await planInEffect(flowCtx(w, M)))!.plan.tasks.find((t) => t.id === 'b')!;
+    // a comes after b, and b's new card (which revives it) depends on a: each would wait for the other
+    assert.deepEqual(await w.scheduler.run(archStep(w, 'R-2'), { handBack: { reopen: [{ task: 'a', issue: 'read through the new b', after: ['b'] }], add: [], change: [{ ...b, dependsOn: ['iface', 'a'] }], note: 'b on a, a after b' } }), []);
+    await engine.reconcile();
+    assert.ok(!(await events(w, 'repairs', 'decided')).some((e) => e.key === 'R-2'), 'R-2 is not applied');
+    assert.ok(failuresOf(w, 'R-2').includes(CIRCLE('a')), JSON.stringify(failuresOf(w, 'R-2')));
+  });
+
+  it("p7-r3-3: a task a repair added keeps waiting for that repair's reopen of its dependency after a new plan that keeps its card takes effect", async () => {
+    const { w, engine, s1, s2 } = await bothClaimed();
+    assert.deepEqual(await w.scheduler.run(s1, reopenImpl('keep the header row')), []);
+    await drive(engine, w.scheduler, script({ constructor: hold('con.m1.impl.2') }));
+    // R-2 reopens impl too (it waits for attempt 2) and adds hdr on impl
+    const hdr = task({ id: 'hdr', dependsOn: ['impl'] });
+    assert.deepEqual(await w.scheduler.run(s2, { handBack: { reopen: [{ task: 'impl', issue: 'keep the last row' }], add: [hdr], note: 'impl and a check' } }), []);
+    await drive(engine, w.scheduler, script({ constructor: hold('con.m1.impl.2') }));
+    // a new plan takes effect that keeps every card, hdr's too (it carries no amendment)
+    const words = say(w, 'Once it has parsed a file, keep the parser read-only.');
+    await recordItem(w, { mission: M, item: 'd1', type: 'decision', text: 'The parser is read-only once it has parsed a file', source: { kind: 'words', words, quote: 'keep the parser read-only' } });
+    const next = pmPlan(M, { elements: [{ ...pmPlan(M).elements[0]!, text: 'A CSV parser library, read-only once it has parsed a file', items: ['g1', 'd1'] }, pmPlan(M).elements[1]!] });
+    await submitPmBatch(w, { mission: M, plan: next, userWords: [words], changedItems: ['d1'], mode: 'fast' });
+    const plan = detailedPlan(M);
+    const kept = (): DetailedPlanDoc => ({ ...plan, tasks: [...plan.tasks, hdr] });
+    await drive(engine, w.scheduler, hold('con.m1.impl.2', happyScript(M, kept)));
+    const eff = (await planInEffect(flowCtx(w, M)))!.eff;
+    assert.deepEqual([eff.dplan, eff.amendments ?? []], ['dplan.m1.2.1', []]);
+    // impl's attempt 2 is accepted: hdr waits for R-2's attempt, as before the new plan
+    await drive(engine, w.scheduler, hold('con.m1.impl.3', happyScript(M, kept)));
+    assert.equal((await events(w, 'task:impl', 'rework')).find((e) => e.key === '3')?.body.reopen?.repair, 'R-2');
+    assert.ok(!w.scheduler.tasks.has('con.m1.hdr.1'), 'hdr does not start on the impl work R-2 replaces');
+    await drive(engine, w.scheduler, happyScript(M, kept));
+    assert.ok((await events(w, 'task:hdr', 'dispatched')).find((e) => e.body.k === 1)!.body.prerequisites.includes('prod.con.m1.impl.3'));
+    await settled(w, engine);
+  });
+});
