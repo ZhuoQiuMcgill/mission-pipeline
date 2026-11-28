@@ -166,6 +166,8 @@ export function purposeOf(card: { readonly seat: string } & Readonly<Record<stri
       return `feasibility review of ${c['target']}`;
     case 'architect-repair':
       return clip(`repair ${c['repair']?.id} (${c['repair']?.kind}) of plan ${c['dplan']}: ${c['repair']?.text}`);
+    case 'architect-answer':
+      return clip(`answer escalation ${c['escalation']?.id} (${c['escalation']?.source}) on task ${c['taskCard']?.id}, asked by the ${c['asked']?.by === 'pm' ? 'PM' : 'Secretary'}: ${c['escalation']?.summary}`);
     case 'secretary':
       return clip(`decide ${c['request']?.id} (${c['request']?.source}): ${c['request']?.summary}`);
     case 'crititor':
@@ -383,7 +385,8 @@ export function readSteps(ctx: ProcessContext, o: { readonly afters?: AfterCheck
         const why = t !== undefined ? (JSON.parse(ctx.memory.data.text(t.body)) as { why: string }).why : dBody !== null && (dBody.classification === 'needs-user' || dBody.classification === 'needs-pm') ? dBody.notice || dBody.reason : null;
         if (why === null) continue;
         const esc = JSON.parse(ctx.memory.data.text(e.body)) as EscalationBody;
-        waitingOnUser.push({ mission: m, escalation: esc.id, subject: esc.subject, summary: esc.summary, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), why });
+        // the user's options (4.4, G1: the user does not ask the Architect; the PM does, with --by pm)
+        waitingOnUser.push({ mission: m, escalation: esc.id, subject: esc.subject, summary: esc.summary, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm' && o !== 'ask-architect'), why });
       }
     }
     return { ready, held, inFlight, waitingOnUser };

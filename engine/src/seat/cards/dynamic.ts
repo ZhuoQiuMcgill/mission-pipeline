@@ -9,6 +9,7 @@ import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
 import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
+import { carriedArchitectAnswer } from '../../flow/architectAnswers.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -82,6 +83,7 @@ export function taskDecisionQuotes(items: readonly CurrentItem[], events: readon
     const linked = related.has(i.line) || i.source.kind === 'authorization' || constraints.some((c) => c.text.includes(i.line));
     if (linked || after) out.push(`${i.text}${after ? ' (recorded after the plan)' : ''}`);
   }
+  let sec: FlowEvent[] | undefined;
   for (const e of events) {
     if (e.line !== 'secretary' || e.event !== 'escalation' || e.revision <= (spec?.revision ?? 0)) continue;
     const esc = e.body as EscalationBody;
@@ -91,8 +93,10 @@ export function taskDecisionQuotes(items: readonly CurrentItem[], events: readon
     if (what?.what?.option !== 'answer') continue;
     const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
     const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
+    // 4.4 (G1): the Architect's answer carried out on the asker's decision is read from its reply
+    const architect = carriedArchitectAnswer(sec ??= events.filter((a) => a.line === 'secretary'), esc.id);
     // 4.4 (F4, review r2): the text of an answer, one function everywhere: its instructions, or else the user's cited words
-    const text = d?.option === 'answer' && d.by === what.by ? answerText(d) : '';
+    const text = architect !== null ? architect.text : d?.option === 'answer' && d.by === what.by ? answerText(d) : '';
     if (text.trim() !== '') out.push(text);
   }
   return [...new Set(out)];

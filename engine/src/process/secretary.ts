@@ -282,7 +282,10 @@ function inboxItems(ctx: ProcessContext): InboxItem[] {
     if (!routed) continue;
     const id = `${e.mission}/${esc.id}`;
     const asked = is(e.mission, 'asked-user', esc.id);
-    out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${pmRound > 1 ? '; the words it rested on changed' : ''}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound,
+    // 4.4 (G1): a round the Architect's reply sent back says so, with the reply (in full: mp read show escalation)
+    const closed = pmRound > 1 ? events.find((r) => r.mission === e.mission && r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === `${esc.id}#${pmRound - 1}`)?.body as {why?: string; architect?: string} | undefined : undefined;
+    const back = pmRound <= 1 ? '' : typeof closed?.architect === 'string' ? `; your ask came back: ${clip(closed.why ?? '', 600)}` : '; the words it rested on changed';
+    out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${back}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound,
       brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans, mine.find((t) => t.line === 'secretary' && t.event === 'to-user' && t.key === esc.id)?.body.why ?? null)});
   }
   for (const n of listNotices(ctx.memory, ctx.memory.data, {audience: 'pm'})) {

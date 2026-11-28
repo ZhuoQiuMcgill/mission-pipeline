@@ -18,6 +18,7 @@
 import { missionIdProblem, type MissionId } from '../common/ids.ts';
 import { flowCtx, type FlowCtx } from './context.ts';
 import { executionStep } from './execution.ts';
+import { architectAskStep } from './architectAsk.ts';
 import { planningStep } from './planning.ts';
 import { planConstraintStep } from './plan-constraints.ts';
 import { repairStep } from './repair.ts';
@@ -89,6 +90,8 @@ export class FlowEngine {
   private steps(): ReadonlyArray<{ readonly name: string; readonly step: FlowStep }> {
     const out = [
       { name: 'secretary', step: secretaryStep },
+      // 4.4 (G1): an ask of the Architect, queued after the decision that asked and recorded before execution carries it out
+      { name: 'architect-ask', step: architectAskStep },
       { name: 'planning', step: planningStep },
       // 4.1.2 (D-10): repairs amend the plan in effect before execution moves
       { name: 'repair', step: repairStep },

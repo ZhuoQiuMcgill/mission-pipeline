@@ -24,6 +24,8 @@ import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, task
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
 import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectRepairCard } from './architect.ts';
+import type { ArchitectAnswerCard } from './architectAnswer.ts';
+import { askStanding } from '../../flow/architectAnswers.ts';
 import type { SecretaryCard } from './secretary.ts';
 import type { AuditNodeCard, AuditChainCard } from './auditor.ts';
 import type { AuthorCard, ReaderCard, InterpreterCard } from './researcher.ts';
@@ -31,7 +33,7 @@ import type { ExperimentCard } from './experiment.ts';
 import type { CrititorCard } from './crititor.ts';
 import type { StabilizerCard } from './stabilizer.ts';
 
-type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
+type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | ArchitectAnswerCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
 
 /** A card's constraint that is a project constraint (a basis line of `mp pm constraint`), not an exploration definition's own. */
 function projectConstraint(ix: BasisIndex, id: string): boolean {
@@ -64,6 +66,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
   // explorations planned before it are selected below. Blind cards exclude intent (§4.3).
   switch (card.seat) {
     case 'architect-repair':
+    case 'architect-answer':
     case 'researcher-author':
     case 'researcher-reader':
     case 'researcher-interpreter':
@@ -177,6 +180,15 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const tasks = new Set(events.filter((e) => e.line === 'plan' && e.event === 'effective').flatMap((e) => (e.body as EffectiveBody).tasks));
       card.owners = ownersOfPaths(new Map([...tasks].map((id) => [id, lineOf(id)])), about).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
       card.materials = [repairPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')];
+      break;
+    }
+    case 'architect-answer': {
+      // 4.4 (G1): an ask no longer current (answered by another decider, carried out, closed, its round closed) is not
+      // claimed: the flow's next pass cancels the step; a reply of it would change nothing (flow/architectAsk.ts)
+      const moot = askStanding(events.filter((e) => e.line === 'secretary'), { escalation: card.escalation.id, by: card.asked.by, round: card.asked.round });
+      if (moot !== null) throw new ProcessError('NOT_READY', `Architect step ${spec.task} was superseded: ${moot}; run mp pm next.`);
+      // the constraints in force at the claim, by the queue-time builder's selection
+      card.constraints = planningConstraints(constraints, mission);
       break;
     }
     case 'researcher-author':

@@ -57,6 +57,7 @@ import { explorationState } from '../flow/exploration/flow.ts';
 import type { SettleRecord } from '../flow/exploration/machine.ts';
 import { PLAN_LINE, PM_PLAN_EFFECTIVE, REQUIREMENTS_LINE, SECRETARY_LINE, explorationLine, taskLine } from '../flow/plandoc.ts';
 import { decisionFor } from '../flow/secretary.ts';
+import { askTask } from '../flow/architectAsk.ts';
 import { activeStopScopes, stopCovers, type Db } from '../memory/index.ts';
 import { purposeOf, readSteps, type ProcessContext } from '../process/index.ts';
 import { age, clip } from './render.ts';
@@ -395,6 +396,8 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
   const sec = (m: string, event: string, k: string): Flow | undefined => (flowsByLine.get(`${m}\n${SECRETARY_LINE}`) ?? []).find((f) => f.event === event && f.key === k);
   /** The Secretary steps of escalations the flows no longer consume: no block comes from them. */
   const orphaned = new Set<string>();
+  // 4.4 (G1): the Architect step of an ask: the PM's round, or the Secretary's (its retries so far)
+  const askStep = (m: string, id: string, d: { readonly by: string; readonly answerRound?: number }): string => askTask(m, d.by === 'pm' ? { escalation: id, by: 'pm', round: d.answerRound ?? 1 } : { escalation: id, by: 'secretary', round: (flowsByLine.get(`${m}\n${SECRETARY_LINE}`) ?? []).filter((f) => f.event === 'secretary-retry' && f.body['id'] === id).length });
   for (const e of escalations) {
     const source = String(e.body['source'] ?? '');
     const subject = String(e.body['subject'] ?? '');
@@ -413,16 +416,23 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       if (typeof e.body['task'] === 'string') owner.set(e.body['task'], k);
     }
     const id = String(e.body['id'] ?? e.key);
-    const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user');
+    // the user's own answer: 4.4 (G1) the user does not ask the Architect (the PM does, --by pm)
+    const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user' && o !== 'ask-architect');
     const onUser = waiting.has(`${e.mission}\n${id}`);
     const deciding = steps.inFlight.find((d) => d.step === e.body['task']);
+    const decided = onUser ? null : await decisionFor(flowCtx(ports, e.mission as MissionId), id);
+    // 4.4 (G1): an ask of the Architect waits for its step, named with where it stands
+    const ask = decided?.option === 'ask-architect' ? askStep(e.mission, id, decided) : null;
+    const answering = ask === null ? undefined : steps.inFlight.find((d) => d.step === ask);
     const next = onUser
       ? `ask the user; then mp pm answer ${e.mission} ${id} --option <${options.join('|')}> --words W-<n>`
-      : (await decisionFor(flowCtx(ports, e.mission as MissionId), id)) !== null
-        ? 'the decision is carried out on the next mp pm next'
-        : deciding !== undefined
-          ? `the Secretary is deciding (${deciding.dispatch} in flight): wait for its hand-back`
-          : 'the Secretary decides: dispatch its step (mp pm next)';
+      : ask !== null
+        ? `the Architect answers it: step ${ask} ${answering !== undefined ? `(${answering.dispatch} in flight): wait for its hand-back` : steps.ready.some((r) => r.step === ask) ? 'is ready: dispatch it (mp pm next)' : 'is queued by the next pass (mp pm next)'}`
+        : decided !== null
+          ? 'the decision is carried out on the next mp pm next'
+          : deciding !== undefined
+            ? `the Secretary is deciding (${deciding.dispatch} in flight): wait for its hand-back`
+            : 'the Secretary decides: dispatch its step (mp pm next)';
     block(k, `escalation ${id} is open (${source}: ${clip(String(e.body['summary'] ?? ''), 120)})`, next, ESCALATION_WI[source] ?? (onUser ? 'WI-24' : null));
   }
   // steps held (what mp pm next computes)

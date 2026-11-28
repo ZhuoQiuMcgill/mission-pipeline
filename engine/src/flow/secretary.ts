@@ -28,6 +28,7 @@ import { DetailedPlanDoc, PLAN_LINE, SECRETARY_LINE, amendedPlan, latestEffectiv
 import type { AppendGuard, FlowEventInput, FlowPorts, FlowSchedulerPort } from './ports.ts';
 import { currentItems, currentConstraints } from './requirements.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, deferredItemBodies, escalationQuestions } from './openItems.ts';
+import { ARCHITECT_ANSWER, answerKey, answersInPlace, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
 import { WI } from './wi.ts';
 
 export interface EscalationSpec {
@@ -83,10 +84,18 @@ export interface DecisionBody {
   readonly notice: string;
   readonly mayMatter: boolean;
   readonly inputs?: readonly { line: string; version: string; type: string }[];
+  /**
+   * 4.4 (G1): never stored in a decision event. decisionFor sets it on the answer it derives from an ask of
+   * the Architect and the Architect's answer (the reply's key); carryOut names it on the applied record.
+   */
+  readonly architect?: string;
 }
 
 /** Whether a decision covers reopens is the task line's state (execution.ts coveredReopens), not the escalation's: said as a condition. */
 const REOPEN_GRANTS = 'grants for reopens of one dependency attempt share its next attempt and carry their own covered requests';
+/** 4.4 (G1): what always holds for an ask of the Architect (flow/architectAsk.ts). */
+const ASK_STEP = 'one Architect step answers the question with your instructions and changes no card, standard or plan; the work waits for it as for any decision';
+const ASK_BACK = 'when the plan has to change, or the Architect needs to know something first, the escalation comes back to the decider that asked, with its reply';
 
 /**
  * What an option means, for the card. 4.4 (G2): an outcome says only what holds for the option on every
@@ -107,6 +116,8 @@ const OPTION_TEXT: Readonly<Record<DecisionOption, { label: string; outcome: str
   approve: { label: 'Approve the structural diff', outcome: 'the revision may take effect after its required checks' },
   'ask-pm': {label: 'Ask the PM', outcome: 'the related work waits for a PM decision on the recorded words'},
   'ask-user': { label: 'Ask the user', outcome: 'the related work waits; the PM asks the user' },
+  // 4.4 (G1): offered on a Constructor's questions and a Reviewer's "needs a decision" (flow/architectAsk.ts); a used-up loop has its own text
+  'ask-architect': { label: 'Ask the Architect (a question of design)', outcome: `${ASK_STEP}; its answer is carried out as this escalation's answer and goes to the next cards of the work; ${ASK_BACK}` },
 };
 
 type Outcomes = Partial<Record<DecisionOption, string>>;
@@ -165,6 +176,12 @@ export function sourceOutcome(e: EscalationBody, o: DecisionOption): string | nu
   if (e.source === 'constructor-decision' && o === 'answer' && escalationQuestions(e).length > 0) {
     return `${OPTION_TEXT.answer.outcome}: ${facts['blocked'] === true ? 'the paused attempt resumes on its parked edits' : 'a review that waits for it is ready once it is carried out'}; a question it puts off (defer, by number) stays an open item, answered later`;
   }
+  // 4.4 (G1): the Architect's answer is carried out as the answer of a Constructor's questions (answerQuestions); a used-up loop
+  // has no answer that continues it, so every reply comes back (flow/architectAnswers.ts answersInPlace)
+  if (o === 'ask-architect' && e.source === 'constructor-decision' && escalationQuestions(e).length > 0) {
+    return `${ASK_STEP}; its answer is carried out as this escalation's answer (${facts['blocked'] === true ? 'the paused attempt resumes on its parked edits' : 'a review that waits for it is ready once it is carried out'}) and goes to the next cards of the work; ${ASK_BACK}`;
+  }
+  if (o === 'ask-architect' && e.source === 'loop-exhausted') return `${ASK_STEP}; every reply (an answer, "the plan has to change", or a question) is recorded on this escalation and comes back to the decider that asked, and a grant then carries an answer to the next attempt`;
   return null;
 }
 
@@ -499,7 +516,7 @@ export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBod
   const answer = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'user-answer', id);
   if (answer !== null) return observed(ctx, id, answer.body);
   const pm = await currentPmAnswer(ctx, id);
-  if (pm !== null) return observed(ctx, id, pm);
+  if (pm !== null) return observed(ctx, id, await architectAnswered(ctx, id, pm, { escalation: id, by: 'pm', round: pm.answerRound ?? 1 }));
   // Recording a PM answer permanently overrides the earlier Secretary choice. A rejected
   // answer leaves the next PM round waiting, including on pure reads before rejection is recorded.
   if ((await eventsOf(ctx, SECRETARY_LINE, 'pm-answer')).some((e) => e.key.startsWith(`${id}#`))) return null;
@@ -509,7 +526,22 @@ export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBod
   const d = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', round?.key ?? id);
   if (d === null || d.body.classification === 'needs-user' || d.body.classification === 'needs-pm' || isAskOption(d.body.option)) return null;
   if (round !== null && !(await isApplied(ctx, id)) && !(await decisionAuthorityCurrent(ctx, round.esc, round, d.body))) return null;
-  return observed(ctx, id, d.body);
+  return observed(ctx, id, d.body.by === 'secretary' ? await architectAnswered(ctx, id, d.body, { escalation: id, by: 'secretary', round: round?.round ?? 0 }) : d.body);
+}
+
+/**
+ * 4.4 (G1): an ask of the Architect whose step answered, on a kind that is carried out as an answer: the
+ * decision in effect is that answer (the Architect's text as its instructions; the asker stays the decider of
+ * record), so it is carried out as any answer is. Anything else: the ask itself, and the work waits.
+ */
+async function architectAnswered(ctx: FlowCtx, id: string, d: DecisionBody, ask: Ask): Promise<DecisionBody> {
+  if (d.option !== 'ask-architect') return d;
+  const esc = await escalation(ctx, id);
+  if (esc === null || !answersInPlace(esc.source)) return d;
+  const key = answerKey(ask);
+  const a = (await eventOf<ArchitectAnswerBody>(ctx, SECRETARY_LINE, ARCHITECT_ANSWER, key))?.body;
+  if (a === undefined || a.reply !== 'answer' || a.moot !== undefined) return d;
+  return { ...d, option: 'answer', instructions: a.text, architect: key };
 }
 
 /** Records a PM answer; returns its answer round (4.4, F9: the command reports on this very answer). */
@@ -523,7 +555,7 @@ export async function answerByPm(ports: FlowPorts, req: {mission: MissionId; esc
   if (!req.reason.trim() || (req.noWords === true) === (req.words.length > 0)) throw Object.assign(new Error('a PM answer requires --reason and either --words W-a[,W-b] or --no-words'), {name: 'ProcessError', code: 'NOT_ALLOWED'});
   const words = req.words.map((id) => {const fingerprint = ports.wordsAuthority?.(id, req.mission); if (fingerprint == null) throw Object.assign(new Error(`${id} is not in force for ${req.mission}`), {name: 'ProcessError', code: 'NOT_ALLOWED'}); return {id, fingerprint};});
   if (req.option === 'grant' && (!Number.isSafeInteger(req.grantExtra) || req.grantExtra! < 1)) throw Object.assign(new Error('grant requires a positive --extra'), {name: 'ProcessError', code: 'NOT_ALLOWED'});
-  if (['send-back', 'replan', 'rework', 'answer'].includes(req.option) && !req.instructions?.trim()) throw Object.assign(new Error(`${req.option} requires --instructions`), {name: 'ProcessError', code: 'NOT_ALLOWED'});
+  if (['send-back', 'replan', 'rework', 'answer', 'ask-architect'].includes(req.option) && !req.instructions?.trim()) throw Object.assign(new Error(`${req.option} requires --instructions`), {name: 'ProcessError', code: 'NOT_ALLOWED'});
   const deferProblem = deferProblems(esc, req.option, req.defer ?? []);
   if (deferProblem !== null) throw Object.assign(new Error(deferProblem), {name: 'ProcessError', code: 'NOT_ALLOWED'});
   const round = await pmAnswerRound(ctx, esc.id);
@@ -630,6 +662,8 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
     if (dispatch !== null) decider['dispatch'] = dispatch;
   }
   if (d !== null && d.by === 'pm') {decider['words'] = (d.words ?? []).map((w) => w.id); decider['answerRound'] = d.answerRound; decider['noWords'] = d.noWords;}
+  // 4.4 (G1): the Architect's answer carried out on the asker's decision: its reply's key (the cards read the text from it)
+  if (d.architect !== undefined) decider['architect'] = d.architect;
   if (d !== null && d.by === 'user') {
     const w = /\((W-[0-9]+)\)\s*$/.exec(d.reason);
     if (w !== null) decider['words'] = w[1];
@@ -790,6 +824,8 @@ export async function answerEscalation(
   const esc = await escalation(ctx, req.escalation);
   if (esc === null) throw new Error(`no escalation ${req.escalation} in mission ${req.mission}`);
   if (isAskOption(req.option) || !esc.options.some((o) => sameDecisionOption(o, req.option))) throw new Error(`option ${req.option} is not a decision for ${req.escalation} (choose one of ${esc.options.filter((o) => o !== 'ask-user').join(', ')})`);
+  // 4.4 (G1): asking the Architect is a decider's step, not the user's own answer: the PM asks on the user's words (--by pm)
+  if (req.option === 'ask-architect') throw new Error(`ask-architect is the Secretary's or the PM's choice, not the user's own answer: the PM asks the Architect on the user's words with mp pm answer ${req.mission} ${esc.id} --option ask-architect --by pm --words ${/\((W-[0-9]+)\)\s*$/.exec(req.words)?.[1] ?? 'W-<n>'} --instructions "…" --reason "…"`);
   const deferProblem = deferProblems(esc, req.option, req.defer ?? []);
   if (deferProblem !== null) throw new Error(deferProblem);
   // an escalation already carried out (applied once) takes no later answer: it would never be carried out,

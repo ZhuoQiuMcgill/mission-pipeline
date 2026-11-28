@@ -87,7 +87,7 @@ import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
 import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
-import { decisionOutcome, type DecisionOutcome } from './decisions.ts';
+import { decisionOutcome, replyOutcome, type DecisionOutcome } from './decisions.ts';
 
 // ---------------------------------------------------------------- the dispatch's card and materials
 
@@ -229,7 +229,8 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string, o: { r
  */
 async function productCheckout(ctx: ProcessContext, v: DispatchView, task: string): Promise<{ readonly path: string; readonly commit: string; readonly product: string }> {
   const accepted = (v.card['accepted'] as Array<{ task: string; product: string; commit?: string }> | undefined) ?? null;
-  if (v.card.seat !== 'architect-repair' || accepted === null) throw new ProcessError('NOT_ALLOWED', `--product is for a repair Architect's card, which lists the accepted products it may reopen; this is a ${v.card.seat} card`);
+  // 4.4 (G1): an Architect asked a question reads the accepted product of the task it is about the same way
+  if ((v.card.seat !== 'architect-repair' && v.card.seat !== 'architect-answer') || accepted === null) throw new ProcessError('NOT_ALLOWED', `--product is for a repair Architect's card, which lists the accepted products it may reopen; this is a ${v.card.seat} card (an Architect answering a question reads its task's accepted product the same way)`);
   const a = accepted.find((x) => x.task === task);
   if (a === undefined) throw new ProcessError('NOT_ALLOWED', `task ${task} has no accepted product on the card (accepted: ${accepted.map((x) => x.task).join(', ') || 'none'})`);
   // a card queued before 4.4 names no commit: the product's recorded one
@@ -603,6 +604,8 @@ export type HandBackAnswer =
       readonly parked?: true;
       /** 4.4 (F9): an accepted Secretary decision: what became of it in this command. */
       readonly decision?: DecisionOutcome;
+      /** 4.4 (G1): an accepted reply of an Architect asked a question: what became of it in this command, read from its record. */
+      readonly reply?: DecisionOutcome;
     };
 
 export interface HandBackInput {
@@ -847,13 +850,17 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     }
   }
   let decision: DecisionOutcome | undefined;
+  let reply: DecisionOutcome | undefined;
   if (input.advance !== false) {
     const why = await advanceQuietly(ctx, v, notes);
     // 4.4 (F9): a Secretary decision says what became of it, read from the record after the pass
     const escalation = (v.card as { request?: { id?: unknown } }).request?.id;
     if (v.card.seat === 'secretary' && out.accepted && typeof escalation === 'string') decision = ctx.memory.read((db) => decisionOutcome(db, data, { mission: v.info.mission, escalation, task: v.info.task, fields: input.fields, why }));
+    // 4.4 (G1): an Architect's reply says what became of it: carried out, back to the decider, kept as moot, or left to the next pass
+    const asked = (v.card as { escalation?: { id?: unknown } }).escalation?.id;
+    if (v.card.seat === 'architect-answer' && out.accepted && typeof asked === 'string') reply = ctx.memory.read((db) => replyOutcome(db, data, { mission: v.info.mission, escalation: asked, step: v.info.task, why }));
   }
-  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(parked ? { parked: true as const } : {}), ...(decision !== undefined ? { decision } : {}) };
+  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(parked ? { parked: true as const } : {}), ...(decision !== undefined ? { decision } : {}), ...(reply !== undefined ? { reply } : {}) };
 }
 
 /**

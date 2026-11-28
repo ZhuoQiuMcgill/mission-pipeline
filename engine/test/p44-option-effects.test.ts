@@ -120,6 +120,42 @@ describe('option effects: task escalations', () => {
     says(esc, 'replan', /the task waits while the Architect re-plans it with the instructions/);
     await replanned(w, esc, 'impl');
   });
+  // 4.4 (G1): one Architect step; its answer is carried out as the escalation's answer, any other reply comes back
+  const architectReplies = (r: Record<string, unknown>): Script => () => ({ handBack: r });
+  test('constructor-decision / ask-architect (an answer)', async () => {
+    const { w, engine } = await scripted();
+    await drive(engine, w.scheduler, withKinds({
+      constructor: (t: FlowTask): ScriptedOutcome | null => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Should empty lines be skipped?'] } : {}) }),
+      secretary: decides('constructor-decision', 'ask-architect'),
+      'architect-answer': architectReplies({ reply: 'answer', text: 'ARCH: skip them' }),
+    }));
+    const esc = await ofSource(w, 'constructor-decision');
+    says(esc, 'ask-architect', /one Architect step answers the question with your instructions and changes no card, standard or plan; the work waits for it as for any decision; its answer is carried out as this escalation's answer \(a review that waits for it is ready once it is carried out\) and goes to the next cards of the work; when the plan has to change, or the Architect needs to know something first, the escalation comes back to the decider that asked, with its reply/);
+    const arch = [...w.scheduler.tasks.keys()].find((t) => t.startsWith('arch-ask.'))!;
+    assert.equal(w.scheduler.card<{ asked: { instructions: string } }>(arch).asked.instructions, INSTR, 'one Architect step, with the instructions');
+    const a = await appliedOf(w, esc.id);
+    assert.equal(a?.what?.['option'], 'answer');
+    assert.equal((a as { architect?: string } | undefined)?.architect, `${esc.id}:s0`);
+    assert.ok((await events(w, { line: 'task:impl', event: 'accepted' })).length === 1, 'the review that waited went on');
+    const evs = await w.ledger.events({ mission: M }) as FlowEvent[];
+    const task = detailedPlan(M).tasks.find((t) => t.id === 'impl')!;
+    assert.ok(taskDecisionQuotes(await currentItems(flowCtx(w, M)), evs, task, [], taskReferencePlan(evs)).includes('ARCH: skip them'), 'the next cards of the task quote it');
+  });
+  test('constructor-decision / ask-architect (the plan has to change: back to the decider)', async () => {
+    const { w, engine } = await scripted();
+    let rounds = 0;
+    await drive(engine, w.scheduler, withKinds({
+      constructor: (t: FlowTask): ScriptedOutcome | null => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Should empty lines be skipped?'] } : {}) }),
+      // the first round asks; the round the reply comes back to goes to the PM (nothing else moves)
+      secretary: (t, s) => (rounds++ === 0 ? decides('constructor-decision', 'ask-architect')(t, s) : { handBack: secretary(t.card as unknown as SecretaryCard, 'ask-pm') }),
+      'architect-answer': architectReplies({ reply: 'plan-must-change', text: 'ARCH: S1 must change', why: 'it is silent' }),
+    }));
+    const esc = await ofSource(w, 'constructor-decision');
+    says(esc, 'ask-architect', /when the plan has to change, or the Architect needs to know something first, the escalation comes back to the decider that asked, with its reply/);
+    const back = (await events<{ why: string }>(w, { line: SECRETARY_LINE, event: 'secretary-retry' })).find((e) => e.key === `${esc.id}#1`);
+    assert.match(back?.body.why ?? '', /the plan has to change\. What: ARCH: S1 must change Why: it is silent/);
+    assert.equal(await appliedOf(w, esc.id), undefined, 'nothing is carried out');
+  });
 
   const reviewerAsks = async (option: DecisionOption) => {
     const { w, engine } = await scripted();
@@ -139,6 +175,23 @@ describe('option effects: task escalations', () => {
     says(esc, 'answer', /the answer is recorded as the decision and goes to the next cards of the work/);
     assert.ok((await events(w, { line: 'task:impl', event: 'reanswer' })).length === 1);
     assert.ok(w.scheduler.card<ReviewerCard>('rev.m1.impl.1.r1').decisionQuotes.includes(INSTR), 'the next review of the work quotes it');
+  });
+  test('reviewer-needs-decision / ask-architect', async () => {
+    const { w, engine } = await scripted();
+    let first = true;
+    await drive(engine, w.scheduler, withKinds({
+      reviewer: (t) => {
+        const c = t.card as unknown as ReviewerCard;
+        if (c.target.includes('impl') && first) { first = false; return { handBack: reviewer(c, 'needs-decision') }; }
+        return { handBack: reviewer(c, 'pass') };
+      },
+      secretary: decides('reviewer-needs-decision', 'ask-architect'),
+      'architect-answer': architectReplies({ reply: 'answer', text: 'ARCH: S1 means RFC quoting' }),
+    }));
+    const esc = await ofSource(w, 'reviewer-needs-decision');
+    says(esc, 'ask-architect', /one Architect step answers the question with your instructions and changes no card, standard or plan; the work waits for it as for any decision; its answer is carried out as this escalation's answer and goes to the next cards of the work; when the plan has to change/);
+    assert.deepEqual((await events<{ decision: string }>(w, { line: 'task:impl', event: 'reanswer' })).map((e) => e.body.decision), ['ARCH: S1 means RFC quoting']);
+    assert.ok(w.scheduler.card<ReviewerCard>('rev.m1.impl.1.r1').decisionQuotes.includes('ARCH: S1 means RFC quoting'), 'the next review of the work quotes it');
   });
   test('reviewer-needs-decision / rework', async () => {
     const { w, esc } = await reviewerAsks('rework');
@@ -191,6 +244,34 @@ describe('option effects: task escalations', () => {
     says(esc, 'accept-risk', /accepted as it is, its unresolved findings recorded as risks/);
     const acc = (await events<{ decision: { option: string }; risks: string[] }>(w, { line: 'task:impl', event: 'accepted' })).at(-1);
     assert.equal(acc?.body.decision.option, 'accept-risk');
+  });
+  test('loop-exhausted (rework) / ask-architect', async () => {
+    const { w, engine } = await scripted();
+    let reworks = 0;
+    let round = 0;
+    await drive(engine, w.scheduler, withKinds({
+      reviewer: (t) => {
+        const c = t.card as unknown as ReviewerCard;
+        if (c.target.includes('iface')) return { handBack: reviewer(c, 'pass') };
+        reworks++;
+        return { handBack: reviewer(c, 'rework', { failing: reworks % 2 === 0 ? 'S2' : 'S1' }) };
+      },
+      // the first round asks; the round the reply comes back to goes to the PM (nothing else moves)
+      secretary: (t, s) => { const c = t.card as unknown as SecretaryCard; if (c.request.source !== 'loop-exhausted') return null; return round++ === 0 ? decides('loop-exhausted', 'ask-architect')(t, s) : { handBack: secretary(c, 'ask-pm') }; },
+      'architect-answer': architectReplies({ reply: 'answer', text: 'ARCH: both standards hold with RFC quoting' }),
+    }));
+    const esc = await ofSource(w, 'loop-exhausted');
+    says(esc, 'ask-architect', /one Architect step answers the question with your instructions and changes no card, standard or plan; the work waits for it as for any decision; every reply \(an answer, "the plan has to change", or a question\) is recorded on this escalation and comes back to the decider that asked, and a grant then carries an answer to the next attempt/);
+    const reply = (await events<{ reply: string; moot?: string }>(w, { line: SECRETARY_LINE, event: 'architect-answer' })).find((e) => e.key === `${esc.id}:s0`);
+    assert.equal(reply?.body.reply, 'answer', 'recorded on this escalation');
+    const back = (await events<{ why: string }>(w, { line: SECRETARY_LINE, event: 'secretary-retry' })).find((e) => e.key === `${esc.id}#1`);
+    assert.match(back?.body.why ?? '', /answered: ARCH: both standards hold with RFC quoting A grant carries this answer to the next attempt/, 'it comes back to the decider that asked');
+    assert.equal(await appliedOf(w, esc.id), undefined, 'nothing is carried out by the reply itself');
+    // the grant that follows carries it to the next attempt
+    await answerByPm(w, { mission: M, escalation: esc.id, option: 'grant', words: [], noWords: true, reason: 'one more attempt', grantExtra: 1 });
+    await drive(engine, w.scheduler, withKinds({ reviewer: (t) => ({ handBack: reviewer(t.card as unknown as ReviewerCard, 'pass') }), secretary: () => null }));
+    const rw = (await events<{ instructions: string[] }>(w, { line: 'task:impl', event: 'rework' })).at(-1);
+    assert.ok(rw?.body.instructions.some((i) => i.includes('ARCH: both standards hold with RFC quoting')), JSON.stringify(rw?.body));
   });
   test('loop-exhausted (rework) / abandon', async () => {
     const { w, esc } = await reworkExhausted('abandon');

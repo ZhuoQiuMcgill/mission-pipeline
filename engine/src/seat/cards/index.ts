@@ -56,3 +56,4 @@ import './stabilizer.ts';
 import './experiment.ts';
 import './researcher.ts';
 import './auditor.ts';
+import './architectAnswer.ts';
