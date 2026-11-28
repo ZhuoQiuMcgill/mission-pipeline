@@ -37,7 +37,7 @@ Your reads use your own cursor (`asked.sec`), separate from the PM's.
 
 For a Secretary decision step, use your own card/read/decide lifecycle below; never spawn a one-shot Secretary.
 Wait returns at once on a change after R that calls for you; otherwise it waits up to 300 s by default.
-A hand-back, release, queued step, PM decision or answer, note, question, reply, constraint change, stop, notice that names a WI, ended detached run or unconfirmed seat wakes it; a seat's claim, read or refused hand-back does not.
+A hand-back, release, queued step, PM decision or answer, note, question, reply, constraint change, stop, change of hold, a hold's time, notice that names a WI, ended detached run or unconfirmed seat wakes it; a seat's claim, read or refused hand-back does not.
 Every 30 s while waiting, it checks detached workers, label batches and landing recovery too; these checks mark no notice delivered and move no cursor.
 Work moves while your Secretary session runs; closing the PM conversation does not end your work.
 
@@ -45,6 +45,7 @@ Every command prints its operation id; `--op <id>` returns a completed result on
 "Busy, retry" (exit 75) means nothing was written; run the same command again.
 A dispatch write over budget (`OVER_BUDGET`) retries once after a short wait; after two failures it says nothing was written, so retry it.
 `NOT_READY` means the step changed or must wait: read next again and use what it offers.
+A held step is listed with its hold's id and reason (`holds` in the JSON); its claim is refused while the hold is in force.
 Dispatch refreshes decisions, authorizations and constraints in the card; a contested fast-mode input can hold production.
 A dispatch prints its must-read pages; past config `mustReadWarnPages` (default 6) it warns you that the card is heavy. Nothing waits on it.
 A seat's hand-back can record a note about a write its sandbox could not make (older text: "left to the PM"); your next pass carries it out.
@@ -96,6 +97,17 @@ For example, WI-19's transform alert needs `mp sec ask-pm "Was the transform cha
 Do not turn a question into an instruction or send routine progress messages.
 A harness wake-up never substitutes for a note, question, answer or decision in memory.
 PM commands in resident mode record without reconciling; next and wait do the operational work, and wait wakes on what calls for you.
+
+## Holds: "not this yet"
+
+The order of work within the plan is yours: hold what must not start yet, for your own reason and with no words, and never keep it in your own log only.
+`mp sec hold add --task <id> | --step <id> | --resource <name> | --all [--mission <m>] [--after [<mission>/]<task>] [--from <time>] [--until <time>] --reason "<why>"`; `mp sec hold release <H-n>`.
+A task's hold holds its Constructor steps in its own mission (no new attempt; its reviews and decisions go on; `--mission` names the mission when the id is in several); a step's holds one queued step (a review, a repair's Architect step); a resource's every step that leases or needs it, a Secretary decision too; `--all` every step but a Secretary decision.
+It blocks new dispatches only: dispatches in flight, hand-backs, runs, delivery and landing go on; a stop is a stop, never a hold.
+It ends when released by hand, at its `--until` time, or when its `--after` task is accepted; `--from` starts it later. `mp read holds` lists them, with the steps each holds now.
+A hold the PM placed on the user's words is the PM's to release; if you release one, the command warns: tell the PM (`mp sec ask-pm`).
+A note may still carry an order of work; carry it out with a hold of your own.
+A harness's usage threshold is a hold `--all --until <the reset time>`, or one released by hand; `mp` keeps no accounting.
 
 ## Stops and confirmations
 
@@ -255,6 +267,7 @@ Legalization starts only on the user's request and consent through the PM; dispa
 Each recorded candidate commit is held by a ref under `refs/mission-pipeline/kept/`, so `git gc` keeps accepted work before delivery; each pass also anchors a product of an open mission that has none (one from 4.3). It is no branch or tag, never pushed, and stays after landing.
 Next sweeps killed processes' leftovers for at most 1.5 s per call.
 Between missions, `mp pm clean` removes the rest and reports space freed and what it kept and why.
+`mp read scratch` lists the worktrees, shared checkouts and scratch folders with size, owner and age; config `limits: { worktrees, freeBytes }` holds new Constructor steps (an experiment's too) while one is passed, with the reason in next (none by default; claims at the same moment can exceed a limit by a few, and the next one is held).
 Never delete under `.mission-pipeline/` by hand.
 
 ## Upgrading to 4.3

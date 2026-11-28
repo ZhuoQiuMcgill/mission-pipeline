@@ -18,7 +18,9 @@ import { submitPmBatch } from '../src/flow/planning.ts';
 import { architect, constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { answerByPm, answerEscalation, deferProblems, escalation, raiseEscalation, secretaryOptions } from '../src/flow/secretary.ts';
 import { heldForQuestions } from '../src/process/questions.ts';
-import { pmDispatch, readSteps } from '../src/process/pm.ts';
+import { pmDispatch, readSteps, type HeldStep } from '../src/process/pm.ts';
+import { placeHold, releaseHold } from '../src/process/holds.ts';
+import { resolveSubtasks } from '../src/cli/layers.ts';
 import { REDISPATCH_LOOP } from '../src/process/index.ts';
 import { answerOpenItem, listOpenItems } from '../src/process/openItems.ts';
 import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
@@ -517,5 +519,66 @@ describe('4.4 F4, review round 2', () => {
     assert.match(text('current-facts'), /answered by the Secretary: The BOM is dropped\. .*… \(cut; in full: material task-line\)/);
     const line = JSON.parse(text('task-line')) as { openItems?: Array<{ id: string; answer: { answer: string } }> };
     assert.equal(line.openItems?.find((i) => i.id === 'cdec.con.m1.impl.1.q1')?.answer.answer, long);
+  });
+});
+
+describe('4.4 F4 with G6: a review that waits for its questions and a hold on it', () => {
+  /** A review that waits for the answer to its Constructor's question, and a hold H-1 placed on that step. */
+  async function waitingAndHeld(): Promise<{ ports: World; engine: FlowEngine; id: string; rev: string }> {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({
+      constructor: (t: FlowTask) => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Should empty lines be skipped?'] } : {}) }),
+      secretary: () => null,
+    }));
+    const rev = 'rev.m1.impl.1';
+    assert.equal(placeHold(ports.ctx, { op: 'h1', subject: { kind: 'step', step: rev }, reason: 'not this review yet' }).hold, 'H-1');
+    return { ports, engine, id: 'cdec.con.m1.impl.1', rev };
+  }
+  const heldOf = (w: World, step: string): HeldStep | undefined => readSteps(w.ctx).held.find((h) => h.step === step);
+  const claimRefusal = (w: World, step: string): Error & { code?: string; detail?: { holds?: Array<{ id: string }> } } => {
+    try {
+      pmDispatch(w.ctx, step, { filledBy: 'test/scripted' });
+    } catch (e) {
+      return e as never;
+    }
+    throw new Error(`${step} was claimed`);
+  };
+
+  it('both are named, in the ready list (the hold as data too), in the claim and in mp read blocked; the hold released first, the wait still shows', async () => {
+    const { ports, engine, id, rev } = await waitingAndHeld();
+    const both = heldOf(ports, rev)!;
+    assert.ok(both.why.includes(id) && both.why.includes('hold H-1'), `both reasons: ${both.why}`);
+    assert.deepEqual(both.holds?.map((h) => [h.id, h.reason]), [['H-1', 'not this review yet']]);
+    const refused = claimRefusal(ports, rev);
+    assert.ok(refused.code === 'NOT_READY' && refused.message.includes(id) && refused.message.includes('hold H-1'), refused.message);
+    assert.deepEqual(refused.detail?.holds?.map((h) => h.id), ['H-1']);
+    const blockedLine = (await resolveSubtasks(ports.ctx)).blocked.flatMap((e) => (e.blocked !== null ? [e.blocked] : [])).find((b) => b.because.includes(id))!;
+    assert.ok(blockedLine.next.includes('carried out as an answer') && blockedLine.next.includes('while H-1 holds it'), blockedLine.next);
+    assert.ok(!blockedLine.next.includes('resource is free'), 'the wait is not read as a lease');
+
+    releaseHold(ports.ctx, { op: 'r1', hold: 'H-1' });
+    const waits = heldOf(ports, rev)!;
+    assert.ok(waits.why.includes(id) && !waits.why.includes('H-1') && waits.holds === undefined, `the wait alone: ${waits.why}`);
+    assert.ok(!readSteps(ports.ctx).ready.some((r) => r.step === rev));
+    assert.ok(claimRefusal(ports, rev).message.includes(id));
+
+    await drive(engine, ports.scheduler, withKinds({ secretary: answers((c) => c.request.id === id, 'Skip empty lines.') }));
+    assert.equal(ports.ctx.memory.read((db) => db.stmt('SELECT COUNT(*) AS n FROM dispatches WHERE task = ?').get(rev) as { n: number }).n, 1, 'claimed once both were gone');
+  });
+
+  it('the question answered first, the hold still shows, alone; its release makes the review ready', async () => {
+    const { ports, engine, id, rev } = await waitingAndHeld();
+    // the answer is carried out; the Reviewer's seat is not run (the hold would refuse its claim)
+    await drive(engine, ports.scheduler, withKinds({ secretary: answers((c) => c.request.id === id, 'Skip empty lines.'), reviewer: () => null }));
+    assert.ok((await events(ports, { line: 'secretary', event: 'applied' })).some((e) => e.key === id), 'the answer was carried out');
+    const holdOnly = heldOf(ports, rev)!;
+    assert.ok(holdOnly.why.startsWith('hold H-1') && !holdOnly.why.includes(id), `the hold alone: ${holdOnly.why}`);
+    assert.deepEqual(holdOnly.holds?.map((h) => h.id), ['H-1']);
+    const refused = claimRefusal(ports, rev);
+    assert.ok(refused.message.includes('hold H-1') && !refused.message.includes(id), refused.message);
+
+    releaseHold(ports.ctx, { op: 'r1', hold: 'H-1' });
+    assert.equal(heldOf(ports, rev), undefined);
+    assert.ok(readSteps(ports.ctx).ready.some((r) => r.step === rev));
   });
 });
