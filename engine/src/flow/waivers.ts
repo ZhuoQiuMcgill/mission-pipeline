@@ -22,6 +22,10 @@
 
 import { PLAN_LINE } from './plandoc.ts';
 import { eventsOf, objectRecord, type FlowCtx } from './context.ts';
+import { selectedWaiver } from './waiverChoice.ts';
+
+// 4.4 (G7): the planner's choice, shared with the reads and the words' dependency lookup
+export { selectedWaiver };
 
 /** The one check a waiver names in 4.1.3. */
 export const WAIVABLE_CHECKS = ['plan-reviews'] as const;
@@ -100,26 +104,6 @@ export function planReviewsWaiverIn(events: readonly PlanEvent[], mission: strin
   if (inForce !== null) return { by: inForce.by, ref: inForce.ref, reason: inForce.reason };
   if (!withdrawn && (config.includes(mission) || config.includes(dplan))) return { by: 'config', ref: CONFIG_KEY, reason: null };
   return null;
-}
-
-/**
- * The waiver on the record the planner applies to one plan not in effect yet: the latest that covers
- * it, unless a withdrawal that covers it came after. A withdrawal for the whole mission (dplan null)
- * covers every plan, also when it was written for the mission-wide waiver alone (scope-only). 4.4 (G7):
- * the reads use this same choice, so a read never calls in force a waiver the planner does not apply.
- */
-export function selectedWaiver(events: readonly PlanEvent[], dplan: string): { readonly waiver: ReviewsWaiverBody | null; readonly withdrawn: boolean } {
-  let inForce: ReviewsWaiverBody | null = null;
-  let withdrawn = false;
-  for (const e of events) {
-    if (e.event !== REVIEWS_WAIVER) continue;
-    const b = e.body as ReviewsWaiverBody;
-    if (b.check !== 'plan-reviews') continue;
-    if (b.action === 'withdraw') {
-      if (b.scopeOnly !== true || b.dplan === null || b.dplan === dplan) {inForce = null; withdrawn = true;}
-    } else if (b.dplan === null || b.dplan === dplan) inForce = b;
-  }
-  return { waiver: inForce, withdrawn };
 }
 
 /** The plan line's events the planner reads: a waiver on words that lost force is left out (4.3, Appendix B.3). */

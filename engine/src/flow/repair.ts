@@ -39,7 +39,7 @@ import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
 import { itemIds, recordOnAct, riskItemsOf, takenItems } from './riskItems.ts';
 import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REPAIR_ENDED, REPAIR_KINDS, REQUIREMENTS_LINE, amendedPlan, amendedTaskIds, cardChangedBy, explorationLine, repairOfTask, repairRef, taskCardHash, taskLine, type AmendmentEntry, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairEndedBody, type RepairKind, type RepairRef } from './plandoc.ts';
 import { detailedPlanOf, explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
-import { acceptedProduct, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
+import { acceptedProduct, givenUpUnderCard, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints, currentItems, itemLine, newItemRecords, type ItemVersionBody } from './requirements.ts';
 import { newItemTerms } from '../memory/domain/requirementSets.ts';
@@ -728,21 +728,30 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
       reopen.push({ task: x.task, issue: x.issue, attempt: last.k, product: last.product, ...extra });
       continue;
     }
-    // a giving-up holds only under the card it was recorded under: a card of the plan in effect the task has not taken
-    // yet (another repair changed it) revives the task once execution lays it, so nothing is decided now (read again)
+    // a giving-up holds only under the card in effect (execution.ts givenUpUnderCard, F2-1): a card of the plan in
+    // effect the task has not taken yet (another repair changed it), or a drop since its card that the plan brings
+    // back, revives the task once execution lays the card, so nothing is decided now (read again)
     const spec = events.filter((e) => e.event === 'spec').at(-1);
     const card = plan.tasks.find((t) => t.id === x.task);
-    if (sel.abandoned && card !== undefined && spec !== undefined && (spec.body as { hash?: string }).hash !== taskCardHash(card)) return;
+    if (sel.abandoned && !givenUpUnderCard(events, card)) return;
     specsRead.push({ mission: ctx.mission, line: taskLine(x.task), event: 'spec', revision: spec?.revision ?? null });
     notCarried.push({ task: x.task, attempt: sel.k, why: sel.abandoned ? 'the task was given up' : 'the task has no accepted work to reopen' });
   }
   const added: readonly DetailedTask[] = result.add.map(bind);
-  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now; 4.4: one accepted
-  // meanwhile went back to the Architect first (oneRepair), so what is left out here is said, never an accepted task's edit
+  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now. 4.4 (F5, final review F1-1): one
+  // accepted since this pass's checks is never left out in silence: nothing is decided now, and the next pass sends
+  // the hand-back back to the Architect by the mechanical-return loop (oneRepair, "now has an accepted product"); the
+  // write checks that no changed task was accepted after this read (its acceptance read first, then its product)
   const changed: DetailedTask[] = [];
+  const acceptanceRead: Array<{ readonly mission: string; readonly line: string; readonly event: string; readonly revision: number | null }> = [];
   for (const c of result.change ?? []) {
-    if ((await acceptedProduct(ctx, c.id)) !== null || !plan.tasks.some((t) => t.id === c.id)) skipped.push(c.id);
-    else changed.push(bind(keepCarried(c)));
+    if (!plan.tasks.some((t) => t.id === c.id)) {
+      skipped.push(c.id);
+      continue;
+    }
+    acceptanceRead.push({ mission: ctx.mission, line: taskLine(c.id), event: 'accepted', revision: (await eventsOf(ctx, taskLine(c.id), 'accepted')).at(-1)?.revision ?? null });
+    if ((await acceptedProduct(ctx, c.id)) !== null) return;
+    changed.push(bind(keepCarried(c)));
   }
   // 4.4 (G3, F2): the Architect's note is recorded with its decision (also an empty one, so a read tells it from a
   // 4.3 decision, which has none); the cards of the tasks it added, changed or reopened print it
@@ -784,12 +793,12 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   // the card it was read under (a new card revives a task given up). Any one changed: read again on the next pass
   // 4.4 (G9, P-3): and, for a filing with items, no item was withdrawn since they were read (the user may have taken it back)
   const itemsRead = filing.length > 0 ? [{ mission: ctx.mission, line: REQUIREMENTS_LINE, event: 'withdrawn', revision: read.withdrawn }] : [];
-  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records, guard: { latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.effective }, { mission: ctx.mission, line: REPAIRS_LINE, event: 'decided', revision: read.decided }, ...specsRead, ...itemsRead], absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: REPAIR_ENDED, key: r.id }], code: 'STALE_REQUEST', message: `the plan in effect, the repairs decided, or the card of a task it reopens changed while repair ${r.id}'s decision was being recorded${filing.length > 0 ? ' (or an item of it was withdrawn, or it ended)' : ''}; nothing was written (the next pass reads it again)` } });
+  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records, guard: { latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.effective }, { mission: ctx.mission, line: REPAIRS_LINE, event: 'decided', revision: read.decided }, ...specsRead, ...acceptanceRead, ...itemsRead], absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: REPAIR_ENDED, key: r.id }], code: 'STALE_REQUEST', message: `the plan in effect, the repairs decided, the card of a task it reopens, or the acceptance of a task it changes changed while repair ${r.id}'s decision was being recorded${filing.length > 0 ? ' (or an item of it was withdrawn, or it ended)' : ''}; nothing was written (the next pass reads it again)` } });
   await tellOnce(ctx, REPAIRS_LINE, {
     category: 'repair-decided',
     wi: null,
     key: r.id,
-    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.map((t) => t.id).join(', ')}` : ''}${skipped.length > 0 ? `; the card change of ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} left out (accepted meanwhile, so its card stays, or no longer in the plan)` : ''}${notCarried.length > 0 ? `; not carried out: the reopen of ${notCarried.map((x) => `${x.task} (${x.why})`).join(', ')}` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
+    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.map((t) => t.id).join(', ')}` : ''}${skipped.length > 0 ? `; the card change of ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} left out (no longer in the plan in effect)` : ''}${notCarried.length > 0 ? `; not carried out: the reopen of ${notCarried.map((x) => `${x.task} (${x.why})`).join(', ')}` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
     defaultAction: `the work goes on: the added tasks run like any task of the plan, each reopened task gets a new attempt with the repair on its card (one with an open attempt, once that attempt is accepted)${changed.length > 0 ? ', each changed task starts a new attempt under its new card and carries its earlier work on' : ''}; nothing else is re-reviewed (D-10)${notCarried.length > 0 ? `. Repair ${r.id} does not read as done while a reopen was not carried out: a new repair on the user's words (mp pm repair … --again) or a re-plan routes that work` : ''}`,
     detail: { repair: r.id, dplan: eff.dplan, added: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), skipped, ...(notCarried.length > 0 ? { notCarried } : {}), orderChanges: mc.orderChanges },
   });

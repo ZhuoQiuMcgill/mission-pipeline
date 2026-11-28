@@ -473,3 +473,56 @@ test('G7: what rests on untyped words (a memory from before tagging) reads so, a
     for (const read of [['read','tree','m1'], ['read','from',w.words], ['read','why','waiver:m1:plan-reviews#1']]) assert.doesNotMatch(await text44(p, read), /out of force/, read.join(' '));
   } finally {p.cleanup();}
 });
+
+// ---- final review of the release
+
+test('G7 (final review F3-8): in an open mission the read names the waiver the planner applies; a later grant that lost its words is history', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    const w1 = await done43(p, ['pm','say','Skip the plan reviews.','--tag','decision@m1']);
+    const w2 = await done43(p, ['pm','say','Skip them, again.','--tag','decision@m1']);
+    await done43(p, ['pm','waive','m1','plan-reviews','--words',w1.words]);
+    await done43(p, ['pm','waive','m1','plan-reviews','--words',w2.words]);
+    await done43(p, ['pm','say','Review the plans again.','--tag','decision@m1','--supersedes',`${w2.words}#1`,'--keep-items','waiver:m1:plan-reviews#2']);
+    const ctx = flowCtx(p.ctx.ports(), 'm1' as MissionId);
+    assert.equal((await planReviewsWaiver(ctx, 'dplan.m1.1.1'))?.ref, w1.words, 'the planner applies waiver 1: waiver 2 lost its words');
+    const first = 'in force; replaced in the record by plan-reviews#2, which the planner does not apply';
+    const state = async (args: string[], key: string) => (await done43(p, args)).nodes.find((n: any) => n.key === key)?.state as string;
+    assert.equal(await state(['read','from',w1.words], 'waiver:m1:plan-reviews#1'), first);
+    assert.equal(await state(['read','why','waiver:m1:plan-reviews#1'], 'waiver:m1:plan-reviews#1'), first);
+    assert.match(await text44(p, ['read','tree','m1']), /waiver m1:plan-reviews#1 [^\n]*\[in force; replaced in the record by plan-reviews#2, which the planner does not apply\]/);
+    assert.match(await state(['read','from',w2.words], 'waiver:m1:plan-reviews#2'), /^its words are out of force/);
+    // the next plan takes effect: on the waiver the read named
+    await startAddMission(p.ctx, 'm1');
+    await step(p.ctx, 'calibrator-1', (x) => cal1Pass(x));
+    await step(p.ctx, 'architect-decompose', () => addDetailedPlan('m1'));
+    const eff = p.ctx.memory.stmt("SELECT body FROM flow_events WHERE event = 'effective' AND key = 'dplan.m1.1.1'").get() as {body: string} | undefined;
+    assert.ok(eff);
+    assert.equal(JSON.parse(p.ctx.memory.data.text(eff.body)).reviewsWaived?.ref, w1.words);
+    assert.equal(await state(['read','from',w1.words], 'waiver:m1:plan-reviews#1'), `${first}; dplan.m1.1.1 took effect on it`);
+  } finally {p.cleanup();}
+});
+
+test('G7 (final review F1-2): a supersession asks about a grant the planner selects again once a later grant of its scope lost its words', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    const w1 = await done43(p, ['pm','say','The details are yours.','--tag','decision@m1']);
+    await done43(p, ['pm','requirement','add','m1','auth','--type','authorization','--text','details','--quote','The details are yours','--words',w1.words]);
+    await done43(p, ['pm','waive','m1','plan-reviews','--authority','auth']);
+    const drop = await done43(p, ['pm','say','Take that authorization back.','--tag','instruction']);
+    await done43(p, ['pm','requirement','withdraw','m1','auth','--words',drop.words]);
+    const w2 = await done43(p, ['pm','say','Skip the plan reviews.','--tag','decision@m1']);
+    await done43(p, ['pm','waive','m1','plan-reviews','--words',w2.words]);
+    await done43(p, ['pm','say','Review the plans again.','--tag','decision@m1','--supersedes',`${w2.words}#1`,'--keep-items','waiver:m1:plan-reviews#2']);
+    const ctx = flowCtx(p.ctx.ports(), 'm1' as MissionId);
+    assert.equal((await planReviewsWaiver(ctx, 'dplan.m1.1.1'))?.by, 'authority', 'the planner applies grant 1 again');
+    const base = ['pm','say','Fewer details are yours now.','--tag','decision@m1','--supersedes',`${w1.words}#1`];
+    const refused = await command43(p, base);
+    assert.equal(refused.error.code, 'NOT_ALLOWED', 'grant 1 is asked about');
+    assert.deepEqual(refused.error.detail.toName, ['waiver:m1:plan-reviews#1']);
+    await done43(p, [...base, '--withdraw-items','waiver:m1:plan-reviews#1']);
+    assert.equal(await planReviewsWaiver(ctx, 'dplan.m1.1.1'), null, 'the next plan gets its reviews');
+  } finally {p.cleanup();}
+});

@@ -22,8 +22,8 @@ import type { FlowEvent } from '../../flow/ports.ts';
 import { secretaryOptions, type EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
-import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints, addressedForPlanning, planReviewInstructions, repairsOfTaskWork, writtenForTask, noteOfHandBack } from './dynamic.ts';
-import { repairRef, type RepairBody } from '../../flow/plandoc.ts';
+import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints, addressedForPlanning, planReviewInstructions, repairsOfTaskWork, writtenForTask, noteOfHandBack, grantedRepairReopens, grantedReopenLine } from './dynamic.ts';
+import { cardAmendments, repairRef, type RepairBody } from '../../flow/plandoc.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
 import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectRepairCard } from './architect.ts';
@@ -167,8 +167,12 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
   };
   // 4.4 (G3): the repairs a task's work answers and what was written for it, by the queue-time builder's
   // derivation (a card queued by 4.3 gets them here); `k` null: the attempt is not known, the card's repairs stand
+  const secretaryLine = events.filter((e) => e.line === 'secretary');
+  const repairsLine = events.filter((e) => e.line === 'repairs');
   const writtenFor = (c: ConstructorCard | ReviewerCard, t: DetailedTask, k: number | null): void => {
-    const ids = k === null ? (c.repairs ?? []).map((r) => r.id) : repairsOfTaskWork(mission, planInEffect(events)?.amendments, t.id, lineOf(t.id), events.filter((e) => e.line === 'secretary'), events.filter((e) => e.line === 'repairs'), k);
+    // the amendments that gave its card, also of an earlier plan whose card the plan in effect keeps (F3-6)
+    const amendments = cardAmendments(events.filter((e) => e.line === 'plan' && e.event === 'effective').map((e) => e.body as EffectiveBody), planInEffect(events), t);
+    const ids = k === null ? (c.repairs ?? []).map((r) => r.id) : repairsOfTaskWork(mission, amendments, t.id, lineOf(t.id), secretaryLine, repairsLine, k);
     const refs = events.filter((e) => e.line === 'repairs' && e.event === 'repair' && ids.includes(e.key)).map((e) => repairRef(e.body as RepairBody));
     if (refs.length > 0) c.repairs = refs;
     else delete c.repairs;
@@ -178,6 +182,11 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     // a 4.3 decision's note, from its Architect's accepted hand-back (one not readable is left out, never refusing the claim)
     const note43 = readers === null ? undefined : (step: string): string | null => noteOfHandBack(readers.handBack(step));
     Object.assign(c, writtenForTask(constraints, events, mission, t.id, ids, note43));
+    // 4.4 (F1-3): a granted attempt's card shows the issue of each repair's reopen the grant covered, as 4.4 queues it;
+    // a step 4.3 queued lacks it (with no Constructor, its Reviewer is the only seat that could judge it)
+    if (k === null) return;
+    const missing = grantedRepairReopens(mission, t.id, lineOf(t.id), secretaryLine, repairsLine, k).filter((g) => !c.duties.includes(g.issue));
+    if (missing.length > 0) c.duties = `${c.duties}${grantedReopenLine(missing.map((g) => ({ by: `repair ${g.repair}`, issue: g.issue })), c.seat)}`;
   };
   // 4.4 (G3, F1): an Architect's card prints the addressed instructions of the repair in hand (or its task) in full, the rest as an index
   const planningAddressed = (c: ArchitectRepairCard | ArchitectDecomposeCard | ArchitectAnswerCard, inHand: { repair?: string; about?: string }): void => {

@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask, stepsOfNotes43, noteOfHandBack } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask, stepsOfNotes43, noteOfHandBack, grantedReopenLine } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -67,7 +67,7 @@ import {
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
 import { attach, constructorClaims, pausedHandBack, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
-import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REQUIREMENTS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type AmendmentEntry, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REQUIREMENTS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardAmendments, cardChangedBy, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
@@ -283,6 +283,23 @@ class Line {
     const r = this.all('spec').at(-1)?.revision ?? 0;
     return this.events.some((e) => e.event === 'abandoned' && e.revision > r);
   }
+}
+
+/**
+ * 4.4 (F13, final review F2-1): whether a task is given up under the card that is, or will be, in effect: given up
+ * under its latest spec, while execution will lay no new spec on it (taskStep's rule: the plan in effect holds that
+ * spec's card, and no drop is recorded after that spec). A task out of the plan in effect (`card` undefined) given
+ * up stays given up. The one reading wherever a giving-up ends a reopen (recorded as not carried out) or a wait (an
+ * edge of the gate, a hold of a repair's work, an edge of the circle check): a giving-up that a card about to be laid
+ * revokes ends nothing.
+ */
+export function givenUpUnderCard(events: Line['events'], card: DetailedTask | undefined): boolean {
+  const line = new Line(events);
+  if (!line.abandoned) return false;
+  if (card === undefined) return true;
+  const last = line.all<SpecBody>('spec').at(-1);
+  if (last === undefined || last.body.hash !== taskCardHash(card)) return false;
+  return !line.all('dropped').some((d) => d.revision > last.revision);
 }
 
 /** The key and op part of a giving-up under the n-th spec (the first keeps key "abandoned" and the plain op). */
@@ -1231,7 +1248,8 @@ export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: D
   const added = t.kind === 'integration' ? amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)) : new Set<string>();
   const after = afterOf(l, l.k);
   const givenUp = new Set<string>();
-  for (const x of plan.tasks) if ((added.has(x.id) || after.includes(x.id)) && (await readLine(ctx, x.id)).abandoned) givenUp.add(x.id);
+  // given up under the card in effect (F2-1): a card about to revive it keeps the edge
+  for (const x of plan.tasks) if ((added.has(x.id) || after.includes(x.id)) && givenUpUnderCard((await readLine(ctx, x.id)).events, x)) givenUp.add(x.id);
   return effectiveDependencies(plan, t, added, (id) => givenUp.has(id), after);
 }
 
@@ -1299,13 +1317,12 @@ export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { read
   const added = new Set([...amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)), ...d.add.map((t) => t.id)]);
   const lines = new Map<string, Line>();
   for (const t of after.tasks) lines.set(t.id, await readLine(ctx, t.id));
-  // 4.4 (p7-r3-2): a task given up stays given up only under the card it was given up under: one whose card this
-  // decision changes (or the plan in effect changed, and execution has not laid yet) is open again under that card,
-  // both as a task that waits and as the end of a wait
+  // 4.4 (p7-r3-2, F2-1): given up under the card it will have once this decision applies (givenUpUnderCard): one whose
+  // card this decision changes, the plan in effect changed, or a drop since its card brings back is open again under
+  // that card, both as a task that waits and as the end of a wait
   const givenUp = (id: string): boolean => {
     const l = lines.get(id);
-    const card = cards.get(id);
-    return l !== undefined && l.abandoned && card !== undefined && l.all<SpecBody>('spec').at(-1)?.body.hash === taskCardHash(card);
+    return l !== undefined && givenUpUnderCard(l.events, cards.get(id));
   };
   const waits = new Map<string, string[]>();
   const afterWaits = new Map<string, string[]>();
@@ -1316,7 +1333,7 @@ export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { read
     // an added task has no line yet, a changed one no accepted product: both are open
     const open = lineAcceptance(line.events).product === null;
     const pending: ReopenRequest[] = [];
-    for (const q of requests) if (q.task === t.id && (await waitingRequest(ctx, line, q))) pending.push(q);
+    for (const q of requests) if (q.task === t.id && (await waitingRequest(ctx, line, q, t))) pending.push(q);
     if (!open && here === undefined && pending.length === 0) continue;
     const waitsAfter = [...(here?.after ?? []), ...(open ? afterOf(line, line.k) : []), ...pending.flatMap((q) => q.after)].filter((x) => x !== t.id);
     waits.set(t.id, effectiveDependencies(after, t, added, givenUp, waitsAfter));
@@ -1501,7 +1518,7 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // 4.4 (F12 b, #59): a dependency that the repair this work answers reopens, while that reopen has not reached it
   // yet, holds this attempt: its new work comes first. Read before the dependencies' products (p7-2): a reopen carried
   // after this read has its dependency's next attempt written already, so the products read next show it not accepted
-  if (await sameRepairReopenPending(ctx, eff, t, line, depIds)) return null;
+  if (await sameRepairReopenPending(ctx, eff, plan, t, line, depIds)) return null;
   const deps: string[] = [];
   // config `startOnHandback` (a project setting: it removes no check, E-2): a dependency still in review counts
   // with its current attempt's verified hand-back; the dependent's own acceptance still waits for the
@@ -1542,7 +1559,7 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
 function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t: DetailedTask, line: Line): Set<string> {
   const out = new Set<string>();
   // the repair that added it, also once a later plan keeps the card it gave (that plan carries no amendment, p7-r3-3)
-  const added = repairOfTask(eff.amendments, t.id) ?? history.flatMap((e) => e.amendments ?? []).find((a) => a.tasks.some((x) => x.id === t.id && taskCardHash(x) === taskCardHash(t)))?.repair ?? null;
+  const added = cardAmendments(history, eff, t).find((a) => a.added)?.repair ?? null;
   if (added !== null) out.add(added);
   const spec = line.all<SpecBody>('spec').at(-1);
   if (spec?.body.repair !== undefined) out.add(spec.body.repair);
@@ -1557,7 +1574,7 @@ function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t
  * (startOnHandback) a verified hand-back in review, is the work the repair replaces: the task waits for the attempt
  * that carries the repair, and the gate reads that one once it is accepted. A reopen of 4.3 holds nothing (p7-r2-3).
  */
-async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
+async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
   if (depIds.length === 0) return false;
   // only a repair's reopen of a dependency can hold the attempt: while there is none, the plan's history (every
   // plan in effect so far, read for the repairs the work answers) is not read, on every pass of every task
@@ -1567,7 +1584,7 @@ async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, t: Deta
   if (causing.size === 0) return false;
   for (const r of requests) {
     if (r.source.kind !== 'repair' || !causing.has(r.source.repair)) continue;
-    if (await waitingRequest(ctx, await readLine(ctx, r.task), r)) return true;
+    if (await waitingRequest(ctx, await readLine(ctx, r.task), r, plan.tasks.find((x) => x.id === r.task))) return true;
   }
   return false;
 }
@@ -1797,9 +1814,13 @@ function acceptedReview(line: Line, k: number, before: number, adopted?: string)
 /** 4.4 (G5): open items not recorded yet, in bounded writes (an append takes at most 1,000 records), each under the operation id of its own items. */
 async function writeItemBatches(ctx: FlowCtx, bodies: readonly RiskItemBody[], requires?: string): Promise<void> {
   if (bodies.length === 0) return;
-  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
-  // an acceptance made under 4.3 wrote no first batch: nothing is written for it (its sentences are listed as not recorded)
-  if (requires !== undefined && !existing.has(requires)) return;
+  const recorded = new Map((await eventsOf<RiskItemBody>(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => [x.key, x.body] as const));
+  const existing = new Set(recorded.keys());
+  // an acceptance made under 4.3 wrote no first batch: nothing is written for it (its sentences are listed as not
+  // recorded). F3-4: its first item must be one the acceptance wrote itself; a record made later for a sentence of an
+  // acceptance made before 4.4 (`before44`, when someone acted on it) never makes it one of 4.4
+  const first = requires === undefined ? undefined : recorded.get(requires);
+  if (requires !== undefined && (first === undefined || first.before44 === true)) return;
   const missing = bodies.filter((b) => !existing.has(b.id));
   for (let i = 0; i < missing.length; i += ITEM_BATCH) {
     const batch = missing.slice(i, i + ITEM_BATCH);
@@ -2047,10 +2068,11 @@ async function requestState(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise
 /**
  * Whether a reopen request a 4.4 decision made has still to reach its task: requested, or carried on an attempt no
  * seat took that the task moved past or that was accepted as it was (the next pass moves it on). A reopen of a 4.3
- * decision, or one 4.3 counted, holds nothing (p7-r2-3): no wait comes of it that 4.3 would not have had.
+ * decision, or one 4.3 counted, holds nothing (p7-r2-3): no wait comes of it that 4.3 would not have had. A task
+ * given up under the card in effect (`card`, givenUpUnderCard) ends it; one a card about to be laid revives does not.
  */
-async function waitingRequest(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise<boolean> {
-  if (r.source.kind !== 'repair' || !r.by44 || line.abandoned || countedBy43(line, r)) return false;
+async function waitingRequest(ctx: FlowCtx, line: Line, r: ReopenRequest, card: DetailedTask | undefined): Promise<boolean> {
+  if (r.source.kind !== 'repair' || !r.by44 || givenUpUnderCard(line.events, card) || countedBy43(line, r)) return false;
   const s = await requestState(ctx, line, r);
   return s.kind === 'requested' || (s.kind === 'carried' && !s.taken && (line.k > s.at || line.one('accepted', String(s.at)) !== null));
 }
@@ -2095,7 +2117,9 @@ async function repairReopen(ctx: FlowCtx, read: PlanRead, r: ReopenRequest): Pro
     return;
   }
   if (t === undefined) return reopenNotCarried(ctx, read, r, line, 'the plan in effect no longer has the task');
-  if (line.abandoned) return reopenNotCarried(ctx, read, r, line, 'the task was given up');
+  // given up under the card in effect: not carried out; given up under a card the plan in effect replaces (or a drop
+  // since brings back), it waits: execution lays that card first and the task goes on (F2-1)
+  if (line.abandoned) return givenUpUnderCard(line.events, t) ? reopenNotCarried(ctx, read, r, line, 'the task was given up') : undefined;
   const k = line.k;
   const from = s.at;
   if (k < from) return;
@@ -2263,7 +2287,9 @@ async function reopenRequests(ctx: FlowCtx): Promise<ReopenRequest[]> {
  */
 async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<{ readonly repairs: RepairRef[]; readonly written: ReturnType<typeof writtenForTask> }> {
   const repairsLine = await eventsOf(ctx, REPAIRS_LINE);
-  const ids = repairsOfTaskWork(ctx.mission, eff.amendments, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
+  // the amendments that gave its card, also of an earlier plan whose card the plan in effect keeps (F3-6)
+  const card = cardAmendments((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t);
+  const ids = repairsOfTaskWork(ctx.mission, card, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
   const all = repairsLine.filter((e) => e.event === 'repair') as Array<{ readonly key: string; readonly body: RepairBody }>;
   const events = await ctx.ports.ledger.events({ mission: ctx.mission });
   // 4.4 (G3, G4): a 4.3 decision has no note; its Architect's accepted hand-back has one (one not readable is left out)
@@ -2863,18 +2889,13 @@ async function productContract(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask
  * 4.4 (G9, p12-2, p12-r2-1): the item lines task t carries through a filing: on each amendment that added or changed its
  * card, the items of that amendment's filing (a new requirement, a repair naming an item) the card in fact names (the
  * Architect named them, or the one-item rule put them there); and those a filing's reopen gives the attempt. The
- * amendments are those of the plan in effect, and, of an earlier plan, one whose card the later plans keep (the same
- * resolution as causingRepairs: a plan that carries a card over carries no amendment). Reads only when one touched the task.
+ * amendments are those of the plan in effect, and, of an earlier plan, one whose card the later plans keep (plandoc.ts
+ * cardAmendments, the one resolution, as causingRepairs and the cards: a plan that carries a card over carries no amendment).
  */
 export async function filingCarried(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, attempt: readonly string[]): Promise<Set<string>> {
   const out = new Set<string>(attempt);
-  const cardsOf = (a: AmendmentEntry): DetailedTask[] => [...a.tasks, ...(a.changed ?? [])].filter((x) => x.id === t.id);
-  const touching = (eff.amendments ?? []).flatMap((a) => cardsOf(a).map((card) => ({ repair: a.repair, card })));
-  const earlier = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).filter((e) => e.body.dplan !== eff.dplan).flatMap((e) => e.body.amendments ?? []);
-  if (earlier.some((a) => cardsOf(a).length > 0)) {
-    const hash = taskCardHash(t);
-    for (const a of earlier) for (const card of cardsOf(a)) if (taskCardHash(card) === hash) touching.push({ repair: a.repair, card });
-  }
+  // the one resolution of the amendments that gave the card (plandoc.ts cardAmendments)
+  const touching = cardAmendments((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t);
   if (touching.length === 0) return out;
   const items = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((e) => [e.key, (e.body.items ?? []).map((i) => `item.${ctx.mission}.${i}`)] as const));
   for (const { repair, card } of touching) for (const l of card.requirementItems) if ((items.get(repair) ?? []).includes(l)) out.add(l);
@@ -3616,7 +3637,7 @@ async function submitReviewer(
   const rw = await reworkAt(ctx, t, line, k);
   // 4.4 (p6-r2-1): an attempt a grant gave a covered reopen tells its Reviewer the reopen's issue too (with no Constructor, no other card shows it)
   const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${reopenedBy(rw.reopen)}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.`
-    : rw !== null && rw.covered.length > 0 ? ` This attempt was granted for a reopen (${[...new Set(rw.covered.map((c) => reopenedBy(c.source)))].join('; ')}): ${rw.covered.map((c) => c.issue).join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
+    : rw !== null ? grantedReopenLine(rw.covered.map((c) => ({ by: reopenedBy(c.source), issue: c.issue })), 'reviewer') : '';
   // 4.4 (F13): the repairs this attempt carries (each reopen opens its own attempt), judged the same way
   const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
