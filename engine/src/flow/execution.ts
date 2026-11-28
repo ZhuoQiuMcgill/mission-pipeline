@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask, stepsOfNotes43, noteOfHandBack } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask, stepsOfNotes43, noteOfHandBack, grantedReopenLine } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -67,7 +67,7 @@ import {
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
 import { attach, constructorClaims, pausedHandBack, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
-import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REQUIREMENTS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type AmendmentEntry, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REQUIREMENTS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardAmendments, cardChangedBy, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
@@ -1559,7 +1559,7 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
 function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t: DetailedTask, line: Line): Set<string> {
   const out = new Set<string>();
   // the repair that added it, also once a later plan keeps the card it gave (that plan carries no amendment, p7-r3-3)
-  const added = repairOfTask(eff.amendments, t.id) ?? history.flatMap((e) => e.amendments ?? []).find((a) => a.tasks.some((x) => x.id === t.id && taskCardHash(x) === taskCardHash(t)))?.repair ?? null;
+  const added = cardAmendments(history, eff, t).find((a) => a.added)?.repair ?? null;
   if (added !== null) out.add(added);
   const spec = line.all<SpecBody>('spec').at(-1);
   if (spec?.body.repair !== undefined) out.add(spec.body.repair);
@@ -2287,7 +2287,9 @@ async function reopenRequests(ctx: FlowCtx): Promise<ReopenRequest[]> {
  */
 async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<{ readonly repairs: RepairRef[]; readonly written: ReturnType<typeof writtenForTask> }> {
   const repairsLine = await eventsOf(ctx, REPAIRS_LINE);
-  const ids = repairsOfTaskWork(ctx.mission, eff.amendments, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
+  // the amendments that gave its card, also of an earlier plan whose card the plan in effect keeps (F3-6)
+  const card = cardAmendments((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t);
+  const ids = repairsOfTaskWork(ctx.mission, card, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
   const all = repairsLine.filter((e) => e.event === 'repair') as Array<{ readonly key: string; readonly body: RepairBody }>;
   const events = await ctx.ports.ledger.events({ mission: ctx.mission });
   // 4.4 (G3, G4): a 4.3 decision has no note; its Architect's accepted hand-back has one (one not readable is left out)
@@ -2887,18 +2889,13 @@ async function productContract(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask
  * 4.4 (G9, p12-2, p12-r2-1): the item lines task t carries through a filing: on each amendment that added or changed its
  * card, the items of that amendment's filing (a new requirement, a repair naming an item) the card in fact names (the
  * Architect named them, or the one-item rule put them there); and those a filing's reopen gives the attempt. The
- * amendments are those of the plan in effect, and, of an earlier plan, one whose card the later plans keep (the same
- * resolution as causingRepairs: a plan that carries a card over carries no amendment). Reads only when one touched the task.
+ * amendments are those of the plan in effect, and, of an earlier plan, one whose card the later plans keep (plandoc.ts
+ * cardAmendments, the one resolution, as causingRepairs and the cards: a plan that carries a card over carries no amendment).
  */
 export async function filingCarried(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, attempt: readonly string[]): Promise<Set<string>> {
   const out = new Set<string>(attempt);
-  const cardsOf = (a: AmendmentEntry): DetailedTask[] => [...a.tasks, ...(a.changed ?? [])].filter((x) => x.id === t.id);
-  const touching = (eff.amendments ?? []).flatMap((a) => cardsOf(a).map((card) => ({ repair: a.repair, card })));
-  const earlier = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).filter((e) => e.body.dplan !== eff.dplan).flatMap((e) => e.body.amendments ?? []);
-  if (earlier.some((a) => cardsOf(a).length > 0)) {
-    const hash = taskCardHash(t);
-    for (const a of earlier) for (const card of cardsOf(a)) if (taskCardHash(card) === hash) touching.push({ repair: a.repair, card });
-  }
+  // the one resolution of the amendments that gave the card (plandoc.ts cardAmendments)
+  const touching = cardAmendments((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t);
   if (touching.length === 0) return out;
   const items = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((e) => [e.key, (e.body.items ?? []).map((i) => `item.${ctx.mission}.${i}`)] as const));
   for (const { repair, card } of touching) for (const l of card.requirementItems) if ((items.get(repair) ?? []).includes(l)) out.add(l);
@@ -3640,7 +3637,7 @@ async function submitReviewer(
   const rw = await reworkAt(ctx, t, line, k);
   // 4.4 (p6-r2-1): an attempt a grant gave a covered reopen tells its Reviewer the reopen's issue too (with no Constructor, no other card shows it)
   const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${reopenedBy(rw.reopen)}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.`
-    : rw !== null && rw.covered.length > 0 ? ` This attempt was granted for a reopen (${[...new Set(rw.covered.map((c) => reopenedBy(c.source)))].join('; ')}): ${rw.covered.map((c) => c.issue).join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
+    : rw !== null ? grantedReopenLine(rw.covered.map((c) => ({ by: reopenedBy(c.source), issue: c.issue })), 'reviewer') : '';
   // 4.4 (F13): the repairs this attempt carries (each reopen opens its own attempt), judged the same way
   const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
