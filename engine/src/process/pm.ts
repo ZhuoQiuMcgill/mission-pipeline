@@ -11,7 +11,7 @@ import { taskLine } from '../flow/plandoc.ts';
 //               dispatches removed, the process advanced; then, notices first (marked delivered):
 //               the ready steps (seat, task, mission, purpose, parallel), the steps held (a stop,
 //               a lease, the git-writes hold, an exploration planned after others not settled
-//               yet), what waits on the user, the dispatches in flight with their age. 4.1.2:
+//               yet; 4.4: a hold or a disk limit, holds.ts), what waits on the user, the dispatches in flight with their age. 4.1.2:
 //               after an environment change, no renew step; one notice per change names how
 //               many runs current proof rests on are from older environments
 //   pmDispatch  claims a ready step once (A1 claimDispatch): the dispatch id, the card leaf
@@ -115,6 +115,7 @@ import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts'
 import { heldByPredecessors } from './explorationAfter.ts';
 import { materialLeaf } from './seat.ts';
 import { carriedRunLines, detachedRunNotes, stopDetachedRuns, type DetachedRunNote } from './detached.ts';
+import { diskLimitPassed, heldByHolds, holdsInForce, type HoldRef } from './holds.ts';
 
 // ---------------------------------------------------------------- shared
 
@@ -213,6 +214,10 @@ export interface HeldStep {
   readonly wi: string | null;
   /** 4.4 (F8): a production step of a closed mission (`mp sec next` counts these). */
   readonly closedMission?: true;
+  /** 4.4 (G6): the holds in force that hold it, each with its id and reason (holds.ts). */
+  readonly holds?: readonly HoldRef[];
+  /** 4.4 (F6, H-3): a new Constructor step held because a disk limit of config.json is passed. */
+  readonly diskLimit?: true;
 }
 
 export interface InFlight {
@@ -284,7 +289,9 @@ function constraintGapHolds(db: Db, data: { text(h: string): string }): HeldStep
 export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held' | 'inFlight' | 'waitingOnUser'> {
   const now = ctx.now();
   const gitHeld = ctx.memory.gitHold();
+  const disk = diskLimitPassed(ctx);
   return ctx.memory.read((db) => {
+    const holds = holdsInForce(db, ctx.memory.data, now);
     const inFlightRows = listDispatches(db, { state: 'in-flight', limit: 10_000 });
     const flightSpecs: TaskSpecDoc[] = [];
     const inFlight: InFlight[] = inFlightRows.map((d) => {
@@ -316,6 +323,12 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
       const after = heldByPredecessors(db, ctx.memory.data, spec);
       if (after !== null) {
         held.push({ ...base, why: after, wi: null });
+        continue;
+      }
+      // 4.4 (G6, F6): a hold in force, or a disk limit passed for a new Constructor step (holds.ts)
+      const hold = heldByHolds(holds, disk, q, spec);
+      if (hold !== null) {
+        held.push({ ...base, ...hold });
         continue;
       }
       const busy = (spec.exclusive ?? []).filter((r) => leased.has(r));
@@ -533,6 +546,8 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   const prior = ctx.memory.read((db) => dispatchCount(db, step));
   // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
   const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
+  // 4.4 (F6, H-3): the disk is read before the write (a new Constructor step only)
+  const disk = entry.exportsProduct === true ? diskLimitPassed(ctx) : null;
   const queued = spec;
   const claim = (): ClaimResponse => pmWrite(
     ctx,
@@ -547,6 +562,9 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
       const after = heldByPredecessors(tx, tx.data, spec);
       if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
+      // 4.4 (G6, F6): a hold in force, or a disk limit passed, holds a new dispatch: checked in the same write
+      const hold = heldByHolds(holdsInForce(tx, tx.data, ctx.now()), disk, { task: step, mission: task.mission, lineage: spec.lineage }, spec);
+      if (hold !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${ctx.secretary !== null ? hold.why.replaceAll('mp pm hold', 'mp sec hold') : hold.why}`, { detail: { holds: hold.holds ?? [], diskLimit: hold.diskLimit === true } });
       // 4.4 (F3, F5): the recorded hand-backs fill in what a card queued by 4.3 lacks; a repair card's unpinned starts as checked before this write
       spec = refreshDispatchCard(tx, tx.data, spec, {
         handBack: (t) => taskStatus(tx, tx.data, t)?.handBack ?? null,

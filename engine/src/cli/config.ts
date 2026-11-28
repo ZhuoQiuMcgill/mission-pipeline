@@ -33,6 +33,9 @@
 //                           committer defaults to the author
 //   mustReadWarnPages       (4.4) a dispatch whose must-read material has more pages warns whoever
 //                           dispatches it; default 6; it refuses nothing
+//   limits                  (4.4) { worktrees?, freeBytes? }: while this many worktrees are on disk, or
+//                           the project's disk has fewer free bytes, new Constructor steps are held
+//                           with the reason shown (`mp read scratch` lists the space); default none
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -89,6 +92,8 @@ export const ConfigSchema = z
     startOnHandback: z.array(z.string().min(1).max(200)).max(200).optional(),
     // 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (the Secretary while one is live); default 6
     mustReadWarnPages: z.number().int().min(1).max(10_000).optional(),
+    // 4.4 (F6, H-3): while one is passed, new Constructor steps are held with the reason shown; default none
+    limits: z.object({ worktrees: z.number().int().min(1).max(100_000).optional(), freeBytes: z.number().int().min(0).optional() }).strict().optional(),
   })
   .strict();
 

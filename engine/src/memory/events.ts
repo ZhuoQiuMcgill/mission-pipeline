@@ -54,7 +54,23 @@ export type ResidentEvent =
    * superseded again).
    */
   | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null; readonly kept?: readonly string[]; readonly withdrew?: readonly string[]; readonly confirms?: readonly string[] }
-  | { readonly kind: 'words.summary'; readonly id: string; readonly text: string; readonly covers: readonly { readonly id: string; readonly fingerprint: string }[] };
+  | { readonly kind: 'words.summary'; readonly id: string; readonly text: string; readonly covers: readonly { readonly id: string; readonly fingerprint: string }[] }
+  /**
+   * 4.4 (G6, the plan's F6): "not this yet" on the record. `mission` narrows a task, resource or
+   * everything to one mission (null: every mission); `after`: in force while that task is not accepted;
+   * `from` / `until` (ms): in force from / until that time. `by` the PM (with the user's words) or the
+   * Secretary (its own reason, no words). A 4.3 engine ignores both kinds.
+   */
+  | { readonly kind: 'hold.placed'; readonly hold: string; readonly subject: HoldSubject; readonly mission: string | null; readonly after: string | null; readonly from: number | null; readonly until: number | null; readonly reason: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null }
+  /** 4.4 (G6): a hold released by hand. */
+  | { readonly kind: 'hold.released'; readonly hold: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null; readonly reason: string | null };
+
+/** 4.4 (G6): what a hold names: one task's Constructor steps, one queued step, a resource, or everything but a Secretary decision. */
+export type HoldSubject =
+  | { readonly kind: 'task'; readonly task: string }
+  | { readonly kind: 'step'; readonly step: string }
+  | { readonly kind: 'resource'; readonly resource: string }
+  | { readonly kind: 'all' };
 
 export interface WordsTag {
   readonly id: string;

@@ -13,6 +13,7 @@ import { copyDocs, mpInit, mpVersion, type PointerTarget } from '../init.ts';
 import type { Project } from '../project.ts';
 import { section } from '../render.ts';
 import { wiText } from '../render.ts';
+import { bytesText } from '../../process/holds.ts';
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -79,6 +80,8 @@ const config: Command = {
       // 4.1.3 (E-2): a project setting is not a waiver; the key still waives (labelled so) so running missions go on
       ...((cfg.planReviewsWaived ?? []).length > 0 ? [`Warning: planReviewsWaived is deprecated (a project setting is not a waiver). It still waives the plan reviews of ${cfg.planReviewsWaived!.join(', ')}, labelled "waived by config; no words on record". Record the user's words instead: mp pm waive <mission> plan-reviews --words W-<n> (--plan <dplan> for one plan version), then remove the key.`] : []),
       ...section('Tasks that start on their dependencies\' verified hand-backs while those are in review: startOnHandback (fast mode; never an integration task; the acceptance still waits)', cfg.startOnHandback ?? [], 'none'),
+      // 4.4 (F6, H-3)
+      `Disk limits: ${cfg.limits?.worktrees === undefined && cfg.limits?.freeBytes === undefined ? 'none' : [cfg.limits.worktrees !== undefined ? `worktrees ${cfg.limits.worktrees}` : '', cfg.limits.freeBytes !== undefined ? `freeBytes ${bytesText(cfg.limits.freeBytes)}` : ''].filter((x) => x !== '').join(', ')} (while one is passed, new Constructor steps are held; mp read scratch)`,
       `Command timeout: ${Math.round(cfg.commandTimeoutMs / 1000)} s`,
       `Experiment command timeout (an exploration's experiment reruns): ${Math.round(experimentCommandTimeoutOf(cfg) / 1000)} s${cfg.experimentCommandTimeoutMs === undefined ? ' (experimentCommandTimeoutMs not set: the command timeout)' : ''}`,
       // 4.1.3 (#27): the shell in effect per run class
