@@ -16,7 +16,7 @@ import { FlowEngine } from '../src/flow/engine.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE } from '../src/flow/openItems.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import type { DetailedPlanDoc, DetailedTask } from '../src/flow/plandoc.ts';
-import { acceptanceOf, riskItemBodies, riskRecord, withRiskText, type RiskItemBody } from '../src/flow/riskItems.ts';
+import { ITEM_BATCH, acceptanceOf, riskItemBodies, riskRecord, withRiskText, type RiskItemBody } from '../src/flow/riskItems.ts';
 import { architect, detailedPlan, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import type { EscalationBody } from '../src/flow/secretary.ts';
 import { itemStateLines, readItems } from '../src/cli/itemsRead.ts';
@@ -57,13 +57,13 @@ function accepted43(w: World, taskId: string, escalation: string, reasons: reado
   const risks = reasons.map((r) => `accepted with its risk by the Secretary on ${escalation}: ${r}`);
   w.memory.write({}, (tx) => appendRecords(tx, [{ kind: 'flow.event', mission: M, line: `task:${taskId}`, event: 'accepted', key: '1', body: tx.data.put(canonicalJson({ k: 1, product: `prod.${taskId}`, judgment: `j.sec.${escalation}`, decision: { escalation, option: 'accept-risk', by: 'secretary' }, risks })) as ContentHash }]));
 }
-/** An acceptance with risk as 4.4 writes it: its sentences and one item per reason in the same write. */
-function accepted44(w: World, taskId: string, escalation: string, reasons: readonly string[]): RiskItemBody[] {
+/** An acceptance with risk as 4.4 writes it: its sentences and one item per reason in the same write (`written`: the first so many, as an interruption after the first batch leaves it). */
+function accepted44(w: World, taskId: string, escalation: string, reasons: readonly string[], written = Infinity): RiskItemBody[] {
   const risks = reasons.map((r) => `accepted with its risk by the Secretary on ${escalation}: ${r}`);
   const bodies = riskItemBodies(taskId, 1, escalation, reasons);
   w.memory.write({}, (tx) => appendRecords(tx, [
     { kind: 'flow.event', mission: M, line: `task:${taskId}`, event: 'accepted', key: '1', body: tx.data.put(canonicalJson({ k: 1, product: `prod.${taskId}`, judgment: `j.sec.${escalation}`, decision: { escalation, option: 'accept-risk', by: 'secretary' }, risks })) as ContentHash },
-    ...bodies.map((b) => ({ kind: 'flow.event' as const, mission: M, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash })),
+    ...bodies.slice(0, written).map((b) => ({ kind: 'flow.event' as const, mission: M, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash })),
   ]));
   return bodies;
 }
@@ -189,6 +189,27 @@ describe('v1-4: the risk sentences of acceptances made before 4.4 are counted ap
     assert.deepEqual(c.doc.openItems?.map((i) => i.id), ['exh.task.m1.impl.1.r1']);
     assert.deepEqual(c.doc.notRecorded, [{ task: 'impl', count: 1 }]);
     assert.ok(snapshotLines(c.doc).includes('Risk sentences of acceptances made before 4.4, what became of them is not recorded (mp read open-items m1 --all lists them): task impl: 1'), snapshotLines(c.doc).join('\n'));
+  });
+
+  it('F3-4: the tail of an interrupted batch is written only for an acceptance that wrote its first batch itself; one made before 4.4 whose first sentence someone acted on gets nothing more', async () => {
+    const reasons = Array.from({ length: ITEM_BATCH + 50 }, (_, i) => `[S1] not met: case ${i}`);
+    const holdImpl = (s: Script): Script => (t, st) => (t.task.startsWith('con.m1.impl.') ? null : s(t, st));
+    const mine = async (w: World, esc: string) => (await events<RiskItemBody>(w, OPEN_ITEMS_LINE, OPEN_ITEM)).filter((e) => e.body.escalation === esc).map((e) => e.key);
+    // 4.4: the first batch written with the acceptance, the rest left out: the next pass writes the rest
+    const a = await world();
+    await drive(a.engine, a.w.scheduler, holdImpl(script()));
+    accepted44(a.w, 'impl', 'exh.task.m1.impl.1', reasons, ITEM_BATCH);
+    assert.equal((await mine(a.w, 'exh.task.m1.impl.1')).length, ITEM_BATCH);
+    await drive(a.engine, a.w.scheduler, holdImpl(script()));
+    assert.equal((await mine(a.w, 'exh.task.m1.impl.1')).length, reasons.length, 'the tail is written');
+    // 4.3: no item; the user's words close the first sentence, which records it: a pass writes nothing more
+    const b = await world();
+    await drive(b.engine, b.w.scheduler, holdImpl(script()));
+    accepted43(b.w, 'impl', 'exh.task.m1.impl.1', reasons);
+    closeOpenItem(b.w.ctx, { op: 'c1', ref: 'exh.task.m1.impl.1.r1', words: say(b.w, 'The first case does not matter.'), reason: 'the first case does not matter' });
+    await drive(b.engine, b.w.scheduler, holdImpl(script()));
+    assert.deepEqual(await mine(b.w, 'exh.task.m1.impl.1'), ['exh.task.m1.impl.1.r1'], 'no tail for an acceptance made before 4.4');
+    assert.equal((await read(b.w)).split('\n')[0], `Open items of mission m1: 0 open, 1 answered or closed; ${reasons.length - 1} risk sentences accepted before 4.4: what became of them is not recorded`);
   });
 
   it('a 4.4 acceptance whose later batch an interruption left out is not one made before 4.4: what its sentences give is open', () => {

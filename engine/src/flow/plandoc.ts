@@ -334,6 +334,28 @@ export function repairOfTask(amendments: readonly AmendmentEntry[] | undefined, 
   return amendments?.find((a) => a.tasks.some((t) => t.id === task))?.repair ?? null;
 }
 
+/** One amendment that gave a task its card: the repair, the card it gave, and whether it added the task (else changed its card). */
+export interface CardAmendment { readonly repair: string; readonly card: DetailedTask; readonly added: boolean }
+
+/**
+ * 4.4 (F12 b, G3, G4, G9): the amendments that gave task `t` the card it has: each amendment of the plan in effect
+ * that added it or changed its card, then each amendment of a plan in effect before (`history`, the bodies of the
+ * "effective" events) whose card for it is this card, by id and card hash: a later plan that keeps a card carries no
+ * amendment (p7-r3-3). The one resolution of a card's repairs: the gate of a repair's reopen (execution.ts
+ * causingRepairs), a filing's items (filingCarried), and the repairs, notes and instructions on the task's cards
+ * (seat/cards/dynamic.ts repairsOfTaskWork, at queue time and at the claim).
+ */
+export function cardAmendments(history: ReadonlyArray<{ readonly amendments?: readonly AmendmentEntry[] }>, eff: { readonly amendments?: readonly AmendmentEntry[] } | undefined, t: DetailedTask): CardAmendment[] {
+  const of = (a: AmendmentEntry): CardAmendment[] => [...a.tasks.map((card) => ({ repair: a.repair, card, added: true })), ...(a.changed ?? []).map((card) => ({ repair: a.repair, card, added: false }))].filter((x) => x.card.id === t.id);
+  const out = (eff?.amendments ?? []).flatMap(of);
+  const earlier = history.flatMap((e) => e.amendments ?? []).flatMap(of);
+  if (earlier.length > 0) {
+    const hash = taskCardHash(t);
+    for (const x of earlier) if (!out.some((y) => y.repair === x.repair && y.added === x.added) && taskCardHash(x.card) === hash) out.push(x);
+  }
+  return out;
+}
+
 /** The stored content of a detailed plan version (the plan object's content document). */
 export interface StoredDetailedPlan {
   readonly format: 'mp4.detailed-plan.v1';

@@ -7,6 +7,7 @@ import type { Memory, WriteTx } from './memory.ts';
 import { wordsEntry } from './queries.ts';
 import { notAllowed } from './resident.ts';
 import { appendRecords } from './domain/facts.ts';
+import { selectedWaiver } from '../flow/waiverChoice.ts';
 import { resolveBases } from './domain/constraints.ts';
 import { newItemTerms, setVersionsFor } from './domain/requirementSets.ts';
 
@@ -77,6 +78,8 @@ export function wordsDependencies(db: Db, data: Texts, entries: readonly string[
   const waivers = new Map<string, {mission: string; line: string; key: string; by: string; ref: string; rev: number}>();
   // the authorization items whose version in force rests on the entries, withdrawn ones too: the planner applies a waiver granted under one either way
   const authorizations = new Map<string, string>();
+  // each mission's grants, withdrawals and plans in effect, in record order: what the planner chooses from
+  const plan = new Map<string, {event: string; key: string; body: Record<string, any>; rev: number}[]>();
   const events = db.stmt("SELECT mission, event, key, body, revision FROM flow_events WHERE line IN ('requirements', 'plan') ORDER BY revision").all() as {mission: string; event: string; key: string; body: string; revision: number}[];
   for (const e of events) {
     const b = JSON.parse(data.text(e.body)) as Record<string, any>;
@@ -93,12 +96,34 @@ export function wordsDependencies(db: Db, data: Texts, entries: readonly string[
       for (const [id, w] of waivers) if (w.mission === e.mission && (b.action === 'withdraw' ? b.scopeOnly !== true || w.line === scope : w.line === scope)) waivers.delete(id);
       if (b.action !== 'withdraw') waivers.set(`waiver:${e.mission}:${e.key}`, {mission: e.mission, line: scope, key: e.key, by: String(b.by), ref: String(b.ref), rev: Number(e.revision)});
     }
+    if (e.event === 'reviews-waiver' || e.event === 'effective') plan.set(e.mission, [...(plan.get(e.mission) ?? []), {event: e.event, key: e.key, body: b, rev: Number(e.revision)}]);
   }
-  for (const [id, w] of waivers) {
-    // 4.4 (G7): a waiver rests on the entry on its words, or through the authorization item it was granted under
+  // 4.4 (G7): a waiver rests on the entry on its words, or through the authorization item it was granted under
+  const restsOn = (w: {by: string; ref: string}): {words: string; via?: string} | null => {
     const auth = w.by === 'authority' ? authorizations.get(w.ref) : undefined;
-    if (w.by === 'words' && wanted.has(w.ref)) out.set(id, {id, mission: w.mission, kind: 'waiver', line: w.line, key: w.key, words: w.ref, rev: w.rev});
-    else if (auth !== undefined) out.set(id, {id, mission: w.mission, kind: 'waiver', line: w.line, key: w.key, words: auth, via: w.ref, rev: w.rev});
+    return w.by === 'words' && wanted.has(w.ref) ? {words: w.ref} : auth !== undefined ? {words: auth, via: w.ref} : null;
+  };
+  for (const [id, w] of waivers) {const r = restsOn(w); if (r !== null) out.set(id, {id, mission: w.mission, kind: 'waiver', line: w.line, key: w.key, ...r, rev: w.rev});}
+  // ... and every grant on the entries the planner selects for a plan not in effect yet, now or once the entries'
+  // words lose force: it leaves out the grants whose words lost force before it selects, so an earlier grant of a
+  // scope applies again when a later one loses its words (selectedWaiver: the planner's own choice)
+  const closed = new Set((db.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as {mission: string}[]).map((r) => r.mission));
+  const force = new Map<string, boolean>();
+  const inForce = (ref: string, mission: string): boolean => {const k = `${mission}\n${ref}`; if (!force.has(k)) force.set(k, wordsAuthority(db, data, ref, mission) !== null); return force.get(k)!;};
+  for (const [mission, evs] of plan) {
+    if (closed.has(mission)) continue;
+    const grants = evs.filter((e) => e.event === 'reviews-waiver');
+    const effective = new Set(evs.filter((e) => e.event === 'effective').map((e) => e.key));
+    const scopes = ['', ...new Set(grants.map((e) => e.body.dplan).filter((d): d is string => typeof d === 'string' && !effective.has(d)))];
+    const now = grants.filter((e) => e.body.action === 'withdraw' || e.body.by !== 'words' || inForce(String(e.body.ref), mission));
+    const after = now.filter((e) => e.body.action === 'withdraw' || e.body.by !== 'words' || !wanted.has(String(e.body.ref)));
+    for (const view of [now, after]) for (const s of scopes) {
+      const sel = selectedWaiver(view, s).waiver;
+      const g = sel === null ? undefined : grants.find((e) => e.body === sel);
+      const id = g === undefined ? '' : `waiver:${mission}:${g.key}`;
+      const r = g === undefined ? null : restsOn({by: String(g.body.by), ref: String(g.body.ref)});
+      if (g !== undefined && r !== null && !out.has(id)) out.set(id, {id, mission, kind: 'waiver', line: String(g.body.dplan ?? 'mission'), key: g.key, ...r, rev: g.rev});
+    }
   }
   return [...out.values()];
 }
