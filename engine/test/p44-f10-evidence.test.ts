@@ -14,16 +14,18 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
 import { canonicalJson } from '../src/common/hash.ts';
-import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
+import { cal1Pass, cal2Pass, feasible } from '../src/flow/scripted.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE } from '../src/flow/openItems.ts';
+import { personItemId } from '../src/flow/riskItems.ts';
 import { renewalCandidates } from '../src/evaluator/index.ts';
 import { flowEvents, dispatchInfo } from '../src/memory/index.ts';
-import { pmDispatch, pmRenew, recordSeatHandBack, seatHandback, seatRerun, sweepTmp } from '../src/process/index.ts';
-import { recordedGroup, runOnCommit } from '../src/process/runs.ts';
+import { pmDispatch, pmNext, pmRenew, recordSeatHandBack, seatFullRun, seatHandback, seatRerun, sweepTmp } from '../src/process/index.ts';
+import { ownDeclaredFiles, recordedGroup, renewalGroupKey, runOnCommit } from '../src/process/runs.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import { handbackDoc } from '../src/process/ports.ts';
 import { artifactLines, renderSeatCard, type ReviewerCard } from '../src/seat/card.ts';
 import '../src/seat/cards/index.ts';
-import { addDetailedPlan, CHECK_JS, ENV_A, ENV_B, handBack, processProject, readAll, readyOf, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
+import { addDetailedPlan, CHECK_JS, ENV_A, ENV_B, handBack, processProject, readAll, readyOf, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 import { project43 } from './p43-fixtures.ts';
 
 const sha = (b: string | Buffer): string => createHash('sha256').update(b).digest('hex');
@@ -301,6 +303,112 @@ test('review p9-r2-2: the named files of a run are stored once and named from ea
     const plain = await runOnCommit(ctx, { mission: 'm1', commit, commands: [{ id: 'p', command: 'true plain' }], purpose: 'plain', declaration: { by: 'mp', checkout: 'clean', declared: true } });
     assert.equal(plain.runs[0]!.fields['groupFiles'], undefined);
     assert.equal(plain.runs[0]!.fields['group'], canonicalJson([{ command: 'true plain', cwd: '.', sampled: false, network: false }]), 'the group of 4.3');
+  } finally { p.cleanup(); }
+});
+
+test('review F2-3: two runs of one command on one commit that named different files are two renewal groups, and each is compared with the files it named itself', async () => {
+  const p = processProject();
+  try {
+    const commit = p.git('rev-parse', 'HEAD').trim();
+    const declaration = { by: 'mp' as const, checkout: 'clean' as const, declared: true };
+    // in one environment the command names no file; in the next, the same command names its report
+    const none = await runOnCommit(p.ctx, { mission: 'm1', commit, commands: [{ id: 'check', command: 'true check' }], purpose: 'names no file', declaration });
+    p.reopen(ENV_B).environment();
+    const ctx = p.ctx;
+    const named = await runOnCommit(ctx, { mission: 'm1', commit, commands: [{ id: 'check', command: 'true check', artifacts: ['report.md'] }], purpose: 'names its report', declaration });
+    const a = { evidence: none.runs[0]!.evidence, fields: none.runs[0]!.fields };
+    const b = { evidence: named.runs[0]!.evidence, fields: named.runs[0]!.fields };
+    assert.notEqual(a.evidence, b.evidence, 'two recorded runs');
+    assert.equal(a.fields['group'], b.fields['group'], 'the same command group in the 4.3 form');
+    assert.notEqual(renewalGroupKey(commit, a), renewalGroupKey(commit, b), 'two groups: neither lends the other its files');
+    assert.equal(renewalGroupKey(commit, b), renewalGroupKey(commit, { evidence: 'other', fields: b.fields }), 'one group for runs that named the same files');
+    const text = (h: string): string => ctx.memory.data.text(h);
+    assert.deepEqual(ownDeclaredFiles(a, 'true check', '.', text), []);
+    assert.deepEqual(ownDeclaredFiles(b, 'true check', '.', text), ['report.md'], 'its own declaration');
+  } finally { p.cleanup(); }
+});
+
+test('review F2-4: a Reviewer\'s cited path outside its folder that is a link to a file in it: the bytes it was checked against are copied before the folder is removed', async () => {
+  const q = project43();
+  try {
+    const ctx = q.ctx;
+    const con = await toConstructor(q);
+    assert.equal((await handBack(ctx, con, constructorFields([]))).kind, 'recorded');
+    const r = await readyOf(ctx, 'reviewer');
+    const rd = pmDispatch(ctx, r.step);
+    readAll(ctx, rd.dispatch);
+    const { mkdtempSync, symlinkSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const rdir = join(ctx.memory.paths.tmp, rd.dispatch);
+    mkdirSync(rdir, { recursive: true });
+    writeFileSync(join(rdir, 'measure.log'), 'latency 7 ms\n');
+    const outside = mkdtempSync(join(tmpdir(), 'mp-link-in-'));
+    symlinkSync(join(rdir, 'measure.log'), join(outside, 'measure.log'));
+    const cited = `data:${join(outside, 'measure.log')}#sha256=${sha('latency 7 ms\n')}&size=13`;
+    const card = dispatchView(ctx, rd.dispatch).card as unknown as ReviewerCard;
+    const fields = { judgments: [{ standard: 'S1', met: 'yes', reason: 'measured', evidence: [`evidence:${card.verificationRuns[0]!.evidence}`, cited] }], gap_responses: [], issue_responses: [], findings: [], verdict: 'pass' };
+    const rv = await recordSeatHandBack(ctx, rd.dispatch, { report: '# r\n', fields, advance: false });
+    assert.equal(rv.kind, 'recorded', JSON.stringify(rv));
+    const doc = ctx.memory.read((db) => handbackDoc(ctx.memory.data, dispatchInfo(db, rd.dispatch)!))!;
+    assert.equal(doc.data?.[0]?.kept, `files/${sha('latency 7 ms\n')}`, 'kept, and the record says where');
+    assert.ok(!existsSync(rdir), 'the clean-up removed the folder the link points into');
+    assert.equal(readFileSync(join(ctx.memory.paths.root, 'files', sha('latency 7 ms\n')), 'utf8'), 'latency 7 ms\n', 'the bytes checked are kept');
+  } finally { q.cleanup(); }
+});
+
+test('review F3-7: an integration task whose only standard a person checks passes resting on its full run; the acceptance lists the standard as an item to verify', async () => {
+  const SUITE = [{ id: 'suite', command: 'node suite.js' }];
+  const SUITE_JS = "const { add } = require('./src/add.js');\nconsole.log(add(2, 3) === 5 ? 'ok 1 - the whole suite' : 'not ok 1 - the whole suite');\nprocess.exit(add(2, 3) === 5 ? 0 : 1);\n";
+  const p = processProject({ files: { 'suite.js': SUITE_JS }, options: { fullSuite: SUITE } });
+  try {
+    const ctx = p.ctx;
+    const dp = addDetailedPlan('m1') as { tasks: unknown[] };
+    dp.tasks.push({
+      id: 'integ', kind: 'integration', module: null, goal: 'Use add in the app',
+      standards: [{ id: 'S1', text: 'A user runs the app and sees 5', check: 'person' }],
+      requirementItems: ['item.m1.g1'], writeScope: ['app/**'], readableFiles: ['README.md'], interpreter: 'node',
+      verificationCommands: [{ id: 'app', command: 'node app/main.js' }], implements: [], calls: ['add'], dependsOn: ['impl'], exclusive: [],
+      estimate: { durationMs: 60_000, costMicros: 100_000, basis: 'a small change' }, provenance: { planElement: 'e1' },
+    });
+    await startAddMission(ctx, 'm1');
+    await step(ctx, 'calibrator-1', (c) => cal1Pass(c));
+    await step(ctx, 'architect-decompose', () => dp);
+    if ((await pmNext(ctx)).ready.some((r) => r.kind === 'architect-feasibility')) await step(ctx, 'architect-feasibility', () => feasible());
+    await step(ctx, 'calibrator-2', (c) => cal2Pass(c));
+    const construct = async (task: string, files: Record<string, string>): Promise<void> => {
+      const s = (await pmNext(ctx)).ready.find((x) => x.kind === 'constructor' && x.step.includes(`.${task}.`))!;
+      const d = pmDispatch(ctx, s.step);
+      for (const [rel, text] of Object.entries(files)) write(join(p.dir, d.worktree!), rel, text);
+      const a = await handBack(ctx, d.dispatch, constructorFields([]));
+      assert.ok(a.kind === 'recorded' && a.candidate !== null, JSON.stringify(a));
+    };
+    const reviewer = async (task: string): Promise<{ dispatch: string; card: ReviewerCard }> => {
+      const s = (await pmNext(ctx)).ready.find((x) => x.kind === 'reviewer' && x.step.includes(`.${task}.`))!;
+      const d = pmDispatch(ctx, s.step);
+      readAll(ctx, d.dispatch);
+      return { dispatch: d.dispatch, card: dispatchView(ctx, d.dispatch).card as unknown as ReviewerCard };
+    };
+    await construct('impl', { 'src/add.js': 'exports.add = (a, b) => a + b;\n', 'src/check.js': CHECK_JS });
+    const ri = await reviewer('impl');
+    assert.equal((await handBack(ctx, ri.dispatch, reviewerPass(ri.card as never))).kind, 'recorded');
+    await construct('integ', { 'app/main.js': "const { add } = require('../src/add.js');\nconsole.log(add(2, 3));\n" });
+    const rv = await reviewer('integ');
+    assert.deepEqual(rv.card.standards.map((s) => [s.id, s.check]), [['S1', 'person']]);
+    const pass = { judgments: [], gap_responses: rv.card.selfReportedGaps.map((g) => ({ gap: g.id, response: 'noted' })), issue_responses: [], findings: [], verdict: 'pass' };
+    const refused = await handBack(ctx, rv.dispatch, pass);
+    assert.ok(refused.kind === 'refused' && refused.problems.some((x) => /cites a passing full run of its candidate/.test(x)), 'without a full run: refused, as every integration pass is');
+    const fr = await seatFullRun(ctx, rv.dispatch);
+    assert.equal(fr.marker.passed, true);
+    const a = await handBack(ctx, rv.dispatch, pass);
+    assert.ok(a.kind === 'recorded' && a.outcome === 'accepted', JSON.stringify(a));
+    await pmNext(ctx);
+    const accepted = ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as never, line: 'task:integ', event: 'accepted' }));
+    assert.equal(accepted.length, 1, 'the integration task is accepted');
+    const judgment = ctx.memory.read((db) => (db.stmt("SELECT record FROM log WHERE kind = 'judgment' AND json_extract(record, '$.judgment') = ?").get(rv.card.binding.judgment) as { record: string }).record);
+    const cites = ctx.memory.data.getList(JSON.parse(judgment).evidence as never);
+    assert.deepEqual([...cites].sort(), fr.marker.commands.map((x) => x.evidence).sort(), 'the pass rests on its full run');
+    const items = ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as never, line: OPEN_ITEMS_LINE, event: OPEN_ITEM })).map((e) => JSON.parse(ctx.memory.data.text(e.body)) as { id: string; kind: string; task?: string });
+    assert.deepEqual(items.filter((i) => i.task === 'integ').map((i) => [i.id, i.kind]), [[personItemId('integ', 1, 'S1'), 'verify']], 'the person\'s standard is an item to verify');
   } finally { p.cleanup(); }
 });
 
