@@ -104,6 +104,7 @@ import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, raiseNotice, taskStatus, type TaskSpecDoc } from './ports.ts';
 import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { keptArtifactsOf } from './keptFiles.ts';
 import { fullRunLine, heldByClose } from './close.ts';
 import { authorizationInForce, fullRunStatus } from './fullRuns.ts';
 import { CONFIG_KEY, REVIEWS_WAIVER, WAIVABLE_CHECKS, waiversInForce, type ReviewsWaiverBody } from '../flow/waivers.ts';
@@ -929,7 +930,7 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
         ? recorded.filter((rec) => rec.fields['candidate'] === first.candidate && (fields['run'] === undefined ? rec.evidence === first.evidence : rec.fields['run'] === fields['run']))
           .map((rec) => ({ command: rec.fields['command']!, cwd: runCwd(rec.fields), sampled: rec.runClass === 'sampling', network: rec.runClass === 'other' }))
         : JSON.parse(fields['group']) as Array<Omit<DeclaredCommand, 'id'>>;
-      if (!Array.isArray(source) || source.length === 0 || source.some((cmd) => typeof cmd?.command !== 'string' || (cmd.cwd !== undefined && typeof cmd.cwd !== 'string') || (cmd.sampled !== undefined && typeof cmd.sampled !== 'boolean') || (cmd.network !== undefined && typeof cmd.network !== 'boolean'))) {
+      if (!Array.isArray(source) || source.length === 0 || source.some((cmd) => typeof cmd?.command !== 'string' || (cmd.cwd !== undefined && typeof cmd.cwd !== 'string') || (cmd.sampled !== undefined && typeof cmd.sampled !== 'boolean') || (cmd.network !== undefined && typeof cmd.network !== 'boolean') || (cmd.artifacts !== undefined && (!Array.isArray(cmd.artifacts) || cmd.artifacts.some((a) => typeof a !== 'string'))))) {
         throw new Error('the recorded verification group is invalid: a Reviewer judges again');
       }
       const commands = source.map((cmd, i) => ({ ...cmd, id: `renew-${i + 1}` }));
@@ -937,9 +938,23 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
         throw new Error('the recorded verification group omits a declared run to renew: a Reviewer judges again');
       }
       const replacementFor = (runs: readonly RecordedRun[], cand: (typeof originals)[number]): RecordedRun => runs.find((r) => r.command.command === cand.command && runCwd(r.fields) === cand.cwd && !r.command.sampled && !r.command.network)!;
+      // 4.4 (F10, review p9-2): a run whose command names files kept them; a rerun that does not write the same
+      // files (missing, or another sha256) did not repeat what a judgment on them may rest on: a new review
+      const lostFiles = (tx: WriteTx, cand: (typeof originals)[number], x: RecordedRun): string[] => {
+        if (!source.some((cmd) => cmd.command === cand.command && (cmd.cwd ?? '.') === cand.cwd && (cmd.artifacts ?? []).length > 0)) return [];
+        const was = keptArtifactsOf(tx, tx.data, cand.evidence) ?? [];
+        const now = x.artifacts ?? keptArtifactsOf(tx, tx.data, x.evidence) ?? [];
+        return was.filter((a) => a.sha256 !== undefined && !now.some((b) => b.path === a.path && b.sha256 === a.sha256)).map((a) => a.path);
+      };
       const renewGroup = (tx: WriteTx, runs: readonly RecordedRun[], records: readonly EvidenceRecord[] = []): Array<Renewed['reruns'][number]> => originals.map((cand) => {
         const x = replacementFor(runs, cand);
         const rec: EvidenceRecord = records.find((r) => r.evidence === x.evidence) ?? { kind: 'evidence', evidence: x.evidence as never, envLine: 'env' as never, envSnapshot: env.identity, runClass: 'declared', fields: x.fields };
+        const lost = lostFiles(tx, cand, x);
+        if (lost.length > 0) {
+          // the rerun is recorded; no judgment on the original is renewed by it
+          recordRenewedRun(tx, { original: cand.evidence, run: rec, judgments: new Set() });
+          return { original: cand.evidence, run: x.evidence, passed: x.passed, renewed: [], refused: cand.judgments.map((j) => ({ judgment: j.judgment as string, reason: `it did not write ${lost.join(', ')} as the original run did (missing, or another sha256): a new review` })) };
+        }
         const out = recordRenewedRun(tx, { original: cand.evidence, run: rec, judgments: new Set(cand.judgments.map((j) => j.judgment as string)) });
         const ix = new StoredIndex(tx);
         const renewed: string[] = [];

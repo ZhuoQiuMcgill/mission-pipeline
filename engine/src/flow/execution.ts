@@ -600,7 +600,9 @@ async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTa
         break;
     }
   }
-  return review.verdict;
+  // 4.4 (F10, review p9-3): the disposition taken, when recorded and when resumed: such a review waits for its
+  // decider's answer as a "needs decision" does (the hand-back keeps the verdict the Reviewer gave)
+  return onlyUnverifiable(review) ? 'needs-decision' : review.verdict;
 }
 
 /** 6.2: an accepted product whose basis was withdrawn → the Secretary judges whether to re-plan. */
@@ -1047,8 +1049,9 @@ async function reviewerNeedsDecision(ctx: FlowCtx, t: DetailedTask, k: number, r
  * 4.4 (F10): a review whose only open standards are ones the Reviewer could not verify from what it can
  * see goes once to a decider (its escalation is keyed by the review): accept the verified product with
  * those standards recorded as left open (accept-risk: each one is among the acceptance's risks, with what
- * would be needed), or send it back with instructions. It is not sent back to the Constructor by itself,
- * and it spends no rework. The option list has the shape of a Reviewer's "needs decision".
+ * would be needed), send it back with instructions, or answer (what is missing, or where it is: the same
+ * candidate is reviewed again). It is not sent back to the Constructor by itself, and it spends no rework.
+ * The option list has the shape of a Reviewer's "needs decision".
  */
 async function reviewerUnverifiable(ctx: FlowCtx, t: DetailedTask, k: number, rev: string, review: ReviewBody, product: ProductBody): Promise<void> {
   const risk = await riskAcceptable(ctx, t, k);
@@ -1064,7 +1067,8 @@ async function reviewerUnverifiable(ctx: FlowCtx, t: DetailedTask, k: number, re
     subject: `task:${t.id}`,
     summary: `The Reviewer of task ${t.id} (attempt ${k}) could not verify ${standards.join(', ')} from what it can see, and nothing else is open: a decider settles it; it is not sent back to the Constructor by itself.`,
     reasons: [...review.issues, ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
-    options: startOnly(await readLine(ctx, t.id), product) ? ['replan', ...accept, 'ask-user'] : ['rework', 'replan', ...accept, 'ask-user'],
+    // review p9-8: `answer` (what is missing, or where it is: the same candidate is reviewed again) stays, as on every Reviewer's "needs decision"
+    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'replan', ...accept, 'ask-user'] : ['answer', 'rework', 'replan', ...accept, 'ask-user'],
     ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
     ...(offered !== null ? { position: { target: offered.product, review: 'reviewer', revokes: offered.judgment } } : {}),
     items: t.requirementItems,

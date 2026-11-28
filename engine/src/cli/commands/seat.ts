@@ -300,7 +300,8 @@ const handback: Command = {
   },
   afterOutput(c, r) {
     const a = r.json as HandBackAnswer;
-    if (a.kind === 'recorded' && c.project !== null) dispatchOver(c.project.ctx, a.dispatch);
+    // review p9-5: a cited file of the folder that could not be copied keeps it (the sweep may remove it later)
+    if (a.kind === 'recorded' && c.project !== null) dispatchOver(c.project.ctx, a.dispatch, undefined, { keepTmp: a.keepScratch === true });
   },
 };
 

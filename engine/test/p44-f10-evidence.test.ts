@@ -9,14 +9,14 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { renewalCandidates } from '../src/evaluator/index.ts';
 import { flowEvents, dispatchInfo } from '../src/memory/index.ts';
-import { pmDispatch, recordSeatHandBack, seatRerun } from '../src/process/index.ts';
+import { pmDispatch, pmRenew, recordSeatHandBack, seatHandback, seatRerun, sweepTmp } from '../src/process/index.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import { handbackDoc } from '../src/process/ports.ts';
 import { renderSeatCard, type ReviewerCard } from '../src/seat/card.ts';
@@ -27,17 +27,17 @@ import { project43 } from './p43-fixtures.ts';
 const sha = (b: string | Buffer): string => createHash('sha256').update(b).digest('hex');
 
 /** The add mission's plan whose standard is checked by an artifact its verification command writes. */
-function artifactPlan(): unknown {
+function artifactPlan(commands: unknown[] = [{ id: 'check', command: 'node src/check.js > check.log', artifacts: ['check.log', 'missing.txt'] }]): unknown {
   const p = addDetailedPlan('m1') as { tasks: Array<Record<string, unknown>> };
-  return { ...p, tasks: p.tasks.map((t) => ({ ...t, standards: [{ id: 'S1', text: 'add(2, 3) is 5, as check.log shows', check: 'artifact' }], verificationCommands: [{ id: 'check', command: 'node src/check.js > check.log', artifacts: ['check.log', 'missing.txt'] }] })) };
+  return { ...p, tasks: p.tasks.map((t) => ({ ...t, standards: [{ id: 'S1', text: 'add(2, 3) is 5, as check.log shows', check: 'artifact' }], verificationCommands: commands })) };
 }
 
 /** The mission up to its Constructor's dispatch, its worktree written. */
-async function toConstructor(p: ProcessProject): Promise<string> {
+async function toConstructor(p: ProcessProject, plan: unknown = artifactPlan()): Promise<string> {
   const ctx = p.ctx;
   await startAddMission(ctx, 'm1');
   await step(ctx, 'calibrator-1', (c) => cal1Pass(c));
-  await step(ctx, 'architect-decompose', () => artifactPlan());
+  await step(ctx, 'architect-decompose', () => plan);
   await step(ctx, 'calibrator-2', (c) => cal2Pass(c));
   const s = await readyOf(ctx, 'constructor');
   const d = pmDispatch(ctx, s.step);
@@ -87,7 +87,7 @@ test('a run keeps the files its command names; the Constructor\'s handed-in file
     assert.ok(rendered.includes(`  file it wrote: check.log (sha256 ${arts[0]!.sha256}, ${arts[0]!.size} bytes), kept at ${arts[0]!.kept}`), rendered);
     assert.ok(rendered.includes(`- ${pointer}\n  handed in with attempt 1 (dispatch ${con}); outside the commit (sha256 checked at hand-back); a copy is kept at .mission-pipeline/files/${sha(log)}`), rendered);
     const summary = readFileSync(join(ctx.memory.paths.root, ...`missions/m1/runs/${String(card.verificationRuns[0]!.evidence).split('.')[0]}.md`.split('/')), 'utf8');
-    assert.match(summary, /- Files it wrote:\n {2}- check\.log: kept at \.mission-pipeline\/files\/[0-9a-f]{64} \(sha256 [0-9a-f]{64}, \d+ bytes\)\n {2}- missing\.txt: not kept \(the run did not write it\)/);
+    assert.match(summary, /- Files it names:\n {2}- check\.log: kept at \.mission-pipeline\/files\/[0-9a-f]{64} \(sha256 [0-9a-f]{64}, \d+ bytes\)\n {2}- missing\.txt: not kept \(the run did not write it\)/);
     // a rerun keeps them too, and says so
     const rerun = await seatRerun(ctx, rd.dispatch, 'check');
     assert.equal(rerun.artifacts?.[0]?.path, 'check.log');
@@ -164,4 +164,102 @@ test('keeping a file is bounded and never throws: over the size or the count, a 
     assert.match((await keepFile(root, join(base, 'big.bin'), keepBudget()) as { why: string }).why, /over the 64 MiB a kept file may have/);
     assert.equal((await keepFile(root, join(base, 'none.log'), keepBudget()) as { why: string }).why, 'no such file');
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+/** The add mission through its Constructor (no file handed in) to its Reviewer, which passes citing the verification run: the judgment and the dispatch. */
+async function reviewedOnRun(p: ProcessProject, plan: unknown): Promise<{ judgment: string; reviewer: string }> {
+  const ctx = p.ctx;
+  const con = await toConstructor(p, plan);
+  const a = await handBack(ctx, con, constructorFields([]));
+  assert.equal(a.kind, 'recorded', JSON.stringify(a));
+  const r = await readyOf(ctx, 'reviewer');
+  const rd = pmDispatch(ctx, r.step, { filledBy: 'h/reviewer' });
+  readAll(ctx, rd.dispatch);
+  const card = dispatchView(ctx, rd.dispatch).card as unknown as ReviewerCard;
+  const fields = { judgments: card.standards.map((s) => ({ standard: s.id, met: 'yes', reason: 'check.log says so', evidence: card.verificationRuns.map((x) => `evidence:${x.evidence}`) })), gap_responses: [], issue_responses: [], findings: [], verdict: 'pass' };
+  const rv = await handBack(ctx, rd.dispatch, fields);
+  assert.equal(rv.kind, 'recorded', JSON.stringify(rv));
+  return { judgment: `j.${r.step}`, reviewer: rd.dispatch };
+}
+
+test('review p9-2: after an environment change, a pass on a run whose command names files is renewed only when the rerun writes the same files', async () => {
+  for (const [command, renews] of [['node src/check.js > check.log', true], ['node src/check.js > check.log && date +%N >> check.log', false]] as const) {
+    const p = project43();
+    try {
+      const { judgment } = await reviewedOnRun(p, artifactPlan([{ id: 'check', command, artifacts: ['check.log'] }]));
+      p.reopen(ENV_B).environment();
+      const r = await pmRenew(p.ctx, { mission: 'm1' });
+      const rerun = r.reruns.find((x) => x.renewed.includes(judgment) || x.refused.some((f) => f.judgment === judgment));
+      assert.ok(rerun !== undefined, JSON.stringify(r));
+      if (renews) assert.deepEqual(rerun.renewed, [judgment], 'the same files: renewed as before');
+      else {
+        assert.deepEqual(rerun.renewed, []);
+        assert.match(rerun.refused.find((f) => f.judgment === judgment)!.reason, /^it did not write check\.log as the original run did \(missing, or another sha256\): a new review$/);
+        const needed = p.ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as never, line: 'renew', event: 'review-needed' }));
+        assert.ok(needed.some((e) => e.key.startsWith(`${judgment}@`)), 'the existing re-review path takes it');
+      }
+    } finally { p.cleanup(); }
+  }
+});
+
+test('review p9-7: a named file an earlier command of the run wrote, unchanged by the command that names it, is kept with its origin not established', async () => {
+  const p = project43();
+  try {
+    const ctx = p.ctx;
+    const con = await toConstructor(p, artifactPlan([{ id: 'prep', command: 'echo prepared > report.json' }, { id: 'check', command: 'node src/check.js', artifacts: ['report.json'] }]));
+    const a = await handBack(ctx, con, constructorFields([]));
+    assert.equal(a.kind, 'recorded', JSON.stringify(a));
+    const r = await readyOf(ctx, 'reviewer');
+    const card = dispatchView(ctx, pmDispatch(ctx, r.step).dispatch).card as unknown as ReviewerCard;
+    const check = card.verificationRuns.find((x) => x.command === 'node src/check.js')!;
+    assert.equal(check.artifacts?.[0]?.origin, 'not-established');
+    assert.match(check.artifacts?.[0]?.kept ?? '', /^\.mission-pipeline\/files\//, 'it is kept all the same');
+    const text = renderSeatCard(card as never, { dispatch: 'D-x' });
+    assert.ok(text.includes('  file there after it, unchanged from before it ran (that it wrote it is not established): report.json'), text);
+    assert.ok(!text.includes('file it wrote: report.json'));
+  } finally { p.cleanup(); }
+});
+
+test('review p9-5, p9-6: a Reviewer\'s cited file in its own folder is copied before its hand-back is recorded; one that cannot be copied keeps the folder; a sweep and a retry after the record lose nothing', async () => {
+  const p = project43();
+  try {
+    const ctx = p.ctx;
+    const con = await toConstructor(p);
+    const cdir = join(ctx.memory.paths.tmp, con);
+    mkdirSync(cdir, { recursive: true });
+    writeFileSync(join(cdir, 'sim.log'), 'rows: 3\n');
+    const handed = `data:${join(cdir, 'sim.log')}#sha256=${sha('rows: 3\n')}&size=8`;
+    // the seat's command leaves its folder until it has printed; a sweep by another process after the record loses nothing
+    const writeFiles = (dir: string, fields: unknown): void => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'report.md'), '# r\n'); writeFileSync(join(dir, 'result.json'), JSON.stringify(fields)); };
+    writeFiles(cdir, constructorFields([handed]));
+    const a = await seatHandback(ctx, con, { report: `.mission-pipeline/tmp/${con}/report.md`, result: `.mission-pipeline/tmp/${con}/result.json`, keepScratch: true });
+    assert.equal(a.kind, 'recorded');
+    assert.ok(existsSync(cdir));
+    sweepTmp(ctx, { budgetMs: 10_000 });
+    assert.ok(!existsSync(cdir), 'the sweep removed the folder');
+    assert.equal(readFileSync(join(ctx.memory.paths.root, 'files', sha('rows: 3\n')), 'utf8'), 'rows: 3\n', 'what the hand-back named was copied before its record');
+    const again = await recordSeatHandBack(ctx, con, { report: '# r\n', fields: constructorFields([handed]), advance: false });
+    assert.ok(again.kind === 'recorded' && again.repeated, 'an identical retry after the record: nothing new, nothing lost');
+    // the Reviewer cites a measurement written to its own folder, and one too large to keep
+    const r = await readyOf(ctx, 'reviewer');
+    const rd = pmDispatch(ctx, r.step);
+    readAll(ctx, rd.dispatch);
+    const rdir = join(ctx.memory.paths.tmp, rd.dispatch);
+    mkdirSync(rdir, { recursive: true });
+    writeFileSync(join(rdir, 'measure.log'), 'latency 12 ms\n');
+    const measured = `data:${join(rdir, 'measure.log')}#sha256=${sha('latency 12 ms\n')}&size=14`;
+    const card = dispatchView(ctx, rd.dispatch).card as unknown as ReviewerCard;
+    const judge = (evidence: string[]) => ({ judgments: [{ standard: 'S1', met: 'yes', reason: 'measured', evidence: [`evidence:${card.verificationRuns[0]!.evidence}`, ...evidence] }], gap_responses: [], issue_responses: [], findings: [], verdict: 'pass' });
+    writeFileSync(join(rdir, 'big.bin'), '');
+    truncateSync(join(rdir, 'big.bin'), 64 * 1024 * 1024 + 1);
+    const big = `data:${join(rdir, 'big.bin')}#sha256=${sha(Buffer.alloc(64 * 1024 * 1024 + 1))}&size=${64 * 1024 * 1024 + 1}`;
+    const rv = await recordSeatHandBack(ctx, rd.dispatch, { report: '# r\n', fields: judge([measured, big]), advance: false });
+    assert.equal(rv.kind, 'recorded', JSON.stringify(rv));
+    const doc = ctx.memory.read((db) => handbackDoc(ctx.memory.data, dispatchInfo(db, rd.dispatch)!))!;
+    assert.equal(doc.data?.find((x) => x.pointer === measured)?.kept, `files/${sha('latency 12 ms\n')}`, 'the measurement is kept, and the record says where');
+    assert.match(doc.data?.find((x) => x.pointer === big)?.notKept ?? '', /over the 64 MiB/);
+    assert.equal(readFileSync(join(ctx.memory.paths.root, 'files', sha('latency 12 ms\n')), 'utf8'), 'latency 12 ms\n');
+    assert.ok(existsSync(join(rdir, 'big.bin')), 'a file that could not be copied keeps the folder');
+    assert.ok(rv.kind === 'recorded' && rv.keepScratch === true && rv.notes.some((n) => n.includes(`.mission-pipeline/tmp/${rd.dispatch}/ is left in place: ${join(rdir, 'big.bin')} could not be copied`)), JSON.stringify(rv));
+  } finally { p.cleanup(); }
 });

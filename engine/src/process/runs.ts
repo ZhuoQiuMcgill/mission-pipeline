@@ -70,7 +70,7 @@ import { appendRecords, LedgerError, tryLock, type ProcessLock, type WriteTx } f
 import type { RunArtifactT } from '../seat/card.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
-import { ARTIFACTS_LINE, KEPT_ARTIFACTS, keepArtifacts, keepBudget, type KeptArtifactsBody } from './keptFiles.ts';
+import { ARTIFACTS_LINE, KEPT_ARTIFACTS, artifactStates, keepArtifacts, keepBudget, type KeptArtifactsBody } from './keptFiles.ts';
 
 // ---------------------------------------------------------------- running one command
 
@@ -479,7 +479,7 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
     // 4.4 (F10): the files the command wrote that mp kept
-    if (r.artifacts !== undefined && !r.reused) lines.push('- Files it wrote:', ...r.artifacts.map((a) => `  - ${a.path}: ${a.kept !== undefined ? `kept at ${a.kept} (sha256 ${a.sha256}, ${a.size} bytes)` : `not kept (${a.why})`}`));
+    if (r.artifacts !== undefined && !r.reused) lines.push('- Files it names:', ...r.artifacts.map((a) => `  - ${a.path}: ${a.kept !== undefined ? `kept at ${a.kept} (sha256 ${a.sha256}, ${a.size} bytes)` : `not kept (${a.why})`}${a.origin === 'not-established' ? '; it was there before the command ran and is unchanged: that the command wrote it is not established' : ''}`));
     // a failing command's last lines, a failing setup's, and a rerun's whether it passed or failed (4.1.3)
     if (r.tail !== '') lines.push('', 'Last lines of the output:', '', fence(r.tail), r.tail, fence(r.tail));
     lines.push('');
@@ -591,7 +591,8 @@ async function executeRuns(
   const executed: RecordedRun[] = [];
   const records: EvidenceRecord[] = [];
   const staged = new Map<string, RecordedRun>();
-  const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
+  // 4.4 (F10, review p9-2): a command's named files are part of its group, so a renewal reruns it with them (absent: the 4.3 group)
+  const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true, ...((c.artifacts ?? []).length > 0 ? { artifacts: [...c.artifacts!] } : {}) })));
   let cleanup: readonly CleanupFailure[] = [];
   // 4.4 (F10): the kept files of this run share one bound
   const budget = keepBudget();
@@ -611,6 +612,8 @@ async function executeRuns(
       const rel = normalizeCwd(c.cwd);
       const cwd = rel === '.' ? dir : join(dir, ...rel.split('/'));
       mkdirSync(cwd, { recursive: true });
+      // review p9-7: the named files as they are before this command (an earlier one, or the commit, may have written them)
+      const before = (c.artifacts ?? []).length > 0 ? await artifactStates(dir, c.artifacts!) : undefined;
       const out = await runner({ command: c.command, cwd, timeoutMs, ...(shell === undefined ? {} : { shell }) });
       const runClass = classOf(c);
       const key = canonicalJson({ command: c.command, cwd: rel });
@@ -629,7 +632,7 @@ async function executeRuns(
       records.push(rec);
       const passed = fields['status'] === 'completed' && fields['exit'] === '0';
       // 4.4 (F10): the files the command names are kept before the checkout is removed (bounded; never refuses the run)
-      const artifacts = (c.artifacts ?? []).length > 0 ? await keepArtifacts(ctx.memory.paths.root, dir, c.artifacts!, budget) : [];
+      const artifacts = (c.artifacts ?? []).length > 0 ? await keepArtifacts(ctx.memory.paths.root, dir, c.artifacts!, budget, before) : [];
       const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed && req.keepPassingTail !== true ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false, ...(artifacts.length > 0 ? { artifacts } : {}) };
       executed.push(recorded);
       if (runClass === 'declared') staged.set(key, recorded);

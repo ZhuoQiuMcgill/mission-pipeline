@@ -12,6 +12,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { constants, promises as fsp } from 'node:fs';
 import { join, posix } from 'node:path';
 import type { RunArtifactT } from '../seat/card.ts';
+import { checkDataFile } from '../common/dataFile.ts';
 import { ARTIFACTS_LINE, KEPT_ARTIFACTS, type KeptArtifactsBody } from '../flow/plandoc.ts';
 
 export { ARTIFACTS_LINE, KEPT_ARTIFACTS, type KeptArtifactsBody };
@@ -28,18 +29,66 @@ export function runArtifactsOf(db: { stmt(sql: string): { get(...args: unknown[]
 }
 
 /**
+ * 4.4 (F10, review p9-2): a run's kept files by its evidence id alone, in whichever mission's record the run
+ * was written (renewal compares a rerun's files with the original's). Null: it kept none.
+ */
+export function keptArtifactsOf(db: { stmt(sql: string): { get(...args: unknown[]): unknown } }, data: { text(h: string): string }, evidence: string): readonly RunArtifactT[] | null {
+  const row = db.stmt('SELECT body FROM flow_events WHERE line = ? AND event = ? AND key = ? LIMIT 1').get(ARTIFACTS_LINE, KEPT_ARTIFACTS, evidence) as { body: string } | undefined;
+  if (row === undefined) return null;
+  try {
+    return (JSON.parse(data.text(row.body)) as KeptArtifactsBody).artifacts;
+  } catch {
+    return null;
+  }
+}
+
+/** A plain path relative to the checkout root (a named artifact), else null. */
+function artifactPath(dir: string, p: string): string | null {
+  return posix.isAbsolute(p) || posix.normalize(p) !== p || p === '..' || p.startsWith('../') || p.split('/').includes('.git') ? null : join(dir, ...p.split('/'));
+}
+
+/**
+ * 4.4 (F10, review p9-7): the named files as they are before a command runs (commands of one run share a
+ * checkout): a file's sha256, "present" when it is there but too large to hash, or absent.
+ */
+export async function artifactStates(dir: string, paths: readonly string[]): Promise<ReadonlyMap<string, string | null>> {
+  const out = new Map<string, string | null>();
+  for (const p of new Set(paths)) {
+    const abs = artifactPath(dir, p);
+    const st = abs === null ? null : await fsp.lstat(abs).catch(() => null);
+    if (abs === null || st === null || !st.isFile()) {
+      out.set(p, null);
+      continue;
+    }
+    if (st.size > KEEP_FILE_BYTES) {
+      out.set(p, 'present');
+      continue;
+    }
+    const c = await checkDataFile(abs, { kind: 'full' });
+    out.set(p, c.state === 'ok' ? c.sha256 : 'present');
+  }
+  return out;
+}
+
+/**
  * 4.4 (F10): keep the files a declared command names as its artifacts, from the checkout `dir` it ran in,
  * before the checkout is removed. A path that is not a plain relative path of the checkout is not read.
+ * Review p9-7: `before`, the files as they were before the command ran; one that was there and is unchanged
+ * is kept with its origin marked not established (an earlier command, or the commit, may have written it).
  */
-export async function keepArtifacts(root: string, dir: string, paths: readonly string[], budget: KeepBudget): Promise<RunArtifactT[]> {
+export async function keepArtifacts(root: string, dir: string, paths: readonly string[], budget: KeepBudget, before?: ReadonlyMap<string, string | null>): Promise<RunArtifactT[]> {
   const out: RunArtifactT[] = [];
   for (const p of [...new Set(paths)]) {
-    if (posix.isAbsolute(p) || posix.normalize(p) !== p || p === '..' || p.startsWith('../') || p.split('/').includes('.git')) {
+    const abs = artifactPath(dir, p);
+    if (abs === null) {
       out.push({ path: p, why: 'not a path relative to the repository root' });
       continue;
     }
-    const k = await keepFile(root, join(dir, ...p.split('/')), budget);
-    out.push('kept' in k ? { path: p, sha256: k.sha256, size: k.size, kept: `.mission-pipeline/${k.kept}` } : { path: p, ...(k.sha256 !== undefined ? { sha256: k.sha256 } : {}), ...(k.size !== undefined ? { size: k.size } : {}), why: k.why === 'no such file' ? 'the run did not write it' : k.why });
+    const k = await keepFile(root, abs, budget);
+    const was = before?.get(p) ?? null;
+    const unchanged = was !== null && (was === 'present' || ('sha256' in k && k.sha256 === was));
+    const origin = unchanged ? { origin: 'not-established' as const } : {};
+    out.push('kept' in k ? { path: p, sha256: k.sha256, size: k.size, kept: `.mission-pipeline/${k.kept}`, ...origin } : { path: p, ...(k.sha256 !== undefined ? { sha256: k.sha256 } : {}), ...(k.size !== undefined ? { size: k.size } : {}), why: k.why === 'no such file' ? 'the run did not write it' : k.why, ...origin });
   }
   return out;
 }

@@ -8,11 +8,18 @@
 // The flows run on a real memory with scripted seats (test/flow-memory-fixtures.ts).
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { flowCtx } from '../src/flow/context.ts';
-import { DetailedTask, taskCardHash, type DetailedPlanDoc } from '../src/flow/plandoc.ts';
+import { commit, ev, flowCtx } from '../src/flow/context.ts';
+import { acceptedProduct } from '../src/flow/execution.ts';
+import { DetailedTask, RENEW_LINE, REVIEW_NEEDED, taskCardHash, type DetailedPlanDoc, type ReviewNeededBody } from '../src/flow/plandoc.ts';
+import { recordSeatHandBack } from '../src/process/seat.ts';
+import type { ProcessContext } from '../src/process/index.ts';
 import type { FlowEvent, FlowTask } from '../src/flow/ports.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import { constructorDone, detailedPlan, drive, happyScript, pmPlan, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
@@ -162,7 +169,7 @@ describe('4.4 F10: the fourth answer goes once to a decider', () => {
     const e = await escalation(flowCtx(ports, M), id);
     assert.ok(e !== null, 'the escalation is keyed by the review');
     assert.equal(e.source, 'reviewer-needs-decision');
-    assert.deepEqual(e.options, ['rework', 'replan', 'accept-risk', 'ask-user']);
+    assert.deepEqual(e.options, ['answer', 'rework', 'replan', 'accept-risk', 'ask-user'], "review p9-8: answer stays, as on every Reviewer's needs-decision");
     assert.deepEqual(e.reasons, ['[S2] cannot be verified: judged S2; needed: a run on the real device']);
     assert.deepEqual((e.facts as { unverifiable: unknown }).unverifiable, [{ standard: 'S2', reason: 'judged S2', needed: 'a run on the real device' }]);
     assert.match(e.summary, /could not verify S2 from what it can see, and nothing else is open: a decider settles it; it is not sent back to the Constructor by itself/);
@@ -235,5 +242,77 @@ describe('4.4 F10: many standards on a task warn', () => {
     const text = renderArchitectFeasibility({ ...card, standardsWarn: 7 });
     assert.ok(text.includes('## Tasks with more than 7 standards (standardsWarn; rework rises with their number: say whether each has a finite check)\n- impl: 8 standards\n'), text);
     assert.ok(!renderArchitectFeasibility(card).includes('standardsWarn'));
+  });
+});
+
+describe('4.4 F10, review round 1', () => {
+  const S2_UNVERIFIED = { S1: { met: 'yes' as const }, S2: { met: 'cannot-verify' as const, needed: 'the device log', evidence: [] } };
+
+  it("p9-8: answer on the fourth answer's escalation: the same candidate is reviewed again with the answer, and no attempt starts", async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds(() => detailedPlan(M), {
+      reviewer: (t: FlowTask) => {
+        const c = t.card as unknown as ReviewerCard;
+        return { handBack: c.target.includes('impl') && t.task === 'rev.m1.impl.1' ? judge(c, 'needs-decision', S2_UNVERIFIED) : judge(c, 'pass') };
+      },
+      secretary: (t: FlowTask) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'answer', { instructions: 'The device log is in the hand-back folder of attempt 1.' }) }),
+    }));
+    const e = (await escalation(flowCtx(ports, M), 'unv.rev.m1.impl.1'))!;
+    assert.match(secretaryOptions(e).find((o) => o.id === 'answer')!.outcome, /the same candidate is reviewed again with the answer on the Reviewer's card; no new attempt starts/);
+    const again = ports.scheduler.card<ReviewerCard>('rev.m1.impl.1.r1');
+    assert.equal(again.target, ports.scheduler.card<ReviewerCard>('rev.m1.impl.1').target, 'the same candidate');
+    assert.ok(again.decisionQuotes.includes('The device log is in the hand-back folder of attempt 1.'), again.decisionQuotes.join('\n'));
+    assert.ok(!(await events(ports, { line: 'task:impl' })).some((x) => x.event === 'rework'));
+    assert.ok((await events(ports, { line: 'task:impl' })).some((x) => x.event === 'accepted' && x.key === '1'));
+  });
+
+  it('p9-3: an environment re-review whose only open standard cannot be verified waits for its decider, and the answer starts the next round', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, happyScript(M));
+    const target = (await acceptedProduct(flowCtx(ports, M), 'impl'))!;
+    const judgment = (await ports.evaluator.deciding([target])).views[target]!.positions.find((p) => p.review === 'reviewer')!.by!;
+    const environment = ports.ctx.environment().identity;
+    const ctx = flowCtx(ports, M);
+    const body: ReviewNeededBody = { target, judgment, review: 'reviewer', environment, reason: 'the environment changed', rerun: null, passed: null };
+    await commit(ctx, 'test:p9-3:renew', { events: [ev(ctx, RENEW_LINE, REVIEW_NEEDED, `${judgment}@${environment}`, body)] });
+    await drive(engine, ports.scheduler, withKinds(() => detailedPlan(M), {
+      reviewer: (t: FlowTask) => ({ handBack: t.task === 'rev.m1.impl.1.e1' ? judge(t.card as unknown as ReviewerCard, 'rework', S2_UNVERIFIED) : judge(t.card as unknown as ReviewerCard, 'pass') }),
+      secretary: (t: FlowTask) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'answer', { instructions: 'The device log is kept with the run.' }) }),
+    }));
+    const e = (await escalation(flowCtx(ports, M), 'rnd.rev.m1.impl.1.e1'))!;
+    assert.match(e.summary, /could not verify S2 from what it can see, and nothing else is open/);
+    const line = await events(ports, { line: 'task:impl' });
+    assert.ok(!line.some((x) => x.event === 'rework'), 'not sent back to the Constructor');
+    assert.ok(ports.scheduler.tasks.has('rev.m1.impl.1.e2'), 'the answer starts the next round on the same request');
+    assert.ok(line.some((x) => x.event === 'reaccepted' && x.key === '1:2'), 'and its pass re-accepts the product');
+    const review = line.find((x) => x.event === 'review' && x.key === 'rev.m1.impl.1.e1')!.body as { verdict: string };
+    assert.equal(review.verdict, 'rework', 'the hand-back keeps the verdict the Reviewer gave');
+  });
+
+  it('p9-1: an integration pass may not rest on its run and on data outside the commit in one judgment: that standard goes to a decider', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds(() => detailedPlan(M, { extraTask: true }), { reviewer: (t: FlowTask) => (t.task.startsWith('rev.m1.docs.') ? null : { handBack: judge(t.card as unknown as ReviewerCard, 'pass') }) }));
+    const step = 'rev.m1.docs.1';
+    const card = ports.scheduler.card<ReviewerCard>(step);
+    assert.ok(card.integration !== undefined);
+    const d = ports.scheduler.dispatchOf(step);
+    const run = ports.scheduler.rerun(d, 'npm test');
+    const dir = mkdtempSync(join(tmpdir(), 'mp-p9-1-'));
+    writeFileSync(join(dir, 'sim.log'), 'ok\n');
+    const pointer = `data:${join(dir, 'sim.log')}#sha256=${createHash('sha256').update('ok\n').digest('hex')}&size=3`;
+    // the project declares a full suite: the integration pass rests on its full run
+    const suite = { ...ports.ctx, fullSuite: [{ id: 'all', command: 'npm run all' }] } as ProcessContext;
+    const both = { judgments: [{ standard: 'S1', met: 'yes' as const, reason: 'the run and the simulator agree', evidence: [`evidence:${run}`, pointer] }], gap_responses: card.selfReportedGaps.map((g) => ({ gap: g.id, response: 'noted' })), issue_responses: [], findings: [], verdict: 'pass' as const };
+    const refused = await recordSeatHandBack(suite, d, { report: 'r', fields: both, advance: false });
+    assert.equal(refused.kind, 'refused');
+    assert.ok(refused.kind === 'refused' && refused.problems.some((x) => x.startsWith('judgments[S1]: an integration pass rests on its full run, and one judgment cannot rest on a run and on data outside the commit together: answer this standard "cannot-verify"')), JSON.stringify(refused));
+    // the fourth answer keeps both pointers and goes to a decider; no pass is recorded
+    const fourth = { ...both, judgments: [{ ...both.judgments[0]!, met: 'cannot-verify' as const, needed: 'a full run that writes the simulator log' }], verdict: 'needs-decision' as const };
+    const a = await recordSeatHandBack(suite, d, { report: 'r', fields: fourth, advance: false });
+    assert.equal(a.kind, 'recorded', JSON.stringify(a));
+    await drive(engine, ports.scheduler, withKinds(() => detailedPlan(M, { extraTask: true }), { secretary: () => null }));
+    const e = await escalation(flowCtx(ports, M), `unv.${step}`);
+    assert.ok(e !== null && e.reasons[0]!.startsWith('[S1] cannot be verified: the run and the simulator agree; needed: a full run that writes the simulator log'), JSON.stringify(e));
+    assert.ok(!(await events(ports, { line: 'task:docs' })).some((x) => x.event === 'accepted'), 'no pass is recorded');
   });
 });

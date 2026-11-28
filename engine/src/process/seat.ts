@@ -67,7 +67,7 @@ import { handBackDataTexts, handBackProblems, handBackRecords, seatCardEntry } f
 import { dataPaths, dataPointers, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
 import { checkDataFile, checkDataFiles } from '../common/dataFile.ts';
 import { OUTSIDE_DATA_EVENT, OUTSIDE_DATA_LINE, outsideDataKey } from '../evaluator/renew.ts';
-import { keepBudget, keepFile, runArtifactsOf } from './keptFiles.ts';
+import { keepBudget, keepFile, keptFilePath, runArtifactsOf } from './keptFiles.ts';
 import type { RunArtifactT } from '../seat/card.ts';
 import { tellReviewHealth } from './reviews.ts';
 import { explorationCardAtHandBack } from './explorationSnapshot.ts';
@@ -494,8 +494,16 @@ export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promis
  */
 function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
   if (!integrationReview(ctx, v.card)) return [];
-  const r = fields as { verdict?: unknown; judgments?: Array<{ evidence?: unknown }> } | null;
+  const r = fields as { verdict?: unknown; judgments?: Array<{ standard?: unknown; met?: unknown; evidence?: unknown }> } | null;
   if (r === null || typeof r !== 'object' || r.verdict !== 'pass') return [];
+  // 4.4 (F10, PM design §7; review p9-1): the pass rests on its full run, a declared run, and the proof contract cannot
+  // admit one judgment on both a run and data outside the commit (a judgment of outside data cites sampling runs only):
+  // such a standard goes to a decider through the fourth answer, its pointers kept; no rule is bent
+  const both = (Array.isArray(r.judgments) ? r.judgments : []).filter((j) => {
+    const ev = Array.isArray(j?.evidence) ? j.evidence.filter((e): e is string => typeof e === 'string') : [];
+    return j?.met === 'yes' && ev.some((e) => e.startsWith('data:')) && ev.some((e) => e.startsWith('evidence:'));
+  });
+  if (both.length > 0) return both.map((j) => `judgments[${String(j.standard)}]: an integration pass rests on its full run, and one judgment cannot rest on a run and on data outside the commit together: answer this standard "cannot-verify" (keep both pointers, say in "needed" what would settle it) and hand back "needs-decision"; a decider settles it`);
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) return [];
   const cited = new Set((Array.isArray(r.judgments) ? r.judgments : []).flatMap((j) => (Array.isArray(j?.evidence) ? j.evidence : [])).filter((e): e is string => typeof e === 'string' && e.startsWith('evidence:')).map((e) => e.slice('evidence:'.length)));
@@ -611,6 +619,8 @@ export type HandBackAnswer =
       readonly parked?: true;
       /** 4.4 (F9): an accepted Secretary decision: what became of it in this command. */
       readonly decision?: DecisionOutcome;
+      /** 4.4 (F10, review p9-5): a cited file in the hand-back's folder could not be copied: the folder is left to the sweep. */
+      readonly keepScratch?: true;
     };
 
 export interface HandBackInput {
@@ -711,12 +721,22 @@ const VIA_COPY_LABEL = 'outside the commit (sha256 checked at hand-back, on the 
 /**
  * 4.4 (F10, issue 65): the files a Constructor's hand-back names, each copied into the kept files before
  * the write (its hand-back folder goes once the hand-back is printed); the record says where each copy
- * is, or why none was kept. Never refuses the hand-back.
+ * is, or why none was kept. Never refuses the hand-back. Review p9-5: a Reviewer's cited files that a
+ * clean-up would remove (`only`: under the memory's tmp/) are kept the same way; one checked on the copy
+ * kept when the Constructor handed it in (`viaCopy`) names that copy.
  */
-async function keepHandedIn(ctx: ProcessContext, data: readonly RecordedData[]): Promise<RecordedData[]> {
+async function keepHandedIn(ctx: ProcessContext, data: readonly RecordedData[], o: { readonly only?: (d: RecordedData) => boolean; readonly viaCopy?: ReadonlySet<string> } = {}): Promise<RecordedData[]> {
   const budget = keepBudget();
   const out: RecordedData[] = [];
   for (const d of data) {
+    if (o.viaCopy?.has(d.path) === true && d.check === 'full') {
+      out.push({ ...d, kept: keptFilePath(d.sha256) });
+      continue;
+    }
+    if (o.only !== undefined && !o.only(d)) {
+      out.push(d);
+      continue;
+    }
     if (d.check !== 'full') {
       out.push({ ...d, notKept: 'only part of it was hashed (a file over 2 GiB): no copy is kept' });
       continue;
@@ -725,6 +745,26 @@ async function keepHandedIn(ctx: ProcessContext, data: readonly RecordedData[]):
     out.push('kept' in k ? { ...d, kept: k.kept } : { ...d, notKept: k.why });
   }
   return out;
+}
+
+/** Whether `path` is inside the folder `dir` (both resolved through links); false when either cannot be resolved. */
+function insideDir(dir: string, path: string): boolean {
+  try {
+    const rel = relative(realpathSync.native(dir), realpathSync.native(path));
+    return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 4.4 (F10, review p9-5, p9-6): the cited files in the hand-back's own folder that could not be copied: the
+ * hand-back does not remove that folder itself (its sweep may, later). Everything else a hand-back needs from
+ * the folder was read, or copied, before its write.
+ */
+function uncopiedInScratch(ctx: ProcessContext, dispatch: string, data: readonly RecordedData[]): RecordedData[] {
+  const dir = join(ctx.memory.paths.tmp, dispatch);
+  return data.filter((d) => d.notKept !== undefined && insideDir(dir, d.path));
 }
 
 /** The flow event that records why a Secretary dispatch was taken back at its hand-back (its escalation was already decided or closed). */
@@ -770,7 +810,9 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const prior = handbackDoc(data, v.info);
     if (prior !== null && prior.seat === seatHash) {
       const parkedBefore = v.card.seat === 'constructor' && (input.fields as { blocked?: unknown } | null)?.blocked === true && prior.candidate !== null;
-      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch), ...(parkedBefore ? { parked: true as const } : {}) };
+      // review p9-6: a retry finds everything it needs copied by the first run; a file it could not copy keeps the folder
+      const hold = uncopiedInScratch(ctx, dispatch, prior.data ?? []).length > 0;
+      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch, undefined, { keepTmp: hold }), ...(parkedBefore ? { parked: true as const } : {}), ...(hold ? { keepScratch: true as const } : {}) };
     }
     throw new LedgerError('FACT_CONFLICT', `dispatch ${dispatch} already handed back other content: one hand-back per dispatch`);
   }
@@ -814,6 +856,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks).map((d) => (checked!.viaCopy.has(d.path) ? { ...d, label: VIA_COPY_LABEL } : d));
     // 4.4 (F10, issue 65): the files a Constructor hands in are copied before its hand-back folder goes
     if (v.card.seat === 'constructor' && dataCited.length > 0) dataCited = await keepHandedIn(ctx, dataCited);
+    // review p9-5: a Reviewer's cited files that a clean-up would remove (under the memory's tmp/) are kept the same way
+    else if (v.card.seat === 'reviewer' && dataCited.length > 0) dataCited = await keepHandedIn(ctx, dataCited, { only: (d) => insideDir(ctx.memory.paths.tmp, d.path), viaCopy: checked!.viaCopy });
   }
   // 4.4 (F10): a Reviewer's judgment that cites data outside the commit is marked for renewal (a rerun does not repeat it)
   const judgment = v.card.seat === 'reviewer' && dataCited.length > 0 ? (v.card as unknown as ReviewerCard).binding.judgment : null;
@@ -864,9 +908,12 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   if (out.moot !== null) notes.push(`${out.moot} before this hand-back: it is recorded, not accepted, and nothing it decides is carried out`);
   // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held. 4.4 (F10, #65): the
   // seat's command leaves it until it has printed its result
-  if (input.keepScratch !== true) notes.push(...dispatchOver(ctx, dispatch));
+  // review p9-5: a cited file of its own folder that could not be copied keeps the folder (the original stays for the sweep)
+  const uncopied = out.accepted ? uncopiedInScratch(ctx, dispatch, dataCited) : [];
+  if (input.keepScratch !== true) notes.push(...dispatchOver(ctx, dispatch, undefined, { keepTmp: uncopied.length > 0 }));
+  if (uncopied.length > 0) notes.push(`.mission-pipeline/tmp/${dispatch}/ is left in place: ${uncopied.map((d) => d.path).join(', ')} could not be copied; a later sweep (mp pm next) may still remove it`);
   // 4.4 (F10): what became of the files handed in, from the hand-back's record
-  if (out.accepted && v.card.seat === 'constructor') for (const d of dataCited) notes.push(d.kept !== undefined ? `Kept with this hand-back: ${d.path} (a copy at .mission-pipeline/${d.kept})` : `Recorded, no copy kept: ${d.path} (${d.notKept ?? 'no copy was made'})`);
+  if (out.accepted) for (const d of dataCited.filter((x) => x.kept !== undefined || x.notKept !== undefined)) notes.push(d.kept !== undefined ? `Kept with this hand-back: ${d.path} (a copy at .mission-pipeline/${d.kept})` : `Recorded, no copy kept: ${d.path} (${d.notKept ?? 'no copy was made'})`);
   let verification: VerificationRun[] | null = null;
   // 4.4 (F19, #64): the recorded candidate is held by a ref, so git's garbage collection keeps it (4.4, F4: a
   // parked commit too, for as long as its attempt can be resumed: the ref is never removed)
@@ -916,7 +963,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const escalation = (v.card as { request?: { id?: unknown } }).request?.id;
     if (v.card.seat === 'secretary' && out.accepted && typeof escalation === 'string') decision = ctx.memory.read((db) => decisionOutcome(db, data, { mission: v.info.mission, escalation, task: v.info.task, fields: input.fields, why }));
   }
-  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(parked ? { parked: true as const } : {}), ...(decision !== undefined ? { decision } : {}) };
+  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(parked ? { parked: true as const } : {}), ...(decision !== undefined ? { decision } : {}), ...(uncopied.length > 0 ? { keepScratch: true as const } : {}) };
 }
 
 /**
