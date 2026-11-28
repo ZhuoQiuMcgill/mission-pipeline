@@ -63,7 +63,7 @@ const wait: Command = {
 };
 const card: Command = {
   group: 'sec', name: ['card'], summary: 'claim the current decision round and read its card', usage: 'mp sec card <escalation>', flags: {},
-  async run(c, a) {const r = secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok([r.card, ...r.size.warnings.map((w) => `\nWarning: this card's ${w.replace(/^its /, '')}`)].join('\n'), r);},
+  async run(c, a) {const r = await secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok([r.card, ...r.size.warnings.map((w) => `\nWarning: this card's ${w.replace(/^its /, '')}`)].join('\n'), r);},
 };
 const read: Command = {
   group: 'sec', name: ['read'], summary: 'fetch one page of a material; the fetch is recorded against this round’s decision dispatch', usage: 'mp sec read <escalation> <material> [--page n]', flags: {page: 'string'},

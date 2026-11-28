@@ -199,6 +199,8 @@ export interface FullRunRequest {
   readonly cites: FullRunCites;
   /** The stop scope of the work (§6.6): checked again right before anything executes (a stop recorded meanwhile refuses it). */
   readonly scope?: WorkScope;
+  /** 4.4 (F5): called under the run locks immediately before the suite executes (runOnCommit); not when a passing run is reused. */
+  readonly beforeExecute?: (run: string) => void;
 }
 
 export interface FullRunResult {
@@ -283,6 +285,7 @@ export async function runFullSuite(ctx: ProcessContext, req: FullRunRequest): Pr
     tail: FULL_RUN_TAIL,
     runPrefix: 'full',
     doNotReuse,
+    ...(req.beforeExecute !== undefined ? { beforeExecute: req.beforeExecute } : {}),
     also: (tx, runs, run) => {
       writeMarker(tx, bodyOf(run, runs, runLeaf(req.mission, run), env.identity), dispatch);
       return run;

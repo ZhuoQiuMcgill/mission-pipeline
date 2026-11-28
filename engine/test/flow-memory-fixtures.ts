@@ -31,6 +31,7 @@ import {
   productObjectId,
   recordEvidenceRequest,
   recordSeatHandBack,
+  seatCard,
   seatRead,
   taskStatus,
   type GitActions,
@@ -356,6 +357,8 @@ export class HarnessScheduler extends MemoryFlowScheduler implements ScriptedSch
     const dispatch = this.dispatchOf(task);
     outcome.before?.(dispatch);
     if ('release' in outcome) {
+      // a seat that ended without a hand-back had started: it read its card (4.4, F5: an unstarted release costs nothing)
+      seatCard(this.hctx, dispatch);
       await pmRelease(this.hctx, dispatch, outcome.release);
       return [];
     }
@@ -418,6 +421,12 @@ export function memoryPorts(o: { readonly now?: () => number } = {}): MemoryWorl
   const scheduler = new HarnessScheduler(ctx, knobs);
   const evaluator = new MemoryFlowEvaluator(ctx);
   return { ledger, scheduler, evaluator, now: ctx.now, ctx, memory, dir };
+}
+
+/** Another process on the same memory (its own ports: nothing a flow pass of the world memoized), with these fake actions. */
+export function anotherProcess(w: MemoryWorld, actions: FakeKnobs['actions']): ProcessContext {
+  const knobs: FakeKnobs = { ...w.scheduler.knobs, actions };
+  return processContext(w.memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null });
 }
 
 /** The user's words recorded as `mp pm say` does: their entry (W-<n>). */

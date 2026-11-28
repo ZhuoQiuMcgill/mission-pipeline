@@ -14,6 +14,7 @@ import { openProcess } from '../src/process/context.ts';
 import { answerOutcome } from '../src/process/decisions.ts';
 import { pmDispatch, pmRelease } from '../src/process/pm.ts';
 import { ENV_A, handBack, readAll, startAddMission, readyOf, type ProcessProject } from './process-fixtures.ts';
+import { seatCard } from '../src/process/seat.ts';
 import { secNext, stopSecretary } from '../src/process/secretary.ts';
 import { project43, command43, done43, escalation43, live43, secretary43 } from './p43-fixtures.ts';
 
@@ -21,7 +22,8 @@ import { project43, command43, done43, escalation43, live43, secretary43 } from 
 async function exhausted(p: ProcessProject): Promise<{ id: string; escalation: string; dispatch: string; step: string }> {
   await startAddMission(p.ctx, 'm1');
   const first = await readyOf(p.ctx, 'calibrator-1');
-  for (let i = 0; i < 3; i++) { const d = pmDispatch(p.ctx, first.step); await pmRelease(p.ctx, d.dispatch, 'ended'); }
+  // each seat read its card before it ended (4.4, F5: an unstarted release would cost nothing)
+  for (let i = 0; i < 3; i++) { const d = pmDispatch(p.ctx, first.step); seatCard(p.ctx, d.dispatch); await pmRelease(p.ctx, d.dispatch, 'ended'); }
   const id = await live43(p);
   const ctx = secretary43(p, id);
   try {
@@ -139,7 +141,7 @@ test('mp pm answer under a live Secretary records without reconciling and says t
   try {
     await startAddMission(q.ctx, 'm1');
     const first = await readyOf(q.ctx, 'calibrator-1');
-    for (let i = 0; i < 3; i++) { const d = pmDispatch(q.ctx, first.step); await pmRelease(q.ctx, d.dispatch, 'ended'); }
+    for (let i = 0; i < 3; i++) { const d = pmDispatch(q.ctx, first.step); seatCard(q.ctx, d.dispatch); await pmRelease(q.ctx, d.dispatch, 'ended'); }
     const esc = (await readyOf(q.ctx, 'secretary')).step.slice('sec.'.length);
     const w = await done43(q, ['pm', 'say', 'Try that review once more', '--tag', 'instruction']);
     const out = await text43(q, ['pm', 'answer', 'm1', esc, '--by', 'user', '--words', w.words, '--option', 'grant', '--extra', '1']);
@@ -205,7 +207,7 @@ test('review p1-3: mp pm answer names the answer that was carried out: a user an
   try {
     await startAddMission(p.ctx, 'm1');
     const first = await readyOf(p.ctx, 'calibrator-1');
-    for (let i = 0; i < 3; i++) { const d = pmDispatch(p.ctx, first.step); await pmRelease(p.ctx, d.dispatch, 'ended'); }
+    for (let i = 0; i < 3; i++) { const d = pmDispatch(p.ctx, first.step); seatCard(p.ctx, d.dispatch); await pmRelease(p.ctx, d.dispatch, 'ended'); }
     const esc = (await readyOf(p.ctx, 'secretary')).step.slice('sec.'.length);
     const user = await done43(p, ['pm', 'say', 'Run it once more', '--tag', 'instruction']);
     // the user's answer is recorded by another process and not carried out yet

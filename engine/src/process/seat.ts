@@ -35,7 +35,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
-import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
+import type { BaseRecord, EvidenceRecord, ObjectVersionRecord } from '../common/records.ts';
 import type { Collection } from '../git/workspace.ts';
 import { continuationCheck, sampleRunId, type ContinuationRequest } from '../evaluator/index.ts';
 import {
@@ -44,6 +44,7 @@ import {
   recordContinuationCheck,
   dispatchInfo,
   dispatchLeaf,
+  factById,
   flowEventExists,
   flowEvents,
   LedgerError,
@@ -114,6 +115,9 @@ export function materialLeaf(mission: string, ref: string): string {
   return `missions/${mission}/materials/${ref}.md`;
 }
 
+/** 4.4 (F5): the flow event (line "dispatch:<id>", key "card") that records the first time a dispatch's card was served. */
+export const SERVED_EVENT = 'served';
+
 /** `mp seat <id> card`: the card as the seat received it, hash-checked (§5.2, §3.3). */
 export function seatCard(ctx: ProcessContext, dispatch: string): { readonly dispatch: string; readonly text: string; readonly leaf: string } {
   const v = dispatchView(ctx, dispatch);
@@ -121,7 +125,22 @@ export function seatCard(ctx: ProcessContext, dispatch: string): { readonly disp
   const r = ctx.memory.readLeaf(leaf);
   if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `the card of dispatch ${dispatch} (${leaf}) is missing; the PM follows WI-30`, { wi: 'WI-30' });
   if (r.status === 'edited') throw new ProcessError('LEAF_EDITED', `the card of dispatch ${dispatch} (${leaf}) was edited after it was recorded; the PM follows WI-30`, { wi: 'WI-30' });
+  if (v.info.state === 'in-flight') recordServed(ctx, v.info);
   return { dispatch, text: r.text, leaf };
+}
+
+/** The served receipt of a dispatch in flight (4.4, F5): written once, best effort; a failure to record it never refuses the card. */
+export function recordServed(ctx: ProcessContext, d: Pick<DispatchInfo, 'mission' | 'dispatch'>): void {
+  const at = { mission: d.mission, line: DISPATCH_LINE(d.dispatch), event: SERVED_EVENT, key: 'card' };
+  try {
+    if (ctx.memory.read((db) => flowEventExists(db, at))) return;
+    ctx.memory.write({ op: `served:${d.dispatch}`, payload: { dispatch: d.dispatch } }, (tx) => {
+      if (flowEventExists(tx, at)) return;
+      appendRecords(tx, [{ kind: 'flow.event', ...at, body: tx.data.put(canonicalJson({ dispatch: d.dispatch })) as ContentHash }]);
+    });
+  } catch {
+    /* the card is served all the same; a release then judges the dispatch by its other traces */
+  }
 }
 
 function inFlight(v: DispatchView, what: string): void {
@@ -188,9 +207,10 @@ const COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
  * checkout the seats reading that commit share, `tmp/checkouts/<commit>/` (built once, atomically);
  * the path is printed. This dispatch holds it while in flight.
  */
-export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promise<{ readonly path: string; readonly commit: string | null }> {
+export async function seatCheckout(ctx: ProcessContext, dispatch: string, o: { readonly product?: string } = {}): Promise<{ readonly path: string; readonly commit: string | null; readonly product?: string }> {
   const v = dispatchView(ctx, dispatch);
   allows(ctx, v, 'checkout');
+  if (o.product !== undefined) return productCheckout(ctx, v, o.product);
   const snap = cardSnapshot(v);
   if (snap === null) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to read`);
   if (!COMMIT.test(snap)) return { path: join(ctx.projectDir, ...snap.split('/')), commit: null };
@@ -198,6 +218,24 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promi
   inFlight(v, 'a checkout');
   const c = await holdSharedCheckout(ctx, v.info, snap);
   return { path: c.path, commit: c.commit };
+}
+
+/**
+ * `mp seat <id> checkout --product <task>` (4.4, F3): a repair Architect reads an accepted product it
+ * may reopen, the plan's state, at its commit: the same shared read-only checkout, held by this
+ * dispatch and removed when no dispatch in flight holds it (4.1.2).
+ */
+async function productCheckout(ctx: ProcessContext, v: DispatchView, task: string): Promise<{ readonly path: string; readonly commit: string; readonly product: string }> {
+  const accepted = (v.card['accepted'] as Array<{ task: string; product: string; commit?: string }> | undefined) ?? null;
+  if (v.card.seat !== 'architect-repair' || accepted === null) throw new ProcessError('NOT_ALLOWED', `--product is for a repair Architect's card, which lists the accepted products it may reopen; this is a ${v.card.seat} card`);
+  const a = accepted.find((x) => x.task === task);
+  if (a === undefined) throw new ProcessError('NOT_ALLOWED', `task ${task} has no accepted product on the card (accepted: ${accepted.map((x) => x.task).join(', ') || 'none'})`);
+  // a card queued before 4.4 names no commit: the product's recorded one
+  const commit = a.commit ?? ((ctx.memory.read((db) => factById(db, 'object.version', a.product))?.record as ObjectVersionRecord | undefined)?.source?.commit ?? null);
+  if (commit === null || !COMMIT.test(commit)) throw new ProcessError('NOT_ALLOWED', `product ${a.product} of task ${task} has no recorded commit to read`);
+  inFlight(v, 'a checkout');
+  const c = await holdSharedCheckout(ctx, v.info, commit);
+  return { path: c.path, commit: c.commit, product: a.product };
 }
 
 /** What a rerun of a card's declared command runs on: the dispatch, the command, the card's commit (the checks of `mp seat <id> rerun`). */
@@ -272,9 +310,27 @@ function rerunRequest(t: RerunTarget, extra: { readonly detached?: string; reado
  */
 export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<RerunResult> {
   const t = rerunTarget(ctx, dispatch, commandId);
-  const r = await runOnCommit(ctx, rerunRequest(t));
+  // 4.4 (F5): its start is recorded once its checkout is made, immediately before it executes; its evidence when it ends, as before
+  const r = await runOnCommit(ctx, { ...rerunRequest(t), beforeExecute: (run) => recordRunStart(ctx, t.v, run, { run, command: t.c.id }) });
   const x = r.runs[0]!;
   return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail };
+}
+
+/** 4.4 (F5): the flow event (line "dispatch:<id>", key: the run) a seat's foreground run records when it is admitted, before it executes. */
+export const RUN_STARTED_EVENT = 'run-started';
+
+/**
+ * A foreground run's start on its dispatch line (4.4, F5): while it executes the dispatch has started,
+ * so its release is counted. A dispatch released meanwhile runs nothing, as a detached run's worker checks.
+ */
+function recordRunStart(ctx: ProcessContext, v: DispatchView, key: string, body: Readonly<Record<string, unknown>>): void {
+  const at = { mission: v.info.mission, line: DISPATCH_LINE(v.info.dispatch), event: RUN_STARTED_EVENT, key };
+  ctx.memory.write({ op: `run-start:${v.info.dispatch}:${key}`, payload: { dispatch: v.info.dispatch, key } }, (tx) => {
+    if (ctx.secretary !== null) requireSecretary(tx, ctx.secretary);
+    if (dispatchInfo(tx, v.info.dispatch)?.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${v.info.dispatch} is no longer in flight: a run is for a dispatch in flight`);
+    if (flowEventExists(tx, at)) return;
+    appendRecords(tx, [{ kind: 'flow.event', ...at, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
+  });
 }
 
 /** A detached rerun as `mp seat <id> rerun --detach` answers: its run id and the evidence id its result is recorded under. */
@@ -417,7 +473,8 @@ export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promis
   allows(ctx, v, 'full-run');
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
-  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag) });
+  // 4.4 (F5): a full run is a start too, recorded under its run locks immediately before it executes (a reuse records its own marker)
+  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag), beforeExecute: (run) => recordRunStart(ctx, v, run, { run, fullRun: true }) });
 }
 
 /**

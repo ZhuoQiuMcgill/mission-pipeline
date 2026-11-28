@@ -20,7 +20,7 @@ import { planningStep, submitPmBatch } from '../src/flow/planning.ts';
 import { cal1Pass, cal2Escalate, cal2Pass } from '../src/flow/scripted.ts';
 import { closedEscalation, decisionFor, isApplied, openEscalations, secretaryStep } from '../src/flow/secretary.ts';
 import { pmAnswer, pmDispatch, pmLegalize, pmMission, pmNext, pmPlan, pmRelease, pmRequirement, pmSay, pmStartLegalization } from '../src/process/index.ts';
-import { dispatchView, recordSeatHandBack } from '../src/process/seat.ts';
+import { dispatchView, recordSeatHandBack, seatCard } from '../src/process/seat.ts';
 import type { AuditNodeCard, AuditNodeResult } from '../src/seat/cards/auditor.ts';
 import { assertExits, assertRulingsCarried, drained, frontier, seedFanout, sweepThenClean } from './exploration-exits.ts';
 import { addDetailedPlan, addPlan, CHECK_JS, handBack, processProject, readAll, readyOf, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
@@ -473,7 +473,10 @@ describe('#3 and #4: a given-up task and an ended legalization leave nothing ope
     for (let i = 0; i < 6; i++) {
       const r = (await pmNext(p.ctx)).ready.find((x) => x.step === b1);
       if (r === undefined) break;
-      await pmRelease(p.ctx, pmDispatch(p.ctx, r.step).dispatch, 'abandoned');
+      // the seat read its card before it was lost (4.4, F5: an unstarted release would cost nothing)
+      const d = pmDispatch(p.ctx, r.step).dispatch;
+      seatCard(p.ctx, d);
+      await pmRelease(p.ctx, d, 'abandoned');
     }
     const ctx = flowCtx(p.ctx.ports(), m as MissionId);
     const open = (await openEscalations(ctx, 'audit:L1')).map((e) => e.id);
