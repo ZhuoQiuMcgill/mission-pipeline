@@ -129,10 +129,10 @@ export async function currentItems(ctx: FlowCtx): Promise<CurrentItem[]> {
  * The requirement-set versions an item write makes (4.4, G9: memory/domain/requirementSets.ts): `reqset.<m>` for an
  * item the plan is checked against, a snapshot of those items in force (4.3's record when no item was recorded by
  * `mp pm extend`); the item's term line and `reqnew.<m>` for an item recorded by `mp pm extend` (`term`: a new one).
+ * (p12-5) From the caller's read (`ix`, the requirements line's `events`), the one its checks were made on.
  */
-async function requirementSetVersions(ctx: FlowCtx, change: { readonly line: string; readonly version: string | null; readonly term?: string }): Promise<BaseRecord[]> {
-  const ix = await basisIndex(ctx);
-  const inForce = (await currentItems(ctx)).map((i) => ({ line: i.line, version: i.version }));
+function requirementSetVersions(ctx: FlowCtx, ix: BasisIndex, events: readonly FlowEvent[], change: { readonly line: string; readonly version: string | null; readonly term?: string }): BaseRecord[] {
+  const inForce = resolveItems(ix, events).map((i) => ({ line: i.line, version: i.version }));
   return setVersionsFor(ix, (r) => ctx.ports.ledger.content.getList(r), ctx.mission, change, inForce).map((s) => ({
     kind: 'basis.version',
     basisKind: 'requirement-set',
@@ -166,12 +166,15 @@ export async function recordItem(
   const ctx = flowCtx(ports, req.mission);
   const line = itemLine(req.mission, req.item);
   if (req.tasks !== undefined && req.type !== 'decision') throw new Error(`only a decision item names the tasks it concerns (this one is a ${req.type}): nothing was recorded`);
+  // (p12-5) one read: the withdrawal check and the set the version goes into are decided from it, and the write is checked
+  // against it (a withdrawal since refuses it)
   const ix = await basisIndex(ctx);
+  const reqEvents = await eventsOf(ctx, REQUIREMENTS_LINE);
   checkKind(ix, line, 'a requirement item', ITEM_KINDS, req.mission);
   // a withdrawn line stays withdrawn (v51 3.1 states: valid, replaced, withdrawn, contested): a new version
   // of it would never be in force, so it is refused before anything is written; the item comes back under a new id
   if (ix.withdrawn.has(line)) {
-    const why = (await eventsOf<{ line: string; reason: string }>(ctx, REQUIREMENTS_LINE, 'withdrawn')).find((e) => e.body.line === line)?.body.reason ?? '';
+    const why = (reqEvents.find((e) => e.event === 'withdrawn' && (e.body as { line?: string }).line === line)?.body as { reason?: string } | undefined)?.reason ?? '';
     throw Object.assign(
       new Error(
         `requirement item ${req.item} of mission ${req.mission} was withdrawn${why !== '' ? ` (${why})` : ''} and stays withdrawn, so nothing was recorded. Add it under a new id, quoting the user's words: mp pm requirement add ${req.mission} <new-id> --type ${req.type} --text "<item>" --quote "<verbatim>" --words W-<n>`,
@@ -180,7 +183,7 @@ export async function recordItem(
     );
   }
   const prev = ix.current.get(line);
-  const prevBody = (await eventsOf<ItemVersionBody>(ctx, REQUIREMENTS_LINE, 'item')).filter((e) => e.body.line === line).at(-1)?.body ?? null;
+  const prevBody = (reqEvents.filter((e) => e.event === 'item' && (e.body as ItemVersionBody).line === line).at(-1)?.body as ItemVersionBody | undefined) ?? null;
   // 4.4 (G3): the tasks of a decision are part of its version only when named, so a 4.3 item keeps its identity
   const ident = (b: { type: ItemType; text: string; source: ItemSource; tasks?: readonly string[] | undefined }): string => shortHash({ type: b.type, text: b.text, source: b.source, ...(b.tasks !== undefined ? { tasks: b.tasks } : {}) });
   const identity = ident(req);
@@ -200,7 +203,11 @@ export async function recordItem(
   };
   const rec: BaseRecord = { kind: 'basis.version', basisKind: BASIS_KIND[req.type], line: line as BasisLineId, version: version as BasisVersionId, mission: req.mission, scope: null };
   // 4.4 (G9): a revision of an item recorded by `mp pm extend` stays in its term: the plans that were not checked against it keep their proof
-  await commit(ctx, `flow:item:${req.mission}:${version}`, { events: [ev(ctx, REQUIREMENTS_LINE, 'item', version, body)], records: [rec, ...await requirementSetVersions(ctx, { line, version })] });
+  await commit(ctx, `flow:item:${req.mission}:${version}`, {
+    events: [ev(ctx, REQUIREMENTS_LINE, 'item', version, body)],
+    records: [rec, ...requirementSetVersions(ctx, ix, reqEvents, { line, version })],
+    guard: { absent: [{ mission: req.mission, line: REQUIREMENTS_LINE, event: 'withdrawn', key: line }], code: 'STALE_REQUEST', message: `requirement item ${req.item} of mission ${req.mission} was withdrawn while this version of it was being recorded, so nothing was recorded (it stays withdrawn: add it under a new id)` },
+  });
   return version;
 }
 
@@ -250,7 +257,7 @@ export async function withdrawItem(ports: FlowPorts, req: { readonly mission: Mi
   if (checkKind(ix, line, 'a requirement item', ITEM_KINDS, req.mission) === null) throw new Error(`mission ${req.mission} has no requirement item ${req.item}: nothing was withdrawn`);
   await commit(ctx, `flow:withdraw:${req.mission}:${line}`, {
     events: [ev(ctx, REQUIREMENTS_LINE, 'withdrawn', line, { line, reason: req.reason })],
-    records: [{ kind: 'basis.withdrawn', line: line as BasisLineId }, ...await requirementSetVersions(ctx, { line, version: null })],
+    records: [{ kind: 'basis.withdrawn', line: line as BasisLineId }, ...requirementSetVersions(ctx, ix, await eventsOf(ctx, REQUIREMENTS_LINE), { line, version: null })],
   });
 }
 

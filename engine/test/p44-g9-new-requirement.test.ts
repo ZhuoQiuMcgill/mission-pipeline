@@ -21,7 +21,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
-import { flowCtx } from '../src/flow/context.ts';
+import { basisIndex, flowCtx } from '../src/flow/context.ts';
+import { setVersionsFor } from '../src/memory/domain/requirementSets.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import { recordItem, withdrawItem } from '../src/flow/requirements.ts';
@@ -248,6 +249,61 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     assert.equal(r.term, 2);
     const obj = (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.object === 'pmplan.m1.2')!;
     assert.ok(!(obj.reviews[0]!.basisLines as readonly string[]).includes('reqnew.m1.t2'), 'the plan submitted first is not checked against it');
+  });
+
+  it('p12-4: a new requirement filed between a PM plan\'s read and its write: the plan\'s write is refused and built again, and its contract binds the new term line', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    type Append = World['ledger']['append'];
+    const append: Append = ports.ledger.append.bind(ports.ledger);
+    const ledger = ports.ledger as { append: Append };
+    const ops: string[] = [];
+    ledger.append = async (op, entries) => {
+      ops.push(op);
+      if (op === 'flow:pm-batch:m1:2' && ops.filter((o) => o === op).length === 1) {
+        const w = say(ports, LATER);
+        const r = await recordExtension(ports, { mission: M, items: [{ item: 'g2', type: 'goal', text: 'The parser exports rows as JSON', quote: 'export the rows as JSON', words: w }] });
+        assert.equal(r.term, 1, 'the new requirement falls in the term of the plan before');
+      }
+      return append(op, entries);
+    };
+    const plan2 = pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] });
+    assert.deepEqual(await submitPmBatch(ports, { mission: M, plan: plan2, userWords: ['W-1'] }), { batch: 'b2', plan: 'pmplan.m1.2' });
+    ledger.append = append;
+    assert.equal(ops.filter((o) => o === 'flow:pm-batch:m1:2').length, 2, 'refused once, built again');
+    const obj = (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.object === 'pmplan.m1.2')!;
+    assert.deepEqual(obj.reviews[0]?.basisLines, ['reqset.m1', 'reqnew.m1.t1', 'item.m1.a1'], 'the plan binds the term written in between');
+    await engine.reconcile(M);
+    const card = ports.scheduler.card<Calibrator1Card>('cal1.m1.2');
+    assert.ok(ports.ledger.content.get(card.materials.find((m) => m.id === 'items')!.ref).includes('item.m1.g2'), 'and is checked against its item');
+  });
+
+  it('p12-5: another process withdraws a new item between its revision\'s read and its write: nothing is recorded, the item stays withdrawn and never enters reqset', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    await extendJson(ports);
+    const reqset = await current(ports, 'reqset.m1');
+    type Append = World['ledger']['append'];
+    const append: Append = ports.ledger.append.bind(ports.ledger);
+    const ledger = ports.ledger as { append: Append };
+    ledger.append = async (op, entries) => {
+      if (op === 'flow:item:m1:item.m1.g2.v2') {
+        ledger.append = append;
+        await withdrawItem(ports, { mission: M, item: 'g2', reason: 'taken back meanwhile' });
+      }
+      return append(op, entries);
+    };
+    const w = say(ports, 'As JSON lines.');
+    await assert.rejects(recordItem(ports, { mission: M, item: 'g2', type: 'goal', text: 'The parser exports rows as JSON lines', source: { kind: 'words', words: w, quote: 'As JSON lines' } }), /was withdrawn while this version of it was being recorded, so nothing was recorded/);
+    ledger.append = append;
+    assert.equal(await current(ports, 'item.m1.g2'), 'item.m1.g2.v1', 'no version over the withdrawal');
+    assert.equal(await current(ports, 'reqset.m1'), reqset, 'reqset is not written');
+    assert.ok((await ports.ledger.records(['basis.withdrawn'])).some((c) => c.record.line === 'item.m1.g2'), 'it stays withdrawn');
+    assert.equal(await current(ports, 'reqnew.m1.t1'), 'reqnew.m1.t1.v2', 'its term line has the withdrawal');
+    assert.equal((await labels(ports, ['pmplan.m1.1']))['pmplan.m1.1'], 'proven', 'the plan keeps its proof');
+    // an item ever recorded by mp pm extend is one of its term's, withdrawn too: a set computed for it is never reqset
+    const ix = await basisIndex(flowCtx(ports, M));
+    assert.deepEqual(setVersionsFor(ix, (r) => ports.ledger.content.getList(r), M, { line: 'item.m1.g2', version: 'item.m1.g2.v2' }, []).map((s) => s.line), ['reqnew.m1.t1', 'reqnew.m1']);
   });
 
   it('a supersession that withdraws a new requirement item writes its term line, not reqset', async () => {

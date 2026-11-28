@@ -30,10 +30,17 @@ export function setSnapshot(ix: Pick<BasisIndex, 'current' | 'records'>, getList
   return rec?.basisKind === 'requirement-set' ? getList(rec.snapshot as never) : [];
 }
 
-/** The items recorded by `mp pm extend` in force (item line → its term line), read from the term lines' snapshots. */
+/**
+ * The items ever recorded by `mp pm extend` (item line → its term line), read from every version of the term lines (p12-5:
+ * an item withdrawn since is still one of them, so no write ever puts it into `reqset.<m>`).
+ */
 export function newItemTerms(ix: BasisIndex, getList: (ref: never) => readonly string[], mission: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const term of termLines(ix, mission)) for (const v of setSnapshot(ix, getList, term)) { const l = ix.lineOf.get(v); if (l !== undefined) out.set(l, term); }
+  const terms = new Set(termLines(ix, mission));
+  for (const rec of ix.records.values()) {
+    if (rec.basisKind !== 'requirement-set' || !terms.has(rec.line)) continue;
+    for (const v of getList(rec.snapshot as never)) { const l = ix.lineOf.get(v); if (l !== undefined && !out.has(l)) out.set(l, rec.line); }
+  }
   return out;
 }
 

@@ -86,6 +86,7 @@ import {
   type AmendmentEntry,
   PLAN_LINE,
   PM_PLAN_EFFECTIVE,
+  REPAIRS_LINE,
   PmPlanDoc,
   SECRETARY_LINE,
   pmPlanIdProblems,
@@ -95,7 +96,7 @@ import {
   type StoredDetailedPlan,
   taskLine,
 } from './plandoc.ts';
-import type { FlowEventInput, FlowPorts } from './ports.ts';
+import type { AppendGuard, FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, currentConstraints, itemLine, planSetItems, planSetLines, requirementSetLine, setContested, termLines, type CurrentItem } from './requirements.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
@@ -241,9 +242,26 @@ const cal2Task = (dplan: string, full: boolean): string => safeId(`cal2.${dplan}
  */
 export async function submitPmBatch(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly plan: unknown; readonly userWords: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' },
+  req: PmBatchRequest,
 ): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
+  // 4.4 (G9, p12-4): the write is checked against the filings read with the term lines; a filing of `mp pm extend` written
+  // in between (a new term line) refuses it, and the batch is built again from a fresh read (bounded: another writer each time)
+  for (let tries = 1; ; tries++) {
+    try {
+      return await submitPmBatchOnce(ports, req);
+    } catch (e) {
+      if (tries >= PM_BATCH_TRIES || (e as { code?: unknown }).code !== 'STALE_REQUEST') throw e;
+    }
+  }
+}
+
+type PmBatchRequest = { readonly mission: MissionId; readonly plan: unknown; readonly userWords: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' };
+const PM_BATCH_TRIES = 3;
+
+async function submitPmBatchOnce(ports: FlowPorts, req: PmBatchRequest): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
   const ctx = flowCtx(ports, req.mission);
+  // (p12-4) the filings as read before the term lines: a new requirement's term line is written with its filing
+  const filingsRead = (await eventsOf(ctx, REPAIRS_LINE, 'repair')).at(-1)?.revision ?? null;
   const doc = PmPlanDoc.parse(req.plan);
   if (doc.mission !== req.mission) throw new Error(`the plan names mission ${doc.mission}, not ${req.mission}`);
   const dup = pmPlanIdProblems(doc);
@@ -313,8 +331,13 @@ export async function submitPmBatch(
   const stale: string[] = [];
   for (const o of batches) for (const e of await openEscalations(ctx, `plan:${o.body.plan}`)) stale.push(e.id);
   const close = closing(ctx, stale, `PM plan ${plan} (batch b${n}) was submitted: a decision on the earlier batch is not carried out`);
-  const guard = carryGuard([close]);
-  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, ...(guard !== undefined ? { guard } : {}) });
+  const carry = carryGuard([close]);
+  // (p12-4) the term lines the contract lists are the ones there are at the write: no filing of a new requirement since the read
+  const filings = { mission: req.mission, line: REPAIRS_LINE, event: 'repair', revision: filingsRead };
+  const guard: AppendGuard = carry !== undefined
+    ? { ...carry, latest: [...(carry.latest ?? []), filings], message: `${carry.message} (or a new requirement was filed meanwhile)` }
+    : { latest: [filings], absent: [], code: 'STALE_REQUEST', message: `a new requirement was filed while PM plan ${plan} was being recorded; nothing was written (the batch is built again with it)` };
+  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, guard });
   await cancelSecretarySteps(ctx, stale);
   return { batch: body.batch, plan };
 }
