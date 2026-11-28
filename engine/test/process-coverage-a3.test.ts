@@ -282,13 +282,17 @@ describe('stops, notices, the Secretary\'s re-dispatches', () => {
     const sec = await readyOf(ctx, 'secretary');
     const lineage = ctx.memory.read((db) => (db.stmt('SELECT lineage FROM tasks WHERE task = ?').get(sec.step) as { lineage: string }).lineage);
     assert.match(lineage, /^task\./, 'the Secretary runs in the task lineage it handles');
+    // each seat read its card before it was lost (4.4, F5: an unstarted release would cost nothing)
+    const { seatCard } = await import('../src/process/index.ts');
     for (let i = 1; i <= 2; i++) {
       const d = pmDispatch(ctx, (await readyOf(ctx, 'secretary')).step);
+      seatCard(ctx, d.dispatch);
       const r = await pmRelease(ctx, d.dispatch, 'abandoned');
       assert.equal(r.requeued, true);
       assert.equal(ctx.memory.read((db) => loopState(db, lineage, 'quarantine-restart')).attempts, i);
     }
     const d3 = pmDispatch(ctx, (await readyOf(ctx, 'secretary')).step);
+    seatCard(ctx, d3.dispatch);
     const r3 = await pmRelease(ctx, d3.dispatch, 'abandoned');
     assert.equal(r3.exhausted, true, 'its re-dispatches are used up');
     // no Secretary decides for the Secretary: the escalation goes to the user (WI-24)

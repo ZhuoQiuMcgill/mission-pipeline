@@ -11,7 +11,8 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - Files to read first; the interpreter (the runtime to build and run with); the verification commands `mp` will run (the project's local tests for this task); the exclusive resources leased to you, if any.
 - On a reopened attempt: the issue your task's work must fix, and who reopened it (an integration task's review, or a repair). Your accepted product stays recorded until this attempt is accepted.
 - Work that answers a repair: the repair, with the user's reason verbatim.
-- Materials, read page by page.
+- The plan's data formats and storage, when it declares them.
+- Materials, read page by page. On a later attempt: the previous review's report and your earlier hand-back (optional).
 
 ## How you work
 - Work in your worktree with your harness's own file and shell tools. Change files only under the write paths. A card with no write paths (an experiment, or a task of a plan made before 4.1.2) is a task that only reads and runs: change no file and report what you ran and saw.

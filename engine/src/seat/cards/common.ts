@@ -157,6 +157,8 @@ export const commonCardFields = {
    * recorded then. Never on a blind executor's card.
    */
   dataChecked: z.array(z.object({ pointer: z.string().min(1), check: z.enum(['full', 'partial']), label: z.string().min(1) })).optional(),
+  /** 4.4 (F3): one line for each optional material that could not be attached (too large to store), saying where its report is. */
+  materialsNotAttached: z.array(z.string()).optional(),
 };
 
 /** "## Title\n- a\n- b" (empty string when there is nothing to list). */
@@ -180,10 +182,12 @@ export function renderCommon(c: { duties: string; constraints: readonly { id: st
   );
 }
 
-export function renderMaterials(materials: readonly MaterialRef[]): string {
-  return list(
-    'Materials (read each page with the read command below; read every page of the "must read" ones)',
-    materials.map((m) => `[${m.id}] ${m.title}: ${m.pages} page${m.pages === 1 ? '' : 's'}${m.mustRead ? ' (must read)' : ''}`),
+export function renderMaterials(materials: readonly MaterialRef[], notAttached: readonly string[] = []): string {
+  return (
+    list(
+      'Materials (read each page with the read command below; read every page of the "must read" ones)',
+      materials.map((m) => `[${m.id}] ${m.title}: ${m.pages} page${m.pages === 1 ? '' : 's'}${m.mustRead ? ' (must read)' : ''}`),
+    ) + list('Materials that could not be attached', notAttached)
   );
 }
 

@@ -38,7 +38,7 @@ import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { openEscalations } from '../src/flow/secretary.ts';
 import { assertExits as exitsOf, drained, frontier, seedFanout, sweepThenClean } from './exploration-exits.ts';
 import { pmAnswer, pmClose, pmDispatch, pmMission, pmNext, pmPlan, pmRelease, pmReopenExploration, pmRequirement, pmSay, readSteps } from '../src/process/index.ts';
-import { dispatchView, recordEvidenceRequest, seatCheckout, seatRerun } from '../src/process/seat.ts';
+import { dispatchView, recordEvidenceRequest, seatCard, seatCheckout, seatRerun } from '../src/process/seat.ts';
 import type { CrititorCard } from '../src/seat/cards/crititor.ts';
 import type { AuthorCard } from '../src/seat/cards/researcher.ts';
 import type { StabilizerCard } from '../src/seat/cards/stabilizer.ts';
@@ -426,7 +426,10 @@ describe('the reopened exploration: every exit settles, escalates, or has a step
     for (let i = 0; i < 6; i++) {
       const r = (await pmNext(p.ctx)).ready.find((x) => x.kind === 'constructor-experiment');
       if (r === undefined) break;
-      await pmRelease(p.ctx, pmDispatch(p.ctx, r.step).dispatch, 'abandoned');
+      // the seat read its card before it was lost (4.4, F5: an unstarted release would cost nothing)
+      const d = pmDispatch(p.ctx, r.step).dispatch;
+      seatCard(p.ctx, d);
+      await pmRelease(p.ctx, d, 'abandoned');
     }
     const exhausted = await assertExits(p, 'm6', 'rerun exhausted');
     assert.equal(exhausted.stopped, null);

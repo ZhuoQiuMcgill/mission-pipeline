@@ -30,9 +30,9 @@
 import { canonicalJson } from '../common/hash.ts';
 import type { BasisLineId, BasisVersionId, MissionId } from '../common/ids.ts';
 import type { BaseRecord } from '../common/records.ts';
-import { previousPlanText, type ArchitectRepairCard, type ArchitectRepairResult } from '../seat/cards/architect.ts';
+import { repairPlanMaterial, type ArchitectRepairCard, type ArchitectRepairResult } from '../seat/cards/architect.ts';
 import { planningConstraints } from '../seat/cards/dynamic.ts';
-import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, material, missionClosed, nextBasisVersion, notify, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
+import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, missionClosed, nextBasisVersion, notify, objectRecord, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
 import { PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedTaskIds, explorationLine, repairRef, taskLine, type AmendmentEntry, type DetailedPlanDoc, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
@@ -257,6 +257,13 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
     await commit(ctx, `flow:repair-mechanical:${ctx.mission}:${task}`, { events: [ev(ctx, REPAIRS_LINE, 'mechanical-check', task, mc)] });
   }
   if (!mc.ok) return repairReturn(ctx, r, a, task, mc.failures);
+  // 4.4 (F5, p3-3): a changed card of a task that has an accepted product by now (the Architect's card was
+  // stale, however it became so) is a mechanical failure of the hand-back, never an edit skipped while the
+  // repair is recorded as decided: it goes back to the Architect through the mechanical-return loop, whose
+  // next attempt's card is built on the work accepted now
+  const accepted: string[] = [];
+  for (const c of change) if (plan.tasks.some((t) => t.id === c.id) && (await acceptedProduct(ctx, c.id)) !== null) accepted.push(c.id);
+  if (accepted.length > 0) return repairReturn(ctx, r, a, task, accepted.map((id) => `change[${id}]: task ${id} now has an accepted product: reopen it instead (the card it was changed on predates its acceptance)`));
   await decide(ctx, r, task, eff, plan, result, mc);
 }
 
@@ -318,7 +325,8 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     else reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product });
   }
   const added: readonly DetailedTask[] = result.add;
-  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now (one accepted meanwhile keeps its card, said)
+  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now; 4.4: one accepted
+  // meanwhile went back to the Architect first (oneRepair), so what is left out here is said, never an accepted task's edit
   const changed: DetailedTask[] = [];
   for (const c of result.change ?? []) {
     if ((await acceptedProduct(ctx, c.id)) !== null || !plan.tasks.some((t) => t.id === c.id)) skipped.push(c.id);
@@ -359,6 +367,17 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   });
 }
 
+/**
+ * One entry of the repair card's accepted work, from its task line: the product, the attempt it is
+ * accepted at, the paths it changed and (4.4, F3) its commit, which `mp seat <id> checkout --product`
+ * serves. Built alike when the step is queued and when it is claimed (F5, seat/cards/refresh.ts).
+ */
+export function acceptedEntry(task: string, events: Parameters<typeof lineAcceptance>[0], product: string, commit: string | undefined): ArchitectRepairCard['accepted'][number] {
+  const b = events.filter((e) => e.event === 'product').map((e) => e.body as { object: string; changedPaths: string[]; commit?: string }).find((x) => x.object === product);
+  const c = commit ?? b?.commit;
+  return { task, product, attempt: lineAcceptance(events).k, changedPaths: [...(b?.changedPaths ?? [])], ...(c !== undefined ? { commit: c } : {}) };
+}
+
 async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, task: string, eff: EffectiveBody, plan: DetailedPlanDoc): Promise<void> {
   const doc = await pmPlanDoc(ctx, eff.pmPlan);
   if (doc === null) return;
@@ -369,9 +388,7 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
     const p = await acceptedProduct(ctx, t.id);
     if (p === null) continue;
     const events = (await eventsOf(ctx, taskLine(t.id))).map((e) => ({ revision: e.revision, event: e.event, key: e.key, body: e.body }));
-    const k = lineAcceptance(events).k;
-    const product = events.filter((e) => e.event === 'product').map((e) => e.body as { object: string; changedPaths: string[] }).find((b) => b.object === p);
-    accepted.push({ task: t.id, product: p, attempt: k, changedPaths: [...(product?.changedPaths ?? [])] });
+    accepted.push(acceptedEntry(t.id, events, p, (await objectRecord(ctx, p))?.source?.commit));
   }
   // the owners of the paths the repair is about: a task's accepted change, else none
   const about = r.about?.kind === 'task' ? accepted.find((x) => x.task === r.about!.id)?.changedPaths ?? [] : [];
@@ -394,7 +411,7 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
     history: { gitLog: history.gitLog, runs: [...history.runs] },
     revision: a.mechanicalFailures.length > 0 ? { mechanicalFailures: [...a.mechanicalFailures] } : null,
     projectCommands: projectCommandsOf(ctx),
-    materials: [material(ctx, 'plan', `Detailed plan ${eff.dplan} as it is in effect (with earlier repairs), in full`, previousPlanText(eff.dplan, plan), true, 'plan')],
+    materials: [repairPlanMaterial((d) => ctx.ports.ledger.content.put(d), eff.dplan, plan)],
   };
   await ctx.ports.scheduler.submit({
     task,
