@@ -24,7 +24,7 @@ function P(c: RunContext): Project {
 const init: Command = {
   group: 'admin',
   name: ['init'],
-  summary: 'create .mission-pipeline/ in this project: the memory, the role descriptions and PM handbook, config.json, the git exclude',
+  summary: 'create .mission-pipeline/ in this project: the memory, the role descriptions, both handbooks and the WI pages, config.json, the git exclude',
   usage: 'mp init [--pointer claude|agents|both|none] [--target-branch <branch>]   (in the project folder, or with --project <dir>)',
   flags: { pointer: 'string', 'target-branch': 'string' },
   noProject: true,
@@ -113,7 +113,7 @@ const recomputeCmd: Command = {
 const docs: Command = {
   group: 'admin',
   name: ['docs'],
-  summary: 'refresh the role descriptions and the PM handbook in .mission-pipeline/ from the installed mp',
+  summary: 'refresh the role descriptions, both handbooks and the WI pages in .mission-pipeline/ from the installed mp (run it after every upgrade)',
   usage: 'mp docs update',
   flags: {},
   async run(c, args) {
