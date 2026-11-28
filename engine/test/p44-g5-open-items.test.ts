@@ -262,7 +262,8 @@ describe('4.4 G5: deferrals, and the record of 4.3', () => {
     assert.deepEqual(listed.map((i) => [i.id, i.kind, i.recorded, i.text]), [['exh.old.1.r1', 'fix', false, '[S1] not met: slow'], ['exh.old.1.r2', 'finding', false, 'finding: no docs']]);
     await engine.reconcile();
     assert.deepEqual((await events(w, OPEN_ITEMS_LINE, OPEN_ITEM)).length, 0, 'nothing is written for a 4.3 acceptance');
-    const r = await cli(w.dir, ['read', 'open-items', 'm1']);
+    // v1-4: listed in full with --all (by default a count per task)
+    const r = await cli(w.dir, ['read', 'open-items', 'm1', '--all']);
     assert.match(r.out, /\[exh\.old\.1\.r1\] fix, task old \(attempt 1, accepted with risk on exh\.old\.1\): not recorded as an item \(an acceptance with risk made before 4\.4\): what became of it is not recorded/);
     const words = say(w, 'The speed does not matter.');
     closeOpenItem(w.ctx, { op: 'c-old', ref: 'exh.old.1.r1', words, reason: 'speed does not matter' });

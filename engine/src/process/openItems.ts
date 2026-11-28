@@ -12,7 +12,7 @@ import { canonicalJson } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import type { IssueRecord, ListRef, ObjectVersionRecord } from '../common/records.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, OPEN_ITEM_ANSWER, itemDecider, openItemsOf, type OpenItem, type OpenItemAnswerBody } from '../flow/openItems.ts';
-import { OPEN_ITEM_CLOSED, VERIFIED, VERIFIED_LINE, issueBacked, issueResolver, itemIssue, reopenTakers, riskItemsOf, takersOf, type IssueNote, type ItemClosedBody, type RiskItem, type Taker, type VerifiedBody } from '../flow/riskItems.ts';
+import { OPEN_ITEM_CLOSED, VERIFIED, VERIFIED_LINE, issueBacked, issueResolver, itemIssue, recordOnAct, reopenTakers, riskItemsOf, takersOf, type IssueNote, type ItemClosedBody, type RiskItem, type Taker, type VerifiedBody } from '../flow/riskItems.ts';
 import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, amendedPlan, type AmendmentEntry, type RepairBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import { appendRecords, factById, flowEventExists, flowEvents, flowMissions, recordsByKind, type Db } from '../memory/index.ts';
 import { requireSecretary } from '../memory/resident.ts';
@@ -240,13 +240,16 @@ export function closeOpenItem(ctx: ProcessContext, req: { readonly op: string; r
   const at = ctx.memory.read((db) => missionOf(db, req.ref, (m, id) => riskItemsOf(missionEvents(db, ctx.memory.data, m)).some((i) => i.id === id)));
   const body: ItemClosedBody = { id: at.id, by: 'pm', words: req.words, reason: req.reason };
   return ctx.memory.write({ op: `open-item-close:${req.op}`, payload: { mission: at.mission, ...body } }, (tx) => {
-    const [item] = closable(missionEvents(tx, tx.data, at.mission), at.mission, [at.id]);
+    const events = missionEvents(tx, tx.data, at.mission);
+    const [item] = closable(events, at.mission, [at.id]);
     if (item!.closed !== null) {
       const c = item!.closed;
       if (c.how === 'words' && c.words === req.words && c.reason === req.reason && c.statement === undefined) return { mission: at.mission, item: item!, repeated: true };
       throw new ProcessError('NOT_ALLOWED', `open item ${at.id} is closed already: ${closureText(c)}`);
     }
-    appendRecords(tx, [{ kind: 'flow.event', mission: at.mission as MissionId, line: OPEN_ITEMS_LINE, event: OPEN_ITEM_CLOSED, key: at.id, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
+    // v1-4: a risk sentence of an acceptance made before 4.4 is recorded as an item in the write that closes it
+    const acted = recordOnAct(events, [at.id]).map((b) => ({ kind: 'flow.event' as const, mission: at.mission as MissionId, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash }));
+    appendRecords(tx, [...acted, { kind: 'flow.event', mission: at.mission as MissionId, line: OPEN_ITEMS_LINE, event: OPEN_ITEM_CLOSED, key: at.id, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
     return { mission: at.mission, item: { ...item!, closed: { how: 'words', words: req.words, reason: req.reason, revision: 0 } }, repeated: false };
   });
 }
@@ -276,8 +279,8 @@ function verifiedSubject(events: readonly Ev[], mission: string, given: string):
   return `${item ? 'item' : 'repair'}:${given}`;
 }
 
-/** The most open items one statement closes (one append takes at most 1,000 records). */
-export const ITEMS_PER_STATEMENT = 500;
+/** The most open items one statement closes (one append takes at most 1,000 records: the statement, a close for each, and v1-4 the record of each sentence before 4.4 it names). */
+export const ITEMS_PER_STATEMENT = 499;
 
 /** A requirement item's line, or null for an id that cannot be one. */
 function itemLineOf(mission: string, item: string): string | null {
@@ -326,7 +329,10 @@ export function recordVerified(ctx: ProcessContext, req: { readonly op: string; 
     const named = closable(events, req.mission, items);
     const open = named.filter((i) => i.closed === null);
     const reason = `the user's statement on ${req.words}: ${subject.startsWith('repair:') ? 'repair' : 'requirement item'} ${id} was checked in the field and holds`;
+    // v1-4: a risk sentence of an acceptance made before 4.4 it names is recorded as an item in the same write
+    const acted = recordOnAct(events, open.map((i) => i.id)).map((b) => ({ kind: 'flow.event' as const, mission: req.mission as MissionId, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash }));
     appendRecords(tx, [
+      ...acted,
       { kind: 'flow.event', mission: req.mission as MissionId, line: VERIFIED_LINE, event: VERIFIED, key, body: tx.data.put(canonicalJson(body)) as ContentHash },
       ...open.map((i) => ({ kind: 'flow.event' as const, mission: req.mission as MissionId, line: OPEN_ITEMS_LINE, event: OPEN_ITEM_CLOSED, key: i.id, body: tx.data.put(canonicalJson({ id: i.id, by: 'pm', words: req.words, reason, statement: key } satisfies ItemClosedBody)) as ContentHash })),
     ]);
