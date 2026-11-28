@@ -347,7 +347,7 @@ export class Index implements IndexView {
         this.basisLineOf.set(r.version, r.line);
         this.basisRev.set(r.version, c.revision);
         this.basisKindOf.set(r.version, r.basisKind);
-        if (r.basisKind === 'requirement-set' && r.snapshot.length > 0) this.setEverListed.add(r.line);
+        if (r.basisKind === 'requirement-set' && ((r.snapshot as readonly string[] | undefined)?.length ?? 0) > 0) this.setEverListed.add(r.line);
         addTo(this.versionsByLine, r.line, r.version);
         if (r.basisKind === 'constraint') {
           // A new content version keeps the current scope unless it states one.

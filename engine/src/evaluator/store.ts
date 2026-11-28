@@ -610,7 +610,7 @@ export class StoredIndex implements IndexView {
     // (no list read; versions are written once, so a read's answer holds for it)
     const setItems = (v: string): number => {
       const f = factRecord<Extract<BaseRecord, { kind: 'basis.version' }>>(db, 'basis.version', v);
-      return f !== null && f.rec.basisKind === 'requirement-set' ? f.rec.snapshot.count : 0;
+      return f !== null && f.rec.basisKind === 'requirement-set' ? ((f.rec.snapshot as { count?: number } | undefined)?.count ?? 0) : 0;
     };
     const everListed = new Lazy(m, (l: string) => (db.stmt("SELECT version FROM lbl_basis WHERE line = ? AND kind = 'requirement-set'").all(l) as Array<{ version: string }>).some((r) => setItems(r.version) > 0));
     this.setEverListed = { has: (l) => everListed.get(l) === true };
