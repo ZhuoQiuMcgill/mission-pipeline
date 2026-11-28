@@ -1797,9 +1797,13 @@ function acceptedReview(line: Line, k: number, before: number, adopted?: string)
 /** 4.4 (G5): open items not recorded yet, in bounded writes (an append takes at most 1,000 records), each under the operation id of its own items. */
 async function writeItemBatches(ctx: FlowCtx, bodies: readonly RiskItemBody[], requires?: string): Promise<void> {
   if (bodies.length === 0) return;
-  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
-  // an acceptance made under 4.3 wrote no first batch: nothing is written for it (its sentences are listed as not recorded)
-  if (requires !== undefined && !existing.has(requires)) return;
+  const recorded = new Map((await eventsOf<RiskItemBody>(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => [x.key, x.body] as const));
+  const existing = new Set(recorded.keys());
+  // an acceptance made under 4.3 wrote no first batch: nothing is written for it (its sentences are listed as not
+  // recorded). F3-4: its first item must be one the acceptance wrote itself; a record made later for a sentence of an
+  // acceptance made before 4.4 (`before44`, when someone acted on it) never makes it one of 4.4
+  const first = requires === undefined ? undefined : recorded.get(requires);
+  if (requires !== undefined && (first === undefined || first.before44 === true)) return;
   const missing = bodies.filter((b) => !existing.has(b.id));
   for (let i = 0; i < missing.length; i += ITEM_BATCH) {
     const batch = missing.slice(i, i + ITEM_BATCH);
