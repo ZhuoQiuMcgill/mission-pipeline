@@ -242,7 +242,8 @@ engine README's known limitations.
 What 4.4.1 documents and does not change (`engine/README.md`, "Windows and PowerShell"):
 
 - **Windows PowerShell 5.1 pipes text to a program as ASCII** by default: non-ASCII characters arrive
-  as `?`, and the engine cannot restore them. What to do: `--file`, PowerShell 7, or
+  as `?`, and the engine cannot restore them; it warns when the standard input bears that pipe's
+  byte-order mark and a `?` (a genuine `?` piped that way warns too). What to do: `--file`, PowerShell 7, or
   `$OutputEncoding = [Text.Encoding]::UTF8` first (5.1 then writes the byte-order mark twice; the
   reader drops both).
 - **Double quotes inside an argument are dropped** by `mp.cmd` called from PowerShell, and by Windows

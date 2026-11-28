@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, it, test } from 'node:test';
 import { sha256 } from '../src/common/hash.ts';
 import { POWERSHELL_NOTE, psQuote, withPowerShellNote } from '../src/common/powershell.ts';
-import { decodeInput, readInputFile } from '../src/common/textInput.ts';
+import { decodeInput, inputWarning, readInputFile } from '../src/common/textInput.ts';
 import { occursVerbatim } from '../src/common/verbatim.ts';
 import { forgetObservedEnvironment, readEnvironmentConfig } from '../src/evaluator/index.ts';
 import { PlainGit } from '../src/git/plainGit.ts';
@@ -105,7 +105,7 @@ describe('A: everyone told to run mp on Windows is told how in PowerShell', () =
     assert.equal(win.prompt, `${prompt440} ${POWERSHELL_NOTE}`);
     assert.ok(win.launch.startsWith('MP_SECRETARY=S-2 claude --bg -n '), 'the existing hint stays beside it');
     assert.equal(win.launchPowerShell, `try { $env:MP_SECRETARY = 'S-2'; claude --bg -n 'it''s-Secretary' ${psQuote(win.prompt)} } finally { Remove-Item Env:MP_SECRETARY }`);
-    assert.equal(psQuote('a’b'), "'a’’b'", 'PowerShell reads a typographic quote as a quote too');
+    assert.equal(psQuote('a\u2019b'), "'a\u2019\u2019b'", 'PowerShell reads a typographic quote as a quote too');
   });
 
   const shell = ['pwsh', 'powershell.exe'].find((s) => spawnSync(s, ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 60_000 }).status === 0);
@@ -115,7 +115,7 @@ describe('A: everyone told to run mp on Windows is told how in PowerShell', () =
       const hint = secretaryLaunch({ generation: 'S-3', name: "it's-Secretary" }, 'win32').launchPowerShell!;
       // a stand-in for claude: prints its arguments and the variable it sees, one per line
       const script = ["function claude { [Console]::Out.WriteLine(\"env=$env:MP_SECRETARY\"); foreach ($a in $args) { [Console]::Out.WriteLine(\"arg=$a\") } }", hint, '[Console]::Out.WriteLine("after=[$env:MP_SECRETARY]")'].join('\n');
-      writeFileSync(join(dir, 'launch.ps1'), `﻿${script}\n`);
+      writeFileSync(join(dir, 'launch.ps1'), `\uFEFF${script}\n`);
       const r = spawnSync(shell!, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(dir, 'launch.ps1')], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, MP_SECRETARY: '' } });
       assert.equal(r.status, 0, r.stderr);
       const lines = r.stdout.split(/\r?\n/).filter((l) => l !== '');
@@ -191,7 +191,7 @@ describe('A: everyone told to run mp on Windows is told how in PowerShell', () =
 
 describe('B: one reader for text a person or a seat hands the engine', () => {
   it('no byte-order mark: exactly what 4.4.0 read (bytes that are not UTF-8 too), line ends kept', () => {
-    for (const bytes of [Buffer.from(`a\r\nb\n${CHINESE}`), Buffer.from([0x61, 0xff, 0x62, 0xc3]), Buffer.from(''), Buffer.from('﻿not at the start? no: it is', 'utf8').subarray(3)]) {
+    for (const bytes of [Buffer.from(`a\r\nb\n${CHINESE}`), Buffer.from([0x61, 0xff, 0x62, 0xc3]), Buffer.from(''), Buffer.from('\uFEFFnot at the start? no: it is', 'utf8').subarray(3)]) {
       const r = decodeInput(bytes, 'x');
       assert.equal(r.text, bytes.toString('utf8'));
       assert.equal(r.bom, null);
@@ -208,8 +208,8 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
     }
     // Windows PowerShell 5.1 with $OutputEncoding = UTF8 pipes the mark twice
     assert.equal(decodeInput(Buffer.concat([BOM, BOM, Buffer.from(text)]), 'x').text, text);
-    assert.equal(decodeInput(Buffer.from(`﻿${text}`, 'utf8').subarray(3), 'x').text, text);
-    assert.equal(decodeInput(Buffer.from(`a﻿`, 'utf8'), 'x').text, 'a﻿', 'a U+FEFF after the start is text');
+    assert.equal(decodeInput(Buffer.from(`\uFEFF${text}`, 'utf8').subarray(3), 'x').text, text);
+    assert.equal(decodeInput(Buffer.from(`a\uFEFF`, 'utf8'), 'x').text, 'a\uFEFF', 'a U+FEFF after the start is text');
     const dir = mkdtempSync(join(tmpdir(), 'mp-read-'));
     try {
       writeFileSync(join(dir, 'f.txt'), utf16le('from a file'));
@@ -221,13 +221,33 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
 
   it('bytes that are not UTF-8: read as U+FFFD as before, with one warning line; a NUL with no mark: a warning that says what to do', () => {
     const bad = decodeInput(Buffer.from([0x63, 0x61, 0x66, 0xe9]), 'the file cafe.txt');
-    assert.equal(bad.text, 'caf�');
+    assert.equal(bad.text, 'caf\uFFFD');
     assert.equal(bad.invalid, true);
     assert.equal(bad.warning, 'Warning: the file cafe.txt holds bytes that are not UTF-8; they are shown as U+FFFD. Save it as UTF-8 and run the command again.');
     const nul = decodeInput(Buffer.from('hi', 'utf16le'), 'the standard input');
     assert.equal(nul.nul, true);
     assert.match(nul.warning!, /NUL characters: it is probably UTF-16 without a byte-order mark\. Save it as UTF-8/);
     assert.equal(decodeInput(utf16le('a\u0000b'), 'x').nul, false, 'with a mark a NUL is the text');
+  });
+
+  it('the standard input with a mark and a "?" (Windows PowerShell 5.1 pipes so, characters outside ASCII lost to "?"): one warning line; a file, no mark or no "?": none', () => {
+    const lost = Buffer.concat([BOM, Buffer.from('?? text ??\r\n')]);
+    const piped = decodeInput(lost, 'the standard input', { stdin: true });
+    assert.equal(piped.text, '?? text ??\r\n', 'the text goes on as it came');
+    assert.equal(piped.markedPipe, true);
+    assert.equal(piped.warning, 'Warning: the standard input came through a pipe that marks it the way Windows PowerShell 5.1 does, and it holds "?": that shell replaces characters outside ASCII with "?" unless $OutputEncoding is UTF-8. Check the recorded text, or pass the text with --file.');
+    assert.match(inputWarning(piped, { read: 'mp read show words W-3', file: 'the files --report and --result' })!, /Check the recorded text \(mp read show words W-3\), or pass the text with the files --report and --result\.$/);
+    assert.equal(decodeInput(Buffer.concat([BOM, BOM, Buffer.from('? x')]), 'the standard input', { stdin: true }).markedPipe, true, 'the mark written twice');
+    const dir = mkdtempSync(join(tmpdir(), 'mp-pipe-'));
+    try {
+      writeFileSync(join(dir, 'f.txt'), lost);
+      assert.equal(readInputFile(join(dir, 'f.txt')).warning, null, 'a file: no warning');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    assert.equal(decodeInput(lost, 'the file f.txt').warning, null, 'not the standard input: none');
+    assert.equal(decodeInput(Buffer.from('?? text ??'), 'the standard input', { stdin: true }).warning, null, 'no mark: none');
+    assert.equal(decodeInput(Buffer.concat([BOM, Buffer.from(CHINESE)]), 'the standard input', { stdin: true }).warning, null, 'no "?": none');
   });
 
   it('mp pm say --file with a byte-order mark records the same entry as without one; UTF-16 and a BOM on stdin too; the identity without a mark is 4.4.0\'s', async () => {
@@ -273,7 +293,7 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       writeFileSync(join(p.base, 'cp.txt'), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x20, 0x6f, 0x6b]));
       const r = await mp(p.dir, ['pm', 'say', '--file', join(p.base, 'cp.txt')]);
       assert.equal(r.code, 0);
-      assert.equal(recorded(p.dir, r.json.result.words), 'caf� ok');
+      assert.equal(recorded(p.dir, r.json.result.words), 'caf\uFFFD ok');
       const text = await runCli(['pm', 'say', '--file', join(p.base, 'cp.txt'), '--op', 'again-1'], { cwd: p.dir, env: { ...process.env, MP_PROJECT: '', MP_SECRETARY: '' }, process: { observe: () => ENV_A, git: PlainGit.create() } });
       assert.match(text.stdout, /Already recorded as W-1[^\n]*\nWarning: the file .*cp\.txt holds bytes that are not UTF-8; they are shown as U\+FFFD/);
       writeFileSync(join(p.base, 'nobom16.txt'), Buffer.from('words', 'utf16le'));
@@ -281,6 +301,21 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       assert.equal(nul.code, 3);
       assert.equal(nul.json.error.code, 'BAD_REQUEST');
       assert.match(nul.json.error.message, /probably UTF-16 without a byte-order mark\. Save it as UTF-8/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  it('mp pm say --stdin with a mark and "?" (what Windows PowerShell 5.1 pipes of Chinese text): recorded as it came, exit 0, one warning that names the read', async () => {
+    const p = await project();
+    try {
+      const r = await runCli(['pm', 'say', '--stdin', '--tag', 'principle'], { cwd: p.dir, env: { ...process.env, MP_PROJECT: '', MP_SECRETARY: '' }, stdin: () => Buffer.concat([BOM, Buffer.from('?????? CSV ???\r\n')]), process: { observe: () => ENV_A, git: PlainGit.create() } });
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.equal(recorded(p.dir, 'W-1'), '?????? CSV ???\r\n');
+      const lines = r.stdout.split('\n');
+      assert.equal(lines[0], 'Recorded as W-1.');
+      assert.equal(lines[1], 'Warning: the standard input came through a pipe that marks it the way Windows PowerShell 5.1 does, and it holds "?": that shell replaces characters outside ASCII with "?" unless $OutputEncoding is UTF-8. Check the recorded text (mp read show words W-1), or pass the text with --file.');
+      assert.equal(lines.filter((l) => l.startsWith('Warning:')).length, 1);
     } finally {
       p.cleanup();
     }
@@ -314,7 +349,7 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       const warned = await runCli(['config'], { cwd: p.dir, env: { ...process.env, MP_PROJECT: '', MP_SECRETARY: '' }, process: { observe: () => ENV_A, git: PlainGit.create() } });
       assert.equal(warned.exitCode, 0, warned.stderr);
       assert.match(warned.stdout, /config\.json is valid\.\nWarning: \.mission-pipeline\/config\.json holds bytes that are not UTF-8; they are shown as U\+FFFD/);
-      assert.equal(readConfig(p.dir).projectName, 'caf�');
+      assert.equal(readConfig(p.dir).projectName, 'caf\uFFFD');
     } finally {
       p.cleanup();
     }

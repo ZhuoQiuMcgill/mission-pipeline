@@ -25,6 +25,7 @@ The engine runs without error in PowerShell on Windows. 4.4.0 was built and test
 ### Fixed
 
 - A file or standard input with a UTF-8 byte-order mark (Windows PowerShell 5.1's `Set-Content -Encoding UTF8`, many editors; 5.1 pipes it twice with `$OutputEncoding = [Text.Encoding]::UTF8`) no longer records U+FEFF as the first character of the user's words, and a JSON file with one (`mp pm plan submit --file`, `--attempts`, a hand-back's result, `config.json`) is no longer refused with `Unexpected token`. A UTF-16 file with a mark (5.1's `Out-File` and `>`) is read. One reader serves every file and stdin a person or a seat hands the engine.
+- Text Windows PowerShell 5.1 pipes to `--stdin` with its default ASCII pipe has lost its characters outside ASCII to `?`, which the engine cannot restore: when the standard input begins with the byte-order mark that pipe writes and holds a `?`, the command goes on and says so in one warning line (check the recorded text, with the read that shows it, or pass the text with `--file`).
 - Bytes that are not UTF-8 (a file saved in the system code page) are read as U+FFFD as before, and the command now says so in one warning line. A NUL with no byte-order mark is refused where it was, and the refusal says the file is probably UTF-16 without a mark: save it as UTF-8.
 - A quote of the user's words (a tag, a requirement item, a repair's reason, `mp pm extend`, a stop's words) that spans a line break matches whether the words and the quote use CRLF or LF; what is recorded does not change.
 
