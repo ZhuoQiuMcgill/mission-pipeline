@@ -412,7 +412,7 @@ export interface RepairDecidedBody {
    * and then opens the next). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every
    * reopen before 4.4).
    */
-  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[]; readonly openItems?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
   /** 4.4 (G3, F2): the Architect's note on its decision, printed on the cards of the tasks it added, changed or reopened (absent: a 4.3 decision). */

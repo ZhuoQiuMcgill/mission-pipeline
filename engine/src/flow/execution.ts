@@ -43,7 +43,7 @@ import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVers
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
-import { ITEM_BATCH, acceptanceReasons, deferredItemBody, itemIssueLine, riskItemBodies, takenItems, type ItemAnswer, type RiskItemBody } from './riskItems.ts';
+import { ITEM_BATCH, acceptanceReasons, cardItemNames, deferredItemBody, itemIssueLine, riskItemBodies, takenItems, type ItemAnswer, type RiskItemBody } from './riskItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -3244,8 +3244,8 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // 4.4 (F4; G5): the attempt's questions with their answers, and every question of the task left open
   const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
   const questions = taskQuestions(missionEvents, t.id, k);
-  // 4.4 (G5): the open items the task's card takes, still open
-  const openItems = takenItems(missionEvents, t.openItems);
+  // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open
+  const openItems = takenItems(missionEvents, cardItemNames(missionEvents, t, k));
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: withoutAnswers(await decisionQuotes(ctx, t), questions), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
@@ -3394,8 +3394,8 @@ async function submitReviewer(
   // 4.4 (F4): the questions of the attempt under review with their answers, and those left open on the task
   const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
   const questions = taskQuestions(missionEvents, t.id, product.k);
-  // 4.4 (G5): the open items the task's card takes, still open: the Reviewer answers each
-  const openItems = takenItems(missionEvents, t.openItems);
+  // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open: the Reviewer answers each
+  const openItems = takenItems(missionEvents, cardItemNames(missionEvents, t, product.k));
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,

@@ -36,7 +36,7 @@ import { answerText } from './openItems.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, missionClosed, nextBasisVersion, notify, objectRecord, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
-import { itemIds, riskItemsOf } from './riskItems.ts';
+import { itemIds, riskItemsOf, takenItems } from './riskItems.ts';
 import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedPlan, amendedTaskIds, cardChangedBy, explorationLine, repairOfTask, repairRef, taskCardHash, taskLine, type AmendmentEntry, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
 import { detailedPlanOf, explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { acceptedProduct, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
@@ -344,6 +344,13 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
       // 4.4 (G5): the open items an added or changed task may take (read only when one names one)
       ...([...added, ...change].some((t) => (t.openItems ?? []).length > 0) ? { openItems: itemIds(await ctx.ports.ledger.events({ mission: ctx.mission })) } : {}),
     });
+    // 4.4 (G5): a reopened task takes only open items of the mission too
+    const reopenNames = result.reopen.flatMap((x) => (x.open_items ?? []).map((id) => ({ task: x.task, id })));
+    if (reopenNames.length > 0) {
+      const known = itemIds(await ctx.ports.ledger.events({ mission: ctx.mission }));
+      const bad = reopenNames.filter((x) => !known.has(x.id)).map((x) => `open items: the reopen of task ${x.task} takes "${x.id}", which is not an open item of the mission`);
+      if (bad.length > 0) mc = { ...mc, ok: false, failures: [...mc.failures, ...bad] };
+    }
     await commit(ctx, `flow:repair-mechanical:${ctx.mission}:${mcKey}`, { events: [ev(ctx, REPAIRS_LINE, 'mechanical-check', mcKey, mc)] });
   }
   if (!mc.ok) return repairReturn(ctx, r, a, task, mc.failures);
@@ -499,7 +506,9 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     const sel = lineAcceptance(events);
     // 4.4 (F12 b): the tasks of this repair the reopen comes after (absent when none: the 4.3 shape)
     const after = [...new Set(x.after ?? [])];
-    const extra = after.length > 0 ? { after } : {};
+    // 4.4 (G5): the open items the reopened task takes (absent when none)
+    const items = [...new Set(x.open_items ?? [])];
+    const extra = { ...(after.length > 0 ? { after } : {}), ...(items.length > 0 ? { openItems: items } : {}) };
     if (sel.product !== null && (await acceptedProduct(ctx, x.task)) !== null) {
       reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product, ...extra });
       continue;
@@ -604,6 +613,8 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
   const addressed = addressedForPlanning(constraints, ctx.mission, { repair: r.id, ...(r.about?.kind === 'task' ? { about: r.about.id } : {}) });
   // 4.4 (G4): the questions this repair's Architect asked, and the answers that came back
   const answers = (await attemptsOf(ctx, r.id)).flatMap((x) => (x.answered !== undefined ? [{ question: x.answered.question, answer: x.answered.answer, by: x.answered.by }] : []));
+  // 4.4 (G4, G5): the open items the repair is for, still open, for the Architect to give to tasks
+  const openItems = (r.openItems ?? []).length === 0 ? [] : takenItems(await ctx.ports.ledger.events({ mission: ctx.mission }), r.openItems);
   const card: ArchitectRepairCard = {
     ...cardBase(ctx, task, {
       duties: `Turn repair ${r.id} into the least work that fixes it: reopen the tasks whose accepted work causes it, change the card of a task with no accepted product when the repair is about its card, and add tasks only for work no existing task owns. A task with an accepted product keeps its card. Only the program's mechanical checks follow (no Calibrator, no feasibility review).`,
@@ -625,6 +636,7 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
     revision: a.mechanicalFailures.length > 0 ? { mechanicalFailures: [...a.mechanicalFailures] } : null,
     projectCommands: projectCommandsOf(ctx),
     materials: [repairPlanMaterial((d) => ctx.ports.ledger.content.put(d), eff.dplan, plan)],
+    ...(openItems.length > 0 ? { openItems } : {}),
   };
   await ctx.ports.scheduler.submit({
     task,

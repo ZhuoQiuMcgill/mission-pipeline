@@ -24,6 +24,7 @@ import { addressee, constraintsForTask, forRepairArchitect, isAddressed, planInE
 import { lineAcceptance, taskLineage } from '../flow/execution.ts';
 import { repairLineage } from '../flow/repair.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED } from '../flow/exploration/machine.ts';
+import { riskItemsOf } from '../flow/riskItems.ts';
 
 function pages<T extends { revision: number }>(read: (after: number) => readonly T[]): T[] {
   const out: T[] = [];
@@ -181,10 +182,15 @@ export interface RepairRead {
    * Null: not a repair of the plan's tasks, or not decided.
    */
   readonly done: boolean | null;
+  /**
+   * 4.4 (G4, G5): the open items the repair names (`--open-items`) or its decision gave to a task: the tasks of its
+   * decision that took each (none: it stays open, given to no task) and whether it is closed now. Absent: none.
+   */
+  readonly openItems?: ReadonlyArray<{ readonly id: string; readonly named: boolean; readonly takenBy: readonly string[]; readonly closed: boolean }>;
 }
 
-/** The same repair (flow/repair.ts recordRepair): the same words, kind, text and subject. */
-const sameRepair = (a: RepairBody, b: RepairBody): boolean => a.words === b.words && a.kind === b.kind && a.text === b.text && canonicalJson(a.about) === canonicalJson(b.about);
+/** The same repair (flow/repair.ts recordRepair): the same words, kind, text and subject (4.4: and the open items it names). */
+const sameRepair = (a: RepairBody, b: RepairBody): boolean => a.words === b.words && a.kind === b.kind && a.text === b.text && canonicalJson(a.about) === canonicalJson(b.about) && canonicalJson(a.openItems ?? []) === canonicalJson(b.openItems ?? []);
 
 /** Whether a seat took attempt k of a task (as execution.ts attemptTaken): it was reviewed, or a dispatch of its Constructor or Reviewer exists. */
 function attemptTaken(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], k: number): boolean {
@@ -283,6 +289,14 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
     // 4.4 (F13): filed again, with --again or (its earlier one's work over) as the same repair
     const same = on('repair').find((x) => x.revision < e.revision && sameRepair(x.body as RepairBody, r))?.key ?? null;
     const filedAgain = r.op !== undefined || same !== null ? { flag: r.op !== undefined, of: same } : null;
+    // 4.4 (G4, G5): the open items it names and what its decision gave to which task (the cards it added or changed, its reopens)
+    const took = new Map<string, string[]>();
+    const give = (task: string, ids: readonly string[] | undefined): void => { for (const id of ids ?? []) took.set(id, [...(took.get(id) ?? []), task]); };
+    for (const t of [...(amendment?.tasks ?? []), ...(amendment?.changed ?? [])]) give(t.id, t.openItems);
+    for (const x of body?.reopen ?? []) give(x.task, x.openItems);
+    const itemIds = [...new Set([...(r.openItems ?? []), ...took.keys()])];
+    const closedNow = itemIds.length === 0 ? new Set<string>() : new Set(riskItemsOf(s.events).filter((i) => i.closed !== null).map((i) => i.id));
+    const openItems = itemIds.map((id) => ({ id, named: (r.openItems ?? []).includes(id), takenBy: took.get(id) ?? [], closed: closedNow.has(id) }));
     out.push({
       id: r.id, kind: r.kind, words: r.words, text: r.text, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state, filedAgain,
       note: body?.note ?? null,
@@ -292,6 +306,7 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       dispatches: s.dispatches.filter((x) => x.lineage === lineage).map((x) => ({ dispatch: x.dispatch, seat: x.seat, state: x.state })),
       taskDispatches: s.dispatches.filter((x) => x.rev > decidedRev && tasks.has(x.lineage)).length,
       done: r.about?.kind === 'exploration' || body === undefined ? null : all.length > 0 && all.every((t) => t.done),
+      ...(openItems.length > 0 ? { openItems } : {}),
     });
   }
   return { mission, repairs: out };
@@ -308,6 +323,8 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
     if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
     for (const [label, ts] of [['added', x.added], ['changed', x.changed], ['reopened', x.reopened]] as const) for (const t of ts) lines.push(`    ${label} ${t.task}: ${t.state}`);
+    // 4.4 (G4, G5): what became of the open items it is for
+    for (const i of x.openItems ?? []) lines.push(`    open item ${i.id}${i.named ? '' : ' (not named on the repair)'}: ${i.takenBy.length > 0 ? `taken by ${i.takenBy.map((t) => `task ${t}`).join(', ')}` : x.state === 'decided' ? 'given to no task by its decision' : 'not given to a task yet (not decided)'}${i.closed ? '; closed' : '; still open'}`);
     if (x.instructions.length > 0) lines.push(`    instructions addressed to it: ${x.instructions.join(', ')}`);
     lines.push(`    dispatches: ${x.dispatches.map((d) => `${d.dispatch} (${d.seat}, ${d.state})`).join(', ') || 'none'}${x.state === 'decided' ? `; on its tasks since its decision: ${x.taskDispatches}` : ''}`);
   }

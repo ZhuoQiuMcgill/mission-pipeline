@@ -470,6 +470,12 @@ export const ArchitectRepairCardSchema = z.object({
   materials: z.array(Material).optional(),
   /** 4.4 (G4): the questions this repair's Architect handed back with no edit, each with the answer of the PM (or the user). */
   answers: z.array(z.object({ question: z.string(), answer: z.string(), by: z.string() })).optional(),
+  /**
+   * 4.4 (G4, G5): the open items the repair is for (`mp pm repair --open-items`), each still open: where it was left
+   * and its text. The decision gives each to a task (`openItems` on an added or changed card, `open_items` on a
+   * reopen); one given to no task stays open. Absent: none named (or a card queued before 4.4).
+   */
+  openItems: z.array(z.object({ id: z.string().min(1), kind: z.string(), text: z.string(), from: z.string() })).optional(),
 });
 export type ArchitectRepairCard = z.infer<typeof ArchitectRepairCardSchema>;
 
@@ -487,6 +493,8 @@ export const ArchitectRepairResultShape = {
         issue: z.string().min(1).describe('What its work must fix for this repair.'),
         // 4.4 (F12 b, #59)
         after: z.array(z.string().min(1)).optional().describe('4.4: tasks this repair adds, changes or reopens whose new work this task builds on: its new attempt waits until they are accepted and starts on their work.'),
+        // 4.4 (G4, G5)
+        open_items: z.array(z.string().min(1)).optional().describe('4.4: open items listed on the card that this reopened task takes: its new attempt\'s cards list them and its Reviewer answers each. Omit when it takes none.'),
       }),
     )
     .describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
@@ -506,6 +514,7 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
     renderCommon(c) +
     `## The repair\n${c.repair.id} (${c.repair.kind}${c.repair.about !== null ? `, about ${c.repair.about}` : ''}): the user's reason, verbatim from ${c.repair.words}: "${c.repair.text}"\n\n` +
     list('Your questions on this repair and the answers', (c.answers ?? []).map((x) => `You asked: ${x.question}\n  Answer (${x.by}): ${x.answer}`)) +
+    list('Open items this repair is for (give each to a task: openItems on an added or changed card, open_items on a reopen; its Reviewer then answers it; one you give to no task stays open)', (c.openItems ?? []).map((i) => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`)) +
     `## The plan in effect\nDetailed plan ${c.dplan} (PM plan ${c.pmPlan}), ${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'}${(c.materials ?? []).length > 0 ? `, in full in material ${(c.materials ?? [])[0]!.id}` : ''}.\n\n` +
     list('Tasks', p.tasks.map((t) => `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing'}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t.provenance)})`)) +
     list('PM plan elements an added task may trace to', c.elements.map((e) => `[${e.id}] (${e.kind}) ${e.text}`)) +

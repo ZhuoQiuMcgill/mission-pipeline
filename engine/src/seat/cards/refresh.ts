@@ -13,7 +13,7 @@ import { acceptedEntry } from '../../flow/repair.ts';
 import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
 import { repairPlanMaterial } from './architect.ts';
 import { cardQuestions, taskQuestions, withoutAnswers } from '../../flow/openItems.ts';
-import { takenItems } from '../../flow/riskItems.ts';
+import { cardItemNames, takenItems } from '../../flow/riskItems.ts';
 import type { MaterialRef } from './common.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
@@ -200,6 +200,11 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const tasks = new Set(events.filter((e) => e.line === 'plan' && e.event === 'effective').flatMap((e) => (e.body as EffectiveBody).tasks));
       card.owners = ownersOfPaths(new Map([...tasks].map((id) => [id, lineOf(id)])), about).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
       card.materials = [repairPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')];
+      // 4.4 (G4, G5): the open items the repair is for, as they stand at the claim (one closed meanwhile is not listed)
+      const named = (events.find((e) => e.line === 'repairs' && e.event === 'repair' && e.key === card.repair.id)?.body as { openItems?: readonly string[] } | undefined)?.openItems;
+      const listed = takenItems(events, named);
+      if (listed.length > 0) card.openItems = listed;
+      else delete card.openItems;
       break;
     }
     case 'researcher-author':
@@ -260,7 +265,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       if (qs.length > 0) card.questions = cardQuestions(qs);
       else delete card.questions;
       // 4.4 (G5): the open items the card takes, as they stand at the claim (one closed meanwhile is not listed)
-      const taken = takenItems(events, task.openItems);
+      const taken = k === undefined ? [] : takenItems(events, cardItemNames(events, task, k));
       if (taken.length > 0) card.openItems = taken;
       else delete card.openItems;
       const was = k === undefined ? null : attemptPast(lineOf(task.id), k);
@@ -290,7 +295,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
         if (qs.length > 0) card.questions = cardQuestions(qs);
         else delete card.questions;
         // 4.4 (G5): the open items the card takes, as they stand at the claim: each listed one is answered
-        const taken = takenItems(events, task.openItems);
+        const taken = attempt === null ? [] : takenItems(events, cardItemNames(events, task, attempt));
         if (taken.length > 0) card.openItems = taken;
         else delete card.openItems;
       }

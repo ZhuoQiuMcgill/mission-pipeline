@@ -223,6 +223,37 @@ export function takersOf(plan: Pick<DetailedPlanDoc, 'tasks'> | null, amendments
   return out;
 }
 
+/** The reopens repairs' decisions gave open items to (a decided reopen's `openItems`): who took each. */
+export function reopenTakers(events: readonly Ev[]): Map<string, Taker[]> {
+  const out = new Map<string, Taker[]>();
+  for (const e of events) {
+    if (e.line !== 'repairs' || e.event !== 'decided') continue;
+    const d = e.body as { repair: string; reopen?: ReadonlyArray<{ task: string; openItems?: readonly string[] }> };
+    for (const x of d.reopen ?? []) for (const id of x.openItems ?? []) out.set(id, [...(out.get(id) ?? []), { task: x.task, by: `repair ${d.repair}, its reopen` }]);
+  }
+  return out;
+}
+
+/**
+ * 4.4 (G5): the open items attempt `attempt` of a task takes: those its card names, and those a repair's reopen
+ * gave it, on the reopened attempt and the reworks after it until one of them is accepted (the reopen's work).
+ */
+export function cardItemNames(events: readonly Ev[], task: { readonly id: string; readonly openItems?: readonly string[] | undefined }, attempt: number): string[] {
+  const line = events.filter((e) => e.line === `task:${task.id}`);
+  const accepted = new Set(line.filter((e) => e.event === 'accepted').map((e) => (e.body as { k?: unknown }).k));
+  let reopened: readonly string[] = [];
+  for (let j = attempt; j >= 1; j--) {
+    const rw = line.find((e) => e.event === 'rework' && e.key === String(j))?.body as { reopen?: { kind?: string; repair?: string } } | undefined;
+    if (rw?.reopen?.kind === 'repair') {
+      const d = events.find((e) => e.line === 'repairs' && e.event === 'decided' && e.key === rw.reopen!.repair)?.body as { reopen?: ReadonlyArray<{ task: string; openItems?: readonly string[] }> } | undefined;
+      reopened = d?.reopen?.find((x) => x.task === task.id)?.openItems ?? [];
+      break;
+    }
+    if (accepted.has(j - 1)) break;
+  }
+  return [...new Set([...(task.openItems ?? []), ...reopened])];
+}
+
 /** An open item as a card lists it, for the task that took it. */
 export interface CardItem {
   readonly id: string;

@@ -109,6 +109,39 @@ describe('4.4 G5: an item is taken by a re-plan or a repair', () => {
     assert.ok(facts.includes(`[${taken.id}] fix, attempt ${taken.attempt} of task impl, taken by this task`), facts);
   });
 
+  it('G4: the repair\'s Architect card lists the items it is for; a reopen takes one (open_items), whose next attempt\'s cards list it; mp read repairs says which task took each, and that one given to no task stays open', async () => {
+    const { w, engine, items } = await acceptedWithRisk();
+    const [first, second] = items as [RiskItemBody, RiskItemBody];
+    const words = say(w, 'Trying it: empty fields still vanish.');
+    const filed = await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'empty fields still vanish', openItems: [first.id, second.id] });
+    let hand = 0;
+    await drive(engine, w.scheduler, script({
+      'architect-repair': (t) => {
+        if ((t.card as unknown as ArchitectRepairCard).repair.id !== filed.repair) return null;
+        hand++;
+        return { handBack: { reopen: [{ task: 'impl', issue: 'empty fields vanish', open_items: [hand === 1 ? 'no-such-item' : first.id] }], add: [], note: 'impl owns it' } };
+      },
+      reviewer: (t) => ({ handBack: reviewer(t.card as unknown as ReviewerCard, 'pass') }),
+      secretary: acceptsRisk,
+    }));
+    const cards = [...w.scheduler.tasks.values()].map((t) => t.spec.card as unknown as ArchitectRepairCard).filter((c) => c.seat === 'architect-repair' && c.repair.id === filed.repair);
+    assert.equal(cards.length, 2, 'the hand-back went back once');
+    const [arch, again] = cards as [ArchitectRepairCard, ArchitectRepairCard];
+    assert.deepEqual(arch.openItems?.map((i) => i.id), [first.id, second.id], 'the repair card lists the items it is for');
+    assert.ok(again.revision?.mechanicalFailures.includes('open items: the reopen of task impl takes "no-such-item", which is not an open item of the mission'), JSON.stringify(again.revision));
+    const decided = (await events<any>(w, 'repairs', 'decided')).find((e) => e.key === filed.repair)!.body;
+    assert.deepEqual(decided.reopen.map((x: any) => [x.task, x.openItems]), [['impl', [first.id]]]);
+    const k = first.attempt + 1;
+    assert.deepEqual(w.scheduler.card<ConstructorCard>(`con.m1.impl.${k}`).openItems?.map((i) => i.id), [first.id]);
+    assert.deepEqual(w.scheduler.card<ReviewerCard>(`rev.m1.impl.${k}`).openItems?.map((i) => i.id), [first.id]);
+    const all = listAllItems(w.ctx, M).items;
+    assert.equal(all.find((i) => i.id === first.id)!.closed?.how, 'fixed');
+    assert.equal(all.find((i) => i.id === second.id)!.closed, null);
+    const r = await cli(w.dir, ['read', 'repairs', 'm1']);
+    assert.ok(r.out.includes(`open item ${first.id}: taken by task impl; closed`), r.out);
+    assert.ok(r.out.includes(`open item ${second.id}: given to no task by its decision; still open`), r.out);
+  });
+
   it('the commands: a repair names an item that is none, or one closed, and is refused with the reason; the PM closes one with mp pm open-item close; one left at the cap is not answered as a question is', async () => {
     const { w, items } = await acceptedWithRisk();
     const [first, second] = items as [RiskItemBody, RiskItemBody];

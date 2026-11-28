@@ -21,6 +21,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - All: the project constraints in force (an instruction is labelled "Instruction (follow it; not a proof input)": follow it), the relevant decisions, materials.
 - Instructions addressed to tasks or repairs: on a repair card those for this repair or its task in full, under "Instructions for this task"; the others as an index (each reaches only what it names).
 - Repair: your earlier questions on this repair and the answers, when you asked.
+- Open items: a decomposition card lists those left open earlier (at an acceptance with risk, or deferred) that no task of the plan it revises takes; a repair card lists those the repair is for.
 - Decomposition, revision and repair cards also carry the planning rules: how to cut tasks, the mechanical checks your plan must pass, the project's local commands and full suite, and what a Reviewer can see.
 
 `mp seat <id> checkout` prints the path of a read-only directory holding the commit your card names: read the project there, not in anyone's working tree. Other seats reading the same commit share it: never write there.
@@ -44,6 +45,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
   - `change`: tasks of the plan in effect with no accepted product whose card the repair must change: the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs. Each starts a new attempt under its new card and carries its earlier work on;
   - `note`: why the repair is these reopenings, changes and additions, in a few sentences. It is recorded with the decision and printed on the cards of every task you reopen, change or add: write what their seats need to know of the repair's scope.
   A task with an accepted product keeps its card: reopen it with the issue instead. Reopen, change or add at least one task.
+- **Open items** (decomposition and repair): a task takes an open item by naming its id in `openItems` on its card (an added or changed card), a reopen with `open_items`; its cards list it and its Reviewer answers it. A name that is no open item of the mission comes back as a mechanical failure. An item you give to no task stays open, on the record.
   If you cannot decide without an answer, hand back no reopen, add or change, with your question as the `note`: it goes to the PM, whose filing the repair is; the repair's next card brings the answer.
 
 Rules for the plan:

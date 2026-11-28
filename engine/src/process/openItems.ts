@@ -12,7 +12,7 @@ import { canonicalJson } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import type { ObjectVersionRecord } from '../common/records.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, OPEN_ITEM_ANSWER, itemDecider, openItemsOf, type OpenItem, type OpenItemAnswerBody } from '../flow/openItems.ts';
-import { OPEN_ITEM_CLOSED, VERIFIED, VERIFIED_LINE, riskItemsOf, takersOf, type ItemClosedBody, type RiskItem, type Taker, type VerifiedBody } from '../flow/riskItems.ts';
+import { OPEN_ITEM_CLOSED, VERIFIED, VERIFIED_LINE, reopenTakers, riskItemsOf, takersOf, type ItemClosedBody, type RiskItem, type Taker, type VerifiedBody } from '../flow/riskItems.ts';
 import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, amendedPlan, type AmendmentEntry, type RepairBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import { appendRecords, factById, flowEventExists, flowEvents, flowMissions, type Db } from '../memory/index.ts';
 import { requireSecretary } from '../memory/resident.ts';
@@ -96,6 +96,8 @@ export function riskViews(db: Db, data: { text(h: string): string }, mission: st
   if (items.length === 0) return [];
   const eff = planInEffectOf(db, data, events);
   const takers = takersOf(eff?.plan ?? null, eff?.amendments);
+  // 4.4 (G4, G5): and the reopens a repair's decision gave items to
+  for (const [id, xs] of reopenTakers(events)) takers.set(id, [...(takers.get(id) ?? []), ...xs]);
   const named = new Map<string, string[]>();
   for (const e of events) {
     if (e.line !== REPAIRS_LINE || e.event !== 'repair') continue;
