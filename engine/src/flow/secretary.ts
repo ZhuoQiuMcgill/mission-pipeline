@@ -28,7 +28,7 @@ import { DetailedPlanDoc, PLAN_LINE, SECRETARY_LINE, amendedPlan, latestEffectiv
 import type { AppendGuard, FlowEvent, FlowEventInput, FlowPorts, FlowSchedulerPort } from './ports.ts';
 import { currentItems, currentConstraints } from './requirements.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, deferredItemBodies, escalationQuestions } from './openItems.ts';
-import { ARCHITECT_ANSWER, answerKey, answersInPlace, reopenedAt, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
+import { ARCHITECT_ANSWER, answerKey, answersInPlace, currentHandUp, handUpKey, reopenedAt, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
 import { WI } from './wi.ts';
 
 export interface EscalationSpec {
@@ -361,8 +361,8 @@ export async function secretaryStep(ctx: FlowCtx): Promise<void> {
       // the notices a decision calls for are sent until marked told (code review r1 #14)
       if (decided.body.by === 'program') await tellUndecided(ctx, esc, decided.body.reason);
       else await tellPm(ctx, esc, decided.body);
-      const toUser = await eventOf<{ why: string; wi: string | null }>(ctx, SECRETARY_LINE, 'to-user', esc.id);
-      if (toUser !== null && (await eventOf(ctx, SECRETARY_LINE, 'user-answer', esc.id)) === null) await tellToUser(ctx, esc.id, toUser.body.why, toUser.body.wi ?? null);
+      const toUser = currentHandUp(await roundEvents(ctx), esc.id) as FlowEvent<{ why: string; wi: string | null }> | undefined;
+      if (toUser !== undefined && (await eventOf(ctx, SECRETARY_LINE, 'user-answer', esc.id)) === null) await tellToUser(ctx, esc.id, toUser.body.why, toUser.body.wi ?? null, toUser.key);
       continue;
     }
     const view = await taskView(ctx, esc.task);
@@ -454,18 +454,29 @@ async function tellApplied(ctx: FlowCtx, id: string): Promise<void> {
   if (esc !== null && d !== null && d.body.by === 'secretary') await tellPm(ctx, esc, d.body);
 }
 
-/** Hand a decided escalation to the user (e.g. the Secretary's grant was refused, WI-08). */
+/**
+ * Hand a decided escalation to the user (e.g. the Secretary's grant was refused, WI-08). Once per round (4.4, G1,
+ * review p11-r2-2): in a round an Architect's reply reopened, the hand-up is that round's (architectAnswers.ts handUpKey).
+ */
 export async function escalateToUser(ctx: FlowCtx, id: string, why: string, wi: string | null): Promise<void> {
-  if ((await eventOf(ctx, SECRETARY_LINE, 'to-user', id)) === null) await commit(ctx, `flow:to-user:${ctx.mission}:${id}`, { events: [ev(ctx, SECRETARY_LINE, 'to-user', id, { why, wi })] });
-  await tellToUser(ctx, id, why, wi);
+  const key = handUpKey(await roundEvents(ctx), id);
+  if ((await eventOf(ctx, SECRETARY_LINE, 'to-user', key)) === null) await commit(ctx, `flow:to-user:${ctx.mission}:${key}`, { events: [ev(ctx, SECRETARY_LINE, 'to-user', key, { why, wi })] });
+  await tellToUser(ctx, id, why, wi, key);
 }
 
-async function tellToUser(ctx: FlowCtx, id: string, why: string, wi: string | null): Promise<void> {
+/** 4.4 (G1): the secretary line's events a round's hand-up is read from (its retries, PM answers and hand-ups), in commit order. */
+async function roundEvents(ctx: FlowCtx): Promise<FlowEvent[]> {
+  const out: FlowEvent[] = [];
+  for (const event of ['secretary-retry', 'pm-answer', 'to-user']) out.push(...(await eventsOf(ctx, SECRETARY_LINE, event)));
+  return out.sort((a, b) => a.revision - b.revision);
+}
+
+async function tellToUser(ctx: FlowCtx, id: string, why: string, wi: string | null, handUp: string = id): Promise<void> {
   const esc = await escalation(ctx, id);
   await tellOnce(ctx, SECRETARY_LINE, {
     category: wi === null ? 'needs-user-decision' : 'loop-exhausted-needs-user',
     wi,
-    key: `${id}:to-user`,
+    key: `${handUp}:to-user`,
     trigger: why,
     defaultAction: `only ${esc?.subject ?? id} waits for the ${ctx.ports.resident?.() ? 'PM’s' : 'user’s'} decision; the rest of the mission continues`,
     detail: { escalation: id, options: esc?.options ?? [] },
@@ -532,23 +543,17 @@ export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBod
   if (pm !== null) return observed(ctx, id, await architectAnswered(ctx, id, pm, { escalation: id, by: 'pm', round: pm.answerRound ?? 1 }));
   // Recording a PM answer permanently overrides the earlier Secretary choice. A rejected
   // answer leaves the next PM round waiting, including on pure reads before rejection is recorded.
-  // 4.4 (G1, review p11-2): except in a Secretary round an Architect's reply reopened after it (no PM answer since)
-  const pmAnswers = (await eventsOf(ctx, SECRETARY_LINE, 'pm-answer')).filter((e) => e.key.startsWith(`${id}#`));
-  const handed = await eventOf(ctx, SECRETARY_LINE, 'to-user', id);
-  if ((pmAnswers.length > 0 || handed !== null) && (await secretaryReopened(ctx, id, pmAnswers)) === null) return null;
+  // 4.4 (G1, review p11-2): except in a Secretary round an Architect's reply reopened after it (no PM answer since);
+  // a hand-up of that round sends it up again (review p11-r2-2: architectAnswers.ts currentHandUp)
+  const sec = await roundEvents(ctx);
+  if (currentHandUp(sec, id) !== undefined) return null;
+  if (sec.some((e) => e.event === 'pm-answer' && e.key.startsWith(`${id}#`)) && reopenedAt(sec, id) === null) return null;
   const esc = await escalation(ctx, id);
   const round = esc === null ? null : await secretaryRound(ctx, esc);
   const d = await eventOf<DecisionBody>(ctx, SECRETARY_LINE, 'decision', round?.key ?? id);
   if (d === null || d.body.classification === 'needs-user' || d.body.classification === 'needs-pm' || isAskOption(d.body.option)) return null;
   if (round !== null && !(await isApplied(ctx, id)) && !(await decisionAuthorityCurrent(ctx, round.esc, round, d.body))) return null;
   return observed(ctx, id, d.body.by === 'secretary' ? await architectAnswered(ctx, id, d.body, { escalation: id, by: 'secretary', round: round?.round ?? 0 }) : d.body);
-}
-
-/** 4.4 (G1, review p11-2): the revision of the Secretary round an Architect's reply reopened after the PM's round (architectAnswers.ts reopenedAt), or null. */
-async function secretaryReopened(ctx: FlowCtx, id: string, pmAnswers: readonly FlowEvent[]): Promise<number | null> {
-  const retries = await eventsOf(ctx, SECRETARY_LINE, 'secretary-retry');
-  if (!retries.some((r) => (r.body as { id?: unknown; architect?: unknown }).id === id && typeof (r.body as { architect?: unknown }).architect === 'string')) return null;
-  return reopenedAt([...retries, ...pmAnswers], id);
 }
 
 /**
@@ -702,7 +707,8 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
     const w = /\((W-[0-9]+)\)\s*$/.exec(d.reason);
     if (w !== null) decider['words'] = w[1];
   }
-  const handedBefore = d.by === 'secretary' && (await eventOf(ctx, SECRETARY_LINE, 'to-user', id)) !== null;
+  // 4.4 (G1, review p11-r2-2): the hand-up guarded is the current round's (a reopened round's own; one from before it stays)
+  const handUp = d.by === 'secretary' ? handUpKey(await roundEvents(ctx), id) : id;
   return {
     id,
     openMissions: d.by === 'pm' ? [ctx.mission] : [],
@@ -716,8 +722,7 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
       // after carryOut prepared it. Rejection never removes the immutable overriding answer.
       ...(d.by !== 'user' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'user-answer', key: id }] : []),
       ...(d.by === 'secretary' ? [
-        // 4.4 (G1, review p11-2): a hand-up before a round an Architect's reply reopened stays (it is written once): not guarded
-        ...(handedBefore ? [] : [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'to-user', key: id }]),
+        { mission: ctx.mission, line: SECRETARY_LINE, event: 'to-user', key: handUp },
         { mission: ctx.mission, line: SECRETARY_LINE, event: 'pm-answer', key: `${id}#${pmRound}` },
       ] : []),
       ...(d.by === 'pm' ? [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'pm-answer-rejected', key: `${id}#${d.answerRound}` }] : []),

@@ -18,7 +18,7 @@ import { listNotices, markNotices, onlyInforms } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
 import type { DecisionBody, EscalationBody } from '../flow/secretary.ts';
 import { secretaryRoundInputs } from '../seat/cards/dynamic.ts';
-import { reopenedAt } from '../flow/architectAnswers.ts';
+import { currentHandUp, reopenedAt } from '../flow/architectAnswers.ts';
 import { handBackFiles } from '../seat/card.ts';
 import type { SecretaryResult } from '../seat/cards/secretary.ts';
 import { holdTimeReached } from './holds.ts';
@@ -260,6 +260,7 @@ function inboxItems(ctx: ProcessContext): InboxItem[] {
   const events = allFlow(ctx);
   const out: InboxItem[] = [];
   const plans = new Map<string, DetailedPlanDoc | null>();
+  const held = new Set<string>();
   const is = (mission: string, event: string, key: string) => events.some((e) => e.mission === mission && e.line === 'secretary' && e.event === event && e.key === key);
   const answered = (mission: string, id: string) => {
     if (is(mission, 'applied', id) || is(mission, 'user-answer', id)) return true;
@@ -279,24 +280,32 @@ function inboxItems(ctx: ProcessContext): InboxItem[] {
     // 4.4 (F9, issue 62): listed from the moment the hand-back is recorded, before a pass writes the decision
     const handed = d === undefined ? handedBackDecision(ctx, round.esc.task) : undefined;
     const decided = d ?? handed;
-    // 4.4 (G1, review p11-2): a Secretary round an Architect's reply reopened is the Secretary's: listed only once that round sends it up
-    const reopened = reopenedAt(mine.filter((r) => r.line === 'secretary'), esc.id) !== null;
-    const routed = reopened ? decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined : is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || DIRECT_TO_PM.has(esc.source);
-    if (!routed) continue;
+    // 4.4 (G1, review p11-2, p11-r2-2): a Secretary round an Architect's reply reopened is the Secretary's: listed only once
+    // that round sends it up (its decision, or its own hand-up, as a refused grant writes); its earlier notices wait with it
+    const sec = mine.filter((r) => r.line === 'secretary');
+    const reopened = reopenedAt(sec, esc.id) !== null;
+    const handUp = currentHandUp(sec, esc.id);
+    const routed = reopened ? decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || handUp !== undefined : handUp !== undefined || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || DIRECT_TO_PM.has(esc.source);
+    if (!routed) {
+      if (reopened) held.add(`${e.mission}/${esc.id}`);
+      continue;
+    }
     const id = `${e.mission}/${esc.id}`;
     const asked = is(e.mission, 'asked-user', esc.id);
     // 4.4 (G1): a round the PM itself closed (an ask it answered over), or one the Architect's reply closed, says so
     const closed = pmRound > 1 ? events.find((r) => r.mission === e.mission && r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === `${esc.id}#${pmRound - 1}`)?.body as {why?: string; architect?: string; closedBy?: string} | undefined : undefined;
     const back = pmRound <= 1 ? '' : typeof closed?.architect === 'string' ? `; your earlier ask of the Architect came back to the Secretary: ${clip(closed.why ?? '', 600)}` : closed?.closedBy === 'pm' ? '' : '; the words it rested on changed';
     out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${back}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound,
-      brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans, mine.find((t) => t.line === 'secretary' && t.event === 'to-user' && t.key === esc.id)?.body.why ?? null)});
+      brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans, (handUp?.body as {why?: string} | undefined)?.why ?? null)});
   }
   for (const n of listNotices(ctx.memory, ctx.memory.data, {audience: 'pm'})) {
     const detail = n.detail as {escalation?: string | {id?: string}; escalations?: string[]} | null;
     const id = typeof detail?.escalation === 'string' ? detail.escalation : detail?.escalation?.id;
     const linked = [...new Set([...(id === undefined ? [] : [id]), ...(detail?.escalations ?? [])])];
     if (linked.length > 0 && n.mission !== null && linked.every((id) => answered(n.mission!, id))) continue;
-    const pending = linked.filter((id) => n.mission === null || !answered(n.mission, id));
+    // 4.4 (G1, review p11-2): an escalation back with the Secretary (a reopened round not sent up) waits for no PM answer
+    const pending = linked.filter((id) => n.mission === null || (!answered(n.mission, id) && !held.has(`${n.mission}/${id}`)));
+    if (linked.length > 0 && pending.length === 0) continue;
     if (pending.length > 0 && pending.every((id) => out.some((i) => i.id === `${n.mission}/${id}`))) continue;
     // A revised batch resolves a returned first review without an operational PM pass.
     if ((n.category === 'calibrator-1-returned' || n.category === 'calibrator-1-unavailable') && events.some((e) => e.mission === n.mission && e.line === 'plan' && (e.event === 'pm-batch' || e.event === 'cal1-recheck') && e.revision > n.revision)) continue;

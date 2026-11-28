@@ -13,15 +13,18 @@ import { flowCtx } from '../src/flow/context.ts';
 import type { FlowEvent, FlowTask } from '../src/flow/ports.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import { constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
-import { answerByPm, answerEscalation, closeEscalations, decisionFor, escalation, pmOptions, raiseEscalation, secretaryOptions } from '../src/flow/secretary.ts';
+import { answerByPm, answerEscalation, closeEscalations, decisionFor, escalateToUser, escalation, pmOptions, raiseEscalation, secretaryOptions } from '../src/flow/secretary.ts';
 import { askTask } from '../src/flow/architectAsk.ts';
-import { ARCHITECT_ANSWER, type ArchitectAnswerBody } from '../src/flow/architectAnswers.ts';
+import { ARCHITECT_ANSWER, askStanding, type ArchitectAnswerBody } from '../src/flow/architectAnswers.ts';
 import { pmDispatch, readSteps } from '../src/process/pm.ts';
 import { resolveSubtasks } from '../src/cli/layers.ts';
-import { architectNotesFor, taskDecisionQuotes } from '../src/seat/cards/dynamic.ts';
+import { architectNotesFor, earlierDecisionsOf, taskDecisionQuotes } from '../src/seat/cards/dynamic.ts';
+import type { EscalationBody } from '../src/flow/secretary.ts';
 import { currentItems, recordItem } from '../src/flow/requirements.ts';
 import { REDISPATCH_LOOP } from '../src/process/index.ts';
 import { pmInbox } from '../src/process/secretary.ts';
+import { decisionOutcome } from '../src/process/decisions.ts';
+import { listOpenItems } from '../src/process/openItems.ts';
 import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
 import '../src/seat/cards/index.ts';
 import { handBackProblems } from '../src/seat/cards/index.ts';
@@ -641,6 +644,177 @@ describe('4.4 G1, review round 1', () => {
     const step = askTask(M, { escalation: id, by: 'pm', round: 1 });
     const line = (await resolveSubtasks(ports.ctx)).blocked.flatMap((e) => (e.blocked !== null ? [e.blocked] : [])).find((b) => b.because.includes(id))!;
     assert.equal(line.next, `the Architect answers it: step ${step} is ready: dispatch it (mp pm next)`);
+  });
+});
+
+/** The used-up rework loop of impl (its Reviewer always sends it back); the Secretary's script on it: `round` 0 or a returned one. */
+const reworksImpl: Script = (t) => { const c = t.card as unknown as ReviewerCard; return { handBack: reviewer(c, c.target.includes('impl') ? 'rework' : 'pass') }; };
+const onLoop = (f: (c: SecretaryCard, returned: boolean) => ReturnType<Script>): Script => (t) => {
+  const c = t.card as unknown as SecretaryCard;
+  return c.request.source === 'loop-exhausted' ? f(c, c.request.reasons.some((r) => r.startsWith('The Architect'))) : null;
+};
+const blockedLine = async (w: World, id: string): Promise<string> => (await resolveSubtasks(w.ctx)).blocked.flatMap((e) => (e.blocked !== null ? [e.blocked] : [])).find((b) => b.because.includes(id))!.next;
+/** What the PM inbox lists about one escalation: its decision item, or a notice whose action answers it. */
+const inboxAbout = (w: World, id: string) => pmInbox(w.ctx).filter((i) => i.id.includes(id) || i.action.includes(id));
+
+describe('4.4 G1, review round 2', () => {
+  it('p11-r2-1: the PM asks, the Architect needs to know first, the returned Secretary round answers: the released Reviewer\'s card carries that answer under the question, and the task\'s next cards in their decision quotes', async () => {
+    const { ports, engine } = await constructorAsks(['Which line ending?']);
+    const id = 'cdec.con.m1.impl.1';
+    await answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'design', instructions: ASK });
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': reply({ reply: 'need-to-know', text: 'Does the user run it on Windows?' }) }));
+    const answer = 'Use LF: the user runs Linux only.';
+    await drive(engine, ports.scheduler, withKinds({
+      secretary: (t) => { const c = t.card as unknown as SecretaryCard; return c.request.id === id ? { handBack: secretary(c, 'answer', { instructions: answer }) } : null; },
+      reviewer: (t) => ({ handBack: reviewer(t.card as unknown as ReviewerCard, t.task === 'rev.m1.impl.1' ? 'rework' : 'pass') }),
+    }));
+    const a = await applied(ports, id);
+    assert.deepEqual([(a?.['what'] as { option: string }).option, a?.['by']], ['answer', 'secretary']);
+    const rev = claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1');
+    assert.deepEqual(rev.questions?.map((q) => [q.state, q.by, q.answer]), [['answered', 'secretary', answer]], 'under the question (its own attempt\'s answers are not repeated in its quotes, F4)');
+    // the decision quotes: the next attempt's Constructor, queued and claimed
+    for (const [where, quotes] of [['queued', ports.scheduler.card<ConstructorCard>('con.m1.impl.2').decisionQuotes], ['claimed', claimedCard<ConstructorCard>(ports, 'con.m1.impl.2').decisionQuotes]] as const) assert.ok(quotes.includes(answer), `${where}: ${JSON.stringify(quotes)}`);
+    // and in the earlier decisions a Secretary card lists for another escalation of the task
+    const earlier = earlierDecisionsOf({ id: 'other', subject: 'task:impl' } as EscalationBody, await events(ports)).find((x) => x.escalation === id);
+    assert.deepEqual([earlier?.option, earlier?.by], ['answer', 'secretary']);
+  });
+
+  it('p11-r2-2: a grant the returned round chose and the ledger refused hands it up for that round: the PM inbox lists it, and mp read blocked says to ask the user', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({
+      reviewer: reworksImpl,
+      secretary: onLoop((c, returned) => (returned ? null : { handBack: secretary(c, 'ask-architect', { instructions: ASK }) })),
+      'architect-answer': reply({ reply: 'answer', text: 'Use commas.' }),
+    }));
+    const id = (await events(ports, { line: 'secretary', event: 'escalation' })).map((e) => e.body as { id: string; source: string }).find((e) => e.source === 'loop-exhausted')!.id;
+    const retry = `sec.${id}.retry1`;
+    assert.equal(ports.scheduler.tasks.get(retry)?.state, 'queued', 'returned to a fresh Secretary round');
+    // claimed while its grant is available; another escalation of the lineage uses the Secretary's one grant meanwhile
+    ports.scheduler.dispatchOf(retry);
+    await ports.scheduler.grant({ op: 'other-escalation', lineage: 'task.m1.impl', loop: 'rework', extra: 1, by: 'secretary', reason: 'another escalation of the lineage' });
+    assert.deepEqual(await ports.scheduler.run(retry, { handBack: secretary(ports.scheduler.card<SecretaryCard>(retry), 'grant', { instructions: 'One more attempt.', grantExtra: 1 }) }), []);
+    await drive(engine, ports.scheduler, withKinds({ reviewer: reworksImpl, secretary: () => null }));
+    assert.deepEqual((await events(ports, { line: 'secretary', event: 'to-user' })).map((e) => e.key), [`${id}#1`], 'the hand-up is the returned round\'s');
+    assert.equal(await decisionFor(flowCtx(ports, M), id), null, 'no decision of the Secretary\'s to carry out');
+    const item = pmInbox(ports.ctx).find((i) => i.id === `${M}/${id}`);
+    assert.ok(item !== undefined, 'the PM gets it');
+    assert.match(item!.brief?.handedOver ?? '', /grant on lineage task\.m1\.impl was refused/);
+    assert.ok(readSteps(ports.ctx).waitingOnUser.some((w) => w.escalation === id), 'it waits on the user');
+    assert.match(await blockedLine(ports, id), /^ask the user; then mp pm answer m1 /);
+    assert.equal(await applied(ports, id), undefined, 'nothing carried out');
+    // what the Secretary's hand-back command reports (F9): handed on to the PM, with the flow's reason
+    const told = ports.ctx.memory.read((db) => decisionOutcome(db, ports.ctx.memory.data, { mission: M, escalation: id, task: retry, fields: null, why: null }));
+    assert.deepEqual([told.state, /grant on lineage task\.m1\.impl was refused/.test(told.text)], ['to-pm', true], told.text);
+  });
+
+  it('p11-r2-2, p11-2: handed up before an Architect\'s return: in the returned round neither the escalation nor its hand-up notice waits for the PM; a hand-up in that round is its own, and honoured', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({ reviewer: reworksImpl, secretary: () => null }));
+    const id = (await events(ports, { line: 'secretary', event: 'escalation' })).map((e) => e.body as { id: string; source: string }).find((e) => e.source === 'loop-exhausted')!.id;
+    // the first round's grant: claimed while available, refused by the ledger (another escalation used it)
+    ports.scheduler.dispatchOf(`sec.${id}`);
+    await ports.scheduler.grant({ op: 'other-escalation', lineage: 'task.m1.impl', loop: 'rework', extra: 1, by: 'secretary', reason: 'another escalation of the lineage' });
+    await ports.scheduler.run(`sec.${id}`, { handBack: secretary(ports.scheduler.card<SecretaryCard>(`sec.${id}`), 'grant', { instructions: 'One more attempt.', grantExtra: 1 }) });
+    await drive(engine, ports.scheduler, withKinds({ reviewer: reworksImpl, secretary: () => null }));
+    assert.deepEqual((await events(ports, { line: 'secretary', event: 'to-user' })).map((e) => e.key), [id], 'handed up');
+    assert.deepEqual(inboxAbout(ports, id).map((i) => i.kind), ['decision']);
+    await answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'design', instructions: ASK });
+    await drive(engine, ports.scheduler, withKinds({ reviewer: reworksImpl, secretary: () => null, 'architect-answer': reply({ reply: 'need-to-know', text: 'Which OS does the user run?' }) }));
+    assert.equal(ports.scheduler.tasks.get(`sec.${id}.retry1`)?.state, 'queued', 'back with the Secretary');
+    assert.deepEqual(inboxAbout(ports, id), [], 'no item, and not the earlier hand-up\'s notice, waits for the PM meanwhile');
+    assert.ok(!readSteps(ports.ctx).waitingOnUser.some((w) => w.escalation === id));
+    assert.match(await blockedLine(ports, id), /^the Secretary decides/);
+    const roundAsk = { escalation: id, by: 'secretary', round: 1 } as const;
+    assert.equal(askStanding(await events(ports, { line: 'secretary' }), roundAsk), null, 'an ask of the returned round would stand: the earlier hand-up is history');
+    // the program hands the returned round up (as a refused grant or used-up restarts do): that round's own hand-up
+    await escalateToUser(flowCtx(ports, M), id, 'only the user can allow more (test)', 'WI-08');
+    assert.deepEqual((await events(ports, { line: 'secretary', event: 'to-user' })).map((e) => e.key), [id, `${id}#1`]);
+    assert.equal(await decisionFor(flowCtx(ports, M), id), null);
+    assert.match(askStanding(await events(ports, { line: 'secretary' }), roundAsk) ?? '', /was handed to the PM/, 'and stands no more once that round is handed up');
+    const listed = inboxAbout(ports, id);
+    assert.deepEqual(listed.map((i) => i.kind), ['decision'], 'listed once, as the decision to take');
+    assert.equal(listed[0]!.brief?.handedOver, 'only the user can allow more (test)');
+    assert.ok(readSteps(ports.ctx).waitingOnUser.some((w) => w.escalation === id && w.why === 'only the user can allow more (test)'));
+    assert.match(await blockedLine(ports, id), /^ask the user; then mp pm answer m1 /);
+  });
+
+  it('p11-2: sent up by the Secretary, sent to the Architect by the PM, back with the Secretary: no inbox item or notice for it until the fresh round sends it up, with its new brief', async () => {
+    const { ports, engine } = await constructorAsks(['Which line ending?']);
+    const id = 'cdec.con.m1.impl.1';
+    const sendsUp = (notice: string): Script => (t) => { const c = t.card as unknown as SecretaryCard; return c.request.id === id ? { handBack: secretary(c, 'ask-pm', { notice }) } : null; };
+    await drive(engine, ports.scheduler, withKinds({ secretary: sendsUp('First brief: LF or CRLF?') }));
+    assert.match(inboxAbout(ports, id).find((i) => i.kind === 'decision')?.brief?.notice ?? '', /First brief/);
+    await answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'design', instructions: ASK });
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': reply({ reply: 'need-to-know', text: 'Which OS does the user run?' }) }));
+    assert.equal(ports.scheduler.tasks.get(`sec.${id}.retry1`)?.state, 'queued');
+    assert.deepEqual(inboxAbout(ports, id), [], 'neither the escalation nor the Secretary\'s earlier notice waits for the PM');
+    await drive(engine, ports.scheduler, withKinds({ secretary: sendsUp('Second brief: the Architect asks which OS; ask the user.') }));
+    const listed = inboxAbout(ports, id);
+    assert.deepEqual(listed.map((i) => i.kind), ['decision']);
+    assert.match(listed[0]!.brief?.notice ?? '', /Second brief/);
+  });
+
+  it('p11-r2-3: the Secretary round in flight when the escalation returns to a fresh round hands back an answer that puts question 2 off: recorded as moot, no open item, nothing carried out', async () => {
+    const { ports, engine } = await constructorAsks(['Which quote character?', 'Which licence header?']);
+    const id = 'cdec.con.m1.impl.1';
+    const old = `sec.${id}`;
+    const dispatch = ports.scheduler.dispatchOf(old);
+    await answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'design', instructions: ASK });
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': reply({ reply: 'need-to-know', text: 'Which OS does the user run?' }) }));
+    assert.equal(ports.scheduler.tasks.get(`sec.${id}.retry1`)?.state, 'queued', 'a fresh round');
+    assert.equal(ports.scheduler.tasks.get(old)?.state, 'running', 'the old round is still in flight');
+    await ports.scheduler.run(old, { handBack: { ...secretary(ports.scheduler.card<SecretaryCard>(old), 'answer', { instructions: 'Double quotes.' }), defer: [2] } });
+    const a = ports.scheduler.answers.get(old);
+    assert.ok(a?.kind === 'recorded' && a.notes.some((n) => /round sec\.cdec\.con\.m1\.impl\.1 on escalation cdec\.con\.m1\.impl\.1 was replaced by a newer round/.test(n)), JSON.stringify(a));
+    assert.deepEqual(await events(ports, { line: 'open-items' }), [], 'no open item');
+    assert.ok((await events(ports, { line: 'tasks', event: 'decision-released' })).some((e) => e.key === dispatch), 'taken back');
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null }));
+    assert.equal(await applied(ports, id), undefined, 'nothing carried out');
+    const fresh = `sec.${id}.retry1`;
+    assert.equal(ports.scheduler.tasks.get(fresh)?.state, 'queued', 'the fresh round decides');
+    // the fresh round's own answer puts question 2 off: its open item is the Secretary's (the PM's closed round does not make it the PM's)
+    assert.deepEqual(await ports.scheduler.run(fresh, { handBack: { ...secretary(ports.scheduler.card<SecretaryCard>(fresh), 'answer', { instructions: 'Double quotes.' }), defer: [2] } }), []);
+    assert.deepEqual(listOpenItems(ports.ctx, M).map((i) => [i.id, i.decider]), [[`${id}.q2`, 'secretary']]);
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null }));
+    assert.deepEqual([((await applied(ports, id))?.['what'] as { option: string }).option, (await applied(ports, id))?.['by']], ['answer', 'secretary']);
+  });
+
+  it('p11-r2-3: mp read blocked names the fresh round\'s step, not the replaced one still in flight', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({ reviewer: reworksImpl, secretary: () => null }));
+    const id = (await events(ports, { line: 'secretary', event: 'escalation' })).map((e) => e.body as { id: string; source: string }).find((e) => e.source === 'loop-exhausted')!.id;
+    ports.scheduler.dispatchOf(`sec.${id}`);
+    await answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'design', instructions: ASK });
+    await drive(engine, ports.scheduler, withKinds({ reviewer: reworksImpl, secretary: () => null, 'architect-answer': reply({ reply: 'need-to-know', text: 'Which OS does the user run?' }) }));
+    assert.equal(ports.scheduler.tasks.get(`sec.${id}.retry1`)?.state, 'queued');
+    assert.equal(await blockedLine(ports, id), 'the Secretary decides: dispatch its step (mp pm next)');
+    const d = ports.scheduler.dispatchOf(`sec.${id}.retry1`);
+    assert.equal(await blockedLine(ports, id), `the Secretary is deciding (${d} in flight): wait for its hand-back`);
+  });
+
+  it('p11-6: a paused attempt resumed, whose export used the loop up: the Architect reads the resumed step\'s hand-back, not the pause\'s', async () => {
+    const { ports, engine } = await setup({ reworkCap: 0 });
+    await drive(engine, ports.scheduler, withKinds({
+      constructor: (t: FlowTask) => ({ handBack: t.task === 'con.m1.impl.1' ? { ...constructorDone({ done: 'stopped to ask', decisions_needed: ['Which escape?'] }), blocked: true } : constructorDone({ done: `finished ${t.task}` }) }),
+      secretary: () => null,
+    }));
+    ports.scheduler.actions = { product: async () => { throw Object.assign(new Error('the candidate cannot be recorded'), { code: 'product-rejected' }); } };
+    await drive(engine, ports.scheduler, withKinds({
+      constructor: (t: FlowTask) => ({ handBack: constructorDone({ done: `finished ${t.task}` }) }),
+      secretary: (t) => {
+        const c = t.card as unknown as SecretaryCard;
+        if (c.request.id.startsWith('cblk.')) return { handBack: secretary(c, 'answer', { instructions: 'A backslash.' }) };
+        return c.request.source === 'loop-exhausted' ? { handBack: secretary(c, 'ask-architect', { instructions: ASK }) } : null;
+      },
+      'architect-answer': () => null,
+    }));
+    assert.ok([...ports.scheduler.tasks.keys()].includes('con.m1.impl.1.p1'), 'the attempt resumed');
+    const ask = [...ports.scheduler.tasks.keys()].find((t) => t.startsWith('arch-ask.'));
+    assert.ok(ask !== undefined, JSON.stringify([...ports.scheduler.tasks.keys()]));
+    const claims = ports.scheduler.card<ArchitectAnswerCard>(ask!).materials?.find((m) => m.id === 'constructor-claims');
+    assert.ok(claims !== undefined);
+    const doc = ports.ledger.content.get(claims!.ref);
+    assert.ok(doc.includes('finished con.m1.impl.1.p1') && !doc.includes('stopped to ask'), doc);
   });
 });
 

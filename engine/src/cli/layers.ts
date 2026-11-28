@@ -418,7 +418,9 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     const id = String(e.body['id'] ?? e.key);
     // the user's own answer: 4.4 (G1) the user does not ask the Architect (the PM does, --by pm)
     const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user' && o !== 'ask-architect');
-    const deciding = steps.inFlight.find((d) => d.step === e.body['task']);
+    // the Secretary step of the escalation's current round (4.4, G1, review p11-r2-3: one a fresh round replaced is not deciding)
+    const roundTask = (flowsByLine.get(`${e.mission}\n${SECRETARY_LINE}`) ?? []).filter((f) => f.event === 'secretary-retry' && f.body['id'] === id).at(-1)?.body['task'] ?? e.body['task'];
+    const deciding = steps.inFlight.find((d) => d.step === roundTask);
     // 4.4 (G1, review p11-8): the consultation in effect first: an ask of the Architect waits for its step, named with
     // where it stands, also after an earlier hand-up to the PM (readSteps lists no pending ask as waiting on the user)
     const current = waiting.has(`${e.mission}\n${id}`) ? null : await decisionFor(flowCtx(ports, e.mission as MissionId), id);

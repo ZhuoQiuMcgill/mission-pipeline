@@ -68,10 +68,35 @@ type Ev = { readonly event: string; readonly key: string; readonly body: unknown
  * Secretary's again: the PM's earlier rounds and an earlier hand-up do not shut it out (a later PM answer does).
  */
 export function reopenedAt(sec: readonly Ev[], escalation: string): number | null {
+  const mark = reopenMark(sec, escalation);
+  return mark === undefined ? null : (mark.revision ?? 0);
+}
+
+/** The retry that reopened the escalation's current Secretary round (reopenedAt), or undefined. */
+function reopenMark(sec: readonly Ev[], escalation: string): Ev | undefined {
   const mark = sec.filter((e) => e.event === 'secretary-retry' && (e.body as { id?: unknown; architect?: unknown }).id === escalation && typeof (e.body as { architect?: unknown }).architect === 'string').at(-1);
-  if (mark === undefined) return null;
+  if (mark === undefined) return undefined;
   const at = mark.revision ?? 0;
-  return sec.some((e) => e.event === 'pm-answer' && e.key.startsWith(`${escalation}#`) && (e.revision ?? 0) > at) ? null : at;
+  return sec.some((e) => e.event === 'pm-answer' && e.key.startsWith(`${escalation}#`) && (e.revision ?? 0) > at) ? undefined : mark;
+}
+
+/**
+ * 4.4 (G1, review p11-r2-2): the key of the hand-up (event "to-user") of the escalation's current round: its id, or,
+ * in a round an Architect's reply reopened, that round's key (`<id>#<n>`, its retry's). A hand-up is written once per
+ * round: one from before the reopen stays on the record and does not stand for the reopened round's.
+ */
+export function handUpKey(sec: readonly Ev[], escalation: string): string {
+  return reopenMark(sec, escalation)?.key ?? escalation;
+}
+
+/**
+ * The hand-up in effect on the escalation's current round, or undefined: in a reopened round, that round's own;
+ * otherwise any (the latest). Read from the secretary line's retries, PM answers and hand-ups.
+ */
+export function currentHandUp(sec: readonly Ev[], escalation: string): Ev | undefined {
+  const mark = reopenMark(sec, escalation);
+  if (mark !== undefined) return sec.find((e) => e.event === 'to-user' && e.key === mark.key);
+  return sec.filter((e) => e.event === 'to-user' && (e.key === escalation || e.key.startsWith(`${escalation}#`))).at(-1);
 }
 
 /** The PM's current answer round on an escalation: its rounds closed so far, plus one (flow/secretary.ts pmAnswerRound). */
@@ -110,8 +135,7 @@ export function askStanding(sec: readonly Ev[], a: Ask): string | null {
   // a Secretary round an Architect's reply reopened after the PM's round is the Secretary's: only what came after it counts
   const since = reopenedAt(sec, id) ?? -1;
   if (sec.some((e) => e.event === 'pm-answer' && e.key.startsWith(`${id}#`) && (e.revision ?? 0) > since)) return `the PM answered escalation ${id}`;
-  const handed = at('to-user', id);
-  if (handed !== undefined && (handed.revision ?? 0) > since) return `escalation ${id} was handed to the PM`;
+  if (currentHandUp(sec, id) !== undefined) return `escalation ${id} was handed to the PM`;
   if (at('secretary-retry', `${id}#${a.round + 1}`) !== undefined) return `the Secretary's round ${a.round} on ${id} was closed by a newer round`;
   return null;
 }

@@ -42,7 +42,7 @@ import { currentConstraints, currentItems } from './requirements.ts';
 import { decisionFor, escalation, escalationTask, isApplied, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { addressedForPlanning, addressedIndexOf, constraintsForTask, planningConstraints, secretaryRoundInputs, taskDecisionQuotes, taskRequirementItems } from '../seat/cards/dynamic.ts';
 import { answerPlanMaterial, type ArchitectAnswerCard, type ArchitectAnswerResult } from '../seat/cards/architectAnswer.ts';
-import { ARCHITECT_ANSWER, answerKey, answersInPlace, askOf, askStanding, askTag, earlierReplies, pmRoundOf, replyText, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
+import { ARCHITECT_ANSWER, answerKey, answersInPlace, askOf, askStanding, askTag, earlierReplies, handUpKey, pmRoundOf, replyText, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
 
 /** The Architect step of an ask (its own lineage too: it counts on no loop or re-dispatch allowance of the task). */
 export const askTask = (mission: string, a: Ask): string => safeId(`arch-ask.${mission}.${idPart(a.escalation)}.${askTag(a)}`);
@@ -108,8 +108,8 @@ function standingGuard(ctx: FlowCtx, a: Ask, sec: readonly Ev[]): AppendGuard['a
       : [
           // the PM's next answer round (a round an Architect's reply reopened follows closed PM rounds)
           at('pm-answer', `${id}#${pmRoundOf(sec, id)}`),
-          // a hand-up is written once: one from before a reopened round stays and is not guarded
-          ...(sec.some((e) => e.event === 'to-user' && e.key === id) ? [] : [at('to-user', id)]),
+          // the hand-up of this round (review p11-r2-2: one from before a reopened round stays and is not this round's)
+          at('to-user', handUpKey(sec, id)),
           at('secretary-retry', `${id}#${a.round + 1}`),
         ]),
   ];
@@ -197,18 +197,24 @@ async function askingDecision(ctx: FlowCtx, a: Ask): Promise<DecisionBody | null
 }
 
 /**
- * 4.4 (F3, review p11-6): what the Architect reads of the task's work: the Constructor's hand-back of the attempt
- * (its product's step, the step that paused it, else a Constructor step of the attempt whose hand-back was accepted
- * though no product was recorded, as when its export used the loop up), and the task's last review (of the
- * attempt, else the latest of the work, with its own attempt number).
+ * 4.4 (F3, review p11-6): what the Architect reads of the task's work: the Constructor's latest completed hand-back
+ * of the attempt (its steps the latest first: its product's, a step that continued it after a pause, a step that
+ * paused it, its first; the submit takes the first with an accepted hand-back, so a resumed step whose export used
+ * the loop up comes before the pause it resumed), and the task's last review (of the attempt, else the latest of
+ * the work, with its own attempt number).
  */
 function workSteps(line: readonly Ev[], k: number | null): { readonly constructors: Array<{ readonly step: string; readonly attempt: number }>; readonly review: { readonly step: string; readonly attempt: number } | null } {
   const of = <B extends { k?: unknown }>(event: string, attempt: number | null): Array<{ readonly key: string; readonly body: B }> => line.filter((e) => e.event === event && (attempt === null || (e.body as B).k === attempt)).map((e) => ({ key: e.key, body: e.body as B }));
   const constructors: Array<{ step: string; attempt: number }> = [];
   if (k !== null) {
-    for (const p of of<{ k: number; task: string }>('product', k).reverse()) constructors.push({ step: p.body.task, attempt: k });
-    for (const p of of<{ k: number; step: string }>('paused', k).reverse()) constructors.push({ step: p.body.step, attempt: k });
-    for (const d of of<{ k: number }>('dispatched', k).reverse()) constructors.push({ step: d.key, attempt: k });
+    // each step's events follow the previous step's (dispatched, paused, resumed, product): their order is the steps'
+    const steps = line.flatMap((e) => {
+      const b = e.body as { k?: unknown; task?: unknown; step?: unknown };
+      if (b.k !== k) return [];
+      const step = e.event === 'product' ? b.task : e.event === 'paused' || e.event === 'resumed' ? b.step : e.event === 'dispatched' ? e.key : undefined;
+      return typeof step === 'string' ? [{ step, revision: e.revision }] : [];
+    });
+    for (const s of steps.sort((a, b) => b.revision - a.revision)) constructors.push({ step: s.step, attempt: k });
   }
   const reviews = of<{ k: number; task: string }>('review', k);
   const review = (reviews.at(-1) ?? of<{ k: number; task: string }>('review', null).at(-1))?.body;

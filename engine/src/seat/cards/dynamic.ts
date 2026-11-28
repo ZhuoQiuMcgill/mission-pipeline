@@ -315,6 +315,14 @@ export function writtenForTask(constraints: readonly ConstraintBody[], events: r
 }
 
 /**
+ * 4.4 (G1, review p11-r2-1): a PM answer its rejection set aside. A rejection names a PM round (`id#r`), and a
+ * Secretary retry's decision can carry the same key (`id#n`): it applies to PM answers only.
+ */
+function rejectedPmAnswer(events: readonly FlowEvent[], a: FlowEvent): boolean {
+  return a.event === 'pm-answer' && events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key);
+}
+
+/**
  * The answer in effect on one escalation of a task (the user's first, then the PM's latest round, then the
  * Secretary's), when it was carried out as an answer with a text (answerText: its instructions, or else the
  * user's cited words). The current card's decisions and the earlier-decisions list read it alike.
@@ -329,7 +337,7 @@ function carriedAnswer(events: readonly FlowEvent[], esc: EscalationBody): Decis
     return ruling === null ? null : { escalation: esc.id, by: (what.by ?? 'secretary') as DecisionBody['by'], option: 'answer', classification: 'detail', authorization: null, reason: '', instructions: ruling.text, grantExtra: 0, notice: '', mayMatter: false, architect: ruling.key };
   }
   if (what?.what?.option !== 'answer') return null;
-  const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
+  const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !rejectedPmAnswer(events, a))));
   const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
   // 4.4 (G1): the Architect's answer carried out on the asker's decision: its text, read from its reply (the asker stays the decider)
   const architect = carriedArchitectAnswer(events.filter((a) => a.line === 'secretary'), esc.id);
@@ -490,9 +498,9 @@ export function earlierDecisionsOf(e: EscalationBody, events: readonly FlowEvent
     if (x.line !== 'secretary' || x.event !== 'escalation') continue;
     const esc = x.body as EscalationBody;
     if (esc.id === e.id || esc.subject !== e.subject) continue;
-    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
+    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !rejectedPmAnswer(events, a))));
     const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
-    const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id)?.body as { what?: { option?: string } } | undefined;
+    const applied =events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id)?.body as { what?: { option?: string } } | undefined;
     if (d === undefined && applied?.what?.option !== 'superseded') continue;
     out.push({
       escalation: esc.id,

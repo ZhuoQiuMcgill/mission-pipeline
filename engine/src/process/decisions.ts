@@ -7,7 +7,7 @@ import { flowEvents, type Db } from '../memory/index.ts';
 import type { MissionId } from '../common/ids.ts';
 import { SECRETARY_LINE } from '../flow/plandoc.ts';
 import { isAskOption } from '../seat/cards/secretary.ts';
-import { ARCHITECT_ANSWER, type ArchitectAnswerBody, type Ask } from '../flow/architectAnswers.ts';
+import { ARCHITECT_ANSWER, currentHandUp, type ArchitectAnswerBody, type Ask } from '../flow/architectAnswers.ts';
 import { askTask } from '../flow/architectAsk.ts';
 import { taskStatus } from './ports.ts';
 
@@ -113,9 +113,11 @@ export function decisionOutcome(db: Db, data: Texts, o: { readonly mission: stri
     return by === 'secretary' ? { ...base, state: 'applied', text: `recorded and applied (${String(what.option ?? '')})` } : { ...base, state: 'overridden', text: `recorded; the ${by === 'pm' ? 'PM' : 'user'}'s answer was applied instead (${String(what.option ?? '')})` };
   }
   // 4.4 (F9): the flow may hand a decision on to the PM (a grant the ledger refuses, restarts used up): with the reason it recorded
-  const toUser = secretaryEvent(db, data, o.mission, 'to-user', o.escalation);
-  if (toUser !== null) return { ...base, state: 'to-pm', text: `recorded; the flow handed it to the PM (mp pm inbox lists it): ${String(toUser['why'] ?? '')}` };
   const key = roundKeyOf(db, data, o.mission, o.escalation, o.task);
+  // 4.4 (G1, review p11-r2-2): the hand-up in effect, as the flow reads it: in a round an Architect's reply reopened, that round's own
+  const rounds = ['secretary-retry', 'pm-answer', 'to-user'].flatMap((event) => flowEvents(db, { mission: o.mission as MissionId, line: SECRETARY_LINE, event, limit: 10_000 })).map((e) => ({ event: e.event, key: e.key, revision: Number(e.revision), body: JSON.parse(data.text(e.body)) as unknown })).sort((a, b) => a.revision - b.revision);
+  const toUser = currentHandUp(rounds, o.escalation)?.body as { why?: unknown } | undefined;
+  if (toUser !== undefined) return { ...base, state: 'to-pm', text: `recorded; the flow handed it to the PM (mp pm inbox lists it): ${String(toUser.why ?? '')}` };
   const rejected = secretaryEvent(db, data, o.mission, 'decision-rejected', key);
   if (rejected !== null) return { ...base, state: 'pending', text: `recorded; not carried out: ${String(rejected['why'] ?? '')} A fresh round is queued (mp sec card ${o.escalation}).` };
   const decided = secretaryEvent(db, data, o.mission, 'decision', key);

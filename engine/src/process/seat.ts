@@ -685,7 +685,7 @@ export const DECISION_RELEASED = 'decision-released';
 
 /**
  * A Secretary dispatch whose escalation the flow will not carry out a decision of any more: it was
- * carried out or closed (applied), or the user answered it first. Its hand-back is recorded as
+ * carried out or closed (applied), the user answered it first, or (4.4) a newer round replaced its round. Its hand-back is recorded as
  * history, not accepted, and its records (a ruling judgment) are not appended. Null: still open.
  */
 function mootSecretary(db: Db, v: DispatchView, data: ProcessContext['memory']['data']): string | null {
@@ -706,6 +706,11 @@ function mootSecretary(db: Db, v: DispatchView, data: ProcessContext['memory']['
   const at = (event: string): boolean => flowEventExists(db, { mission: v.info.mission, line: SECRETARY_LINE, event, key: id });
   if (at('applied')) return `escalation ${id} was already carried out or closed`;
   if (at('user-answer')) return `the user already answered escalation ${id}`;
+  // 4.4 (G1, review p11-r2-3): a round a newer one replaced (an Architect's reply returned the escalation to a fresh
+  // Secretary round while this one was in flight): nothing it decides or puts off is written
+  const rounds = flowEvents(db, { mission: v.info.mission, line: SECRETARY_LINE, event: 'secretary-retry', limit: 10_000 }).map((e) => JSON.parse(data.text(e.body)) as { id?: unknown; task?: unknown }).filter((b) => b.id === id && typeof b.task === 'string');
+  const current = rounds.at(-1)?.task;
+  if (current !== undefined && current !== v.info.task) return `the Secretary round ${v.info.task} on escalation ${id} was replaced by a newer round (${String(current)})`;
   return null;
 }
 
