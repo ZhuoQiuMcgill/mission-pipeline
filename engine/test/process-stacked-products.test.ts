@@ -106,14 +106,20 @@ async function ready(pp: ProcessProject, kind: string, task: string) {
   return s;
 }
 
-/** A Constructor attempt of `task`: dispatched, `files` changed in its worktree, handed back; the worktree's files as it started. */
-async function construct(pp: ProcessProject, task: string, files: Readonly<Record<string, string>>): Promise<{ start: string; seen: Record<string, string | null> }> {
+/** CRLF line ends, as an editor on Windows writes them (4.4.1). */
+const crlf = (s: string): string => s.replace(/\n/g, '\r\n');
+
+/**
+ * A Constructor attempt of `task`: dispatched, `files` changed in its worktree, handed back; the
+ * worktree's files as it started. `crlf`: the seat writes CRLF (a repository with core.autocrlf=true).
+ */
+async function construct(pp: ProcessProject, task: string, files: Readonly<Record<string, string>>, o: { crlf?: boolean } = {}): Promise<{ start: string; seen: Record<string, string | null> }> {
   const s = await ready(pp, 'constructor', task);
   const d = pmDispatch(pp.ctx, s.step);
   const wt = join(pp.dir, d.worktree!);
   const start = gitIn(wt, 'rev-parse', 'HEAD');
   const seen = filesIn(wt, PATHS);
-  for (const [rel, text] of Object.entries(files)) write(wt, rel, text);
+  for (const [rel, text] of Object.entries(files)) write(wt, rel, o.crlf === true ? crlf(text) : text);
   const a = await handBack(pp.ctx, d.dispatch, { done: 'done', unmet_standards: [], unfixed_problems: [], decisions_needed: [] });
   assert.ok(a.kind === 'recorded' && a.candidate !== null, JSON.stringify(a));
   await step(pp.ctx, 'reviewer', (c) => reviewerPass(c));
@@ -158,6 +164,11 @@ function record(pp: ProcessProject, id: string): ObjectVersionRecord {
   return c.record as ObjectVersionRecord;
 }
 
+/** Files as a worktree under core.autocrlf=true holds them: CRLF. */
+function asCheckedOut(files: Record<string, string | null>): Record<string, string | null> {
+  return Object.fromEntries(Object.entries(files).map(([k, v]) => [k, v === null ? null : crlf(v)]));
+}
+
 /** The files with `layers` laid over the base, in order. */
 function expected(...layers: Readonly<Record<string, string>>[]): Record<string, string | null> {
   const out: Record<string, string | null> = {};
@@ -166,18 +177,21 @@ function expected(...layers: Readonly<Record<string, string>>[]): Record<string,
   return out;
 }
 
-/** The mission planned, zeta accepted, then alpha (built on zeta's version) accepted. */
-async function stackedPair(): Promise<ProcessProject> {
-  const pp = processProject({ files: BASE_FILES });
+/**
+ * The mission planned, zeta accepted, then alpha (built on zeta's version) accepted. `autocrlf`
+ * (4.4.1): the repository sets core.autocrlf=true, its worktrees hold CRLF and the seats write CRLF.
+ */
+async function stackedPair(o: { autocrlf?: boolean } = {}): Promise<ProcessProject> {
+  const pp = processProject({ files: BASE_FILES, autocrlf: o.autocrlf === true });
   await startAddMission(pp.ctx, M);
   await step(pp.ctx, 'calibrator-1', (c) => cal1Pass(c));
   await step(pp.ctx, 'architect-decompose', () => plan());
   if ((await pmNext(pp.ctx)).ready.some((r) => r.kind === 'architect-feasibility')) await step(pp.ctx, 'architect-feasibility', () => feasible());
   await step(pp.ctx, 'calibrator-2', (c) => cal2Pass(c));
-  await construct(pp, 'zeta', ZETA);
-  const a = await construct(pp, 'alpha', ALPHA);
+  await construct(pp, 'zeta', ZETA, { crlf: o.autocrlf === true });
+  const a = await construct(pp, 'alpha', ALPHA, { crlf: o.autocrlf === true });
   // the premise: alpha's work started from the base with zeta's version laid over it
-  assert.deepEqual(a.seen, expected(ZETA));
+  assert.deepEqual(a.seen, o.autocrlf === true ? asCheckedOut(expected(ZETA)) : expected(ZETA));
   assert.equal(record(pp, prod('alpha')).source?.origin, a.start);
   assert.deepEqual(pp.ctx.memory.data.getList(record(pp, prod('alpha')).prerequisites), [prod('zeta')]);
   assert.ok(prod('alpha') < prod('zeta'), 'the dependent comes first by id');
@@ -234,6 +248,32 @@ describe('product versions stacked on each other compose', () => {
     assert.equal(p.git('rev-parse', `${all.record.commit}^`), p.git('rev-parse', 'main'));
     assert.deepEqual(all.record.proof?.notFullyProven, []);
     assert.deepEqual([...(all.record.proof?.proven ?? [])].sort(), [prod('alpha'), prod('use'), prod('zeta')]);
+  });
+
+  it('4.4.1, the Windows default (core.autocrlf=true in the repository): seats see and write CRLF; products, snapshots and the delivery are the LF trees; the landed worktree is clean', async () => {
+    p = await stackedPair({ autocrlf: true });
+    const pp = p;
+    const main = pp.git('rev-parse', 'main');
+    const tree = (commit: string): string => pp.git('rev-parse', `${commit}^{tree}`);
+    // each product is the tree an LF system makes from the same edits: nothing else reads as changed
+    assert.equal(tree(record(pp, prod('zeta')).source!.commit), tree(commitOn(pp, main, ZETA, 'zeta on LF')));
+    assert.equal(tree(record(pp, prod('alpha')).source!.commit), tree(commitOn(pp, main, { ...ZETA, ...ALPHA }, 'alpha on LF')));
+    const u = await construct(pp, 'use', USE, { crlf: true });
+    assert.deepEqual(u.seen, asCheckedOut(expected(ZETA, ALPHA)));
+    const snap = await pp.ctx.actions().snapshot({ mission: M, purpose: 'test', products: [prod('alpha')] });
+    assert.deepEqual(filesOf(pp, snap.commit, PATHS), expected(ZETA, ALPHA));
+    await pmNext(pp.ctx);
+    const words = pmSay(pp.ctx, 'Deliver the work.').words;
+    const d = await pmDeliver(pp.ctx, { mission: M, delivery: 'crlf', selected: [{ kind: 'object', id: prod('use') }], words });
+    assert.equal(d.kind, 'delivered', JSON.stringify(d));
+    if (d.kind !== 'delivered') return;
+    assert.deepEqual(filesOf(pp, d.record.commit, PATHS), expected(ZETA, ALPHA, USE));
+    assert.equal(tree(d.record.commit), tree(commitOn(pp, main, { ...ZETA, ...ALPHA, ...USE }, 'all on LF')));
+    assert.deepEqual(d.record.proof?.notFullyProven, []);
+    const landed = await pmLand(pp.ctx, { mission: M, delivery: 'crlf', words });
+    assert.equal(landed.kind, 'landed', JSON.stringify(landed));
+    assert.deepEqual(filesIn(pp.dir, PATHS), asCheckedOut(expected(ZETA, ALPHA, USE)));
+    assert.equal(pp.git('status', '--porcelain'), '', 'the landed worktree reads as unmodified');
   });
 
   // Integration dependency (F2): P4's keptStep must compare the pinned closure with

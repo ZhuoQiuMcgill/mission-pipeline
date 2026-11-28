@@ -40,8 +40,12 @@ export interface ProcessProject {
   cleanup(): void;
 }
 
-/** A project on branch main (README.md, a .gitignore with *.local), its memory, and a context observing `env`. */
-export function processProject(o: { files?: Record<string, string>; env?: EnvironmentParts; options?: ProcessOptions } = {}): ProcessProject {
+/**
+ * A project on branch main (README.md, a .gitignore with *.local), its memory, and a context observing `env`.
+ * `autocrlf` (4.4.1): the repository says core.autocrlf=true in its own configuration, as Git for
+ * Windows sets it, and its files are checked out again under it (CRLF in the worktree, LF blobs).
+ */
+export function processProject(o: { files?: Record<string, string>; env?: EnvironmentParts; options?: ProcessOptions; autocrlf?: boolean } = {}): ProcessProject {
   const base = mkdtempSync(join(tmpdir(), 'mp-proc-'));
   const dir = join(base, 'project');
   mkdirSync(dir, { recursive: true });
@@ -52,6 +56,11 @@ export function processProject(o: { files?: Record<string, string>; env?: Enviro
   for (const [rel, text] of Object.entries(o.files ?? {})) write(dir, rel, text);
   sh(dir, 'add', '-A');
   sh(dir, 'commit', '-q', '-m', 'first');
+  if (o.autocrlf === true) {
+    sh(dir, 'config', 'core.autocrlf', 'true');
+    sh(dir, 'rm', '-r', '-q', '--cached', '.');
+    sh(dir, 'reset', '-q', '--hard');
+  }
   const git = PlainGit.create();
   initMemory(dir, { git: git.runner() });
   const open = (env: EnvironmentParts, more: ProcessOptions = {}): ProcessContext => {
