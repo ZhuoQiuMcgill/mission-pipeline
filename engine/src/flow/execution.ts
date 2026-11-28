@@ -2842,19 +2842,28 @@ function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typ
  */
 async function productContract(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, ix: Awaited<ReturnType<typeof basisIndex>>, line: Line, k: number): Promise<string[]> {
   const attempt = await attemptItems(ctx, t.id, line, k);
-  return contractLines(ctx, t, ix, attempt, await filingCarried(ctx, eff.amendments, t.id, attempt));
+  return contractLines(ctx, t, ix, attempt, await filingCarried(ctx, eff, t, attempt));
 }
 
 /**
- * 4.4 (G9, p12-2): the item lines task t carries through a filing: the items of each filing (a new requirement, a repair
- * naming an item) whose amendment of the plan in effect added or changed its card, and those a filing's reopen gives the
- * attempt. One read of the repairs line, only when an amendment touched the task.
+ * 4.4 (G9, p12-2, p12-r2-1): the item lines task t carries through a filing: on each amendment that added or changed its
+ * card, the items of that amendment's filing (a new requirement, a repair naming an item) the card in fact names (the
+ * Architect named them, or the one-item rule put them there); and those a filing's reopen gives the attempt. The
+ * amendments are those of the plan in effect, and, of an earlier plan, one whose card the later plans keep (the same
+ * resolution as causingRepairs: a plan that carries a card over carries no amendment). Reads only when one touched the task.
  */
-export async function filingCarried(ctx: FlowCtx, amendments: readonly AmendmentEntry[] | undefined, task: string, attempt: readonly string[]): Promise<Set<string>> {
+export async function filingCarried(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, attempt: readonly string[]): Promise<Set<string>> {
   const out = new Set<string>(attempt);
-  const by = new Set((amendments ?? []).filter((a) => a.tasks.some((x) => x.id === task) || (a.changed ?? []).some((x) => x.id === task)).map((a) => a.repair));
-  if (by.size === 0) return out;
-  for (const e of await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')) if (by.has(e.key)) for (const i of e.body.items ?? []) out.add(`item.${ctx.mission}.${i}`);
+  const cardsOf = (a: AmendmentEntry): DetailedTask[] => [...a.tasks, ...(a.changed ?? [])].filter((x) => x.id === t.id);
+  const touching = (eff.amendments ?? []).flatMap((a) => cardsOf(a).map((card) => ({ repair: a.repair, card })));
+  const earlier = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).filter((e) => e.body.dplan !== eff.dplan).flatMap((e) => e.body.amendments ?? []);
+  if (earlier.some((a) => cardsOf(a).length > 0)) {
+    const hash = taskCardHash(t);
+    for (const a of earlier) for (const card of cardsOf(a)) if (taskCardHash(card) === hash) touching.push({ repair: a.repair, card });
+  }
+  if (touching.length === 0) return out;
+  const items = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((e) => [e.key, (e.body.items ?? []).map((i) => `item.${ctx.mission}.${i}`)] as const));
+  for (const { repair, card } of touching) for (const l of card.requirementItems) if ((items.get(repair) ?? []).includes(l)) out.add(l);
   return out;
 }
 

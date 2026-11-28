@@ -12,9 +12,9 @@ import type { MissionId } from '../src/common/ids.ts';
 import { basisIndex, flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
-import type { DetailedTask } from '../src/flow/plandoc.ts';
+import type { DetailedPlanDoc, DetailedTask } from '../src/flow/plandoc.ts';
 import { withdrawItem } from '../src/flow/requirements.ts';
-import { drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
+import { detailedPlan, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { listDispatches } from '../src/memory/index.ts';
 import { pmExtend, pmRepair, pmRequirement } from '../src/process/pm.ts';
 import { dispatchView } from '../src/process/seat.ts';
@@ -464,5 +464,106 @@ describe('4.4 G9 review round 1: a new requirement whose work was re-planned awa
     assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g2'], 'the work is bound to the item again');
     const read = repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')));
     assert.ok(read.includes('filed again: the same items as new requirement R-1 (a task R-1 added had left the plan in effect)'), read);
+  });
+});
+
+describe('4.4 G9 review round 2: what a filing gave a task, for as long as its card holds', () => {
+  const PLAN2 = () => pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] });
+  const held: Script = (t, s) => (t.task.startsWith('con.m1.json.') ? null : happyScript(M)(t, s));
+
+  it('p12-r2-1: X and Y filed, only X given to T; a plain repair\'s card lists both, Y withdrawn before it is applied: T\'s product is bound to X alone and is not escalated for Y', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }, { item: 'g3', text: 'Rows keep their order', quote: 'keep the order' }], 'Please export JSON and keep the order.');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [{ ...JSON_TASK, requirementItems: ['item.m1.g2'] }], note: 'JSON' } } : held(t, s)));
+    const w = say(ports, 'The JSON export is too slow.');
+    await pmRepair(ports.ctx, { mission: M, words: w, kind: 'defect', text: 'too slow', about: 'json' });
+    await engine.reconcile(M);
+    const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    await withdrawItem(ports, { mission: M, item: 'g3', reason: 'not now' });
+    assert.deepEqual(await ports.scheduler.run(step, { handBack: { reopen: [], add: [], change: [{ ...JSON_TASK, goal: 'Export rows as JSON, fast', requirementItems: ['item.m1.g2', 'item.m1.g3'] }], note: 'faster' } }), []);
+    await drive(engine, ports.scheduler, happyScript(M));
+    assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g2', 'item.m1.g3'], 'the plain repair\'s card lists both');
+    const product = (await acceptedOf(ports, 'json'))!;
+    assert.ok((await contractOf(ports, product)).includes('item.m1.g2'));
+    assert.ok(!(await contractOf(ports, product)).includes('item.m1.g3'), 'Y was never given to T by its filing: 4.3\'s rule leaves it out');
+    assert.equal((await labels(ports, [product]))[product], 'proven');
+    await engine.reconcile(M);
+    assert.equal((await ports.ledger.events({ mission: M, line: 'secretary', event: 'escalation' })).some((e) => e.key === `withdrawn.${product}`), false, 'no escalation for Y');
+  });
+
+  it('p12-2 (round 2): a task a filing added, carried unchanged into a new detailed plan, keeps its item once withdrawn: its product reads basis withdrawn and a decider is asked', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }], 'Please export JSON.');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'a new task' } } : held(t, s)));
+    const card = (await planInEffect(flowCtx(ports, M)))!.plan.tasks.find((t) => t.id === 'json')!;
+    assert.deepEqual(card.requirementItems, ['item.m1.g2']);
+    // a changed plan whose detailed plan carries the card over unchanged (it has no amendment of its own)
+    const carried = (): DetailedPlanDoc => ({ ...detailedPlan(M), tasks: [...detailedPlan(M).tasks, card] });
+    await submitPmBatch(ports, { mission: M, plan: PLAN2(), userWords: ['W-1'] });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' || t.task.startsWith('con.m1.json.') ? null : happyScript(M, carried)(t, s)));
+    const pie = (await planInEffect(flowCtx(ports, M)))!;
+    assert.equal(pie.eff.pmPlan, 'pmplan.m1.2');
+    assert.equal((pie.eff.amendments ?? []).length, 0, 'no amendment history in the new plan');
+    assert.ok(pie.plan.tasks.some((t) => t.id === 'json'));
+    assert.equal(await acceptedOf(ports, 'json'), undefined, 'no product yet');
+    await withdrawItem(ports, { mission: M, item: 'g2', reason: 'taken back' });
+    await drive(engine, ports.scheduler, happyScript(M, carried));
+    const product = (await acceptedOf(ports, 'json'))!;
+    assert.ok((await contractOf(ports, product)).includes('item.m1.g2'), 'found from the original amendment');
+    assert.equal((await labels(ports, [product]))[product], 'basis-withdrawn');
+    await engine.reconcile(M);
+    assert.ok((await ports.ledger.events({ mission: M, line: 'secretary', event: 'escalation' })).some((e) => e.key === `withdrawn.${product}`), 'a decider is asked');
+  });
+
+  it('p12-7 (round 2): a pending task carries live item X; a new requirement for Y changes its card naming only Y: the card keeps X and adds Y', async () => {
+    const { ports, engine } = await setup('fast');
+    const w = say(ports, 'It should export JSON too.');
+    await pmRepair(ports.ctx, { mission: M, words: w, kind: 'missing', text: 'export JSON too' });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [{ ...JSON_TASK, requirementItems: ['item.m1.g1'] }], note: 'json' } } : held(t, s)));
+    await extend(ports, [{ item: 'g2', text: 'JSON in order', quote: 'in order' }], 'Keep the JSON in order.');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [], change: [{ ...JSON_TASK, goal: 'Export rows as JSON, in order', requirementItems: ['item.m1.g2'] }], note: 'in order' } } : held(t, s)));
+    assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g1', 'item.m1.g2'], 'X is not removed by leaving it out');
+  });
+
+  it('p12-8 (round 2): a new requirement that changed the only task of its work: once a changed plan drops that task, the same extend files anew', async () => {
+    const { ports, engine } = await setup('fast');
+    const w0 = say(ports, 'It should export JSON too.');
+    await pmRepair(ports.ctx, { mission: M, words: w0, kind: 'missing', text: 'export JSON too' });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'json' } } : held(t, s)));
+    const w = say(ports, 'Keep the JSON in order.');
+    const item = { item: 'g2', type: 'goal' as const, text: 'JSON in order', quote: 'in order', words: w };
+    assert.equal((await pmExtend(ports.ctx, { mission: M, items: [item] })).repair, 'R-2');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [], change: [{ ...JSON_TASK, goal: 'Export rows as JSON, in order' }], note: 'in order' } } : held(t, s)));
+    const d = (await ports.ledger.events<{ add: string[]; changed?: string[] }>({ mission: M, line: 'repairs', event: 'decided' })).find((e) => e.key === 'R-2')?.body;
+    assert.deepEqual([d?.add, d?.changed], [[], ['json']], 'its work is the changed task only');
+    assert.equal((await pmExtend(ports.ctx, { mission: M, items: [item] })).repeated, true, 'while the task is in the plan, the filing stands');
+    await submitPmBatch(ports, { mission: M, plan: PLAN2(), userWords: ['W-1'] });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    assert.ok(!(await planInEffect(flowCtx(ports, M)))?.plan.tasks.some((t) => t.id === 'json'), 'the work is gone');
+    const again = await pmExtend(ports.ctx, { mission: M, items: [item] });
+    assert.deepEqual([again.repair, again.repeated, again.again], ['R-3', false, 'R-2'], 'filed anew');
+  });
+
+  it('p12-r2-2: an extend operation retried after a re-plan dropped its filing\'s task returns the filing it made or returned; another operation files anew', async () => {
+    const { ports, engine } = await setup('fast');
+    const w = say(ports, 'Please export JSON.');
+    const item = { item: 'g2', type: 'goal' as const, text: 'JSON export', quote: 'export JSON', words: w };
+    const first = await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K1' });
+    assert.deepEqual([first.repair, first.repeated], ['R-1', false]);
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'a new task' } } : happyScript(M)(t, s)));
+    const returned = await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K2' });
+    assert.deepEqual([returned.repair, returned.repeated], ['R-1', true], 'its work stands: returned');
+    await submitPmBatch(ports, { mission: M, plan: PLAN2(), userWords: ['W-1'] });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    assert.ok(!(await planInEffect(flowCtx(ports, M)))?.plan.tasks.some((t) => t.id === 'json'), 'the work is gone');
+    // the retries of K1 and K2 (their receipts lost) return what each did then
+    const r1 = await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K1' });
+    assert.deepEqual([r1.repair, r1.repeated], ['R-1', false], 'K1 made R-1');
+    const r2 = await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K2' });
+    assert.deepEqual([r2.repair, r2.repeated], ['R-1', true], 'K2 returned R-1');
+    assert.equal((await ports.ledger.events({ mission: M, line: 'repairs', event: 'repair' })).length, 1, 'no second filing');
+    const k3 = await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K3' });
+    assert.deepEqual([k3.repair, k3.repeated, k3.again], ['R-2', false, 'R-1'], 'another operation files anew');
+    assert.deepEqual((await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K3' })).repair, 'R-2');
   });
 });

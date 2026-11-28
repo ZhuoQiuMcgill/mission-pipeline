@@ -671,7 +671,8 @@ const extend: Command = {
     });
     // 4.4 (G5 with G9): open items left at the cap, named as on a repair
     const openItems = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
-    const r = await pmExtend(p.ctx, { mission: m, items, ...(openItems.length > 0 ? { openItems } : {}) });
+    // (p12-r2-2) with its operation id: a retry after a lost receipt returns the filing this operation made
+    const r = await pmExtend(p.ctx, { mission: m, items, ...(openItems.length > 0 ? { openItems } : {}), ...(typeof c.op === 'string' ? { op: c.op } : {}) });
     const named = `item${r.items.length === 1 ? '' : 's'} ${r.items.join(', ')}`;
     const lines = r.repeated
       ? [`New requirement already recorded: ${r.repair} of ${m} (${named}): nothing new was recorded.`]

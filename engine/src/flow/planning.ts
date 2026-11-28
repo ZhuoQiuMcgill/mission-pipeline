@@ -86,7 +86,6 @@ import {
   type AmendmentEntry,
   PLAN_LINE,
   PM_PLAN_EFFECTIVE,
-  REPAIRS_LINE,
   PmPlanDoc,
   SECRETARY_LINE,
   pmPlanIdProblems,
@@ -97,7 +96,7 @@ import {
   taskLine,
 } from './plandoc.ts';
 import type { AppendGuard, FlowEventInput, FlowPorts } from './ports.ts';
-import { currentItems, currentConstraints, itemLine, planSetItems, planSetLines, requirementSetLine, setContested, termLines, type CurrentItem } from './requirements.ts';
+import { currentItems, currentConstraints, itemLine, newRequirementsLine, planSetItems, planSetLines, requirementSetLine, setContested, termLines, type CurrentItem } from './requirements.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 import { itemIds, riskItemsOf } from './riskItems.ts';
@@ -244,8 +243,9 @@ export async function submitPmBatch(
   ports: FlowPorts,
   req: PmBatchRequest,
 ): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
-  // 4.4 (G9, p12-4): the write is checked against the filings read with the term lines; a filing of `mp pm extend` written
-  // in between (a new term line) refuses it, and the batch is built again from a fresh read (bounded: another writer each time)
+  // 4.4 (G9, p12-4, p12-r2-3): the write is checked against the version of reqnew.<m> read with the term lines (every item
+  // write of `mp pm extend` makes one); one written in between refuses it, and the batch is built again from a fresh read
+  // (bounded: another such writer each time). Nothing else refuses it: an ordinary repair touches no requirement set
   for (let tries = 1; ; tries++) {
     try {
       return await submitPmBatchOnce(ports, req);
@@ -260,8 +260,6 @@ const PM_BATCH_TRIES = 3;
 
 async function submitPmBatchOnce(ports: FlowPorts, req: PmBatchRequest): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
   const ctx = flowCtx(ports, req.mission);
-  // (p12-4) the filings as read before the term lines: a new requirement's term line is written with its filing
-  const filingsRead = (await eventsOf(ctx, REPAIRS_LINE, 'repair')).at(-1)?.revision ?? null;
   const doc = PmPlanDoc.parse(req.plan);
   if (doc.mission !== req.mission) throw new Error(`the plan names mission ${doc.mission}, not ${req.mission}`);
   const dup = pmPlanIdProblems(doc);
@@ -306,6 +304,8 @@ async function submitPmBatchOnce(ports: FlowPorts, req: PmBatchRequest): Promise
   // 4.4 (G9): a plan is checked against every item in force: besides reqset, the term lines of the items `mp pm extend`
   // recorded before it (none: 4.3's contract). The items recorded after it fall in its own term, outside its check
   const terms = termLines(ix, req.mission);
+  // (p12-r2-3) the version of reqnew.<m> the term lines were read with (absent: none yet)
+  const reqnewRead = ix.current.get(newRequirementsLine(req.mission)) ?? null;
   const rec: ObjectVersionRecord = {
     kind: 'object.version',
     object: plan as ObjectVersionId,
@@ -332,11 +332,11 @@ async function submitPmBatchOnce(ports: FlowPorts, req: PmBatchRequest): Promise
   for (const o of batches) for (const e of await openEscalations(ctx, `plan:${o.body.plan}`)) stale.push(e.id);
   const close = closing(ctx, stale, `PM plan ${plan} (batch b${n}) was submitted: a decision on the earlier batch is not carried out`);
   const carry = carryGuard([close]);
-  // (p12-4) the term lines the contract lists are the ones there are at the write: no filing of a new requirement since the read
-  const filings = { mission: req.mission, line: REPAIRS_LINE, event: 'repair', revision: filingsRead };
+  // (p12-4, p12-r2-3) the term lines the contract lists are the ones there are at the write: reqnew.<m> as it was read
+  const sets = [{ line: newRequirementsLine(req.mission), version: reqnewRead }];
   const guard: AppendGuard = carry !== undefined
-    ? { ...carry, latest: [...(carry.latest ?? []), filings], message: `${carry.message} (or a new requirement was filed meanwhile)` }
-    : { latest: [filings], absent: [], code: 'STALE_REQUEST', message: `a new requirement was filed while PM plan ${plan} was being recorded; nothing was written (the batch is built again with it)` };
+    ? { ...carry, bases: sets, message: `${carry.message} (or a requirement item of mp pm extend was recorded meanwhile)` }
+    : { absent: [], bases: sets, code: 'STALE_REQUEST', message: `a requirement item of mp pm extend was recorded while PM plan ${plan} was being recorded; nothing was written (the batch is built again with it)` };
   await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, guard });
   await cancelSecretarySteps(ctx, stale);
   return { batch: body.batch, plan };

@@ -32,7 +32,7 @@ import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import { recordItem, withdrawItem } from '../src/flow/requirements.ts';
 import { recordExtension } from '../src/flow/repair.ts';
 import { cal1Pass, drive, happyScript, pmPlan, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
-import { pmExtend, pmRequirement, pmSay } from '../src/process/pm.ts';
+import { pmExtend, pmRepair, pmRequirement, pmSay } from '../src/process/pm.ts';
 import type { Calibrator1Card } from '../src/seat/cards/calibrator.ts';
 import type { AuditChainCard, AuditChainResult } from '../src/seat/cards/auditor.ts';
 import { advanceLegalization, requestLegalization, startLegalization } from '../src/flow/audit/flow.ts';
@@ -284,6 +284,33 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     await engine.reconcile(M);
     const card = ports.scheduler.card<Calibrator1Card>('cal1.m1.2');
     assert.ok(ports.ledger.content.get(card.materials.find((m) => m.id === 'items')!.ref).includes('item.m1.g2'), 'and is checked against its item');
+  });
+
+  it('p12-r2-3: ordinary repairs filed while a changed plan is being recorded do not refuse it (only a new version of reqnew.<m> does)', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    type Append = World['ledger']['append'];
+    const append: Append = ports.ledger.append.bind(ports.ledger);
+    const ledger = ports.ledger as { append: Append };
+    const ops: string[] = [];
+    let filed = 0;
+    ledger.append = async (op, entries) => {
+      ops.push(op);
+      // a distinct repair between the plan's read and its write, on each try (another process)
+      if (op === 'flow:pm-batch:m1:2' && filed < 3) {
+        filed++;
+        const w = say(ports, `The parser fails on case ${filed}.`);
+        await pmRepair(ports.ctx, { mission: M, words: w, kind: 'defect', text: `fails on case ${filed}` });
+      }
+      return append(op, entries);
+    };
+    const plan2 = pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] });
+    assert.deepEqual(await submitPmBatch(ports, { mission: M, plan: plan2, userWords: ['W-1'] }), { batch: 'b2', plan: 'pmplan.m1.2' });
+    ledger.append = append;
+    assert.equal(ops.filter((o) => o === 'flow:pm-batch:m1:2').length, 1, 'written at the first try');
+    assert.equal((await ports.ledger.events({ mission: M, line: 'repairs', event: 'repair' })).length, 1, 'the repair is recorded beside it');
+    const obj = (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.object === 'pmplan.m1.2')!;
+    assert.deepEqual(obj.reviews[0]?.basisLines, ['reqset.m1', 'item.m1.a1'], 'no new requirement: 4.3\'s contract');
   });
 
   it('p12-5: another process withdraws a new item between its revision\'s read and its write: nothing is recorded, the item stays withdrawn and never enters reqset', async () => {

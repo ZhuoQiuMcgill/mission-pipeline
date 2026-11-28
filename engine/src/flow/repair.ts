@@ -42,6 +42,7 @@ import { detailedPlanOf, explorationState, planInEffect, pmPlanDoc, projectComma
 import { acceptedProduct, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints, currentItems, itemLine, newItemRecords, type ItemVersionBody } from './requirements.ts';
+import { newItemTerms } from '../memory/domain/requirementSets.ts';
 import { cancelSecretarySteps, carryGuard, carryOut, closing, commitCarrying, grantForDecision, grantedAttempt, decisionFor, escalateToUser, isApplied, markApplied, openEscalations, raiseEscalation, REPAIR_QUESTION_TO_PM } from './secretary.ts';
 import { recordExplorationRerun } from './exploration/flow.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED, type AttemptRerunBody, type AttemptsAmendedBody, type ConsumedBody, type ResnapshotBody, type Role } from './exploration/machine.ts';
@@ -254,6 +255,28 @@ export async function recordRepair(
   return { id, repeated: false, ...again };
 }
 
+/**
+ * 4.4 (G9, p12-r2-2): the filing an operation of `mp pm extend` created or returned (repairs line, key the hash of the op):
+ * a retry of the operation returns that one, as `mp pm repair --again` does with its op.
+ */
+const EXTEND_OP = 'extend-op';
+interface ExtendOpBody {
+  readonly op: string;
+  readonly repair: string;
+  /** It created the filing (false: it returned one recorded before). */
+  readonly created: boolean;
+  /** The filing it was filed again over, when it was. */
+  readonly again?: string;
+}
+
+/** 4.4 (G9): the term the items of a filing were recorded in (by their term line; `fallback` when none is found). */
+async function itemsTerm(ctx: FlowCtx, ids: readonly string[], fallback: number): Promise<number> {
+  const ix = await basisIndex(ctx);
+  const term = newItemTerms(ix, (r) => ctx.ports.ledger.content.getList(r), ctx.mission).get(itemLine(ctx.mission, ids[0] ?? ''));
+  const n = term === undefined ? NaN : Number(term.slice(term.lastIndexOf('.t') + 2));
+  return Number.isInteger(n) ? n : fallback;
+}
+
 /** 4.4 (G9): the most items one filing of `mp pm extend` carries (one write; an Architect card lists them all). */
 export const EXTEND_ITEMS_MAX = 50;
 
@@ -276,7 +299,7 @@ export interface NewItem {
  * is filed anew against the items as recorded (`again`: the filing before). The write is checked against the PM plan
  * version it read as the latest (the items' term): a plan submitted in between refuses it.
  */
-export async function recordExtension(ports: FlowPorts, req: { readonly mission: MissionId; readonly items: readonly NewItem[]; readonly openItems?: readonly string[] }): Promise<{ readonly id: string; readonly repeated: boolean; readonly term: number; readonly versions: readonly string[]; readonly again?: string }> {
+export async function recordExtension(ports: FlowPorts, req: { readonly mission: MissionId; readonly items: readonly NewItem[]; readonly openItems?: readonly string[]; readonly op?: string }): Promise<{ readonly id: string; readonly repeated: boolean; readonly term: number; readonly versions: readonly string[]; readonly again?: string }> {
   const ctx = flowCtx(ports, req.mission);
   if (req.items.length === 0) throw new Error('a new requirement records at least one requirement item');
   if (req.items.length > EXTEND_ITEMS_MAX) throw new Error(`one filing records at most ${EXTEND_ITEMS_MAX} items (${req.items.length} given): file the rest in another one`);
@@ -291,6 +314,14 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   const existing = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
   const batches = await eventsOf<{ n: number }>(ctx, PLAN_LINE, 'pm-batch');
   const term = batches.at(-1)?.body.n ?? 0;
+  const v1 = ids.map((i) => safeId(`${itemLine(req.mission, i)}.v1`));
+  // (p12-r2-2) the operation filed or returned a filing already (a retry after its receipt was lost): that one, as it
+  // said then, whatever became of its work since (as `mp pm repair --again` does, p7-8)
+  const opKey = req.op === undefined ? null : shortHash(req.op);
+  if (req.op !== undefined) {
+    const done = (await eventsOf<ExtendOpBody>(ctx, REPAIRS_LINE, EXTEND_OP)).find((e) => e.body.op === req.op)?.body;
+    if (done !== undefined) return { id: done.repair, repeated: !done.created, term: await itemsTerm(ctx, ids, term), versions: v1, ...(done.again !== undefined ? { again: done.again } : {}) };
+  }
   // the same filing again (a retry): its items recorded with the same text and words, by the latest filing that names them
   const same = existing.filter((e) => e.body.entry === 'extend' && canonicalJson(e.body.items ?? []) === canonicalJson(ids)).at(-1);
   // (p12-8) the plan in effect as read: a filing anew rests on its work being gone from it, so its write is checked against it
@@ -300,9 +331,15 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   if (same !== undefined) {
     const recorded = new Map((await eventsOf<import('./requirements.ts').ItemVersionBody>(ctx, 'requirements', 'item')).map((e) => [e.body.version, e.body]));
     const ok = req.items.every((i) => { const b = recorded.get(safeId(`${itemLine(req.mission, i.item)}.v1`)); return b !== undefined && b.type === i.type && b.text === i.text && b.source.kind === 'words' && b.source.words === i.words && b.source.quote === i.quote; });
-    // (p12-8) it stands while it is undecided (or ended), or while what it added is in the plan in effect, as a repair does
+    // (p12-8) it stands while it is undecided (or ended), or while some of its work is in the plan in effect: a task it
+    // added, changed or reopened; once none is, it is filed anew
     const d = ok ? (await eventOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided', same.key))?.body : undefined;
-    if (ok && (d === undefined || pie === null || d.add.every((t) => pie.plan.tasks.some((x) => x.id === t)))) return { id: same.key, repeated: true, term, versions: ids.map((i) => safeId(`${itemLine(req.mission, i)}.v1`)) };
+    const work = d === undefined ? [] : [...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)];
+    if (ok && (d === undefined || pie === null || work.some((t) => pie.plan.tasks.some((x) => x.id === t)))) {
+      // (p12-r2-2) the operation returned it: recorded, so a retry returns it again
+      if (req.op !== undefined) await commit(ctx, `flow:extend-op:${req.mission}:${opKey}`, { events: [ev(ctx, REPAIRS_LINE, EXTEND_OP, opKey!, { op: req.op, repair: same.key, created: false } satisfies ExtendOpBody)] });
+      return { id: same.key, repeated: true, term: await itemsTerm(ctx, ids, term), versions: v1 };
+    }
     if (ok) again = same.key;
   }
   if (pie === null) throw new Error(`mission ${req.mission} has no detailed plan in effect: a new requirement amends the plan in effect (plan the work with mp pm plan submit first)`);
@@ -318,8 +355,10 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   const id = `R-${existing.length + 1}`;
   const first = req.items[0]!;
   const body: RepairBody = { id, words: first.words, kind: 'missing', text: first.quote, about: null, ...(open.length > 0 ? { openItems: open } : {}), items: ids, entry: 'extend' };
+  // (p12-r2-2) which filing the operation created, in the same write
+  const opEvent = req.op === undefined ? [] : [ev(ctx, REPAIRS_LINE, EXTEND_OP, opKey!, { op: req.op, repair: id, created: true, ...(again !== undefined ? { again } : {}) } satisfies ExtendOpBody)];
   await commit(ctx, `flow:extend:${req.mission}:${id}`, {
-    events: [...recs.events, ev(ctx, REPAIRS_LINE, 'repair', id, body)],
+    events: [...recs.events, ev(ctx, REPAIRS_LINE, 'repair', id, body), ...opEvent],
     records: recs.records,
     guard: {
       absent: [{ mission: req.mission, line: PLAN_LINE, event: 'pm-batch', key: `b${term + 1}` }],
@@ -492,7 +531,7 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   if (failures.length > 0) return repairReturn(ctx, r, a, task, failures);
   // 4.4 (G9, p12-6): the filing's items in force as this decision reads them (its write is checked against that read)
   const live = lines.filter((l) => !ix.withdrawn.has(l));
-  await decide(ctx, r, task, eff, plan, result, mc, { effective: effective.revision, decided, withdrawn: withdrawals.at(-1)?.revision ?? null, live });
+  await decide(ctx, r, task, eff, plan, result, mc, { effective: effective.revision, decided, withdrawn: withdrawals.at(-1)?.revision ?? null, live, ix });
 }
 
 /**
@@ -642,7 +681,7 @@ async function repairReturn(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, t
  * as basis lines. Reopened tasks get their new attempts from execution (carryReopens). Each reopened
  * task is taken at the attempt it is accepted at now; one no longer accepted is left out, said.
  */
-async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveBody, plan: DetailedPlanDoc, result: ArchitectRepairResult, mc: MechanicalResult, read: { readonly effective: number; readonly decided: number | null; readonly withdrawn: number | null; readonly live: readonly string[] }): Promise<void> {
+async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveBody, plan: DetailedPlanDoc, result: ArchitectRepairResult, mc: MechanicalResult, read: { readonly effective: number; readonly decided: number | null; readonly withdrawn: number | null; readonly live: readonly string[]; readonly ix: Awaited<ReturnType<typeof basisIndex>> }): Promise<void> {
   // 4.4 (G9, p12-6): the work is bound to the filing's items, by the number of them in force when the amendment is applied
   // (`read.live`, checked in the write): exactly one, and every task it adds, changes or reopens carries it with no action
   // of the Architect's; several, and each carries those the Architect named on it (none: bound to none)
@@ -650,6 +689,14 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   const one = read.live.length === 1 ? read.live[0]! : null;
   const bind = (t: DetailedTask): DetailedTask => (one === null || t.requirementItems.includes(one) ? t : { ...t, requirementItems: [...t.requirementItems, one] });
   const reopenItems = (x: ArchitectRepairResult['reopen'][number]): { items?: string[] } => { const items = one !== null ? [one] : [...new Set((x.items ?? []).filter((l) => read.live.includes(l)))]; return items.length > 0 ? { items } : {}; };
+  // (p12-7) on a filing with items, a changed card keeps the items the task already carried that are in force, then the
+  // ones named: a binding is not removed by leaving it out (a repair that names no item: the Architect's card, as 4.3)
+  const keepCarried = (c: DetailedTask): DetailedTask => {
+    if (filing.length === 0) return c;
+    const had = (plan.tasks.find((x) => x.id === c.id)?.requirementItems ?? []).filter((l) => read.ix.current.has(l) && !read.ix.withdrawn.has(l));
+    const items = [...had, ...c.requirementItems.filter((l) => !had.includes(l))];
+    return items.length === c.requirementItems.length ? c : { ...c, requirementItems: items };
+  };
   const reopen: Array<RepairDecidedBody['reopen'][number]> = [];
   const skipped: string[] = [];
   const notCarried: Array<{ readonly task: string; readonly attempt: number; readonly why: string }> = [];
@@ -689,7 +736,7 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   const changed: DetailedTask[] = [];
   for (const c of result.change ?? []) {
     if ((await acceptedProduct(ctx, c.id)) !== null || !plan.tasks.some((t) => t.id === c.id)) skipped.push(c.id);
-    else changed.push(bind(c));
+    else changed.push(bind(keepCarried(c)));
   }
   // 4.4 (G3, F2): the Architect's note is recorded with its decision (also an empty one, so a read tells it from a
   // 4.3 decision, which has none); the cards of the tasks it added, changed or reopened print it

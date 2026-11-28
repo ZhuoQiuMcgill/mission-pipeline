@@ -1295,12 +1295,12 @@ export async function pmRepair(
  * checked against, and its work started on a repair's light path in the same write (one Architect step under the
  * mechanical checks; no Calibrator, no feasibility review, no approval).
  */
-export async function pmExtend(ctx: ProcessContext, req: { readonly mission: string; readonly items: readonly NewItem[]; readonly openItems?: readonly string[] }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly term: number; readonly items: readonly string[]; readonly outsideOf: string | null; readonly olderAudits: readonly string[]; readonly again?: string }> {
+export async function pmExtend(ctx: ProcessContext, req: { readonly mission: string; readonly items: readonly NewItem[]; readonly openItems?: readonly string[]; readonly op?: string }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly term: number; readonly items: readonly string[]; readonly outsideOf: string | null; readonly olderAudits: readonly string[]; readonly again?: string }> {
   for (const i of req.items) ctx.memory.read((db) => checkQuote(db, ctx.memory.data, i.words, i.quote));
   const mission = req.mission as MissionId;
   let r: Awaited<ReturnType<typeof recordExtension>>;
   try {
-    r = await recordExtension(ctx.ports(), { mission, items: req.items, ...((req.openItems ?? []).length > 0 ? { openItems: req.openItems } : {}) });
+    r = await recordExtension(ctx.ports(), { mission, items: req.items, ...((req.openItems ?? []).length > 0 ? { openItems: req.openItems } : {}), ...(req.op !== undefined ? { op: req.op } : {}) });
   } catch (e) {
     if (e instanceof LedgerError || e instanceof ProcessError) throw e;
     const code = (e as { code?: unknown }).code;
