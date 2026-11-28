@@ -11,7 +11,7 @@ import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
 import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
-import { carriedArchitectAnswer } from '../../flow/architectAnswers.ts';
+import { ARCHITECT_ANSWER, answersInPlace, carriedArchitectAnswer, type ArchitectAnswerBody } from '../../flow/architectAnswers.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -258,16 +258,32 @@ export function repairsOfTaskWork(mission: string, amendments: readonly Amendmen
   return ids;
 }
 
-/** 4.4 (G3): a recorded text of an Architect and the tasks it names. */
-export interface ArchitectText { readonly from: string; readonly repair: string | null; readonly tasks: readonly string[]; readonly text: string }
+/**
+ * 4.4 (G3): a recorded text of an Architect and the tasks it names. `since` (G1, an Architect's answer): the
+ * revision it was recorded at; it reaches a named task's cards under the card that task had then, as an answer
+ * belongs to the card it was given under.
+ */
+export interface ArchitectText { readonly from: string; readonly repair: string | null; readonly tasks: readonly string[]; readonly text: string; readonly since?: number }
 
 /**
  * 4.4 (G3): the Architect's recorded texts: the note of each repair decision, naming the tasks it added,
- * changed or reopened. A later source (an Architect's answer on an escalation, fix G1) is added here.
+ * changed or reopened; (G1) an Architect's answer on an escalation that names other tasks of the plan. An
+ * answer of a kind carried out as an answer counts once it was carried out (one another decider's answer
+ * overrode is not printed); a moot one never does. The asking task gets it as its escalation's answer.
  */
 export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
   const out: ArchitectText[] = [];
+  let sec: FlowEvent[] | undefined;
   for (const e of events) {
+    if (e.line === 'secretary' && e.event === ARCHITECT_ANSWER) {
+      const a = e.body as ArchitectAnswerBody;
+      if (a.reply !== 'answer' || a.moot !== undefined || (a.tasks ?? []).length === 0) continue;
+      sec ??= events.filter((x) => x.line === 'secretary');
+      const esc = sec.find((x) => x.event === 'escalation' && x.key === a.escalation)?.body as EscalationBody | undefined;
+      if (esc === undefined || (answersInPlace(esc.source) && carriedArchitectAnswer(sec, a.escalation)?.key !== e.key)) continue;
+      out.push({ from: `escalation ${a.escalation} (${esc.subject}), the Architect's answer`, repair: null, tasks: [...(a.tasks ?? [])], text: a.text, since: e.revision });
+      continue;
+    }
     if (e.line !== 'repairs' || e.event !== 'decided') continue;
     const d = e.body as RepairDecidedBody;
     if (typeof d.note !== 'string' || d.note.trim() === '') continue;
@@ -276,9 +292,13 @@ export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
   return out;
 }
 
-/** 4.4 (G3): the Architect's texts printed on a task's cards: those naming it; a repair's only while it is among the repairs its work answers. */
+/**
+ * 4.4 (G3): the Architect's texts printed on a task's cards: those naming it; a repair's only while it is among the
+ * repairs its work answers; (G1) an answer only while the task keeps the card it had when the answer was recorded.
+ */
 export function architectNotesFor(events: readonly FlowEvent[], task: string, repairs: readonly string[]): Array<{ from: string; text: string }> {
-  return architectTexts(events).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair))).map((t) => ({ from: t.from, text: t.text }));
+  const spec = events.filter((e) => e.line === `task:${task}` && e.event === 'spec').at(-1)?.revision ?? 0;
+  return architectTexts(events).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair)) && (t.since === undefined || spec < t.since)).map((t) => ({ from: t.from, text: t.text }));
 }
 
 /**

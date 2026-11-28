@@ -18,6 +18,7 @@ import { askTask } from '../src/flow/architectAsk.ts';
 import { ARCHITECT_ANSWER, type ArchitectAnswerBody } from '../src/flow/architectAnswers.ts';
 import { pmDispatch, readSteps } from '../src/process/pm.ts';
 import { resolveSubtasks } from '../src/cli/layers.ts';
+import { architectNotesFor } from '../src/seat/cards/dynamic.ts';
 import { REDISPATCH_LOOP } from '../src/process/index.ts';
 import { pmInbox } from '../src/process/secretary.ts';
 import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
@@ -189,6 +190,35 @@ describe('4.4 G1: ask the Architect on a Constructor\'s questions', () => {
     assert.equal(second!.asked.instructions, 'The input is UTF-8 (the user said so).');
     assert.equal((await applied(ports, id))?.['architect'], `${id}:s1`, 'the second answer is carried out');
     assert.ok((await events(ports, { line: 'task:impl', event: 'accepted' })).length === 1);
+  });
+
+  it('an answer that names other tasks is printed on their cards too, under the card they had then; one overridden or moot is not', async () => {
+    const ports = memoryPorts();
+    say(ports, SEED_TEXT);
+    await seedMission(ports, M);
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['W-1'], mode: 'fast' });
+    const engine = new FlowEngine(ports);
+    const base = happyScript(M, () => detailedPlan(M, { extraTask: true }));
+    const over: Record<string, Script> = {
+      constructor: (t: FlowTask) => ({ handBack: t.task === 'con.m1.impl.1' ? constructorDone({ decisions_needed: ['Is the README in English?'] }) : constructorDone() }),
+      secretary: asksArchitect((c) => c.request.id === 'cdec.con.m1.impl.1'),
+      'architect-answer': reply({ reply: 'answer', text: 'English, and docs writes its README in English too.', tasks: ['docs', 'impl'] }),
+      // the docs task's review is not needed here: its Constructor's card is
+      reviewer: (t) => { const c = t.card as unknown as ReviewerCard; return c.target.includes('docs') ? null : { handBack: reviewer(c, 'pass') }; },
+    };
+    await drive(engine, ports.scheduler, (t, s) => (Object.hasOwn(over, t.card.seat) ? over[t.card.seat]! : base)(t, s));
+    const r = await replies(ports);
+    assert.deepEqual(r[0]!.body.tasks, ['docs'], 'the asking task is not named again: it has the answer as its escalation\'s');
+    const docs = claimedCard<ConstructorCard>(ports, 'con.m1.docs.1');
+    assert.deepEqual(docs.architectNotes?.map((n) => [n.from, n.text]), [['escalation cdec.con.m1.impl.1 (task:impl), the Architect\'s answer', 'English, and docs writes its README in English too.']]);
+    assert.ok(!(claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1').architectNotes ?? []).length, 'not as a note on the asking task');
+    // the same reads on other records: moot, overridden, or the named task under a newer card
+    const evs = await events(ports);
+    assert.equal(architectNotesFor(evs, 'docs', []).length, 1);
+    const reply0 = evs.find((e) => e.event === ARCHITECT_ANSWER)!;
+    assert.deepEqual(architectNotesFor(evs.map((e) => (e === reply0 ? { ...e, body: { ...(e.body as object), moot: 'the PM answered' } } : e)), 'docs', []), [], 'a moot answer is never printed');
+    assert.deepEqual(architectNotesFor(evs.map((e) => (e.event === 'applied' && e.key === 'cdec.con.m1.impl.1' ? { ...e, body: { what: { option: 'answer' }, by: 'pm' } } : e)), 'docs', []), [], 'an answer another decider\'s overrode is not printed');
+    assert.deepEqual(architectNotesFor([...evs, { revision: reply0.revision + 10_000, mission: M, line: 'task:docs', event: 'spec', key: 'later', body: {} }], 'docs', []), [], 'not under a newer card of the named task');
   });
 });
 

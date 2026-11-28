@@ -48,7 +48,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
   A task with an accepted product keeps its card: reopen it with the issue instead. Reopen, change or add at least one task.
   If you cannot decide without an answer, hand back no reopen, add or change, with your question as the `note`: it goes to the PM, whose filing the repair is; the repair's next card brings the answer.
 - **Answer**: exactly one `reply`, and nothing else (any other field is refused):
-  - `answer`: the answer in `text`; name in `tasks` other tasks of the plan it concerns. It is recorded as the escalation's answer and reaches the task's next cards;
+  - `answer`: the answer in `text`; name in `tasks` other tasks of the plan it concerns: it is printed on their cards too. It is recorded as the escalation's answer and reaches the task's next cards;
   - `plan-must-change`: what must change in `text`, why in `why`, when the answer would change a card, a standard, a write path, a task or an interface;
   - `need-to-know`: what you must know first, as a question in `text`.
 
