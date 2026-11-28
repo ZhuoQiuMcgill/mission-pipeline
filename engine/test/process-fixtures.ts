@@ -14,6 +14,7 @@ import { openProcess, pmDispatch, pmMission, pmNext, pmPlan, pmRequirement, pmSa
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import type { MaterialRef } from '../src/seat/cards/common.ts';
 import { dispatchView } from '../src/process/seat.ts';
+import { FIXTURE_EOL } from './memory-fixtures.ts';
 
 const GIT_ENV = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 
@@ -45,6 +46,7 @@ export function processProject(o: { files?: Record<string, string>; env?: Enviro
   const dir = join(base, 'project');
   mkdirSync(dir, { recursive: true });
   sh(dir, 'init', '-q', '-b', 'main');
+  sh(dir, 'config', ...FIXTURE_EOL); // the fixture's line endings, not the machine's (memory-fixtures.ts)
   write(dir, 'README.md', '# the project\n');
   write(dir, '.gitignore', '*.local\n');
   for (const [rel, text] of Object.entries(o.files ?? {})) write(dir, rel, text);

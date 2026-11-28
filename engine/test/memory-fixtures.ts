@@ -19,9 +19,25 @@ export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
 }
 
+/**
+ * 4.4.1 (Windows): a fixture repository's line endings are set by the fixture, not by the machine.
+ * Git for Windows' system configuration says core.autocrlf=true; a fixture means git's own default
+ * (no conversion, as on Linux), so every fixture repository says so in its own configuration
+ * (`git config` after an init, `-c` on a clone). A test of the Windows default sets
+ * core.autocrlf=true there itself. (git-fixtures.test.ts needs none: its git reads no system
+ * configuration and a home of its own.)
+ */
+export const FIXTURE_EOL: readonly [string, string] = ['core.autocrlf', 'false'];
+
+/** `git init` of a fixture repository, with the fixture's line endings (FIXTURE_EOL). */
+export function initFixtureRepo(dir: string, ...initArgs: string[]): void {
+  git(dir, 'init', '-q', ...initArgs);
+  git(dir, 'config', ...FIXTURE_EOL);
+}
+
 /** A git repository with one commit (file.txt). */
 export function repo(dir: string): string {
-  git(dir, 'init', '-q', '-b', 'main');
+  initFixtureRepo(dir, '-b', 'main');
   writeFileSync(join(dir, 'file.txt'), 'hello\n');
   git(dir, 'add', 'file.txt');
   git(dir, 'commit', '-q', '-m', 'first');
