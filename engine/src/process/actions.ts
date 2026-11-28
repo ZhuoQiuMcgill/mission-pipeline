@@ -119,9 +119,14 @@ interface Shared {
 /** 4.4 (F14): how many prerequisite closures `composition` built (the others were the same list under the same records). */
 export const COMPOSITIONS = { built: 0 };
 
-/** The revision of the last object version or proof unit recorded: what every composition rests on. */
-function structureRevision(db: { stmt(sql: string): { get(...a: never[]): unknown } }): number {
-  return Number((db.stmt("SELECT COALESCE(MAX(rev), 0) AS r FROM log WHERE kind IN ('object.version', 'proof.unit')").get() as { r: number }).r);
+/**
+ * The last object version or proof unit recorded, what every composition rests on: its revision and its chain
+ * hash. A chain recovery (continue from the last valid event) reuses revisions; the hash, which covers every
+ * event before it, tells the history recorded after it apart from the one it replaced.
+ */
+function structureKey(db: { stmt(sql: string): { get(...a: never[]): unknown } }): string {
+  const last = db.stmt("SELECT rev, hash FROM log WHERE rev = (SELECT MAX(r) FROM (SELECT MAX(rev) AS r FROM log WHERE kind = 'object.version' UNION ALL SELECT MAX(rev) AS r FROM log WHERE kind = 'proof.unit'))").get() as { rev: number; hash: string } | undefined;
+  return last === undefined ? '' : `${last.rev}:${last.hash}`;
 }
 
 /**
@@ -163,7 +168,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
   const repo = (): Promise<RepoLayout> => (shared.repo ??= discoverRepo(ctx.git, ctx.projectDir));
   const description = async (): Promise<TransformDescription> => (shared.description ??= readTransformDescription(ctx.git, await repo(), ctx.projectDir));
   const compositionView = () => memoryProofView(ctx.memory, { revision: ctx.memory.head(), recomputing: false, recomputingIn: () => false, labelOf: () => 'unaccepted', decidingRuns: () => [] });
-  const compositions: { structure: number; view: DeliveryProofView | null; results: Map<string, readonly string[]> } = { structure: -1, view: null, results: new Map() };
+  const compositions: { structure: string | null; view: DeliveryProofView | null; results: Map<string, readonly string[]> } = { structure: null, view: null, results: new Map() };
 
   /** The mission's base: the target branch's head (a mission starts from where it will land). */
   function missionBase(): string {
@@ -288,8 +293,10 @@ export function gitActions(ctx: ProcessContext): GitActions {
     async composition(products) {
       // 4.4 (F14, #69): a closure rests on object versions and proof units only, which are never rewritten: while
       // none is recorded, one view serves every call and a product list's closure is built once, for the life of
-      // the process context (every kept task of a pass, and every pass of a long `mp sec wait`)
-      const structure = structureRevision(ctx.memory);
+      // the process context (every kept task of a pass, and every pass of a long `mp sec wait`). Kept by the last
+      // such record's revision and chain hash: a chain recovery that records another history up to the same
+      // revision builds them again
+      const structure = structureKey(ctx.memory);
       if (structure !== compositions.structure || compositions.view === null) {
         compositions.structure = structure;
         compositions.view = compositionView();
