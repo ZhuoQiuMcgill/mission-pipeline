@@ -119,14 +119,15 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
   const decisions = involved.filter((i) => i.type === 'decision' && i.state === 'valid' && (i.source.kind !== 'authorization' || auths.some((a) => i.source.kind === 'authorization' && a.line === i.source.line)));
   const selectedItems = involved.filter((i) => i.type !== 'decision' || decisions.includes(i));
   const decisionAuthorities = new Set(decisions.flatMap((i) => i.source.kind === 'authorization' ? [i.source.line] : []));
-  const material = (id: string, title: string, text: string, role: MaterialRef['role']): MaterialRef => ({ id, title, ref: put(text), pages: materialPageCount(text), mustRead: true, role });
+  const material = (id: string, title: string, text: string, role: MaterialRef['role'], mustRead = true): MaterialRef => ({ id, title, ref: put(text), pages: materialPageCount(text), mustRead, role });
   const request = [`Escalation ${e.id} from ${e.source} on ${e.subject}`, e.summary, e.original ? `Original:\n${e.original}` : '', e.changed ? `Changed:\n${e.changed}` : '', e.reasons.length > 0 ? `Reasons:\n${e.reasons.map((r) => `- ${r}`).join('\n')}` : '', e.facts !== undefined ? `Facts:\n${JSON.stringify(e.facts, null, 2)}` : ''].filter(Boolean).join('\n\n');
   const batches = events.filter((b) => b.line === 'plan' && b.event === 'pm-batch');
-  const decisionQuotes = decisions.map((i) => i.text);
+  const taskLine = task === undefined ? [] : events.filter((x) => x.line === `task:${task.id}`);
   return {
     // 4.1.2 (item 7): the earlier decisions on the same line, so a ruling is not made again blind
     earlierDecisions: earlierDecisionsOf(e, events),
-    decisionQuotes,
+    // 4.4 (F16): each decision is printed once on the card: in its items, with its id
+    decisionQuotes: [],
     constraints: constraints.map((c) => ({ id: c.line, kind: c.kind, text: c.text })),
     authorizations: auths.map((a) => ({ id: a.line, version: a.version, quote: a.source.kind === 'words' ? a.source.quote : a.text, notifyCondition: a.notifyCondition })),
     items: selectedItems.map((i) => ({ id: i.line, text: i.text })),
@@ -136,9 +137,36 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('request', 'The escalated question and its facts', request, 'record'),
       material('authorizations', 'Authorizations in force (verbatim)', auths.map((a) => `[${a.line}] ${a.text}${a.source.kind === 'words' ? ` — "${a.source.quote}"` : ''}`).join('\n') || '(none)', 'authorizations'),
       material('alignment', 'Alignment record (PM batches)', batches.map((b) => `${b.key}: user messages ${(b.body as { userWords: string[] }).userWords.join(', ') || 'none'}`).join('\n') || '(none)', 'record'),
-      material('current-facts', 'Current escalation facts', canonicalJson({ escalation: e, items: selectedItems, authorizations: auths, constraints, decisions: decisionQuotes, task: task ?? null, taskState: task === undefined ? [] : events.filter((x) => x.line === `task:${task.id}`).map((x) => ({ event: x.event, key: x.key, body: x.body })) }), 'record'),
+      // 4.4 (F16, P5): a digest that can be read, in place of every event of the task line in full; the
+      // constraints are on the card already and are not repeated here
+      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine), 'record'),
+      ...(task === undefined ? [] : [material('task-line', `Task ${task.id}: its card and every event of its line, in full (not must-read)`, canonicalJson({ task, events: taskLine.map((x) => ({ event: x.event, key: x.key, body: x.body })) }), 'record', false)]),
     ],
   };
+}
+
+/** One line of at most `n` characters. */
+function line(text: string, n = 160): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t.length <= n ? t : `${t.slice(0, n - 1)}…`;
+}
+
+/**
+ * 4.4 (F16): the Secretary's current facts as a digest: the escalation, the selected items by id and one
+ * line, the authorizations, the task's goal and standards, one line per event of the task line.
+ */
+function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[]): string {
+  const section = (title: string, lines: readonly string[]): string => `${title}:\n${lines.length === 0 ? '(none)' : lines.map((l) => `- ${l}`).join('\n')}`;
+  return [
+    `Escalation ${e.id} (${e.source}) on ${e.subject}: ${line(e.summary, 300)} (its reasons and facts in full: material request)`,
+    section('Items involved', items.map((i) => `[${i.line}] ${i.type}${i.state === 'contested' ? ' (contested)' : ''}: ${line(i.text)}`)),
+    section('Authorizations in force', auths.map((a) => `[${a.line}] ${line(a.text)}`)),
+    ...(task === undefined ? [] : [
+      `Task ${task.id} (${task.kind}): ${line(task.goal, 300)}`,
+      section('Its standards', task.standards.map((s) => `[${s.id}] ${line(s.text, 300)}`)),
+      section(`Its line, one event each (in full: material task-line)`, taskLine.map((x) => `${x.event} ${x.key}: ${line(canonicalJson(x.body), 120)}`)),
+    ]),
+  ].join('\n\n');
 }
 
 /**

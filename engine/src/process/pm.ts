@@ -457,6 +457,26 @@ export interface Dispatched {
   readonly files: ReturnType<typeof handBackFiles>;
   /** The fixed prompt for the PM's harness (§5.1 step 3). */
   readonly prompt: string;
+  /** 4.4 (F16): what the dispatch reports of its card's size to whoever dispatches it. */
+  readonly size: CardSizeReport;
+}
+
+/**
+ * 4.4 (F16; PM design G3 "Size"): a dispatch's report of its card, to whoever dispatches it (the Secretary
+ * while one is live). It holds nothing and is never a notice to the PM. Today: the must-read pages, with a
+ * warning above `mustReadWarnPages`.
+ */
+export interface CardSizeReport {
+  readonly mustReadPages: number;
+  readonly mustReadWarnPages: number;
+  readonly warnings: readonly string[];
+}
+
+export function cardSizeReport(ctx: Pick<ProcessContext, 'mustReadWarnPages'>, card: Readonly<Record<string, unknown>>): CardSizeReport {
+  const must = ((card['materials'] as MaterialRef[] | undefined) ?? []).filter((m) => m.mustRead);
+  const pages = must.reduce((n, m) => n + m.pages, 0);
+  const limit = ctx.mustReadWarnPages;
+  return { mustReadPages: pages, mustReadWarnPages: limit, warnings: pages > limit ? [`its must-read material is ${pages} pages, above mustReadWarnPages (${limit}): ${must.map((m) => `${m.id} ${m.pages}`).join(', ')}`] : [] };
 }
 
 /** How long `mp pm dispatch` waits before it tries its write again after OVER_BUDGET: a short random delay, so a burst spreads out. */
@@ -544,7 +564,8 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       const dispatch = `D-${n}`;
       // 4.1.3 (#30): a step dispatched again lists the runs its earlier dispatches made
       const carriedRuns = carriedRunLines(tx, tx.data, { mission: task.mission as MissionId, task: step, dispatch });
-      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite, carriedRuns });
+      // 4.4 (F9): the card's commands follow who claims it (the live Secretary's own, or the seat commands)
+      const card = renderSeatCard(cardForSeat(tx, spec.card), { dispatch, projectDir: ctx.projectDir, fullSuite: ctx.fullSuite, carriedRuns, secretaryClaim: ctx.secretary !== null && liveSecretary(tx)?.generation === ctx.secretary });
       const claimed = claimDispatch(tx, { dispatch, task: step, seat: spec.card.seat, capabilities: spec.capabilities, filler, worktree: entry.exportsProduct === true, card });
       // the materials as leaves (§5.2): `mp seat <id> read` reads them, hash-checked
       for (const m of ((spec.card['materials'] as MaterialRef[] | undefined) ?? [])) tx.leaves.writeDocument(materialLeaf(task.mission, m.ref), tx.data.text(m.ref));
@@ -580,6 +601,7 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     worktree,
     files: handBackFiles(out.dispatch),
     prompt: `You are the ${title} of Mission Pipeline. Your card: \`mp seat ${out.dispatch} card\`. Use only the \`mp seat ${out.dispatch}\` commands listed there. Finish with \`mp seat ${out.dispatch} handback\`.`,
+    size: cardSizeReport(ctx, spec.card),
   };
 }
 
@@ -1298,7 +1320,7 @@ export async function pmPlan(
  * `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n] [--findings F,...]`:
  * the user's decision. 4.1.3 (#39): a grant on an exploration may name the findings it is for.
  */
-export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly by?: 'pm' | 'user'; readonly noWords?: boolean; readonly reason?: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<void> {
+export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly by?: 'pm' | 'user'; readonly noWords?: boolean; readonly reason?: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<{ readonly round: number | null }> {
   const text = req.by === 'pm' ? '' : wordsText(ctx, req.words);
   const findings = [...new Set((req.findings ?? []).map((f) => f.trim()).filter((f) => f !== ''))];
   if (findings.length > 0) {
@@ -1309,7 +1331,9 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
     const unknown = findings.filter((f) => !s.findings.has(f));
     if (unknown.length > 0) throw new LedgerError('BAD_REQUEST', `${line.slice('exploration:'.length)} has no finding ${unknown.join(', ')} (mp read show exploration lists its findings)`);
   }
-  if (req.by === 'pm') await answerByPm(ctx.ports(), {...req, mission: req.mission as MissionId, words: req.words.split(',').map((w) => w.trim()).filter(Boolean), reason: req.reason ?? ''});
+  // 4.4 (F9): the answer round this command recorded (a PM answer's), so its output reports on this very answer
+  let round: number | null = null;
+  if (req.by === 'pm') round = (await answerByPm(ctx.ports(), {...req, mission: req.mission as MissionId, words: req.words.split(',').map((w) => w.trim()).filter(Boolean), reason: req.reason ?? ''})).round;
   else await answerEscalation(ctx.ports(), {
     mission: req.mission as MissionId,
     escalation: req.escalation,
@@ -1320,6 +1344,7 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
     ...(findings.length > 0 ? { findings } : {}),
   });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm answer' });
+  return { round };
 }
 
 /** `mp pm grant <lineage> <loop> --extra <n> --words W-<n>` (WI-08: after the Secretary's one grant, only the user). */

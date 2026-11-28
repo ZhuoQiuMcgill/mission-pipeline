@@ -28,7 +28,7 @@
 // "verified" event of that attempt in the same process (4.1.2: the flow reads it and never runs
 // them again); the first writer of that event wins, the other adopts it.
 
-import { requireSecretary } from '../memory/resident.ts';
+import { liveSecretary, requireSecretary } from '../memory/resident.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -85,6 +85,7 @@ import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
 import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
+import { decisionOutcome, type DecisionOutcome } from './decisions.ts';
 
 // ---------------------------------------------------------------- the dispatch's card and materials
 
@@ -166,13 +167,16 @@ export function seatRead(ctx: ProcessContext, dispatch: string, material: string
   const r = ctx.memory.readLeaf(leaf);
   if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `material ${material} (${leaf}) is missing: hand back what you can and say so; the PM follows WI-30`, { wi: 'WI-30' });
   if (r.status === 'edited' || sha256(r.text) !== m.ref) throw new ProcessError('LEAF_EDITED', `material ${material} (${leaf}) was edited after it was recorded: hand back what you can and say so; the PM follows WI-30`, { wi: 'WI-30' });
-  if (v.info.state === 'in-flight') {
+  const recorded = v.info.state === 'in-flight';
+  if (recorded) {
     const key = `${material}#${page}`;
     ctx.memory.write({ op: `read:${dispatch}:${key}`, payload: { dispatch, key } }, (tx) => {
       appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'read', key, body: tx.data.put(canonicalJson({ material, page })) as ContentHash }]);
     });
   }
-  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read)' : ''}\n${materialPage(r.text, page)}` };
+  // 4.4 (F16): the receipt is named only where one is written; a dispatch that is over reads as history
+  const mark = !m.mustRead ? '' : recorded ? ' (must read; this fetch is recorded)' : ` (must read; dispatch ${dispatch} is over, so no fetch is recorded)`;
+  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${mark}\n${materialPage(r.text, page)}` };
 }
 
 /**
@@ -593,6 +597,8 @@ export type HandBackAnswer =
       readonly verification: readonly VerificationRun[] | null;
       /** A note for the seat (e.g. the verification could not run now; the flow runs it later). */
       readonly notes: readonly string[];
+      /** 4.4 (F9): an accepted Secretary decision: what became of it in this command. */
+      readonly decision?: DecisionOutcome;
     };
 
 export interface HandBackInput {
@@ -732,7 +738,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const snapFiles = snap !== null && COMMIT.test(snap) ? (ctx.snapshotFiles !== null ? ctx.snapshotFiles(snap) : commitFiles(ctx, snap)) : null;
     dataChecks = await handBackDataChecks(v, input.fields);
     const problems = [
-      ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not read (mp seat ${dispatch} read <material> --page <n>)`),
+      // 4.4 (F16): the receipt records a fetch; mp cannot see reading, and says so
+      ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not fetched (mp seat ${dispatch} read <material> --page <n>)`),
       ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}), ...(dataChecks !== undefined ? { data: dataChecks } : {}) }),
       ...integrationPassProblems(ctx, v, input.fields),
       ...attemptCommandProblems(ctx, v, input.fields),
@@ -826,8 +833,14 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       notes.push(`the worktree of ${dispatch} could not be removed now (${(e as Error).message}); mp pm next tries again`);
     }
   }
-  if (input.advance !== false) await advanceQuietly(ctx, v, notes);
-  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes };
+  let decision: DecisionOutcome | undefined;
+  if (input.advance !== false) {
+    const why = await advanceQuietly(ctx, v, notes);
+    // 4.4 (F9): a Secretary decision says what became of it, read from the record after the pass
+    const escalation = (v.card as { request?: { id?: unknown } }).request?.id;
+    if (v.card.seat === 'secretary' && out.accepted && typeof escalation === 'string') decision = ctx.memory.read((db) => decisionOutcome(db, data, { mission: v.info.mission, escalation, task: v.info.task, fields: input.fields, why }));
+  }
+  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(decision !== undefined ? { decision } : {}) };
 }
 
 /**
@@ -1013,12 +1026,38 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
  * the seat's. A seat-side pass (4.1.2): what the seat's sandbox could not write is left to the PM's next
  * step with a note, and raises no WI-20 notice; any other error still does.
  */
-async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<void> {
+async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<string | null> {
+  // 4.4 (F9, issue 62): a Secretary decision handed back under the live generation's identity runs the
+  // flow step `mp sec decide` runs, so it takes effect when it is made; any other hand-back keeps the
+  // seat-side pass, which a live Secretary leaves to its own next pass
+  const live = liveSecretary(ctx.memory);
+  const decision = v.card.seat === 'secretary' && live !== null && ctx.secretary === live.generation;
+  // a generation retired since the hand-back's own write: its seat-side pass does nothing (advance.ts), and says so
+  if (v.card.seat === 'secretary' && ctx.secretary !== null && live?.generation !== ctx.secretary) return `the Secretary generation ${ctx.secretary} was retired during this command, so it applies nothing; the live Secretary's next pass does`;
+  // a seat's process skips the recovery of a moved folder while a Secretary is live (memory.ts): such a pass is the Secretary's
+  if (decision && movedSinceRecovery(ctx)) return 'the project folder moved since its last recovery; the Secretary\'s next pass recovers it';
+  // 4.4 (F9; PM/Secretary B.1): every write of that pass is fenced to the live generation, as each write of
+  // `mp sec decide` is (process/context.ts writeGuard): a generation retired meanwhile applies nothing more
+  const guard = ctx.memory.writeGuard;
+  if (decision) ctx.memory.writeGuard = (tx, req) => { guard?.(tx, req); requireSecretary(tx, live.generation); };
   try {
     // the work this hand-back hands over is recorded as handed over by it (§3.2, U-13)
-    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, { seatSide: true });
+    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, decision ? {} : { seatSide: true });
     for (const r of reports) for (const e of r.errors) if (e.sandbox !== undefined) notes.push(`left to the PM: this seat's sandbox could not write ${e.sandbox}`);
+    if (live !== null && !decision) return 'this command ran without the live Secretary\'s identity (MP_SECRETARY), and only the Secretary\'s commands reconcile while it is live';
+    if (decision && liveSecretary(ctx.memory)?.generation !== live.generation) return `the Secretary generation ${live.generation} was retired during this command, so its pass wrote nothing more; the live Secretary's next pass applies the decision`;
+    const error = reports.flatMap((r) => r.errors).at(0);
+    return error === undefined ? null : `the ${error.step} step stopped (${error.message})`;
   } catch (e) {
     notes.push(`the process will advance on the PM's next step (${(e as Error).message})`);
+    return `the pass failed (${(e as Error).message})`;
+  } finally {
+    ctx.memory.writeGuard = guard;
   }
+}
+
+/** The folder was moved or copied and its recovery has not run (memory/move.ts needsRecovery). */
+function movedSinceRecovery(ctx: ProcessContext): boolean {
+  const m = ctx.memory;
+  return m.getMeta('move') !== null || m.getMeta('project_path') !== m.paths.project || m.getMeta('machine') !== m.machine;
 }

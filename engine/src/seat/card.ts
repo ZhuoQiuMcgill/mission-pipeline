@@ -229,6 +229,8 @@ const SEAT_TITLE: Readonly<Record<string, string>> = {
 /** What the project declares that changes a card's commands: its full suite (config.json `fullSuite`, fullSuiteOf). */
 export interface CardProject {
   readonly fullSuite?: readonly SuiteCommand[];
+  /** 4.4 (F9): the live Secretary generation makes this claim (a decision card then names its mp sec commands). */
+  readonly secretaryClaim?: boolean;
 }
 
 /** An integration task's Reviewer card in a project that declares a full suite: it gets `mp seat <id> full-run` (4.1.2). */
@@ -284,9 +286,25 @@ export function rerunCommands(card: Readonly<Record<string, unknown>>): Array<{ 
   return Array.isArray(declared) ? (declared as Array<{ id: string; command: string; cwd?: string }>) : [];
 }
 
+/**
+ * 4.4 (F9): a decision card the live Secretary claims: its escalation, else null. Who claims decides, not
+ * a field set when the step was queued: a PM claim with no live Secretary gets the seat commands.
+ */
+function residentDecision(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: CardProject): string | null {
+  const id = (card['request'] as { id?: unknown } | undefined)?.id;
+  return card.seat === 'secretary' && o.secretaryClaim === true && typeof id === 'string' ? id : null;
+}
+
 function commandLines(card: { readonly seat: string } & Readonly<Record<string, unknown>>, dispatch: string, o: CardProject = {}): string[] {
   const f = handBackFiles(dispatch);
   const ws = card['workspace'] as { snapshot?: string } | undefined;
+  // 4.4 (F9): the live Secretary decides with its own commands; the hand-back takes effect in the same command
+  const esc = residentDecision(card, o);
+  if (esc !== null) return [
+    `\`mp sec card ${esc}\`: this card (the same claim).`,
+    `\`mp sec read ${esc} <material> [--page <n>]\`: fetches one page of a material (page 1 by default) and records the fetch; it reports a missing or edited material instead of serving it.`,
+    `\`mp sec decide ${esc} --option <option> --classification detail|needs-pm --reason "…" [--notice "…"] [--instructions "…"] [--extra <n>] [--findings <ids>] [--authorization <item>] [--may-matter]\`: once, when you have decided; it is checked, recorded and carried out in the same command, and says what happened.`,
+  ];
   const lines: string[] = [];
   for (const c of seatCommandsOf(card, o)) {
     switch (c) {
@@ -294,7 +312,7 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         lines.push(`\`mp seat ${dispatch} card\`: this card.`);
         break;
       case 'read':
-        lines.push(`\`mp seat ${dispatch} read <material> [--page <n>]\`: one page of a material (page 1 by default); it reports a missing or edited material instead of serving it.`);
+        lines.push(`\`mp seat ${dispatch} read <material> [--page <n>]\`: fetches one page of a material (page 1 by default) and records the fetch; it reports a missing or edited material instead of serving it.`);
         break;
       case 'checkout':
         lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
@@ -360,6 +378,24 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
     suite.length > 0
       ? `\n\n## The project's full suite\n${suite.map((c) => `[${c.id}] ${c.command}`).join('; ')} on this card ${suite.length === 1 ? 'is' : 'are'} the project's full suite. \`mp\` does not run ${suite.length === 1 ? 'it' : 'them'} at hand-back, and ${suite.length === 1 ? 'it is' : 'they are'} not rerun from this card: ${offersFullRun(card, o) ? `you run the suite with \`mp seat ${o.dispatch} full-run\`, last (below), and that run is recorded with a full-run marker.` : 'the suite is left to the integration review (its Reviewer runs `mp seat <id> full-run`, last, recorded with a full-run marker).'}${e.exportsProduct === true ? ' Do not run it yourself: you answer for your own part, with its local commands (D-4).' : ''}`
       : '';
+  const esc = residentDecision(card, o);
+  // 4.4 (F9): the live Secretary hands its decision back with mp sec decide, whose flags are the fields
+  const handBackText = esc !== null
+    ? [`Decide once with \`mp sec decide ${esc}\` (above; \`mp help sec decide\` shows the arguments). Its flags are these fields: \`--extra\` is grantExtra, \`--may-matter\` is mayMatter. The fields match this JSON schema:`]
+    : [
+        `Hand back once, when you are done: your report in Markdown, ending with the structured fields as a fenced json block (the last one in the document), on the standard input of \`mp seat ${o.dispatch} handback --stdin\`. Nothing else is needed; \`mp\` files both. For example:`,
+        '',
+        `    mp seat ${o.dispatch} handback --stdin <<'EOF'`,
+        '    # Report',
+        '    What you did, your reasoning, what is not met, the questions that need a decision.',
+        '',
+        '    ```json',
+        '    { "...": "the fields, matching the schema below" }',
+        '    ```',
+        '    EOF',
+        '',
+        'The fields match this JSON schema:',
+      ];
   const evidence = seatCommandsOf(card, o).includes('request-evidence') ? `\nAn evidence request (the last fenced json block of your notes on \`mp seat ${o.dispatch} request-evidence --stdin\`, or the file \`${f.request}\`) matches this JSON schema:\n\n\`\`\`json\n${JSON.stringify(z.toJSONSchema(EvidenceRequestSchema), null, 2)}\n\`\`\`\n` : '';
   return [
     `# ${SEAT_TITLE[e.seat] ?? e.seat} card: dispatch ${o.dispatch}`,
@@ -384,25 +420,13 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
     '',
     '## Hand-back',
     '',
-    `Hand back once, when you are done: your report in Markdown, ending with the structured fields as a fenced json block (the last one in the document), on the standard input of \`mp seat ${o.dispatch} handback --stdin\`. Nothing else is needed; \`mp\` files both. For example:`,
-    '',
-    `    mp seat ${o.dispatch} handback --stdin <<'EOF'`,
-    '    # Report',
-    '    What you did, your reasoning, what is not met, the questions that need a decision.',
-    '',
-    '    ```json',
-    '    { "...": "the fields, matching the schema below" }',
-    '    ```',
-    '    EOF',
-    '',
-    'The fields match this JSON schema:',
+    ...handBackText,
     '',
     '```json',
     JSON.stringify(handBackSchema(e.kind, card), null, 2),
     '```',
     '',
-    `Or with two files (never inside a worktree): the report in \`${f.report}\`, the fields in \`${f.result}\`, then \`mp seat ${o.dispatch} handback --report ${f.report} --result ${f.result}\`.`,
-    '',
+    ...(esc !== null ? [] : [`Or with two files (never inside a worktree): the report in \`${f.report}\`, the fields in \`${f.result}\`, then \`mp seat ${o.dispatch} handback --report ${f.report} --result ${f.result}\`.`, '']),
     'When it refuses, it says why: fix it and run it again. A hand-back is recorded once.',
     evidence,
   ].join('\n');

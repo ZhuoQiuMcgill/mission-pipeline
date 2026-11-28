@@ -29,7 +29,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 
 ## Your commands
 - `mp seat <id> card`: your card.
-- `mp seat <id> read <material> [--page <n>]`: one page of a material; it reports a missing or edited material instead of serving it.
+- `mp seat <id> read <material> [--page <n>]`: fetches one page of a material; it reports a missing or edited material instead of serving it.
 - On a blind-experiment card also: `mp seat <id> rerun <command> [--detach]` and `mp seat <id> wait <run>`.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
 - Run the hand-back from the project root, not from inside your worktree: `mp` removes the worktree once the hand-back is recorded, and a shell that sits in it fails its next command.

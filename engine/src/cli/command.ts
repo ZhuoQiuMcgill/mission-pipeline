@@ -11,6 +11,8 @@ export interface CommandResult {
   readonly text: string;
   /** The machine form (`--json`). */
   readonly json: unknown;
+  /** 4.4: what a receipt cut at its limit says after its "cut" mark (the read that gives the rest). */
+  readonly cutNote?: string;
 }
 
 export interface RunContext {

@@ -6,6 +6,7 @@
 import { pmLayer1 } from '../pmMemory.ts';
 import { tagsReportLines, taggedWords, wordsAuthority } from '../../memory/words.ts';
 import { liveSecretary } from '../../memory/resident.ts';
+import { answerOutcome } from '../../process/decisions.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
@@ -168,7 +169,7 @@ const say: Command = {
   },
 };
 
-export function renderNext(p: Project, n: NextReport, hints: Readonly<Record<string, string | null>>): string {
+export function renderNext(p: Project, n: NextReport, hints: Readonly<Record<string, string | null>>, o: { readonly resident?: boolean } = {}): string {
   const lines: string[] = [];
   lines.push(
     ...section(
@@ -185,7 +186,8 @@ export function renderNext(p: Project, n: NextReport, hints: Readonly<Record<str
     ),
   );
   lines.push(...section('Held', n.held.map((h) => `${h.step}: ${h.seat} in ${h.mission} — ${h.why}${h.wi !== null ? ` [${wiText(h.wi, p.dir)}]` : ''}`)));
-  lines.push(...section('Waiting on the user', n.waitingOnUser.map((w) => `${w.mission} ${w.escalation}: ${clip(w.summary, 200)} — options ${w.options.join(', ')} (mp pm answer ${w.mission} ${w.escalation} --option <option> --words W-<n>)`)));
+  // 4.4 (F9): the Secretary has no answer command (its output once named a "mp sec answer" that does not exist): the PM records the answer
+  lines.push(...section('Waiting on the user', n.waitingOnUser.map((w) => `${w.mission} ${w.escalation}: ${clip(w.summary, 200)} — options ${w.options.join(', ')} (${o.resident === true ? 'waits for the PM to record the answer' : `mp pm answer ${w.mission} ${w.escalation} --option <option> --words W-<n>`})`)));
   lines.push(...section('In flight', n.inFlight.map((d) => `${d.dispatch}: ${d.seat} on ${d.step} (${d.mission}), ${age(d.ageMs)}, ${filler(d.filler)}`)));
   // 4.1.3 (#30): detached runs that ended while their dispatch is in flight; mp cannot see whether the seat is alive
   lines.push(...section('Detached runs that ended (their dispatch is in flight)', (n.detachedRuns ?? []).map((r) => r.text)));
@@ -232,11 +234,14 @@ const dispatch: Command = {
       `Card: .mission-pipeline/${d.cardLeaf} (the seat reads it with mp seat ${d.dispatch} card)`,
       ...(d.worktree !== null ? [`Worktree: ${d.worktree}`] : []),
       `Hand-back files: ${d.files.report}, ${d.files.result}`,
+      // 4.4 (F16): the size of what the seat must fetch, to whoever dispatches (nothing waits on it)
+      ...(d.size.mustReadPages > 0 ? [`Must-read: ${d.size.mustReadPages} page${d.size.mustReadPages === 1 ? '' : 's'}`] : []),
+      ...d.size.warnings.map((w) => `Warning: ${w}`),
       '',
       'Start a sub-agent in your harness with exactly this prompt:',
       d.prompt,
     ];
-    return ok(lines.join('\n'), { dispatch: d.dispatch, step: d.step, seat: d.seat, kind: d.kind, mission: d.mission, card: d.cardLeaf, worktree: d.worktree, files: d.files, prompt: d.prompt });
+    return ok(lines.join('\n'), { dispatch: d.dispatch, step: d.step, seat: d.seat, kind: d.kind, mission: d.mission, card: d.cardLeaf, worktree: d.worktree, files: d.files, prompt: d.prompt, size: d.size });
   },
 };
 
@@ -779,7 +784,7 @@ const OPTIONS = DECISION_OPTIONS.filter((o) => o !== 'ask-user' && o !== 'ask-pm
 const answer: Command = {
   group: 'pm',
   name: ['answer'],
-  summary: 'the user\'s decision on an escalation waiting for them; carried out like a Secretary decision (WI-24)',
+  summary: 'the PM\'s or the user\'s decision on an escalation in the PM inbox; carried out like a Secretary decision, by the Secretary\'s next pass while one is live (WI-24)',
   usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>"\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)`,
   flags: { option: 'string', words: 'string', by: 'string', 'no-words': 'boolean', reason: 'string', instructions: 'string', extra: 'string', findings: 'string' },
   async run(c, args) {
@@ -796,9 +801,20 @@ const answer: Command = {
     if (n !== undefined && (!Number.isSafeInteger(n) || n < 1)) throw usage('--extra is a positive integer');
     const ins = flagStr(args, 'instructions');
     const findings = (flagStr(args, 'findings') ?? '').split(',').map((f) => f.trim()).filter((f) => f !== '');
-    await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
-    const uncited = by === 'pm' ? taggedWords(p.ctx.memory, p.ctx.memory.data).flatMap((entry) => entry.tags.filter((t) => t.inForce && (t.mission === null || t.mission === m) && !w.split(',').includes(entry.words)).map((t) => `[${t.id}] ${t.type}: ${t.quote ?? entry.text}`)) : [];
-    return ok(`${by === 'pm' ? 'The PM’s' : 'The user’s'} answer to ${esc} recorded (${option}, ${w}); mp carries it out. ${uncited.length ? `\nLayer 2 entries not cited:\n${uncited.join('\n')}` : ''}`, { mission: m, escalation: esc, option, words: w, by, uncited });
+    const recorded = await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
+    // 4.4 (F9): say what happened to this very answer (its round and option), read from the applied record
+    const resident = liveSecretary(p.ctx.memory) !== null;
+    const effect = p.ctx.memory.read((db) => answerOutcome(db, p.ctx.memory.data, { mission: m, escalation: esc, by, round: recorded.round, option, resident }));
+    // 4.4 (G2): the principles in force, each in full (a principle is never cut), and a count of every other tag in force with the read that lists them
+    const inForce = by === 'pm' ? taggedWords(p.ctx.memory, p.ctx.memory.data).flatMap((entry) => entry.tags.filter((t) => t.inForce && (t.mission === null || t.mission === m)).map((t) => ({ id: t.id, type: t.type, text: t.quote ?? entry.text }))) : [];
+    const principles = inForce.filter((t) => t.type === 'principle').map((t) => `[${t.id}] ${t.text.trim().split('\n').join('\n  ')}`);
+    const otherTags = inForce.filter((t) => t.type !== 'principle').length;
+    // the count and its read come before the principles, so a receipt cut at its limit keeps them
+    const lines = [
+      `${by === 'pm' ? 'The PM’s' : 'The user’s'} answer to ${esc} recorded (${option}, ${w || 'no words'}); ${effect.text}.`,
+      ...(by === 'pm' ? [`Other tags in force for ${m}: ${otherTags} (mp read words --in-force lists them)`, ...(principles.length > 0 ? ['Principles in force:', ...principles.map((x) => `- ${x}`)] : ['Principles in force: none'])] : []),
+    ];
+    return { ...ok(lines.join('\n'), { mission: m, escalation: esc, option, words: w, by, round: recorded.round, applied: effect.applied, resident, ...(by === 'pm' ? { principles, otherTags } : {}) }), cutNote: 'mp read words --tag principle --in-force lists every principle in force' };
   },
 };
 

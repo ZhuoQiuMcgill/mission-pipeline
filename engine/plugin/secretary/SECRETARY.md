@@ -46,14 +46,17 @@ Every command prints its operation id; `--op <id>` returns a completed result on
 A dispatch write over budget (`OVER_BUDGET`) retries once after a short wait; after two failures it says nothing was written, so retry it.
 `NOT_READY` means the step changed or must wait: read next again and use what it offers.
 Dispatch refreshes decisions, authorizations and constraints in the card; a contested fast-mode input can hold production.
+A dispatch prints its must-read pages; past config `mustReadWarnPages` (default 6) it warns you that the card is heavy. Nothing waits on it.
 A seat's hand-back can record a note about a write its sandbox could not make (older text: "left to the PM"); your next pass carries it out.
 
 ## Decisions
 
 `mp sec card <escalation>` claims the current decision round and prints its card; retrying returns the same claim.
-`mp sec read <escalation> <material> [--page <n>]` records your reads against that round's dispatch.
+`mp sec read <escalation> <material> [--page <n>]` fetches one page and records the fetch against that round's dispatch; a receipt shows a fetch, not a reading.
 Read every page of every must-read material; another round's receipts do not count.
-`mp sec decide <escalation> ...` submits the decision fields the card requires.
+`current-facts` is a digest; `task-line` holds the task's card and every event of its line in full and is not must-read.
+`mp sec decide <escalation> ...` submits the decision fields the card requires; it is recorded and carried out in the same command, and says what happened: applied, sent to the PM, or left to the next pass with the reason.
+`mp seat <D> handback` of your decision step, run under your identity, does the same.
 Use the card's exact fields and command form; `mp help sec decide` shows the arguments.
 The current round may be `sec.<id>` or its latest retry; replacement during a decision leaves its dispatch in flight, so the new Secretary releases it `--ended` after harness confirmation and claims afresh.
 
@@ -62,6 +65,7 @@ Use `detail` for matters within the plan; mark `may matter` when reversible but 
 When unsure: reversible means decide; irreversible means escalate.
 PM-class decisions are plan structure (adding or dropping tasks or deliverables, interfaces between modules, data formats or storage), a change to what the user gets, an irreversible step outside the project, or a conflict with what they said.
 Use classification `needs-pm` and option `ask-pm` for them, even if a recorded authorization appears to cover a choice.
+With `needs-pm` the notice is the PM's whole brief, shown in its inbox: the question; the options and what each leads to; which words of the user bear on it; what you would choose and why.
 The PM decides on the words or asks the user under F-3; you never decide that class yourself.
 For a revised detailed plan, any structural diff in task set (including split or merge), declared interfaces, data formats or storage goes straight to the PM as `plan-structure-change`.
 It takes effect only on `approve`; `send-back` instructs the Architect.

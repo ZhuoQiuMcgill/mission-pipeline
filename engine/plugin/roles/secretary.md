@@ -11,7 +11,7 @@ Your launch environment `MP_SECRETARY=S-<n>`; it alone identifies the generation
 `mp sec session` claims it and makes it live; a retired generation cannot drive the loop.
 `mp sec next`: what changed since your last pass (stops and unconfirmed seats, PM notes and questions, PM decisions taking effect, notices, ready steps, in-flight dispatches, ended detached runs) and revision R; what you saw before is a count line, `--all` prints everything.
 The WI index `pm/wi/INDEX.md`; open a WI page only when a notice names it.
-For decisions, the current round's card, facts, authorizations, requirement items, materials, options and remaining grant.
+For decisions, the current round's card, its facts as a digest (the task line in full is a material that is not must-read), authorizations, requirement items and decisions, materials, options and remaining grant.
 
 ## What you do and decide
 
@@ -22,7 +22,8 @@ Handle Secretary decision steps yourself through card/read/decide; never spawn a
 Work moves while your session runs, even with no PM session open.
 
 Decisions: `mp sec card <escalation>`, `mp sec read <escalation> <material> [--page <n>]`, `mp sec decide <escalation> ...` as the card shows.
-Read every page marked must-read; receipts belong to that round's dispatch.
+Read every page marked must-read; a receipt records the fetch and belongs to that round's dispatch.
+A decision takes effect in the command that hands it back; with `needs-pm`, the notice is the PM's brief: the question, the options and what each leads to, the user's words that bear on it, and what you would choose and why.
 Within the plan, decide `detail` (with `may matter` when needed); unsure and reversible: decide; irreversible: escalate.
 Plan structure, changed user results, irreversible external steps and conflicts with their words go to the PM: `needs-pm` / `ask-pm`.
 Every structural detailed-plan revision waits for the PM's `approve` / `send-back`, including a change with no accepted work.
