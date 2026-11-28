@@ -45,3 +45,33 @@ test('F14: renew covers the missions that are not closed; --mission names a clos
     p.cleanup();
   }
 });
+
+test('F14 (review p2-3): a run that judgments of two missions cite renews only the judgment of the mission covered', { skip: process.platform === 'win32' }, async () => {
+  const p = processProject();
+  try {
+    const commit = p.git('rev-parse', 'HEAD');
+    const b = builders(p.ctx.memory);
+    const legacy = sha256(canonicalJson(ENV_A));
+    p.ctx.memory.write({}, (tx) => {
+      recordEnvironment(tx, { identity: legacy as never, parts: ENV_A });
+      for (const m of ['m1', 'm2'] as MissionId[]) setMission(tx, m, 'open');
+      setMission(tx, 'm2' as MissionId, 'closed');
+      appendRecords(tx, [b.evidence('old-shared', legacy, 'declared', { candidate: commit, command: 'true', run: 'g-shared', status: 'completed', exit: '0' })]);
+      appendRecords(tx, [
+        b.product('PA', { commit }), { ...b.product('PB', { commit }), mission: 'm2' } as BaseRecord,
+        b.judge('JA', 'PA', { evidence: ['old-shared'], fields: ['exit'] }), b.judge('JB', 'PB', { evidence: ['old-shared'], fields: ['exit'] }),
+      ]);
+    });
+    const ctx = p.reopen(ENV_A);
+    const renewedJudgments = () => (ctx.memory.stmt("SELECT json_extract(record, '$.judgment') AS j FROM log WHERE kind = 'evidence.renewal' ORDER BY rev").all() as Array<{ j: string }>).map((r) => r.j);
+    const open = await pmRenew(ctx);
+    assert.deepEqual(open.reruns.map((r) => [r.original, r.renewed]), [['old-shared', ['JA']]]);
+    assert.deepEqual(renewedJudgments(), ['JA'], 'the closed mission’s judgment was renewed through the shared run');
+    assert.equal(open.leftOut, 1);
+    const named = await pmRenew(ctx, { mission: 'm2' });
+    assert.deepEqual(named.reruns.map((r) => [r.original, r.renewed]), [['old-shared', ['JB']]]);
+    assert.deepEqual(renewedJudgments(), ['JA', 'JB']);
+  } finally {
+    p.cleanup();
+  }
+});

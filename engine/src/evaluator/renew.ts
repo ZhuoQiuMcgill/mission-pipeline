@@ -232,7 +232,7 @@ export function recordRenewal(tx: WriteTx, req: { readonly judgment: JudgmentId;
  */
 export function recordRenewedRun(
   tx: WriteTx,
-  req: { readonly original: EvidenceId; readonly run: EvidenceRecord },
+  req: { readonly original: EvidenceId; readonly run: EvidenceRecord; readonly judgments?: ReadonlySet<string> },
 ): { readonly evidence: EvidenceId; readonly renewed: readonly JudgmentId[]; readonly refused: ReadonlyArray<{ readonly judgment: JudgmentId; readonly reason: string; readonly field?: string }> } {
   const run = req.run;
   if (run.runClass !== 'declared') throw new LedgerError('BAD_REQUEST', `a renewal rerun is a declared run (4.1 §6.5), not a ${run.runClass} run`);
@@ -247,7 +247,8 @@ export function recordRenewedRun(
   const ix = new StoredIndex(tx);
   const renewed: JudgmentId[] = [];
   const refused: Array<{ judgment: JudgmentId; reason: string; field?: string }> = [];
-  const judgments = (tx.stmt("SELECT dst FROM lbl_edges WHERE src = ? AND dst >= 'j:' AND dst < 'j;'").all(`ev:${req.original}`) as Array<{ dst: string }>).map((r) => r.dst.slice(2) as JudgmentId);
+  // 4.4 (F14): a renewal scoped to missions renews only the judgments named, though others cite the same run
+  const judgments = (tx.stmt("SELECT dst FROM lbl_edges WHERE src = ? AND dst >= 'j:' AND dst < 'j;'").all(`ev:${req.original}`) as Array<{ dst: string }>).map((r) => r.dst.slice(2) as JudgmentId).filter((j) => req.judgments === undefined || req.judgments.has(j));
   for (const jid of judgments) {
     const info = ix.judgments.get(jid);
     if (info === undefined || !info.rec.evidence.some((e) => effectiveEvidence(ix, info.rec, e as EvidenceId) === req.original)) continue;

@@ -4,13 +4,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
-import { cursor, raiseAlert } from '../src/memory/index.ts';
+import { beginAction } from '../src/cli/project.ts';
+import { appendRecords, cursor, raiseAlert, releaseDispatch } from '../src/memory/index.ts';
 import { listNotices, markNotices } from '../src/process/notices.ts';
-import { secCursorName, secWait, SECRETARY_WAKE } from '../src/process/secretary.ts';
+import { secCursorName, secNext, secWait, SECRETARY_WAKE } from '../src/process/secretary.ts';
 import { recordSeatHandBack } from '../src/process/seat.ts';
 import { ENV_A, readAll, addMissionToReview, type ProcessProject } from './process-fixtures.ts';
-import { project43, done43, live43, secretary43, escalation43 } from './p43-fixtures.ts';
-import type { AlertId, ContentHash } from '../src/common/ids.ts';
+import { project43, command43, done43, live43, secretary43, escalation43 } from './p43-fixtures.ts';
+import type { AlertId, ContentHash, MissionId } from '../src/common/ids.ts';
 
 async function text43(p: ProcessProject, args: string[], identity: string): Promise<string> {
   const r = await runCli(args, {cwd: p.dir, env: {MP_SECRETARY: identity}, process: {observe: () => ENV_A, ident: {name: 'test', email: 'test@test'}}});
@@ -138,5 +139,82 @@ test('F8: the queued steps of a closed mission are one count line', async () => 
     assert.ok(next.earlier.closedMissionSteps >= 1);
     assert.match(await text43(p, ['sec','next'], id), /queued step\(s\) of closed missions held/);
     assert.ok((await done43(p, ['sec','next','--all'], id)).held.some((h: any) => h.closedMission === true));
+  } finally {p.cleanup();}
+});
+
+test('F8 (review p2-2): a pass interrupted after it committed, retried with the same --op, prints the report it committed', async () => {
+  const p = project43();
+  try {
+    const id = await live43(p);
+    await done43(p, ['sec','next'], id);
+    const q = await done43(p, ['sec','ask-pm','which port does the service use?'], id);
+    await done43(p, ['pm','reply',q.id,'port 8080']);
+    notice(p, 'n-info', 'an informational line', {informs: true});
+    // the first attempt of `mp sec next --op pass1`: its action begun, its pass committed, interrupted before its result was recorded
+    const action = {op: 'pass1', command: 'sec next', args: {generation: id, args: {positionals: [], flags: {}}}};
+    assert.equal(beginAction(p.ctx.memory, {...action, filler: null}), null);
+    const sec = secretary43(p, id);
+    try {await secNext(sec, {op: 'pass1'});} finally {sec.memory.close();}
+    const retry = await command43(p, ['sec','next','--op','pass1'], id);
+    assert.equal(retry.code, 0, JSON.stringify(retry));
+    assert.deepEqual(retry.result.replies.map((r: any) => r.id), [q.id], 'before the fix the reply was a count');
+    assert.ok(retry.result.notices.some((n: any) => n.id === 'n-info'), 'before the fix the informational notice was gone');
+    // the retry recorded its result: a replay prints the same report; a new pass counts what it showed
+    const replay = await command43(p, ['sec','next','--op','pass1'], id);
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(replay.result.replies.map((r: any) => r.id), [q.id]);
+    const later = await done43(p, ['sec','next'], id);
+    assert.deepEqual([later.replies.length, later.earlier.replies], [0, 1]);
+    assert.ok(!later.notices.some((n: any) => n.id === 'n-info'));
+  } finally {p.cleanup();}
+});
+
+test('F8 (review p2-5): a release the report did not show lands after the revision it prints, so wait wakes for it', async () => {
+  const p = project43();
+  try {
+    await escalation43(p);
+    const id = await live43(p);
+    const d = await done43(p, ['sec','card','choice'], id);
+    await done43(p, ['sec','next'], id);
+    const sec = secretary43(p, id);
+    const other = secretary43(p, id);
+    try {
+      // another process releases the dispatch right after this pass has read its steps
+      let armed = false;
+      let released = false;
+      const release = () => {released = true; other.memory.write({}, (tx) => {releaseDispatch(tx, {dispatch: d.dispatch, how: 'ended', requeue: true});});};
+      const mem = sec.memory as unknown as {stmt: (sql: string) => unknown; head: () => unknown; read: (fn: (db: unknown) => unknown) => unknown; current: unknown};
+      const stmt = mem.stmt.bind(sec.memory);
+      const head = mem.head.bind(sec.memory);
+      const read = mem.read.bind(sec.memory);
+      // inside a read of this process only (never while it holds the write lock)
+      let reading = 0;
+      mem.read = (fn) => {if (mem.current !== null) return read(fn); reading++; try {return read(fn);} finally {reading--;}};
+      mem.stmt = (sql: string) => {if (/SELECT DISTINCT mission FROM flow_events WHERE line = \? AND event = 'escalation'/.test(sql)) armed = true; return stmt(sql);};
+      mem.head = () => {if (armed && !released && reading > 0 && mem.current === null) release(); return head();};
+      const next = await secNext(sec);
+      if (!released) release();
+      const rev = Number((p.ctx.memory.stmt("SELECT MAX(rev) AS r FROM log WHERE kind = 'dispatch.released'").get() as {r: number}).r);
+      if (rev <= next.revision) assert.ok(!next.inFlight.some((f) => f.dispatch === d.dispatch), 'at or below the printed revision, yet the report shows the dispatch in flight');
+      else assert.equal((await secWait(sec, {since: next.revision, timeout: 0})).timedOut, false);
+    } finally {sec.memory.close(); other.memory.close();}
+  } finally {p.cleanup();}
+});
+
+test('F8 (review p2-8): a detached run that records its result wakes wait; a foreground rerun of the seat does not', async () => {
+  const p = project43();
+  try {
+    await escalation43(p);
+    const id = await live43(p);
+    const d = await done43(p, ['sec','card','choice'], id);
+    const base = await done43(p, ['sec','next'], id);
+    const ran = (key: string, extra: Record<string, unknown>) => p.ctx.memory.write({}, (tx) => {appendRecords(tx, [{kind: 'flow.event', mission: 'm1' as MissionId, line: `dispatch:${d.dispatch}`, event: 'run', key, body: tx.data.put(JSON.stringify({run: key, command: 'check', completed: true, exit: '0', ...extra})) as ContentHash}]);});
+    const sec = secretary43(p, id);
+    try {
+      ran('ev-foreground', {});
+      assert.equal((await secWait(sec, {since: base.revision, timeout: 0})).timedOut, true);
+      ran('ev-detached', {detached: 'run-7'});
+      assert.equal((await secWait(sec, {since: base.revision, timeout: 0})).timedOut, false, 'only a lost or stopped detached run woke it');
+    } finally {sec.memory.close();}
   } finally {p.cleanup();}
 });

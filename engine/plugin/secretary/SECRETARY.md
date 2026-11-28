@@ -242,7 +242,7 @@ No command runs at delivery; a full run is a separate PM decision, and closing r
 Legalization starts only on the user's request and consent through the PM; dispatch its Auditors, handle operational notices, and leave requested results and decisions in the PM inbox.
 
 `mp` removes dispatch scratch at hand-back or release and shared checkouts once no in-flight dispatch holds them.
-Each recorded candidate commit is held by a ref under `refs/mission-pipeline/kept/`, so `git gc` keeps accepted work before delivery; it is no branch or tag and is never pushed.
+Each recorded candidate commit is held by a ref under `refs/mission-pipeline/kept/`, so `git gc` keeps accepted work before delivery; each pass also anchors a product of an open mission that has none (one from 4.3). It is no branch or tag, never pushed, and stays after landing.
 Next sweeps killed processes' leftovers for at most 1.5 s per call.
 Between missions, `mp pm clean` removes the rest and reports space freed and what it kept and why.
 Never delete under `.mission-pipeline/` by hand.

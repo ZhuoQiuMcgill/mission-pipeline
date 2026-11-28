@@ -27,7 +27,7 @@
 // Every action is idempotent: a product version is recorded once per object id, a snapshot of the
 // same inputs is the same commit, a verification is reused.
 
-import { canonicalJson } from '../common/hash.ts';
+import { canonicalJson, sha256 } from '../common/hash.ts';
 import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
 import type { GitOid, MissionId, ModuleId, ObjectVersionId, ProofUnitId } from '../common/ids.ts';
 import type { ObjectVersionRecord } from '../common/records.ts';
@@ -39,9 +39,9 @@ import { memoryProofView } from '../delivery/memoryView.ts';
 import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
-import { keptRef } from '../git/refs.ts';
+import { keptRef, programRef } from '../git/refs.ts';
 import { MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
-import { appendRecords, factById, LedgerError } from '../memory/index.ts';
+import { appendRecords, cursor, factById, LedgerError, setCursor } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
 import type { ProductRequest, ProductVersion, RebindRequest, VerificationRun, VerifyRequest } from '../flow/ports.ts';
 import type { GitActions, ProcessContext } from './context.ts';
@@ -73,6 +73,43 @@ export function anchorCommit(ctx: ProcessContext, mission: string, commit: strin
     return r.code === 0;
   } catch {
     return false;
+  }
+}
+
+/** 4.4 (F19, #64): the marker of a mission's anchors: the revision through which all its product versions are held. */
+export const anchorMarker = (mission: string): string => `kept.${sha256(mission).slice(0, 16)}`;
+
+/**
+ * 4.4 (F19, #64): every product version of a mission that is not closed is held by its kept ref, also one
+ * recorded before 4.4 or accepted under 4.4 after a 4.3 hand-back, and one whose earlier anchor write
+ * failed: each reconciliation checks the versions recorded after the mission's marker, with one listing of
+ * its refs, creates the missing refs, and moves the marker only when all are held. Nothing new: no git call.
+ * Never while git writes are held after a move.
+ */
+export function anchorProducts(ctx: ProcessContext, only?: string): void {
+  try {
+    if (ctx.memory.gitHold() !== null) return;
+    const work = ctx.memory.read((db) => {
+      const head = Number(ctx.memory.head());
+      const closed = new Set((db.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
+      const missions = only !== undefined ? [only] : (db.stmt('SELECT DISTINCT mission FROM flow_events ORDER BY mission').all() as Array<{ mission: string }>).map((r) => r.mission);
+      return missions.filter((m) => !closed.has(m)).map((mission) => {
+        const after = Number(cursor(db, anchorMarker(mission))?.rev ?? 0);
+        const commits = (db.stmt("SELECT json_extract(record, '$.source.commit') AS c FROM log WHERE kind = 'object.version' AND rev > ? AND json_extract(record, '$.mission') = ? AND json_extract(record, '$.objectKind') = 'product' AND json_extract(record, '$.source.commit') IS NOT NULL ORDER BY rev").all(after, mission) as Array<{ c: string }>).map((r) => r.c);
+        return { mission, head, commits: [...new Set(commits)] };
+      });
+    });
+    for (const w of work) {
+      if (w.commits.length === 0) continue;
+      const listed = ctx.git.runSync(['for-each-ref', '--format=%(objectname)', `${programRef('kept', w.mission)}/`], { cwd: ctx.projectDir });
+      if (listed.code !== 0) continue;
+      const held = new Set(listed.stdout.toString('utf8').split('\n').map((x) => x.trim()).filter((x) => x !== ''));
+      let all = true;
+      for (const c of w.commits) if (!held.has(c) && !anchorCommit(ctx, w.mission, c)) all = false;
+      if (all) ctx.memory.write({}, (tx) => {setCursor(tx, { cursor: anchorMarker(w.mission), rev: w.head });});
+    }
+  } catch {
+    /* best effort: tried again on the next reconciliation */
   }
 }
 

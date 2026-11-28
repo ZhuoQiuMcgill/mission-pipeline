@@ -1526,6 +1526,55 @@ describe('4.4 (F14): re-binding with less noise', () => {
     await drive(engine, ports.scheduler, (t, s) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(M, keeps)(t, s));
     const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'impl');
     assert.deepEqual(told.map((n) => [n.key, n.trigger]), [[key, 'raised by 4.3']]);
-    assert.deepEqual((await lineEvents(ports, 'impl', 'kept-notice')).map((e) => e.key), [key]);
+    assert.deepEqual((await lineEvents<{ notice: string }>(ports, 'impl', 'kept-notice')).map((e) => e.body.notice), [key]);
+  });
+
+  it('compatibility (review p2-7): of several open 4.3 notices for one product and plan, the current set is kept and the others close', async () => {
+    const { ports, engine } = await setup();
+    const state = (key: string) => listNotices(ports.ctx.memory, ports.ctx.memory.data, { includeAcknowledged: true }).find((n) => n.id === noticeAlertId({ mission: M, category: 'kept-product-not-rebound', key }))?.state;
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await requestEnvironmentReview(ports, 'iface');
+    await drive(engine, ports.scheduler, (t) => t.card.seat === 'reviewer' && t.task.startsWith('rev.m1.iface.') ? { handBack: reviewer(t.card as ReviewerCard, 'rework') } : null);
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await fastPlan(ports, 2, 'd1');
+    // 4.3 raised one notice per stale set as the set moved: an earlier set and the current one
+    const legacy = (stale: string[], missing: string[]) => ({ key: `impl:prod.con.m1.impl.1:dplan.m1.2.1:prerequisites:${shortHash({ stale, missing })}`, detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.2.1', stale, missing } });
+    const earlier = legacy(['prod.con.m1.iface.1'], []);
+    const current = legacy(['prod.con.m1.iface.1'], ['prod.con.m1.iface.2']);
+    for (const n of [earlier, current]) await ports.ledger.notify({ mission: M, category: 'kept-product-not-rebound', wi: null, key: n.key, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: n.detail });
+    const noSeats = (t: Parameters<Script>[0], s: Parameters<Script>[1]) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(M, keeps)(t, s);
+    await drive(engine, ports.scheduler, noSeats);
+    assert.equal(state(earlier.key), 'acknowledged', 'the earlier set stayed open');
+    assert.notEqual(state(current.key), 'acknowledged');
+    // a later plan supersedes the one they named: the kept one closes too
+    await fastPlan(ports, 3, 'd2');
+    await drive(engine, ports.scheduler, noSeats);
+    assert.equal(state(current.key), 'acknowledged');
+  });
+
+  it('long mission and task ids keep the lifecycle event\'s key within the ledger\'s limit (review p2-4)', async () => {
+    const LM = `m${'x'.repeat(31)}` as MissionId;
+    const LT = `t${'y'.repeat(59)}`;
+    const ports = memoryPorts();
+    world = null;
+    say(ports, SEED_TEXT);
+    await seedMission(ports, LM);
+    await submitPmBatch(ports, { mission: LM, plan: pmPlan(LM), userWords: ['W-1'], changedItems: ['g1', 's1', 'a1'] });
+    const engine = new FlowEngine(ports);
+    const plan = (): DetailedPlanDoc => {
+      const p = detailedPlan(LM);
+      return { ...p, tasks: p.tasks.map((t) => ({ ...t, id: t.id === 'impl' ? LT : t.id, dependsOn: t.dependsOn.map((d) => (d === 'impl' ? LT : d)) })) };
+    };
+    await drive(engine, ports.scheduler, happyScript(LM, plan));
+    const w = say(ports, LATER);
+    await recordItem(ports, { mission: LM, item: 'd1', type: 'decision', text: 'The parser is read-only once it has parsed a file', source: { kind: 'words', words: w, quote: 'keep the parser read-only' } });
+    await submitPmBatch(ports, { mission: LM, plan: pmPlan(LM, { elements: [{ ...pmPlan(LM).elements[0]!, text: 'A CSV parser library, read-only once it has parsed a file', items: ['g1', 'd1'] }, pmPlan(LM).elements[1]!] }), userWords: [w], changedItems: ['d1'], mode: 'fast' });
+    await drive(engine, ports.scheduler, (t, s) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(LM, plan)(t, s));
+    assert.deepEqual(ports.ledger.notices.filter((n) => n.category.startsWith('flow-')).map((n) => n.trigger), [], 'the pass failed at the task');
+    const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === LT);
+    assert.ok(told.length === 1 && told[0]!.key.length > 200, JSON.stringify(told.map((n) => n.key.length)));
+    const events = await ports.ledger.events<{ notice: string }>({ mission: LM, line: `task:${LT}`, event: 'kept-notice' });
+    assert.deepEqual(events.map((e) => e.body.notice), [told[0]!.key]);
+    assert.ok(events.every((e) => e.key.length <= 200));
   });
 });

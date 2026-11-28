@@ -312,7 +312,7 @@ const renew: Command = {
     const lines = [
       `Environment identity: ${short(r.environment)}.`,
       // 4.4 (F14): a renewal covers the open missions unless one is named
-      `Missions: ${r.missions.join(', ') || 'none open'}${m === null ? ' (the open ones)' : ''}.${r.leftOut > 0 ? ` ${r.leftOut} run(s) or judgment(s) of other missions are left as they are (--mission <m> renews one).` : ''}`,
+      `Missions: ${r.missions.join(', ') || 'none open'}${m === null ? ' (the open ones)' : ''}.${r.leftOut > 0 ? ` ${r.leftOut} judgment(s) of other missions are left as they are (--mission <m> renews one).` : ''}`,
       ...section('Reruns', r.reruns.map((x) => `${x.original} → ${x.run}: ${x.passed ? 'passed' : 'failed'}; renewed ${x.renewed.length}${x.refused.length > 0 ? `; refused ${x.refused.map((y) => `${y.judgment} (${y.reason})`).join(', ')}` : ''}`), 'nothing to rerun'),
       ...section('Need a Reviewer (a new judgment of the same position)', r.reviews.filter((x) => !x.renewable).map((x) => `${x.judgment} on ${x.target} (${x.review})${x.reason !== null ? `: ${x.reason}` : ''}`)),
       ...section('Not rerun', r.skipped.map((x) => `${x.evidence}: ${x.why}`)),

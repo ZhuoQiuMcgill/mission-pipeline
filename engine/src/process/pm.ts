@@ -369,8 +369,37 @@ function tidyWorktrees(ctx: ProcessContext): void {
   }
 }
 
+/** What a pass's reconciliation found, before its report is read. */
+export interface Reconciled {
+  readonly olderEnvironmentRuns: number;
+  readonly landings: RecoveryReport | null;
+  readonly errors: readonly string[];
+  readonly detachedRuns: readonly DetachedRunNote[];
+}
+
 /** `mp pm next` (§5.1 step 1). */
 async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: boolean } = {}): Promise<NextReport> {
+  const { report } = readNextReport(ctx, await reconcileNext(ctx));
+  if (o.markDelivered !== false) markNotices(ctx.memory, report.notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
+  return report;
+}
+
+/**
+ * 4.4 (F8): the report of a pass in one read, after its reconciliation: the steps, the notices and the
+ * labels as of one revision, which it returns too (a change that lands later is after it).
+ */
+export function readNextReport(ctx: ProcessContext, recon: Reconciled): { readonly report: NextReport; readonly revision: number } {
+  return ctx.memory.read((db) => {
+    const revision = Number(ctx.memory.head());
+    const steps = readSteps(ctx);
+    const notices = listNotices(db, ctx.memory.data, ctx.secretary !== null ? {audience: 'secretary'} : {}).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
+    const st = labelStatus(db);
+    return { revision, report: { notices, ...steps, olderEnvironmentRuns: recon.olderEnvironmentRuns, labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since }, landings: recon.landings, errors: recon.errors, detachedRuns: recon.detachedRuns } };
+  });
+}
+
+/** A pass's reconciliation: labels, landings, housekeeping, the flows, the environment notice and the detached runs. */
+async function reconcileNext(ctx: ProcessContext): Promise<Reconciled> {
   ctx.environment();
   settleLabels(ctx);
   let landings: RecoveryReport | null = null;
@@ -390,7 +419,6 @@ async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
   for (const r of await advance(ctx)) for (const e of r.errors) errors.push(`${r.mission} ${e.step}: ${e.message}`);
   // 4.1.2: an environment change is told once (runs from older environments still count), never a ready step
   const olderEnvironmentRuns = noticeOlderEnvironment(ctx);
-  const steps = readSteps(ctx);
   // 4.1.3 (#30): a detached run that ended while its dispatch is in flight (its seat may be gone); a lost one is recorded so
   let detachedRuns: DetachedRunNote[] = [];
   try {
@@ -398,19 +426,7 @@ async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
   } catch (e) {
     errors.push(`detached runs: ${(e as Error).message}`);
   }
-  const data = ctx.memory.data;
-  const notices = ctx.memory.read((db) => listNotices(db, data, ctx.secretary !== null ? {audience: 'secretary'} : {})).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
-  if (o.markDelivered !== false) markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
-  const st = ctx.memory.read((db) => labelStatus(db));
-  return {
-    notices,
-    ...steps,
-    olderEnvironmentRuns,
-    labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since },
-    landings,
-    errors,
-    detachedRuns,
-  };
+  return { olderEnvironmentRuns, landings, errors, detachedRuns };
 }
 
 /** `mp pm alerts --ack <id...>`: notices acknowledged (never back). */
@@ -634,7 +650,7 @@ export interface Renewed {
   readonly reviewSteps: number;
   /** 4.4 (F14): the missions covered: the one named, or the open ones. */
   readonly missions: readonly string[];
-  /** 4.4 (F14): runs from older environments left out, because their missions are not covered. */
+  /** 4.4 (F14): judgments resting on runs from older environments left as they are, because their missions are not covered. */
   readonly leftOut: number;
 }
 
@@ -657,9 +673,16 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
   const env = ctx.environment();
   const all = ctx.memory.read((db) => renewalCandidates(db));
   const scope = renewCovers(ctx, o.mission ?? null);
-  const covered = all.candidates.filter((cand) => scope.covers([...cand.judgments.map((j) => missionOfObject(ctx, j.target)), missionOfEvidence(ctx, cand.evidence)]));
-  const c = { ...all, candidates: covered, reviews: all.reviews.filter((j) => scope.covers([missionOfObject(ctx, j.target)])) };
-  const leftOut = all.candidates.length - covered.length + all.reviews.length - c.reviews.length;
+  // 4.4 (F14): each judgment by its own mission (the version it decides, else its run's): a run that judgments of
+  // several missions cite is rerun once, and only the covered judgments are renewed, scoped or sent to a Reviewer
+  const inScope = (j: { readonly target: string }, evidence?: string): boolean => scope.covers([missionOfObject(ctx, j.target) ?? (evidence === undefined ? null : missionOfEvidence(ctx, evidence))]);
+  const covered = all.candidates.flatMap((cand) => {
+    const judgments = cand.judgments.filter((j) => inScope(j, cand.evidence));
+    return judgments.some((j) => j.renewable) ? [{ ...cand, judgments }] : [];
+  });
+  const c = { ...all, candidates: covered, reviews: all.reviews.filter((j) => inScope(j)) };
+  const judgmentsOf = (xs: ReadonlyArray<{ readonly judgments: ReadonlyArray<{ readonly judgment: string }> }>, ys: ReadonlyArray<{ readonly judgment: string }>): number => new Set([...xs.flatMap((x) => x.judgments.map((j) => j.judgment)), ...ys.map((j) => j.judgment)]).size;
+  const leftOut = judgmentsOf(all.candidates, all.reviews) - judgmentsOf(c.candidates, c.reviews);
   const reruns: Array<Renewed['reruns'][number]> = [];
   const skipped: Array<{ evidence: string; why: string }> = [];
   // The log, rather than evidence-id order, preserves legacy command groups and
@@ -709,7 +732,7 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
       const renewGroup = (tx: WriteTx, runs: readonly RecordedRun[], records: readonly EvidenceRecord[] = []): Array<Renewed['reruns'][number]> => originals.map((cand) => {
         const x = replacementFor(runs, cand);
         const rec: EvidenceRecord = records.find((r) => r.evidence === x.evidence) ?? { kind: 'evidence', evidence: x.evidence as never, envLine: 'env' as never, envSnapshot: env.identity, runClass: 'declared', fields: x.fields };
-        const out = recordRenewedRun(tx, { original: cand.evidence, run: rec });
+        const out = recordRenewedRun(tx, { original: cand.evidence, run: rec, judgments: new Set(cand.judgments.map((j) => j.judgment as string)) });
         const ix = new StoredIndex(tx);
         const renewed: string[] = [];
         const refused = out.refused.map((f) => ({ judgment: f.judgment as string, reason: f.reason }));
@@ -1261,6 +1284,14 @@ export async function pmNext(...args: Parameters<typeof driver_pmNext>): Promise
   const was = ctx.operational;
   ctx.operational = true;
   try { return await driver_pmNext(...args); } finally { ctx.operational = was; }
+}
+
+/** 4.4 (F8): a pass's reconciliation alone; `readNextReport` reads its report afterwards in one snapshot (`mp sec next`, `mp sec wait`). */
+export async function pmReconcile(ctx: ProcessContext): Promise<Reconciled> {
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return await reconcileNext(ctx); } finally { ctx.operational = was; }
 }
 
 export function pmDispatch(...args: Parameters<typeof driver_pmDispatch>): ReturnType<typeof driver_pmDispatch> {

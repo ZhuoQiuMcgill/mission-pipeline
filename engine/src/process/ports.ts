@@ -407,6 +407,19 @@ export class MemoryFlowLedger implements FlowLedgerPort {
     });
   }
 
+  /** 4.4 (F14): the notices of a category raised for a mission and not acknowledged (one read). */
+  async openNotices(q: { readonly mission: MissionId; readonly category: string }): Promise<ReadonlyArray<{ readonly key: string; readonly detail: unknown }>> {
+    const data = this.memory.data;
+    return this.memory.read((db) => (db.stmt("SELECT l.record FROM log l WHERE l.kind = 'alert' AND json_extract(l.record, '$.category') = ? AND NOT EXISTS (SELECT 1 FROM notice_deliveries d WHERE d.state = 'acknowledged' AND d.notice = json_extract(l.record, '$.alert')) ORDER BY l.rev").all(q.category) as Array<{ record: string }>).flatMap((r) => {
+      try {
+        const b = JSON.parse(data.text((JSON.parse(r.record) as { body: string }).body)) as { mission?: unknown; key?: unknown; detail?: unknown };
+        return b.mission === q.mission && typeof b.key === 'string' ? [{ key: b.key, detail: b.detail ?? null }] : [];
+      } catch {
+        return [];
+      }
+    }));
+  }
+
   async missions(): Promise<readonly MissionId[]> {
     return this.memory.read((db) => flowMissions(db));
   }

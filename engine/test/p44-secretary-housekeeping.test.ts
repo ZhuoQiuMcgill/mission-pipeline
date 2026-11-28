@@ -4,6 +4,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { hashJson } from '../src/common/hash.ts';
+import type { ContentHash, MissionId } from '../src/common/ids.ts';
+import { appendRecords } from '../src/memory/index.ts';
 import { liveSecretary } from '../src/memory/resident.ts';
 import { project43, command43, done43, live43, escalation43 } from './p43-fixtures.ts';
 
@@ -41,6 +43,36 @@ test('F19: mp pm secretary stop --idle retires a generation only when no mission
     assert.match(r.stopHint, /nothing was in flight/);
     assert.equal(liveSecretary(p.ctx.memory), null);
     assert.equal((await command43(p, ['pm', 'next'])).code, 0, 'the 4.2 loop is available again');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('F19 (review p2-6): --idle checks a pending generation too, and a detached run still running counts as in flight', async () => {
+  const p = project43();
+  try {
+    // a pending generation and an open mission
+    await done43(p, ['pm', 'secretary', 'start']);
+    await done43(p, ['pm', 'mission', 'open', 'm0']);
+    const pending = await command43(p, ['pm', 'secretary', 'stop', '--idle']);
+    assert.equal(pending.error?.code, 'NOT_ALLOWED', 'the pending generation was retired with a mission open');
+    assert.match(pending.error.message, /open: m0/);
+    // a live generation whose released dispatch left a detached run running
+    const words = await done43(p, ['pm', 'say', 'Close it', '--tag', 'instruction']);
+    await done43(p, ['pm', 'close', 'm0', '--words', words.words]);
+    await escalation43(p);
+    const id = await live43(p);
+    const d = await done43(p, ['sec', 'card', 'choice'], id);
+    const line = `dispatch:${d.dispatch}`;
+    p.ctx.memory.write({}, (tx) => {appendRecords(tx, [{ kind: 'flow.event', mission: 'm1' as MissionId, line, event: 'detached', key: 'run-1', body: tx.data.put(JSON.stringify({ run: 'run-1', evidence: 'ev-1', command: 'check', dispatch: d.dispatch, task: d.step, pid: 1, start: null, host: 'elsewhere', startedAt: 0 })) as ContentHash }]);});
+    await done43(p, ['sec', 'release', d.dispatch, '--ended'], id);
+    await done43(p, ['pm', 'close', 'm1', '--words', words.words]);
+    const running = await command43(p, ['pm', 'secretary', 'stop', '--idle']);
+    assert.equal(running.error?.code, 'NOT_ALLOWED', 'retired while a detached run was still running');
+    assert.match(running.error.message, /in flight or not confirmed ended: none; detached runs still running: run-1/);
+    // once the run has ended, the generation is idle
+    p.ctx.memory.write({}, (tx) => {appendRecords(tx, [{ kind: 'flow.event', mission: 'm1' as MissionId, line, event: 'detached-end', key: 'run-1', body: tx.data.put(JSON.stringify({ run: 'run-1', outcome: 'lost', why: 'gone', at: 0 })) as ContentHash }]);});
+    assert.equal((await done43(p, ['pm', 'secretary', 'stop', '--idle'])).generation, id);
   } finally {
     p.cleanup();
   }

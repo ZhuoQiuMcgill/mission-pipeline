@@ -2,13 +2,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MissionId, ContentHash } from '../common/ids.ts';
 import { canonicalJson, sha256 } from '../common/hash.ts';
-import { activeStops, appendRecords, cursor, dispatchInfo, wordsEntry, flowEvents, listDispatches, setCursor, type Db } from '../memory/index.ts';
+import { activeStops, appendRecords, cursor, dispatchInfo, wordsEntry, flowEventExists, flowEvents, listDispatches, setCursor, type Db } from '../memory/index.ts';
 import { generations, liveSecretary, notAllowed, requireSecretary, requirePm, touchSecretary, writeGeneration } from '../memory/resident.ts';
 import { residentRecords, wordsAuthority } from '../memory/words.ts';
 import { stopCovers } from '../memory/stopTypes.ts';
 import type { ProcessContext } from './context.ts';
 import { advance } from './advance.ts';
-import { pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
+import { pmDispatch, pmReconcile, readNextReport, type Dispatched, type NextReport } from './pm.ts';
 import { dispatchView, seatCard, seatHandback } from './seat.ts';
 import { listNotices, markNotices, onlyInforms } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
@@ -29,12 +29,16 @@ export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolea
   return ctx.memory.write({op: `secretary:stop:${o.op}`, payload: o, stop: true, command: 'secretary stop'}, (tx) => {
     const g = generations(tx).filter((g) => g.state !== 'retired').at(-1);
     if (g === undefined) notAllowed('there is no pending or live Secretary to stop');
-    // 4.4 (F19): --idle retires a generation with no stop when no mission is open and no seat may still run
-    const idle = g.state === 'live' && o.idle === true && o.gone !== true;
+    // 4.4 (F19): --idle retires a generation, pending or live, with no stop when no mission is open and nothing
+    // may still run: no dispatch in flight or released unconfirmed, no detached run without a result or an end
+    const idle = o.idle === true;
     if (idle) {
       const open = (tx.stmt("SELECT mission FROM missions WHERE state = 'open' ORDER BY mission").all() as {mission: string}[]).map((r) => r.mission);
       const flying = (tx.stmt("SELECT dispatch FROM dispatches WHERE state = 'in-flight' OR (state = 'released' AND released = 'abandoned') ORDER BY claimed_rev").all() as {dispatch: string}[]).map((r) => r.dispatch);
-      if (open.length > 0 || flying.length > 0) notAllowed(`--idle retires the Secretary only when no mission is open and nothing is in flight (open: ${open.join(', ') || 'none'}; in flight or not confirmed ended: ${flying.join(', ') || 'none'}); otherwise stop the work first and use the stop's grace or --gone`);
+      const running = (tx.stmt("SELECT mission, line, key, body FROM flow_events WHERE event = 'detached' ORDER BY revision").all() as {mission: string; line: string; key: string; body: string}[])
+        .filter((e) => !flowEventExists(tx, {mission: e.mission, line: e.line, event: 'detached-end', key: e.key}) && !flowEventExists(tx, {mission: e.mission, line: e.line, event: 'run', key: String((JSON.parse(tx.data.text(e.body)) as {evidence?: unknown}).evidence)}))
+        .map((e) => e.key);
+      if (open.length > 0 || flying.length > 0 || running.length > 0) notAllowed(`--idle retires the Secretary only when no mission is open and nothing is in flight (open: ${open.join(', ') || 'none'}; in flight or not confirmed ended: ${flying.join(', ') || 'none'}; detached runs still running: ${running.join(', ') || 'none'}); otherwise stop the work first and use the stop's grace or --gone`);
     } else {
       const stops = activeStops(tx);
       const lastStop = stops.at(-1);
@@ -222,15 +226,17 @@ function replyRevisions(db: Db): Map<string, number> {
  * before, PM replies and applied decisions at or before the cursor, and the steps of closed missions are
  * counted, not printed; a delivered notice that only informs is not pending. The first pass of a
  * generation, `all` and nothing else print everything. Only this pass, whose report reaches its caller,
- * marks notices delivered and moves the cursor; `since` replaces the cursor for one pass.
+ * marks notices delivered and moves the cursor; `since` replaces the cursor for one pass. `op`: the command's
+ * operation id; the marks, the cursor and the report commit in one write under it, so a retry after an
+ * interruption prints the report the first attempt committed (what it marked is never lost to a count).
  */
-export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; readonly since?: number | null} = {}): Promise<SecretaryNext> {
+export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; readonly since?: number | null; readonly op?: string | null} = {}): Promise<SecretaryNext> {
   const g = requireSecretary(ctx.memory, ctx.secretary);
   touchSecretary(ctx.memory, ctx.secretary);
-  const r = await pmNext(ctx, {markDelivered: false});
-  // one read: the revision the report is built from and everything it prints (what lands later is the next pass's)
+  // reconcile first; then one read: the revision the report is built from and everything it prints
+  const recon = await pmReconcile(ctx);
   const out = ctx.memory.read((): SecretaryNext => {
-    const built = Number(ctx.memory.head());
+    const {report: r, revision: built} = readNextReport(ctx, recon);
     const since = o.since ?? cursor(ctx.memory, secCursorName(g.generation))?.rev ?? null;
     const full = o.all === true || since === null;
     const deliveredAfter = (id: string): boolean => o.since != null && Number((ctx.memory.stmt("SELECT rev FROM notice_deliveries WHERE notice = ? AND state = 'delivered'").get(id) as {rev: number} | undefined)?.rev ?? 0) > o.since;
@@ -251,29 +257,43 @@ export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; r
     const inbox = pmInbox(ctx);
     return {...r, notices, held, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => inbox.some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...ch, replies, decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: built, since, all: o.all === true, earlier};
   });
-  markNotices(ctx.memory, out.notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
-  ctx.memory.write({}, (tx) => setCursor(tx, {cursor: secCursorName(g.generation), rev: out.revision}));
-  return out;
+  const name = secCursorName(g.generation);
+  const json = canonicalJson(out);
+  const stored = ctx.memory.write(o.op != null ? {op: `sec-next:${o.op}`, payload: {op: o.op}} : {}, (tx) => {
+    for (const n of out.notices) if (n.state === 'undelivered') markNotice(tx, {notice: n.id, state: 'delivered'});
+    // the cursor never moves back (a late retry of an earlier pass)
+    if (out.revision > Number(cursor(tx, name)?.rev ?? -1)) setCursor(tx, {cursor: name, rev: out.revision});
+    return {report: tx.data.put(json)};
+  });
+  return stored.report === sha256(json) ? out : storedNextReport(ctx, stored.report);
+}
+
+/** 4.4 (F8): the report a `mp sec next` committed, read back by its hash (a retry and a replay print it as it was). */
+export function storedNextReport(ctx: ProcessContext, report: string): SecretaryNext {
+  return JSON.parse(ctx.memory.data.text(report)) as SecretaryNext;
 }
 
 /** 4.4 (F8): the pass inside `mp sec wait`: it reconciles; its report reaches nobody, so it marks nothing delivered and leaves the cursor. */
 async function secReconcile(ctx: ProcessContext): Promise<void> {
   requireSecretary(ctx.memory, ctx.secretary);
   touchSecretary(ctx.memory, ctx.secretary);
-  await pmNext(ctx, {markDelivered: false});
+  await pmReconcile(ctx);
 }
 
 /**
  * 4.4 (F8): what calls for the Secretary, the one list `mp sec wait` wakes on: a hand-back, a release,
  * new work queued, a mission opened, git writes allowed again, a decision, an answer or its application,
  * a note, a question or a reply of the PM, a change of constraint or stop, a notice that calls for an
- * action, a detached run that ended (its seat may be gone), and an unconfirmed seat (checked apart).
- * Not on it: a seat's own claim, read, checkout or refused hand-back, and the other writes of a pass.
- * The holds of 4.4 (G6) add their record kinds (a change of hold) and a check by time (a hold's time) here.
+ * action, a detached run that ended (lost, stopped, or finished with its result: its seat may be gone),
+ * and an unconfirmed seat (checked apart). Not on it: a seat's own claim, read, checkout, foreground rerun
+ * or refused hand-back, and the other writes of a pass. The holds of 4.4 (G6) add their record kinds (a
+ * change of hold) and a check by time (a hold's time) here.
  */
 export const SECRETARY_WAKE: {
   readonly kinds: readonly string[];
   readonly flow: ReadonlyArray<{readonly line: string; readonly prefix?: true; readonly events: readonly string[]}>;
+  /** Flow events that wake only when their body says so (the body is data, read for these rows only). */
+  readonly bodies: ReadonlyArray<{readonly line: string; readonly prefix?: true; readonly event: string; readonly when: (body: Record<string, unknown>) => boolean}>;
   readonly checks: ReadonlyArray<(db: Db, now: number) => boolean>;
 } = {
   kinds: ['dispatch.handback', 'dispatch.released', 'task.queued', 'mission.state', 'memory.git-confirmed', 'pm.note', 'pm.question', 'pm.reply', 'stop.committed', 'stop.released'],
@@ -282,15 +302,23 @@ export const SECRETARY_WAKE: {
     {line: 'requirements', events: ['constraint', 'constraint-scope', 'constraint-withdrawn']},
     {line: 'dispatch:', prefix: true, events: ['detached-end']},
   ],
+  // a detached run's worker records its result as the run event of its dispatch, with the detached run's id
+  bodies: [{line: 'dispatch:', prefix: true, event: 'run', when: (b) => typeof b['detached'] === 'string'}],
   checks: [],
 };
 
-/** Whether something on SECRETARY_WAKE was recorded after `since` (a notice calls for an action unless it says it only informs). */
-export function secretaryWakes(db: Db, since: number, now = Date.now()): boolean {
-  const flow = SECRETARY_WAKE.flow.map((f) => `(json_extract(record, '$.line') ${f.prefix === true ? 'LIKE ?' : '= ?'} AND json_extract(record, '$.event') IN (${f.events.map(() => '?').join(', ')}))`).join(' OR ');
-  const args = [since, ...SECRETARY_WAKE.kinds, ...SECRETARY_WAKE.flow.flatMap((f) => [f.prefix === true ? `${f.line}%` : f.line, ...f.events])];
-  const hit = db.stmt(`SELECT 1 FROM log WHERE rev > ? AND (kind IN (${SECRETARY_WAKE.kinds.map(() => '?').join(', ')}) OR (kind = 'alert' AND json_extract(record, '$.informational') IS NULL) OR (kind = 'flow.event' AND (${flow}))) LIMIT 1`).get(...args);
-  return hit !== undefined || SECRETARY_WAKE.checks.some((c) => c(db, now));
+/** Whether something on SECRETARY_WAKE was recorded after `since` (a notice calls for an action unless it says it only informs); one read. */
+export function secretaryWakes(memory: Db & {readonly data: {text(h: string): string}; read<T>(fn: (db: Db) => T): T}, since: number, now = Date.now()): boolean {
+  return memory.read((db) => {
+    const flow = SECRETARY_WAKE.flow.map((f) => `(json_extract(record, '$.line') ${f.prefix === true ? 'LIKE ?' : '= ?'} AND json_extract(record, '$.event') IN (${f.events.map(() => '?').join(', ')}))`).join(' OR ');
+    const args = [since, ...SECRETARY_WAKE.kinds, ...SECRETARY_WAKE.flow.flatMap((f) => [f.prefix === true ? `${f.line}%` : f.line, ...f.events])];
+    if (db.stmt(`SELECT 1 FROM log WHERE rev > ? AND (kind IN (${SECRETARY_WAKE.kinds.map(() => '?').join(', ')}) OR (kind = 'alert' AND json_extract(record, '$.informational') IS NULL) OR (kind = 'flow.event' AND (${flow}))) LIMIT 1`).get(...args) !== undefined) return true;
+    for (const b of SECRETARY_WAKE.bodies) {
+      const rows = db.stmt(`SELECT json_extract(record, '$.body') AS body FROM log WHERE rev > ? AND kind = 'flow.event' AND json_extract(record, '$.event') = ? AND json_extract(record, '$.line') ${b.prefix === true ? 'LIKE ?' : '= ?'}`).all(since, b.event, b.prefix === true ? `${b.line}%` : b.line) as Array<{body: string}>;
+      if (rows.some((r) => {try {return b.when(JSON.parse(memory.data.text(r.body)) as Record<string, unknown>);} catch {return false;}})) return true;
+    }
+    return SECRETARY_WAKE.checks.some((c) => c(db, now));
+  });
 }
 
 export async function secWait(ctx: ProcessContext, o: {since: number; timeout?: number; pollMs?: number; periodicMs?: number}): Promise<{revision: number; timedOut: boolean; unconfirmed: ReturnType<typeof unconfirmedSeats>; replies: ReturnType<typeof channel>['replies']}> {
