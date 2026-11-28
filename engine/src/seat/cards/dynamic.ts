@@ -8,6 +8,7 @@ import { canonicalJson } from '../../common/hash.ts';
 import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
+import { openItemsOf, type OpenItem } from '../../flow/openItems.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -139,7 +140,7 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('alignment', 'Alignment record (PM batches)', batches.map((b) => `${b.key}: user messages ${(b.body as { userWords: string[] }).userWords.join(', ') || 'none'}`).join('\n') || '(none)', 'record'),
       // 4.4 (F16, P5): a digest that can be read, in place of every event of the task line in full; the
       // constraints are on the card already and are not repeated here
-      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine), 'record'),
+      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, task === undefined ? [] : openItemsOf(events).filter((i) => i.task === task.id && i.answer === null)), 'record'),
       ...(task === undefined ? [] : [material('task-line', `Task ${task.id}: its card and every event of its line, in full (not must-read)`, canonicalJson({ task, events: taskLine.map((x) => ({ event: x.event, key: x.key, body: x.body })) }), 'record', false)]),
     ],
   };
@@ -155,7 +156,7 @@ function line(text: string, n = 160): string {
  * 4.4 (F16): the Secretary's current facts as a digest: the escalation, the selected items by id and one
  * line, the authorizations, the task's goal and standards, one line per event of the task line.
  */
-function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[]): string {
+function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[], open: readonly OpenItem[] = []): string {
   const section = (title: string, lines: readonly string[]): string => `${title}:\n${lines.length === 0 ? '(none)' : lines.map((l) => `- ${l}`).join('\n')}`;
   return [
     `Escalation ${e.id} (${e.source}) on ${e.subject}: ${line(e.summary, 300)} (its reasons and facts in full: material request)`,
@@ -164,6 +165,8 @@ function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths
     ...(task === undefined ? [] : [
       `Task ${task.id} (${task.kind}): ${line(task.goal, 300)}`,
       section('Its standards', task.standards.map((s) => `[${s.id}] ${line(s.text, 300)}`)),
+      // 4.4 (F4; G5): a Constructor's question still open is listed on every card of its task
+      ...(open.length > 0 ? [section('Its open questions (open items)', open.map((i) => `[${i.id}] attempt ${i.attempt}, ${i.when}: ${line(i.text)}`))] : []),
       section(`Its line, one event each (in full: material task-line)`, taskLine.map((x) => `${x.event} ${x.key}: ${line(canonicalJson(x.body), 120)}`)),
     ]),
   ].join('\n\n');

@@ -200,6 +200,8 @@ describe('4.4 F4: a review waits for the answer to its Constructor\'s questions'
     assert.equal(reviews, 1, 'the review ran while the later question was open');
     assert.deepEqual(claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1').questions?.map((q) => [q.id, q.state]), [[item, 'open']]);
     assert.deepEqual(ports.scheduler.card<ConstructorCard>('con.m1.impl.2').questions?.map((q) => [q.id, q.state]), [[item, 'open']], 'listed on the next attempt\'s card');
+    const facts = ports.scheduler.card<SecretaryCard>('sec.cdec.con.m1.impl.1').materials.find((m) => m.id === 'current-facts')!;
+    assert.ok(ports.ledger.content.get(facts.ref as never).includes(`Its open questions (open items):\n- [${item}] attempt 1, later: Is a BOM kept?`), 'and on the Secretary\'s card of the task');
     // the Secretary answers it (the escalation is undecided: the item is the Secretary's)
     const a = answerOpenItem(ports.ctx, { op: 't1', ref: item, by: 'secretary', answer: 'The BOM is dropped.' });
     assert.equal(a.repeated, false);
@@ -240,7 +242,8 @@ describe('4.4 F4: a review waits for the answer to its Constructor\'s questions'
   });
 
   it('the Secretary\'s deferral is checked: only with an answer to a Constructor\'s questions, by their numbers', () => {
-    const card = { materials: [], options: [{ id: 'answer' }, { id: 'replan' }], authorizations: [], grantAvailable: true, request: { source: 'constructor-decision', reasons: ['Q1 (before-review): a', 'Q2 (later): b'] } } as unknown as SecretaryCard;
+    // a retried round appends its reason after the numbered questions
+    const card = { materials: [], options: [{ id: 'answer' }, { id: 'replan' }], authorizations: [], grantAvailable: true, request: { source: 'constructor-decision', reasons: ['Q1 (before-review): a', 'Q2 (later): b', 'The Secretary decision was not carried out: decide again.'] } } as unknown as SecretaryCard;
     const base = { classification: 'detail', authorization: null, reason: 'r', instructions: 'do', grantExtra: 0, notice: '', mayMatter: false } as const;
     assert.deepEqual(secretaryProblems(card, { ...base, option: 'answer', defer: [2] }, new Set()), []);
     assert.ok(secretaryProblems(card, { ...base, option: 'answer', defer: [3] }, new Set()).some((p) => p.startsWith('defer: name questions')));

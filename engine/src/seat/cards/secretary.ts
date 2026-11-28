@@ -136,8 +136,10 @@ export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: Re
   if (r.option !== 'grant' && (r.findings ?? []).length > 0) out.push('findings: only for option "grant"');
   // 4.4 (F4): a deferral names questions of this escalation by their numbers
   if ((r.defer ?? []).length > 0) {
+    // the numbered questions of a 4.4 escalation (a retried round appends its reason after them); 4.3's reasons are its questions
+    const questions = c.request.reasons.filter((x) => /^Q\d+ \((before-review|later)\): /.test(x)).length || c.request.reasons.length;
     if (r.option !== 'answer' || c.request.source !== 'constructor-decision') out.push('defer: only for option "answer" on a Constructor\'s questions');
-    else if ((r.defer ?? []).some((n) => n > c.request.reasons.length)) out.push(`defer: name questions by their numbers, 1 to ${c.request.reasons.length}`);
+    else if ((r.defer ?? []).some((n) => n > questions)) out.push(`defer: name questions by their numbers, 1 to ${questions}`);
   }
   if ((r.option === 'send-back' || r.option === 'replan' || r.option === 'rework' || r.option === 'answer') && r.instructions.trim() === '') out.push(`instructions: option "${r.option}" needs the instructions`);
   if (r.classification !== 'detail' && r.notice.trim() === '') out.push('notice: write what the PM is told');
