@@ -145,6 +145,7 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
         : { handBack: { reopen: [{ task: 'impl', issue: 'keep the order', items: ['item.m1.g3'] }], add: [{ ...JSON_TASK, requirementItems: ['item.m1.g2'] }, { ...JSON_TASK, id: 'docs2', goal: 'Document it', writeScope: ['docs/json.md'] }], note: 'second try' } };
     });
     assert.equal(cards.length, 2, 'returned once');
+    assert.deepEqual(cards[0]?.items?.map((i) => [i.id, i.withdrawn]), [['item.m1.g2', undefined], ['item.m1.g3', undefined]]);
     assert.ok(cards[1]?.revision?.mechanicalFailures.some((f) => f.includes('reopen[impl].items: "item.m1.g1" is not a requirement item of R-1 in force')), JSON.stringify(cards[1]?.revision));
     assert.ok(renderArchitectRepair(cards[0]!).includes('Name on each task the items it serves'));
     const pie = await planInEffect(flowCtx(ports, M));
@@ -156,6 +157,19 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     assert.deepEqual(r.unnamed, ['docs2'], 'the read shows it under its filing, with its item not named');
     assert.ok(repairsText({ mission: 'm1', repairs: [r] }).includes('tasks on which its Architect named none of its items (bound to none): docs2'));
     assert.match(buildGraph(ports.ctx, { mission: 'm1' }).nodes.get(`object:${(await acceptedOf(ports, 'impl'))!}`)?.checks ?? '', /this work came with the reopen of new requirement R-1/);
+  });
+
+  it('an item withdrawn between the Architect step\'s queueing and its claim: the claimed card says so and asks nothing for it', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }, { item: 'g3', text: 'Rows keep their order', quote: 'keep the order' }], 'Please export JSON and keep the order.');
+    await engine.reconcile(M);
+    const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    assert.equal(ports.scheduler.card<ArchitectRepairCard>(step).items?.some((i) => i.withdrawn === true), false);
+    await withdrawItem(ports, { mission: M, item: 'g3', reason: 'not now' });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [{ ...JSON_TASK, requirementItems: ['item.m1.g2'] }], note: 'JSON only' } } : happyScript(M)(t, s)));
+    const card = claimed<ArchitectRepairCard>(ports, step);
+    assert.deepEqual(card.items?.map((i) => [i.id, i.withdrawn]), [['item.m1.g2', undefined], ['item.m1.g3', true]]);
+    assert.ok(renderArchitectRepair(card).includes('[item.m1.g3] (goal) Rows keep their order — the user\'s words (W-2): "keep the order" (withdrawn since: plan nothing for it)'));
   });
 
   it('the user takes it back: every item withdrawn before the amendment is applied ends the filing; a hand-back that comes afterwards is kept and not applied', async () => {

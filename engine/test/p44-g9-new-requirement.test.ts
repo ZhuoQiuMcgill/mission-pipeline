@@ -223,7 +223,7 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     const r = await pmExtend(ports.ctx, { mission: M, items: [{ item: 'g2', type: 'goal', text: 'The parser exports rows as JSON', quote: 'export the rows as JSON', words: w }] });
     assert.equal(r.term, 2);
     const obj = (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.object === 'pmplan.m1.2')!;
-    assert.ok(!obj.reviews[0]!.basisLines.includes('reqnew.m1.t2'), 'the plan submitted first is not checked against it');
+    assert.ok(!(obj.reviews[0]!.basisLines as readonly string[]).includes('reqnew.m1.t2'), 'the plan submitted first is not checked against it');
   });
 
   it('a supersession that withdraws a new requirement item writes its term line, not reqset', async () => {
