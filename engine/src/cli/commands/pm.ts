@@ -86,6 +86,7 @@ import { describeScope, detectStop, parseScope, stopScopeFor, stopWords } from '
 import { planTemplate } from '../templates.ts';
 import { pmCoreText, pmHandbookPath, wiDir } from '../wi.ts';
 import { fullRunLines } from './seat.ts';
+import { answerOpenItem, type AnsweredItem } from '../../process/openItems.ts';
 
 const WORDS = /^W-[1-9][0-9]*$/;
 
@@ -785,8 +786,8 @@ const answer: Command = {
   group: 'pm',
   name: ['answer'],
   summary: 'the PM\'s or the user\'s decision on an escalation in the PM inbox; carried out like a Secretary decision, by the Secretary\'s next pass while one is live (WI-24)',
-  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>"\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)`,
-  flags: { option: 'string', words: 'string', by: 'string', 'no-words': 'boolean', reason: 'string', instructions: 'string', extra: 'string', findings: 'string' },
+  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>"\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]] [--defer <n>[,<n>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)\n       (an answer to a Constructor's questions: --defer names the questions it puts off by number; each stays an open item, answered later with mp pm open-item answer)`,
+  flags: { option: 'string', words: 'string', by: 'string', 'no-words': 'boolean', reason: 'string', instructions: 'string', extra: 'string', findings: 'string', defer: 'list' },
   async run(c, args) {
     const p = P(c);
     const m = missionArg(args, 0);
@@ -801,7 +802,8 @@ const answer: Command = {
     if (n !== undefined && (!Number.isSafeInteger(n) || n < 1)) throw usage('--extra is a positive integer');
     const ins = flagStr(args, 'instructions');
     const findings = (flagStr(args, 'findings') ?? '').split(',').map((f) => f.trim()).filter((f) => f !== '');
-    const recorded = await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
+    const defer = deferArg(args);
+    const recorded = await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}), ...(defer.length > 0 ? { defer } : {}) });
     // 4.4 (F9): say what happened to this very answer (its round and option), read from the applied record
     const resident = liveSecretary(p.ctx.memory) !== null;
     const effect = p.ctx.memory.read((db) => answerOutcome(db, p.ctx.memory.data, { mission: m, escalation: esc, by, round: recorded.round, option, resident }));
@@ -815,6 +817,38 @@ const answer: Command = {
       ...(by === 'pm' ? [`Other tags in force for ${m}: ${otherTags} (mp read words --in-force lists them)`, ...(principles.length > 0 ? ['Principles in force:', ...principles.map((x) => `- ${x}`)] : ['Principles in force: none'])] : []),
     ];
     return { ...ok(lines.join('\n'), { mission: m, escalation: esc, option, words: w, by, round: recorded.round, applied: effect.applied, resident, ...(by === 'pm' ? { principles, otherTags } : {}) }), cutNote: 'mp read words --tag principle --in-force lists every principle in force' };
+  },
+};
+
+/** 4.4 (F4): `--defer <n>[,<n>...]`: the numbers of the questions an answer puts off. */
+export function deferArg(args: ParsedArgs): number[] {
+  const xs = flagList(args, 'defer').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+  const ns = xs.map((x) => (/^Q?[1-9][0-9]*$/i.test(x) ? Number(x.replace(/^Q/i, '')) : Number.NaN));
+  if (ns.some((n) => !Number.isSafeInteger(n))) throw usage('--defer names questions by number: 1,2 (or Q1,Q2)');
+  return ns;
+}
+
+/** 4.4 (F4; G5): the line an answered open item prints (from the record of that answer). */
+export function openItemAnswered(r: AnsweredItem): string {
+  const a = r.item.answer!;
+  return r.repeated
+    ? `Open item ${r.mission}/${r.item.id} was answered already with this answer by ${a.by === 'pm' ? 'the PM' : 'the Secretary'}: nothing new.`
+    : `Open item ${r.mission}/${r.item.id} (task ${r.item.task}, attempt ${r.item.attempt}) answered by ${a.by === 'pm' ? 'the PM' : 'the Secretary'}${a.words !== undefined ? ` on ${a.words}` : ''}; the task's next cards carry the answer.`;
+}
+
+const openItem: Command = {
+  group: 'pm',
+  name: ['open-item'],
+  summary: 'answer an open item (a Constructor\'s question put off or raised as later); the answer goes onto the task\'s next cards. The PM may answer any',
+  usage: 'mp pm open-item answer <[mission/]item> --answer "<text>" [--words W-<n>]   (mp read open-items <mission> lists them)',
+  flags: { answer: 'string', words: 'string' },
+  async run(c, args) {
+    const p = P(c);
+    if (positional(args, 0, 'answer') !== 'answer') throw usage('mp pm open-item answer <[mission/]item> --answer "<text>"');
+    const ref = positional(args, 1, 'open item');
+    const w = wordsArg(p.ctx, args, false);
+    const r = answerOpenItem(p.ctx, { op: c.op!, ref, by: 'pm', answer: flagStr(args, 'answer') ?? '', words: w });
+    return ok(openItemAnswered(r), r);
   },
 };
 
@@ -1345,6 +1379,7 @@ export const PM_COMMANDS: readonly Command[] = [
   plan,
   waive,
   answer,
+  openItem,
   grant,
   legalize,
   deliver,

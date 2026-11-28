@@ -424,7 +424,8 @@ describe('#3 and #4: a given-up task and an ended legalization leave nothing ope
       const d = pmDispatch(p.ctx, s.step);
       write(join(p.dir, d.worktree!), 'src/add.js', `exports.add = (a, b) => a + b; // v${n}\n`);
       write(join(p.dir, d.worktree!), 'src/check.js', CHECK_JS);
-      await handBack(p.ctx, d.dispatch, { done: `v${n}`, unmet_standards: [], unfixed_problems: [], decisions_needed: [`question ${n}?`] });
+      // 4.4 (F4): questions due later, so each review goes on beside its open escalation (a before-review one holds its review)
+      await handBack(p.ctx, d.dispatch, { done: `v${n}`, unmet_standards: [], unfixed_problems: [], decisions_needed: [{ question: `question ${n}?`, when: 'later' }] });
       await step(p.ctx, 'reviewer', (c) => {
         const pass = reviewerPass(c) as { judgments: Array<Record<string, unknown>> };
         return { ...pass, judgments: pass.judgments.map((j) => ({ ...j, met: 'no', reason: `missing ${n}` })), findings: [`missing ${n}`], verdict: 'rework' };

@@ -28,14 +28,25 @@ import type { IssueRecord, IssueResponse, JudgmentRecord, ListRef, Verdict } fro
 import { validateRecord } from '../common/validate.ts';
 import type { ConstructorCard, ReviewerCard, SeatCard } from './card.ts';
 
+/** 4.4 (F4): when a Constructor's question must be settled; a plain string (the 4.3 shape) reads as before-review. */
+export type QuestionWhen = 'before-review' | 'later';
+
 export const ConstructorResultShape = {
   done: z.string().min(1).describe('What you did.'),
   unmet_standards: z
     .array(z.object({ standard: z.string().describe('A standard id from the card.'), why: z.string() }))
     .describe('Standards not met, each with why. Empty when all are met.'),
   unfixed_problems: z.array(z.string()).describe('Problems you noticed but did not fix.'),
-  decisions_needed: z.array(z.string()).describe('Questions that need a decision (including "needs more resources").'),
+  decisions_needed: z
+    .array(z.union([z.string(), z.object({ question: z.string().min(1), when: z.enum(['before-review', 'later']) })]))
+    .describe('Questions that need a decision (including "needs more resources"). Each says when it must be settled: {"question": "...", "when": "before-review"} (the review waits for its answer) or "later" (it stays open and is answered later). A plain string is before-review.'),
+  blocked: z.boolean().optional().describe('true: you stop to ask and hand in no finished work. Your questions go in decisions_needed; your edits so far are kept, nothing is verified or reviewed, and the answer resumes this attempt on them.'),
 };
+
+/** 4.4 (F4): a hand-back's questions with when each must be settled (a 4.3 string: before-review). */
+export function constructorQuestions(r: Pick<ConstructorResult, 'decisions_needed'>): Array<{ readonly text: string; readonly when: QuestionWhen }> {
+  return (r.decisions_needed ?? []).map((q) => (typeof q === 'string' ? { text: q, when: 'before-review' as const } : { text: q.question, when: q.when }));
+}
 
 export const ReviewerResultShape = {
   judgments: z
@@ -167,7 +178,10 @@ export function resultProblems(card: SeatCard, raw: unknown, ctx: ResultContext)
 
 function constructorProblems(card: ConstructorCard, r: ConstructorResult): string[] {
   const ids = new Set(card.standards.map((s) => s.id));
-  return r.unmet_standards.filter((u) => !ids.has(u.standard)).map((u) => `unmet_standards: "${u.standard}" is not a standard on the card`);
+  const out = r.unmet_standards.filter((u) => !ids.has(u.standard)).map((u) => `unmet_standards: "${u.standard}" is not a standard on the card`);
+  // 4.4 (F4): a stop to ask carries its questions
+  if (r.blocked === true && r.decisions_needed.length === 0) out.push('blocked: name the questions you stopped for in decisions_needed');
+  return out;
 }
 
 const FILE_POINTER = /^file:([^\s:]+)(?::(\d+)(?:-(\d+))?)?$/;

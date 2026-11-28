@@ -113,6 +113,7 @@ import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/
 import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
 import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts';
 import { heldByPredecessors } from './explorationAfter.ts';
+import { heldForQuestions, openQuestionHolds } from './questions.ts';
 import { materialLeaf } from './seat.ts';
 import { carriedRunLines, detachedRunNotes, stopDetachedRuns, type DetachedRunNote } from './detached.ts';
 
@@ -295,6 +296,9 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
     const held: HeldStep[] = [];
     const candidates: Array<{ spec: TaskSpecDoc; step: ReadyStep }> = [];
     const leased = new Map(leases(db).map((l) => [l.resource, l.dispatch]));
+    // 4.4 (F4): the reviews that wait for their Constructor's questions, read once per mission of this report
+    const asked = new Map<string, ReturnType<typeof openQuestionHolds>>();
+    const askedIn = (m: string): ReturnType<typeof openQuestionHolds> => asked.get(m) ?? asked.set(m, openQuestionHolds(db, ctx.memory.data, m)).get(m)!;
     for (const q of taskQueue(db)) {
       const spec = specOf(ctx, q.card);
       const kind = spec.card.seat;
@@ -316,6 +320,11 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
       const after = heldByPredecessors(db, ctx.memory.data, spec);
       if (after !== null) {
         held.push({ ...base, why: after, wi: null });
+        continue;
+      }
+      const waits = kind === 'reviewer' ? heldForQuestions(db, ctx.memory.data, spec, askedIn(q.mission)) : null;
+      if (waits !== null) {
+        held.push({ ...base, why: waits, wi: null });
         continue;
       }
       const busy = (spec.exclusive ?? []).filter((r) => leased.has(r));
@@ -547,6 +556,9 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
       const after = heldByPredecessors(tx, tx.data, spec);
       if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
+      // 4.4 (F4): a review waits for the answer to its Constructor's before-review questions, checked in the same write
+      const asked = heldForQuestions(tx, tx.data, spec);
+      if (asked !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${asked}`);
       // 4.4 (F3, F5): the recorded hand-backs fill in what a card queued by 4.3 lacks; a repair card's unpinned starts as checked before this write
       spec = refreshDispatchCard(tx, tx.data, spec, {
         handBack: (t) => taskStatus(tx, tx.data, t)?.handBack ?? null,
@@ -583,9 +595,10 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   mkdirSync(join(ctx.memory.paths.tmp, out.dispatch), { recursive: true });
   let worktree: string | null = null;
   if (entry.exportsProduct === true) {
-    const ws = spec.card['workspace'] as { snapshot: string };
-    // A4: after the claim; idempotent (a crash in between leaves nothing half done: the next dispatch call or a release cleans up)
-    ctx.workspaces().ensure(out.dispatch, ws.snapshot);
+    const ws = spec.card['workspace'] as { snapshot: string; start?: string };
+    // A4: after the claim; idempotent (a crash in between leaves nothing half done: the next dispatch call or a release cleans up).
+    // 4.4 (F4): a Constructor that continues a paused attempt starts on its parked commit
+    ctx.workspaces().ensure(out.dispatch, ws.start ?? ws.snapshot);
     worktree = `.mission-pipeline/worktrees/${out.dispatch}`;
   }
   const title = entry.seat.charAt(0).toUpperCase() + entry.seat.slice(1);
@@ -1320,7 +1333,7 @@ export async function pmPlan(
  * `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n] [--findings F,...]`:
  * the user's decision. 4.1.3 (#39): a grant on an exploration may name the findings it is for.
  */
-export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly by?: 'pm' | 'user'; readonly noWords?: boolean; readonly reason?: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<{ readonly round: number | null }> {
+export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly by?: 'pm' | 'user'; readonly noWords?: boolean; readonly reason?: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[]; readonly defer?: readonly number[] }): Promise<{ readonly round: number | null }> {
   const text = req.by === 'pm' ? '' : wordsText(ctx, req.words);
   const findings = [...new Set((req.findings ?? []).map((f) => f.trim()).filter((f) => f !== ''))];
   if (findings.length > 0) {
@@ -1342,6 +1355,7 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
     ...(req.instructions !== undefined ? { instructions: req.instructions } : {}),
     ...(req.grantExtra !== undefined ? { grantExtra: req.grantExtra } : {}),
     ...(findings.length > 0 ? { findings } : {}),
+    ...((req.defer ?? []).length > 0 ? { defer: req.defer } : {}),
   });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm answer' });
   return { round };

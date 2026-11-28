@@ -597,6 +597,8 @@ export type HandBackAnswer =
       readonly verification: readonly VerificationRun[] | null;
       /** A note for the seat (e.g. the verification could not run now; the flow runs it later). */
       readonly notes: readonly string[];
+      /** 4.4 (F4): a Constructor that stopped to ask: `candidate` is the parked commit of its edits, not a candidate. */
+      readonly parked?: true;
       /** 4.4 (F9): an accepted Secretary decision: what became of it in this command. */
       readonly decision?: DecisionOutcome;
     };
@@ -715,7 +717,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(data, v.info);
     if (prior !== null && prior.seat === seatHash) {
-      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch) };
+      const parkedBefore = v.card.seat === 'constructor' && (input.fields as { blocked?: unknown } | null)?.blocked === true && prior.candidate !== null;
+      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch), ...(parkedBefore ? { parked: true as const } : {}) };
     }
     throw new LedgerError('FACT_CONFLICT', `dispatch ${dispatch} already handed back other content: one hand-back per dispatch`);
   }
@@ -798,16 +801,22 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
   notes.push(...dispatchOver(ctx, dispatch));
   let verification: VerificationRun[] | null = null;
-  // 4.4 (F19, #64): the recorded candidate is held by a ref, so git's garbage collection keeps it
+  // 4.4 (F19, #64): the recorded candidate is held by a ref, so git's garbage collection keeps it (4.4, F4: a
+  // parked commit too, for as long as its attempt can be resumed: the ref is never removed)
   if (candidate !== null) anchorCommit(ctx, v.info.mission, candidate.commit);
+  // 4.4 (F4): a Constructor that stopped to ask: what was collected is the parked commit of its edits
+  const parked = v.card.seat === 'constructor' && (input.fields as { blocked?: unknown } | null)?.blocked === true && candidate !== null;
+  if (out.accepted && parked) notes.push(`You stopped to ask: your edits are kept as commit ${candidate!.commit}. It is not a product: nothing is verified or reviewed. The decision on your questions says how this attempt goes on; an answer resumes it in a new worktree on that commit.`);
   if (out.accepted && entry.exportsProduct === true && candidate !== null) {
     // §5.3: the program's runs on a clean checkout of the candidate are the evidence
     const commands = ((v.card['verificationCommands'] as Array<{ id: string; command: string; cwd?: string }> | undefined) ?? []);
     // 4.1.2 (D-4, D-5, D-7): the project's full suite on the card is not run here (actions.ts verify)
     const suite = commands.filter((c) => isFullSuiteCommand(ctx.fullSuite, c.command, c.cwd));
-    if (suite.length > 0) notes.push(`${suite.map((c) => c.id).join(', ')} ${suite.length === 1 ? 'is' : 'are'} the project's full suite: not run at hand-back; it is left to the integration review (its Reviewer's mp seat <id> full-run)`);
+    if (suite.length > 0 && !parked) notes.push(`${suite.map((c) => c.id).join(', ')} ${suite.length === 1 ? 'is' : 'are'} the project's full suite: not run at hand-back; it is left to the integration review (its Reviewer's mp seat <id> full-run)`);
     // a stop stops (§6.6): the runs wait until it is released
-    if (verificationStopped(ctx, v.info.mission as MissionId)) {
+    if (parked) {
+      /* 4.4 (F4): a parked commit is never verified */
+    } else if (verificationStopped(ctx, v.info.mission as MissionId)) {
       notes.push('a stop covers this work: the verification runs of this candidate wait until it is released; mp pm next runs them then');
     } else try {
       const runs = await ctx.actions().verify({ mission: v.info.mission as MissionId, object: productObjectId(v.info.task), snapshot: candidate.commit, commands });
@@ -840,7 +849,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const escalation = (v.card as { request?: { id?: unknown } }).request?.id;
     if (v.card.seat === 'secretary' && out.accepted && typeof escalation === 'string') decision = ctx.memory.read((db) => decisionOutcome(db, data, { mission: v.info.mission, escalation, task: v.info.task, fields: input.fields, why }));
   }
-  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(decision !== undefined ? { decision } : {}) };
+  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(parked ? { parked: true as const } : {}), ...(decision !== undefined ? { decision } : {}) };
 }
 
 /**

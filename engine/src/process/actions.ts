@@ -91,7 +91,12 @@ export function anchorProducts(ctx: ProcessContext, only?: string): void {
       const missions = only !== undefined ? [only] : (db.stmt('SELECT DISTINCT mission FROM flow_events ORDER BY mission').all() as Array<{ mission: string }>).map((r) => r.mission);
       return missions.filter((m) => !closed.has(m)).map((mission) => {
         const commits = (db.stmt("SELECT json_extract(record, '$.source.commit') AS c FROM log WHERE kind = 'object.version' AND json_extract(record, '$.mission') = ? AND json_extract(record, '$.objectKind') = 'product' AND json_extract(record, '$.source.commit') IS NOT NULL ORDER BY rev").all(mission) as Array<{ c: string }>).map((r) => r.c);
-        return { mission, commits: [...new Set(commits)] };
+        // 4.4 (F4): the parked commits of blocked hand-backs, which a resumed attempt starts on
+        const parked = (db.stmt("SELECT body FROM flow_events WHERE mission = ? AND event = 'paused' AND line LIKE 'task:%' ORDER BY revision").all(mission) as Array<{ body: string }>).flatMap((r) => {
+          const p = (JSON.parse(ctx.memory.data.text(r.body)) as { parked?: unknown }).parked;
+          return typeof p === 'string' ? [p] : [];
+        });
+        return { mission, commits: [...new Set([...commits, ...parked])] };
       });
     });
     for (const w of work) {

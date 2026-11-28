@@ -38,7 +38,8 @@ function answerResult(a: HandBackAnswer, p?: Project): CommandResult {
   const lines = [
     a.repeated ? `Hand-back of ${a.dispatch} was already recorded: nothing new${gone}.` : a.outcome === 'accepted' ? `Hand-back of ${a.dispatch} recorded${gone}.` : `Hand-back of ${a.dispatch} recorded but not accepted (${a.outcome === 'after-release' ? 'the dispatch was released before it arrived' : 'a stop covers it'})${gone}.`,
     ...(a.report !== null ? [`Report: .mission-pipeline/${a.report}`] : []),
-    ...(a.candidate !== null ? [`Candidate commit ${a.candidate.commit} on base ${a.candidate.base}: ${a.candidate.changedPaths.join(', ') || 'no changes'}`] : []),
+    // 4.4 (F4): what a Constructor that stopped to ask handed in is a parked commit, not a candidate
+    ...(a.candidate !== null ? [`${a.parked === true ? 'Parked commit (your edits so far, not a product)' : 'Candidate commit'} ${a.candidate.commit} on base ${a.candidate.base}: ${a.candidate.changedPaths.join(', ') || 'no changes'}`] : []),
     ...(a.candidate !== null && a.candidate.ignored.length > 0 ? [`Ignored files inside your write paths were not collected: ${a.candidate.ignored.join(', ')}${a.candidate.ignoredTotal > a.candidate.ignored.length ? ` (and ${a.candidate.ignoredTotal - a.candidate.ignored.length} more)` : ''}`] : []),
     ...(a.verification !== null ? a.verification.map((v) => `Verification ${v.evidence}: ${v.passed ? 'passed' : 'failed'} — ${v.summary}`) : []),
     // 4.4 (F9): a Secretary decision says what became of it
@@ -276,7 +277,7 @@ function stdinFiles(c: RunContext, dispatch: string, args: ParsedArgs, names: { 
 const handback: Command = {
   group: 'seat',
   name: ['handback'],
-  summary: 'hand back once: your report (Markdown) with your structured fields (JSON) on stdin, or as two files in .mission-pipeline/tmp/<dispatch>/',
+  summary: 'hand back once: your report (Markdown) with your structured fields (JSON) on stdin, or as two files in .mission-pipeline/tmp/<dispatch>/ (a Constructor that must stop to ask: "blocked": true with its questions)',
   usage: "mp seat <dispatch> handback --stdin [--result-json '<json>']   (the report on stdin; the fields as its LAST ```json block, or --result-json)\n       mp seat <dispatch> handback --report <report.md> --result <result.json>   [--filled-by \"<harness>/<model>\"]",
   flags: { report: 'string', result: 'string', stdin: 'boolean', 'result-json': 'string', 'filled-by': 'string' },
   decides: true,
