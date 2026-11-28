@@ -6,9 +6,21 @@
 //   - the detailed plan (3.4): the Architect's hand-back, stored as the plan object's content;
 //   - flow lines and event names other flows read or write.
 
+import { posix } from 'node:path';
 import { z } from 'zod';
 import { ITEM_ID, wellFormed, type MissionId } from '../common/ids.ts';
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { STANDARD_CHECKS } from '../seat/cards/common.ts';
+
+/**
+ * 4.4 (F10): a file a declared command writes, as the plan names it: relative to the repository root,
+ * normalized, no glob, never inside .git. mp keeps it with the run's record (process/runs.ts).
+ */
+const ArtifactPath = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((p) => !posix.isAbsolute(p) && !/^[A-Za-z]:/.test(p) && posix.normalize(p) === p && p !== '..' && !p.startsWith('../') && !p.split('/').includes('.git') && !/[*?[\]\\]/.test(p), 'a file path relative to the repository root (normalized, no glob, not in .git)');
 
 /** An exploration's round budget when its definition sets none (4.1 §6.3, U-6). */
 export const EXPLORATION_ROUNDS_DEFAULT = 3;
@@ -176,7 +188,19 @@ export const DetailedTask = z.object({
   /** The module it builds (interface, implementation); null for integration and experiments. */
   module: z.string().nullable(),
   goal: z.string().min(1),
-  standards: z.array(z.object({ id: FreeId, text: z.string().min(1) })).min(1),
+  /** 4.4 (F10): each standard may say how it is checked; one without `check` (every 4.3 plan) reads as `reading`. */
+  standards: z
+    .array(
+      z.object({
+        id: FreeId,
+        text: z.string().min(1),
+        check: z
+          .enum(STANDARD_CHECKS)
+          .optional()
+          .describe('How it is checked: command (a verification command shows it), reading (reading the candidate), report (a statement the Constructor\'s hand-back must make), artifact (a file a verification command writes; name it in that command\'s artifacts), person (someone must look or run it where mp cannot; never judged by the Reviewer). Absent: reading.'),
+      }),
+    )
+    .min(1),
   /** Requirement item lines the task rests on. */
   requirementItems: z.array(z.string()),
   /**
@@ -192,9 +216,10 @@ export const DetailedTask = z.object({
   /**
    * Run by `mp` on a clean checkout of the candidate (4.1 §5.3). `sampled`: one observation among
    * possible others (a benchmark, a flaky-test probe: a sampling run, never reused); `network`: it
-   * needs the network (another run, never reused or renewed) (§6.5).
+   * needs the network (another run, never reused or renewed) (§6.5). 4.4 (F10): `artifacts`, the files the
+   * command writes that mp keeps with the run's record (absent: none, as in every 4.3 plan).
    */
-  verificationCommands: z.array(z.object({ id: FreeId, command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional() })),
+  verificationCommands: z.array(z.object({ id: FreeId, command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional(), artifacts: z.array(ArtifactPath).max(20).optional().describe('Files this command writes (relative to the repository root, e.g. a report or a log) that mp keeps with its run, so the Reviewer reads them and cites the run. At most 20.') })),
   implements: z.array(z.string()),
   calls: z.array(z.string()),
   /** Scheduling dependencies: tasks that must be accepted first (interface definitions before their users). */
@@ -373,6 +398,19 @@ export const SECRETARY_LINE = 'secretary';
 export const taskLine = (task: string): string => `task:${task}`;
 /** One exploration's line (4.3; owned by the exploration flow). */
 export const explorationLine = (exploration: string): string => `exploration:${exploration}`;
+
+/**
+ * 4.4 (F10): the files a run kept (process/keptFiles.ts): line "artifacts", event "kept", key the run's
+ * evidence id, written with the run's record; the Reviewer's card reads them by the evidence it lists.
+ */
+export const ARTIFACTS_LINE = 'artifacts';
+export const KEPT_ARTIFACTS = 'kept';
+export interface KeptArtifactsBody {
+  readonly evidence: string;
+  readonly run: string;
+  readonly command: string;
+  readonly artifacts: readonly import('../seat/card.ts').RunArtifactT[];
+}
 
 /**
  * Repairs (4.1.2, D-9, D-10): a problem the user found when trying the product, recorded by the PM

@@ -20,14 +20,35 @@
 //   Every other judgment needs a new judgment of the same review position (a
 //   Reviewer dispatch): `renewalCandidates` lists them under `reviews`.
 
+import { sha256 } from '../common/hash.ts';
 import type { EvidenceId, JudgmentId } from '../common/ids.ts';
-import { APPEND_KINDS, appendRecords, checkShape, appendFact, LedgerError, type Db, type WriteTx } from '../memory/index.ts';
+import { APPEND_KINDS, appendRecords, checkShape, appendFact, flowEventExists, LedgerError, type Db, type WriteTx } from '../memory/index.ts';
 import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
 import { ENV_LINE, recordedEnvironment } from './environment.ts';
 import { renewalDecision, usesSampledFields } from './renewal.ts';
 import { effectiveEvidence, positionState } from './semantics.ts';
 import { rerunMismatch, RUN_FIELD, runCwdOf } from './runs.ts';
 import { factRecord, StoredIndex } from './store.ts';
+
+/**
+ * 4.4 (F10, the PM design §7): a judgment whose hand-back cites data outside the commit rests on an
+ * observation a rerun does not repeat, so it is never renewed mechanically: the default is a new review.
+ * The Reviewer's hand-back marks it, in its own write, on this flow line of the target's mission (keyed
+ * by the judgment; a long id is hashed: an event key has at most 200 characters). A judgment from before
+ * 4.4 cited no such data: it has no mark and renews as before.
+ */
+export const OUTSIDE_DATA_LINE = 'outside-data';
+export const OUTSIDE_DATA_EVENT = 'cited';
+export function outsideDataKey(judgment: string): string {
+  return judgment.length <= 200 ? judgment : `h:${sha256(judgment)}`;
+}
+/** Why a judgment is not renewed mechanically because it cites data outside the commit, or null. */
+function outsideObservation(db: Db, mission: string | undefined, judgment: string): string | null {
+  if (mission === undefined) return null;
+  return flowEventExists(db, { mission, line: OUTSIDE_DATA_LINE, event: OUTSIDE_DATA_EVENT, key: outsideDataKey(judgment) })
+    ? 'it cites data outside the commit, which a rerun does not repeat: a new review'
+    : null;
+}
 
 /**
  * A declared run that can stand for a new one (§6.5 reuse), or null: the same
@@ -123,7 +144,7 @@ function olderRuns(db: Db): { readonly environment: string | null; readonly runs
       if (pos.state === 'none' || pos.by.rec.judgment !== j.judgment) continue;
       if (!j.evidence.some((e) => effectiveEvidence(ix, j, e as EvidenceId) === run.evidence)) continue;
       const sampled = usesSampledFields(j.evidenceUse);
-      const reason = ev.runClass !== 'declared' ? `a ${ev.runClass} run is never renewed` : sampled !== null ? `${sampled.reason}${sampled.field ? ` (${sampled.field})` : ''}` : j.evidenceUse.fields.length === 0 ? 'no declared fields' : null;
+      const reason = ev.runClass !== 'declared' ? `a ${ev.runClass} run is never renewed` : sampled !== null ? `${sampled.reason}${sampled.field ? ` (${sampled.field})` : ''}` : j.evidenceUse.fields.length === 0 ? 'no declared fields' : outsideObservation(db, ix.objects.get(j.target as never)?.mission, j.judgment);
       judgments.push({ judgment: j.judgment, target: j.target, review: j.review, renewable: reason === null, reason });
       const c = ix.objects.get(j.target as never)?.source?.commit;
       if (c !== undefined) commits.add(c);
@@ -218,6 +239,9 @@ export function recordRenewal(tx: WriteTx, req: { readonly judgment: JudgmentId;
   if (notRerun !== null) return { renewed: false, reason: notRerun };
   const d = renewalDecision(a as EvidenceRecord, b as EvidenceRecord, j.rec.evidenceUse);
   if (!d.renew) return { renewed: false, reason: d.reason, ...(d.field !== undefined ? { field: d.field } : {}) };
+  // 4.4 (F10): read inside the write that would record the renewal
+  const outside = outsideObservation(tx, ix.objects.get(j.rec.target as never)?.mission, req.judgment);
+  if (outside !== null) return { renewed: false, reason: outside };
   const rec: BaseRecord = { kind: 'evidence.renewal', judgment: req.judgment, original: req.original, replacement: req.replacement };
   checkShape(rec, APPEND_KINDS, 'recordRenewal');
   appendFact(tx, rec);

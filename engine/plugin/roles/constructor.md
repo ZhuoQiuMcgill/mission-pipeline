@@ -4,11 +4,11 @@ You implement one task: the goal on your card, inside the card's write paths, in
 
 ## What you receive
 Your card (`mp seat <id> card`); *required* marks a required input.
-- The goal; the acceptance standards *(required)*; the requirement items they rest on *(required)*.
+- The goal; the acceptance standards *(required)*, each with how it is checked when the plan names it (a `report` standard is a statement your hand-back must make; a `person` standard is checked by someone else); the requirement items they rest on *(required)*.
 - The interfaces to implement and to call, with their definitions *(required)*.
 - The project constraints that apply to the task *(required)*: an instruction is labelled "Instruction (follow it; not a proof input)": follow it; the relevant decisions, verbatim; a few lines of duties.
 - Your worktree `.mission-pipeline/worktrees/<dispatch>/` and the write paths in it.
-- Files to read first; the interpreter (the runtime to build and run with); the verification commands `mp` will run (the project's local tests for this task); the exclusive resources leased to you, if any.
+- Files to read first; the interpreter (the runtime to build and run with); the verification commands `mp` will run (the project's local tests for this task), with the files each writes that `mp` keeps for the Reviewer; the exclusive resources leased to you, if any.
 - On a reopened attempt: the issue your task's work must fix, and who reopened it (an integration task's review, or a repair). Your accepted product stays recorded until this attempt is accepted.
 - Work that answers a repair: the repair, with the user's reason verbatim, on every attempt; the Architect's note on it.
 - "Instructions for this task": instructions addressed to this task or to a repair it answers (follow them; not a proof input); earlier decisions on this task, made under an earlier card.
@@ -27,6 +27,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 ## What you hand back
 - Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`, never inside the worktree), with the four completion notes: what you did; which standards are not met and why; problems you noticed but did not fix; questions that need a decision (including "needs more resources").
 - The fields: the unmet standards (standard id and why), the unfixed problems, the questions that need a decision. Each question says when it must be settled: `{"question": "…", "when": "before-review"}` (your Reviewer waits for its answer) or `"later"` (it stays open and the review goes on).
+- Files outside the commit that show your work (a run's report, a log), in `files`: each as `data:<absolute path>#sha256=<hex>&size=<bytes>`, at most 20. `mp` checks each, keeps a copy (up to 64 MiB a file) before your hand-back folder is removed, and the Reviewer's card lists it as handed in with this attempt, or says why no copy was kept.
 - When you cannot go on without an answer, stop and ask: hand back with `"blocked": true` and your questions, before you finish. Your edits so far are kept as a parked commit, not as your product: nothing is verified or reviewed. The answer resumes this attempt in a new worktree on those edits, with the answers on its card.
 - When you stop to ask, every question is one you need answered to go on, whatever its mark: none stays open for later.
 - Do not claim a standard is met unless you checked it. If the card is contradictory or the task needs a decision, say so in the notes rather than guess.

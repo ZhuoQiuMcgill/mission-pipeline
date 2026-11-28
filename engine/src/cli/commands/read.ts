@@ -15,6 +15,7 @@ import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
 import { constraintsRead, constraintsText, repairsRead, repairsText } from '../workReads.ts';
 import { listOpenItems } from '../../process/openItems.ts';
+import { reviewHealth, reviewRows, sharesLine } from '../../process/reviews.ts';
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -229,4 +230,24 @@ const openItemsRead: Command = {
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, constraintsReadCmd, repairsReadCmd, openItemsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+// 4.4 (F10, P12): the health of the review seat, read in one snapshot
+const reviewsRead: Command = {
+  group: 'read', name: ['reviews'], summary: 'the health of a mission\'s review seat: the share of pass, rework and needs-decision of its Reviewer hand-backs, per filler of the Reviewer seat and per week (UTC), and each change of filler', usage: 'mp read reviews <mission>', flags: {},
+  async run(c, a) {
+    const p = P(c);
+    const m = positional(a, 0, 'mission');
+    const h = p.ctx.memory.read((db) => reviewHealth(m, reviewRows(db, p.ctx.memory.data, m)));
+    if (h.all.reviews === 0) return ok(`Mission ${m} has no accepted Reviewer hand-back.`, h);
+    const lines = [
+      `Reviews of mission ${m}: ${sharesLine(h.all)}`,
+      'By filler of the Reviewer seat:',
+      ...h.byFiller.map((f) => `  ${f.filler}: ${sharesLine(f)}`),
+      'By week (UTC):',
+      ...h.byWeek.map((w) => `  ${w.week}: ${sharesLine(w)}`),
+      ...(h.changes.length === 0 ? ['The filler of the Reviewer seat did not change.'] : ['Changes of filler:', ...h.changes.map((x) => `  review ${x.at} (${x.dispatch}): ${x.from} to ${x.to}; the ${x.before.reviews} before: pass ${x.before.reviews === 0 ? 0 : Math.round((100 * x.before.pass) / x.before.reviews)}%; the ${x.since.reviews} since (latest): pass ${x.since.reviews === 0 ? 0 : Math.round((100 * x.since.pass) / x.since.reviews)}%${x.fell ? ' (under half of the share before)' : ''}`)]),
+    ];
+    return ok(lines.join('\n'), h);
+  },
+};
+
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, constraintsReadCmd, repairsReadCmd, openItemsRead, reviewsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
