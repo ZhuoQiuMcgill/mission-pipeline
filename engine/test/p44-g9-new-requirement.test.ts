@@ -25,12 +25,14 @@ import { flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import { recordItem, withdrawItem } from '../src/flow/requirements.ts';
+import { recordExtension } from '../src/flow/repair.ts';
 import { drive, happyScript, pmPlan, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { pmExtend, pmRequirement, pmSay } from '../src/process/pm.ts';
 import type { Calibrator1Card } from '../src/seat/cards/calibrator.ts';
 import type { AuditChainCard, AuditChainResult } from '../src/seat/cards/auditor.ts';
 import { advanceLegalization, requestLegalization, startLegalization } from '../src/flow/audit/flow.ts';
 import '../src/seat/cards/index.ts';
+import { repairsRead, repairsText } from '../src/cli/workReads.ts';
 import { memoryPorts, say } from './flow-memory-fixtures.ts';
 
 const M = 'm1' as MissionId;
@@ -134,6 +136,9 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     await drive(engine, ports.scheduler, noArch);
     assert.equal((await planInEffect(flowCtx(ports, M)))?.eff.pmPlan, 'pmplan.m1.2');
     assert.equal((await labels(ports, ['pmplan.m1.2']))['pmplan.m1.2'], 'proven');
+    // the read says what the record shows: the plan in effect now was checked against the item
+    const read = repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')));
+    assert.ok(read.includes('its items: item.m1.g2; PM plan pmplan.m1.2 was checked against them'), read);
     // an item recorded now falls in the new plan's term, outside it
     const w3 = say(ports, 'And a TSV mode too.');
     const r3 = await pmExtend(ports.ctx, { mission: M, items: [{ item: 'g3', type: 'goal', text: 'A TSV mode', quote: 'a TSV mode', words: w3 }] });
@@ -175,6 +180,50 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     assert.equal((await labels(ports, [chain.object]))[chain.object], 'not-fully-proven', 'the audit goes out of date');
     assert.equal((await ports.evaluator.ops(['legal.m1.L1'])).states['legal.m1.L1']?.allProven, false);
     assert.equal((await labels(ports, ['pmplan.m1.1']))['pmplan.m1.1'], 'proven', 'the plan keeps its check');
+  });
+
+  it('a legalization whose chain object was made before 4.4 binds reqset alone: mp pm extend names it (the residual, detected)', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    const endpoint = (await products(ports)).at(-1)!;
+    await requestLegalization(ports, { legalization: 'L43', mission: M, endpoint, words: 'legalize the parser', chainEvidence: [], capabilities: [] });
+    await startLegalization(ports, M, 'L43', 'go ahead');
+    // the chain object as 4.3 wrote it: its contract binds reqset alone
+    type Append = World['ledger']['append'];
+    const append: Append = ports.ledger.append.bind(ports.ledger);
+    (ports.ledger as { append: Append }).append = async (op, entries) => {
+      if (!op.includes(':chain')) return append(op, entries);
+      const records = (entries.records ?? []).filter((r) => !(r.kind === 'basis.version' && r.line === 'reqnew.m1')).map((r) => (r.kind === 'object.version' ? { ...r, reviews: r.reviews.map((c) => ({ ...c, basisLines: c.basisLines.filter((l) => l !== 'reqnew.m1') })) } : r));
+      return append(op, { ...entries, records });
+    };
+    for (let i = 0; i < 4; i++) await advanceLegalization(ports, M, 'L43');
+    (ports.ledger as { append: Append }).append = append;
+    const chain = (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.objectKind === 'chain-acceptance')!;
+    assert.deepEqual(chain.reviews[0]?.basisLines, ['reqset.m1']);
+    const { r } = await extendJson(ports);
+    assert.deepEqual(r.olderAudits, ['L43']);
+  });
+
+  it('another process submits a PM plan between the new requirement\'s read and its write: nothing is recorded; run again, it falls in the new plan\'s term', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    type Append = World['ledger']['append'];
+    const append: Append = ports.ledger.append.bind(ports.ledger);
+    const ledger = ports.ledger as { append: Append };
+    ledger.append = async (op, entries) => {
+      if (op.startsWith('flow:extend:')) {
+        ledger.append = append;
+        await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] }), userWords: ['W-1'] });
+      }
+      return append(op, entries);
+    };
+    const w = say(ports, LATER);
+    await assert.rejects(recordExtension(ports, { mission: M, items: [{ item: 'g2', type: 'goal', text: 'The parser exports rows as JSON', quote: 'export the rows as JSON', words: w }] }), /a PM plan version was submitted while the new requirement was being recorded: nothing was recorded/);
+    assert.equal(await current(ports, 'reqnew.m1'), undefined, 'nothing written');
+    const r = await pmExtend(ports.ctx, { mission: M, items: [{ item: 'g2', type: 'goal', text: 'The parser exports rows as JSON', quote: 'export the rows as JSON', words: w }] });
+    assert.equal(r.term, 2);
+    const obj = (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.object === 'pmplan.m1.2')!;
+    assert.ok(!obj.reviews[0]!.basisLines.includes('reqnew.m1.t2'), 'the plan submitted first is not checked against it');
   });
 
   it('a supersession that withdraws a new requirement item writes its term line, not reqset', async () => {

@@ -16,8 +16,8 @@ import { safeId } from '../flow/context.ts';
 import { flowEvents, flowMissions, recordsByKind, factById, type Db } from '../memory/index.ts';
 import type { DataStore } from '../memory/data.ts';
 import { resolveBases, resolveConstraints } from '../memory/domain/constraints.ts';
-import { constraintAuthor, type ConstraintBody } from '../flow/requirements.ts';
-import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, REOPEN_NOT_CARRIED, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
+import { constraintAuthor, planSetItems, type ConstraintBody } from '../flow/requirements.ts';
+import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, REOPEN_NOT_CARRIED, REPAIR_ENDED, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import type { FlowEvent } from '../flow/ports.ts';
 import type { EscalationBody } from '../flow/secretary.ts';
 import { addressee, constraintsForTask, forRepairArchitect, isAddressed, planInEffect, repairReopensCarried, reopenRecordState, type ReopenRecordState } from '../seat/cards/dynamic.ts';
@@ -36,6 +36,8 @@ interface Snapshot {
   readonly constraints: ConstraintBody[];
   readonly plan: Plan | null;
   readonly dispatches: Array<{ dispatch: string; task: string; seat: string; state: string; lineage: string; rev: number }>;
+  /** 4.4 (G9): the PM plan in effect and the item lines its check is bound to (null: no plan in effect). */
+  readonly checked: { readonly plan: string; readonly items: ReadonlySet<string> } | null;
 }
 
 function snapshot(db: Db, data: DataStore, mission: string): Snapshot {
@@ -49,7 +51,9 @@ function snapshot(db: Db, data: DataStore, mission: string): Snapshot {
   const obj = eff === undefined ? undefined : (factById(db, 'object.version', eff.dplan)?.record as ObjectVersionRecord | undefined);
   const plan = eff === undefined || obj === undefined ? null : amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(obj.content)) as StoredDetailedPlan).plan), eff.amendments);
   const dispatches = (db.stmt('SELECT dispatch, task, seat, state, lineage, claimed_rev FROM dispatches WHERE mission = ? ORDER BY claimed_rev').all(mission) as Array<{ dispatch: string; task: string; seat: string; state: string; lineage: string; claimed_rev: number }>).map((d) => ({ ...d, rev: Number(d.claimed_rev) }));
-  return { events, constraints, plan, dispatches };
+  const pm = eff === undefined ? undefined : (factById(db, 'object.version', eff.pmPlan)?.record as ObjectVersionRecord | undefined);
+  const checked = eff === undefined || pm === undefined ? null : { plan: eff.pmPlan, items: planSetItems(pm, ix, (r) => data.getList(r)) };
+  return { events, constraints, plan, dispatches, checked };
 }
 
 const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
@@ -156,7 +160,18 @@ export interface RepairRead {
   readonly words: string;
   readonly text: string;
   readonly about: string | null;
-  readonly state: 'waiting' | 'architect' | 'decided' | 'exploration' | 'answered';
+  /** 4.4 (G9): "ended": a filing whose every item was withdrawn before its amendment was applied. */
+  readonly state: 'waiting' | 'architect' | 'decided' | 'exploration' | 'answered' | 'ended';
+  /** 4.4 (G9): "extend": a new requirement's filing; null: a repair. */
+  readonly entry: 'extend' | null;
+  /** 4.4 (G9): the requirement items its work is bound to (a new requirement's, or the one a repair falls short of), with their state. */
+  readonly items: ReadonlyArray<{ readonly id: string; readonly state: 'in force' | 'withdrawn' }>;
+  /** 4.4 (G9): the PM plan in effect, and whether its check is bound to each in-force item of the filing (`inside`), from its contract's sets. */
+  readonly checkedBy: { readonly plan: string; readonly inside: readonly string[] } | null;
+  /** 4.4 (G9): a repair that added tasks and names no item (a lead for a spot-check: was it a new requirement?). */
+  readonly addedNoItem: boolean;
+  /** 4.4 (G9): with several items, the tasks it added, changed or reopened on which its Architect named none of them (bound to none). */
+  readonly unnamed: readonly string[];
   /**
    * 4.4 (F13): filed again: with `--again` (`flag`, its operation recorded with it), and the same repair (words, kind,
    * text and subject) filed before it (`of`, null: none). Null: neither.
@@ -283,8 +298,22 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
     // 4.4 (F13): filed again, with --again or (its earlier one's work over) as the same repair
     const same = on('repair').find((x) => x.revision < e.revision && sameRepair(x.body as RepairBody, r))?.key ?? null;
     const filedAgain = r.op !== undefined || same !== null ? { flag: r.op !== undefined, of: same } : null;
+    // 4.4 (G9): its items and how its tasks are bound to them, from the decision and the cards it gave (one read)
+    if (body === undefined && on(REPAIR_ENDED).some((x) => x.key === r.id)) state = 'ended';
+    const lines = (r.items ?? []).map((i) => `item.${mission}.${i}`);
+    const withdrawn = new Set(s.events.filter((x) => x.line === 'requirements' && x.event === 'withdrawn').map((x) => (x.body as { line: string }).line));
+    const cards = [...(amendment?.tasks ?? []), ...(amendment?.changed ?? [])];
+    const unnamed = lines.length < 2 || body === undefined ? [] : [
+      ...[...(body.add ?? []), ...(body.changed ?? [])].filter((t) => !(cards.find((c) => c.id === t)?.requirementItems ?? []).some((l) => lines.includes(l))),
+      ...(body.reopen ?? []).filter((x) => (x.items ?? []).length === 0).map((x) => x.task),
+    ];
     out.push({
       id: r.id, kind: r.kind, words: r.words, text: r.text, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state, filedAgain,
+      entry: r.entry ?? null,
+      items: lines.map((id) => ({ id, state: withdrawn.has(id) ? 'withdrawn' as const : 'in force' as const })),
+      checkedBy: s.checked === null || lines.length === 0 ? null : { plan: s.checked.plan, inside: lines.filter((l) => s.checked!.items.has(l)) },
+      addedNoItem: lines.length === 0 && (body?.add ?? []).length > 0,
+      unnamed: [...new Set(unnamed)],
       note: body?.note ?? null,
       question: open === undefined ? null : { escalation: open.id, text: open.reasons[0] ?? open.summary },
       added, changed, reopened,
@@ -302,8 +331,17 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
   const lines = [`Repairs of mission ${r.mission}: ${r.repairs.length}`];
   for (const x of r.repairs) {
     const done = x.done === null ? '' : x.done ? '; done' : '; not done';
-    lines.push(`[${x.id}] ${x.kind} (${x.words})${x.about !== null ? `, about ${x.about}` : ''}: "${clip(x.text, 200)}"`);
-    lines.push(`    ${x.state}${done}`);
+    // 4.4 (G9): how the work came in, and what it is bound to
+    lines.push(`[${x.id}] ${x.entry === 'extend' ? 'new requirement' : x.kind} (${x.words})${x.about !== null ? `, about ${x.about}` : ''}: "${clip(x.text, 200)}"`);
+    lines.push(`    ${x.state === 'ended' ? 'ended: every item of it was withdrawn before its amendment was applied (a hand-back that came afterwards is kept and was not applied)' : x.state}${done}`);
+    // what the plan in effect's check is bound to, read from its contract's sets (a changed plan takes them in)
+    const live = x.items.filter((i) => i.state === 'in force').map((i) => i.id);
+    const outside = x.checkedBy === null ? [] : live.filter((i) => !x.checkedBy!.inside.includes(i));
+    const where = x.checkedBy === null || live.length === 0 ? '' : outside.length === 0 ? `; PM plan ${x.checkedBy.plan} was checked against them` : `; outside the set PM plan ${x.checkedBy.plan} was checked against: ${outside.join(', ')}`;
+    if (x.items.length > 0) lines.push(`    ${x.entry === 'extend' ? 'its items' : 'the item it falls short of'}: ${x.items.map((i) => `${i.id}${i.state === 'withdrawn' ? ' (withdrawn)' : ''}`).join(', ')}${where}`);
+    if (x.state === 'decided') lines.push("    its work passed its Architect and the mechanical checks, no plan review (D-10)");
+    if (x.addedNoItem) lines.push('    it added tasks and names no requirement item (a lead for a spot-check: was it a new requirement? mp pm extend records one)');
+    if (x.unnamed.length > 0) lines.push(`    tasks on which its Architect named none of its items (bound to none): ${x.unnamed.join(', ')}`);
     if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)` : ''}`);
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
     if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);

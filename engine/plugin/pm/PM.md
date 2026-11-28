@@ -173,6 +173,7 @@ Write the PM plan at results level; mark each element "the user said" or "PM add
 Edit it, then `mp pm plan submit <mission> --file plan.json --words W-<n>`.
 Calibrator ① checks each batch; the Architect starts after it passes.
 A changed requirement removes proof from the plan and its dependents.
+An item recorded by `mp pm extend` is outside the set the plan was checked against: recording, revising or withdrawing it leaves that proof alone; a changed plan submitted later is checked against it.
 If the plan still holds, submit it unchanged with `--changed <item>`; Calibrator ① re-checks the same version, with no Architect.
 Its pass restores indirect proof; a product bound directly to the changed item needs its own review.
 A changed plan document is a new version; the Secretary handles rebinds, reviews and restarts.
@@ -229,15 +230,20 @@ Closing records labels, unproven and unfinished work, open and deferred issues, 
 Tell the user what matters to their direction.
 Separate steps remain: `mp pm deliver`, `mp pm land`, `mp pm close`, on the same consent.
 
-A problem or new question: `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user's reason, verbatim>" [--about <task or exploration>]`.
-Choose the kind; the text must occur verbatim in the words; the mission must be open.
+Sort what the user says: a usability problem or a defect is a repair; a missing feature is a new requirement; a new question inside an exploration keeps the repair entry. A new exploration goes into the plan (`mp pm plan submit`).
+A new requirement, for work whose acceptance can be written in advance: `mp pm extend <mission> --words W-<n> --item <id> --text "<the item>" --quote "<verbatim>"`; several requests of the user go in one filing (repeat `--item`, `--text`, `--quote`; `--item-words` where an item has its own words).
+It records the items and starts the work on a repair's light path in the same write: one Architect step under the mechanical checks, no Calibrator, no feasibility review. The work is bound to the items; the reads show them apart from the plan's.
+If the user takes every item back (`mp pm requirement withdraw`) before its amendment is applied, the filing ends; afterwards, the work bound to a withdrawn item asks a decider.
+A change too large for one Architect step goes through a changed plan.
+A problem or new question: `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user's reason, verbatim>" [--about <task or exploration>] [--item <id>]`; `--item` names the requirement item it falls short of, and its work is bound to it.
+Choose the kind; the text must occur verbatim in the words; the mission must be open. `--kind missing` still files a repair; `mp read repairs` marks a repair that added tasks and names no item.
 The same repair (words, kind, text, subject) returns the one recorded; when that one was decided and the problem is back, add `--again` to file it anew.
 A repair's reopen of a task gets a fresh rework loop (`loops.rework` in config.json, default 2); at its end accept-risk is offered as for any attempt. A task with an open attempt is reopened once that attempt is accepted. Notice `reopen-not-carried`: the task was given up or left the plan, so tell the user what was not done, and file it again on their words (`--again`) or re-plan.
 An exploration's author answers a question; the Architect routes other repairs under mechanical checks, without Calibrator or feasibility review.
 File what the user said and stop there: the scope of a repair is its Architect's, and its note reaches every task the repair touches.
 If the quoted sentence is not enough, record more of the user's words, or address an instruction to the repair (`--repair R-<n>`).
 A repair's Architect that cannot decide asks you through the inbox; answer with `mp pm answer <mission> <id> --option answer --instructions "…"`; its next step decides.
-`mp read repairs <mission>`: each repair, its note, whether it was filed again, the tasks it touched and whether it is done. A reopen reads as waiting for an attempt, carried out, or not carried out with the reason; a repair with a reopen not carried out is not done.
+`mp read repairs <mission>`: each repair and new requirement, its items, its note, whether it was filed again, the tasks it touched and whether it is done. A reopen reads as waiting for an attempt, carried out, or not carried out with the reason; a repair with a reopen not carried out is not done.
 A user's decision about a registered method takes effect directly, with no round or review: add `--attempts <attempts.json> [--answers R-<n>]`, `--rerun <attempt-id>[,...]` or `--resnapshot`.
 The Secretary handbook holds the operational limits and recovery for these forms.
 Carry out the user's decision on their words; never send it through a review or refuse it for form.

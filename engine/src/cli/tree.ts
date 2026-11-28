@@ -229,11 +229,34 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
     const flowKey = (m: string, line: string, event: string, key: string): string => JSON.stringify([m, line, event, key]);
     const escalationsOfTask = new Map<string, FlowRow[]>();
     const effectivePlans: FlowRow[] = [];
+    // 4.4 (G9): the filings (repairs, new requirements), the tasks their amendments added, and what each was
+    const filings = new Map<string, { readonly entry: string | null }>();
+    const addedBy = new Map<string, { readonly repair: string; readonly dplan: string }>();
     for (const f of flows) {
       byKey.set(flowKey(f.mission, f.line, f.event, f.key), f);
       if (f.line === SECRETARY_LINE && f.event === 'escalation' && typeof f.body['task'] === 'string') escalationsOfTask.set(f.body['task'], [...(escalationsOfTask.get(f.body['task']) ?? []), f]);
       if (f.line === PLAN_LINE && f.event === 'pm-plan-effective') effectivePlans.push(f);
+      if (f.line === REPAIRS_LINE && f.event === 'repair') filings.set(`${f.mission}/${f.key}`, { entry: typeof f.body['entry'] === 'string' ? f.body['entry'] : null });
+      if (f.line === PLAN_LINE && f.event === 'effective') for (const a of (f.body['amendments'] ?? []) as Json[]) for (const t of (a['tasks'] ?? []) as Json[]) if (!addedBy.has(`${f.mission}/${String(t['id'])}`)) addedBy.set(`${f.mission}/${String(t['id'])}`, { repair: String(a['repair']), dplan: String(f.body['dplan']) });
     }
+    // a product made under a later plan that carried the task over was reviewed with that plan: only one made under
+    // the plan the filing amended came with the filing alone
+    const cameWith = (mission: string, task: string, k: number, product: string): string | null => {
+      // the reopen whose loop attempt k is on (execution.ts attemptReopenRepair: until one of its attempts is accepted)
+      let reopened: string | null = null;
+      for (let j = k; j >= 1; j--) {
+        if (j < k && byKey.has(flowKey(mission, `task:${task}`, 'accepted', String(j)))) break;
+        const rw = byKey.get(flowKey(mission, `task:${task}`, 'rework', String(j)))?.body;
+        const by = (rw?.['reopen'] as Json | undefined)?.['kind'] === 'repair' && rw?.['loop'] !== undefined ? String((rw['reopen'] as Json)['repair']) : null;
+        if (by !== null) { reopened = by; break; }
+      }
+      const added = addedBy.get(`${mission}/${task}`);
+      const relies = ((objects.get(product)?.['reviews'] ?? []) as Json[]).flatMap((r) => (r['review'] === 'reviewer' ? ((r['reliesOn'] ?? []) as string[]) : []));
+      const by = reopened ?? (added !== undefined && relies.includes(added.dplan) ? added.repair : undefined);
+      if (by === undefined) return null;
+      const what = filings.get(`${mission}/${by}`)?.entry === 'extend' ? 'new requirement' : 'repair';
+      return `${reopened !== null ? `this work came with the reopen of ${what} ${by}` : `its task came with ${what} ${by}`}: it passed that filing's Architect and the mechanical checks, no plan review`;
+    };
 
     // requirement item versions, and the version of a line in force at a revision
     const itemVersions = new Map<string, Array<{ version: string; rev: number }>>();
@@ -471,6 +494,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
             n.by = seatBy(b['dispatch']);
             edge(n.key, `dispatch:${b['dispatch']}`, 'handed back by');
           }
+          // 4.4 (G9, P-7): how the work came in: a task a filing added (or an attempt a filing's reopen opened) passed
+          // that filing's Architect and the mechanical checks, and no plan review; any other came with the plan
+          const came = cameWith(f.mission, f.line.slice('task:'.length), Number(b['k'] ?? 0), b['object']);
+          if (came !== null) addCheck(n, came);
         } else if (f.event === 'verified') {
           const prod = byKey.get(flowKey(f.mission, f.line, 'product', f.key))?.body['object'];
           const runs = (b['runs'] ?? []) as Json[];

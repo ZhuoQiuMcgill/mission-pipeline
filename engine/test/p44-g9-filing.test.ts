@@ -19,6 +19,8 @@ import { dispatchView } from '../src/process/seat.ts';
 import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
 import '../src/seat/cards/index.ts';
 import { renderArchitectRepair, type ArchitectRepairCard } from '../src/seat/cards/architect.ts';
+import { buildGraph } from '../src/cli/tree.ts';
+import { repairsRead, repairsText } from '../src/cli/workReads.ts';
 import { memoryPorts, say } from './flow-memory-fixtures.ts';
 
 const M = 'm1' as MissionId;
@@ -84,9 +86,21 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     const rev = claimed<ReviewerCard>(ports, 'rev.m1.json.1');
     assert.deepEqual(rev.requirementItems?.map((i) => [i.id, i.text, i.was]), [['item.m1.g2', 'The parser exports rows as JSON', undefined]]);
     assert.ok(renderSeatCard(rev as never, { dispatch: 'D-x' }).includes('## Requirement items this task carries (your judgment is bound to them'));
-    // every task that carries items gets them, not only a new requirement's
-    assert.deepEqual(claimed<ReviewerCard>(ports, 'rev.m1.impl.1').requirementItems?.map((i) => i.id), ['item.m1.g1', 'item.m1.s1']);
+    // every task that carries items gets them, not only a new requirement's; the block stays small (one line an item)
+    const plain = claimed<ReviewerCard>(ports, 'rev.m1.impl.1');
+    assert.deepEqual(plain.requirementItems?.map((i) => i.id), ['item.m1.g1', 'item.m1.s1']);
+    const { requirementItems: _items, ...without } = plain;
+    void _items;
+    const [after, before] = [renderSeatCard(plain as never, { dispatch: 'D-x' }).length, renderSeatCard(without as never, { dispatch: 'D-x' }).length];
+    console.log(`reviewer card bytes: ${before} without the items block, ${after} with it`);
+    assert.ok(after - before < 400, `${after - before} bytes`);
     assert.equal((await labels(ports, ['pmplan.m1.1', product]))['pmplan.m1.1'], 'proven');
+    // the record says how the work came in: the tree's product node, and the read of repairs
+    const g = buildGraph(ports.ctx, { mission: 'm1' });
+    assert.match(g.nodes.get(`object:${product}`)?.checks ?? '', /its task came with new requirement R-1: it passed that filing's Architect and the mechanical checks, no plan review/);
+    assert.doesNotMatch(g.nodes.get(`object:${(await acceptedOf(ports, 'impl'))!}`)?.checks ?? '', /came with/, 'a task of the plan says nothing of the kind');
+    const read = repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')));
+    assert.ok(read.includes('[R-1] new requirement (W-2): "export the rows as JSON"') && read.includes('its items: item.m1.g2; outside the set PM plan pmplan.m1.1 was checked against: item.m1.g2') && !read.includes('names no requirement item'), read);
     // the user revises the item: the bound product reads not fully proven and is reviewed again (stable); nothing else changes
     const w = say(ports, 'As JSON lines, one row per line.');
     await pmRequirement(ports.ctx, { mission: M, item: 'g2', type: 'goal', text: 'The parser exports rows as JSON lines', quote: 'As JSON lines', words: w });
@@ -138,6 +152,10 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     assert.deepEqual(pie?.plan.tasks.find((t) => t.id === 'docs2')?.requirementItems, [], 'none named: bound to none');
     assert.ok((await contractOf(ports, (await acceptedOf(ports, 'impl'))!)).includes('item.m1.g3'));
     assert.ok(!(await contractOf(ports, (await acceptedOf(ports, 'impl'))!)).includes('item.m1.g2'));
+    const r = ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')).repairs[0]!;
+    assert.deepEqual(r.unnamed, ['docs2'], 'the read shows it under its filing, with its item not named');
+    assert.ok(repairsText({ mission: 'm1', repairs: [r] }).includes('tasks on which its Architect named none of its items (bound to none): docs2'));
+    assert.match(buildGraph(ports.ctx, { mission: 'm1' }).nodes.get(`object:${(await acceptedOf(ports, 'impl'))!}`)?.checks ?? '', /this work came with the reopen of new requirement R-1/);
   });
 
   it('the user takes it back: every item withdrawn before the amendment is applied ends the filing; a hand-back that comes afterwards is kept and not applied', async () => {
@@ -154,6 +172,9 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     assert.equal((await ports.ledger.events({ mission: M, line: 'repairs', event: 'decided' })).length, 0, 'not applied');
     assert.equal((await planInEffect(flowCtx(ports, M)))?.plan.tasks.some((t) => t.id === 'json'), false);
     assert.equal(ports.scheduler.tasks.get(step)?.state, 'done', 'the hand-back is kept on the record');
+    const read = ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1'));
+    assert.equal(read.repairs[0]?.state, 'ended');
+    assert.ok(repairsText(read).includes('ended: every item of it was withdrawn before its amendment was applied') && repairsText(read).includes('item.m1.g2 (withdrawn)'), repairsText(read));
     // withdrawn before the step was claimed: it ends and the queued step is cancelled
     await extend(ports, [{ item: 'g3', text: 'TSV mode', quote: 'a TSV mode' }], 'And a TSV mode.');
     await engine.reconcile(M);
@@ -162,6 +183,29 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     await engine.reconcile(M);
     assert.equal(ports.scheduler.tasks.get(queued)?.state, 'abandoned', 'the queued step is cancelled');
     assert.deepEqual((await ports.ledger.events({ mission: M, line: 'repairs', event: 'ended' })).map((e) => e.key), ['R-1', 'R-2']);
+  });
+
+  it('another process withdraws the item between the decision\'s read and its write: nothing is applied, and the next pass ends the filing', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }], 'Please export JSON.');
+    await engine.reconcile(M);
+    const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    assert.deepEqual(await ports.scheduler.run(step, { handBack: { reopen: [], add: [JSON_TASK], note: 'a new task' } }), []);
+    type Append = World['ledger']['append'];
+    const append: Append = ports.ledger.append.bind(ports.ledger);
+    const ledger = ports.ledger as { append: Append };
+    ledger.append = async (op, entries) => {
+      if (op === 'flow:repair-decided:m1:R-1') {
+        ledger.append = append;
+        await withdrawItem(ports, { mission: M, item: 'g2', reason: 'taken back meanwhile' });
+      }
+      return append(op, entries);
+    };
+    await engine.reconcile(M);
+    ledger.append = append;
+    await engine.reconcile(M);
+    assert.equal((await ports.ledger.events({ mission: M, line: 'repairs', event: 'decided' })).length, 0, 'the decision was not written over the withdrawal');
+    assert.deepEqual((await ports.ledger.events({ mission: M, line: 'repairs', event: 'ended' })).map((e) => e.key), ['R-1']);
   });
 
   it('withdrawn once the amendment is applied: the bound product reads basis withdrawn and a decider is asked; the rest keeps its proof', async () => {

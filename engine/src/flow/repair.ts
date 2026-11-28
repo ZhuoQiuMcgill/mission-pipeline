@@ -314,8 +314,13 @@ export async function repairStep(ctx: FlowCtx): Promise<void> {
   for (const e of repairs) {
     if (e.body.about?.kind === 'exploration') continue;
     if ((await eventOf(ctx, REPAIRS_LINE, 'decided', e.key)) !== null) continue;
-    // 4.4 (G9): a filing that ended (every item withdrawn before its amendment was applied) is not taken further
-    if ((await eventOf(ctx, REPAIRS_LINE, REPAIR_ENDED, e.key)) !== null) continue;
+    // 4.4 (G9): a filing that ended (every item withdrawn before its amendment was applied) is not taken further; a step
+    // its end left queued (an interruption after the write) is cancelled on the next pass
+    const ended = await eventOf<RepairEndedBody>(ctx, REPAIRS_LINE, REPAIR_ENDED, e.key);
+    if (ended !== null) {
+      if (ended.body.arch !== null && (await ctx.ports.scheduler.status(ended.body.arch))?.state === 'queued') await ctx.ports.scheduler.cancel(ended.body.arch);
+      continue;
+    }
     await oneRepair(ctx, e.body);
   }
 }

@@ -625,7 +625,7 @@ const repair: Command = {
     const note = !r.repeated && r.over !== undefined ? ` Filed again: the same repair as ${r.over}, and ${over}.`
       : r.repeated && r.over !== undefined ? ` ${r.over} is that repair, and ${over}: --again files a new one.`
       : r.repeated && again ? ` The same repair is still in work: --again filed nothing new.` : '';
-    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}${item !== null && !r.repeated ? ` Its work is bound to item ${item}.` : ''}${extendLine}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
+    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}${item !== null && !r.repeated ? ` The work its Architect plans is bound to item ${item}.` : ''}${extendLine}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
   },
 };
 
