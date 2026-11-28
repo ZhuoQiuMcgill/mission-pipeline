@@ -14,6 +14,7 @@ import { openProcess, pmDispatch, pmMission, pmNext, pmPlan, pmRequirement, pmSa
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import type { MaterialRef } from '../src/seat/cards/common.ts';
 import { dispatchView } from '../src/process/seat.ts';
+import { FIXTURE_EOL } from './memory-fixtures.ts';
 
 const GIT_ENV = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 
@@ -39,17 +40,27 @@ export interface ProcessProject {
   cleanup(): void;
 }
 
-/** A project on branch main (README.md, a .gitignore with *.local), its memory, and a context observing `env`. */
-export function processProject(o: { files?: Record<string, string>; env?: EnvironmentParts; options?: ProcessOptions } = {}): ProcessProject {
+/**
+ * A project on branch main (README.md, a .gitignore with *.local), its memory, and a context observing `env`.
+ * `autocrlf` (4.4.1): the repository says core.autocrlf=true in its own configuration, as Git for
+ * Windows sets it, and its files are checked out again under it (CRLF in the worktree, LF blobs).
+ */
+export function processProject(o: { files?: Record<string, string>; env?: EnvironmentParts; options?: ProcessOptions; autocrlf?: boolean } = {}): ProcessProject {
   const base = mkdtempSync(join(tmpdir(), 'mp-proc-'));
   const dir = join(base, 'project');
   mkdirSync(dir, { recursive: true });
   sh(dir, 'init', '-q', '-b', 'main');
+  sh(dir, 'config', ...FIXTURE_EOL); // the fixture's line endings, not the machine's (memory-fixtures.ts)
   write(dir, 'README.md', '# the project\n');
   write(dir, '.gitignore', '*.local\n');
   for (const [rel, text] of Object.entries(o.files ?? {})) write(dir, rel, text);
   sh(dir, 'add', '-A');
   sh(dir, 'commit', '-q', '-m', 'first');
+  if (o.autocrlf === true) {
+    sh(dir, 'config', 'core.autocrlf', 'true');
+    sh(dir, 'rm', '-r', '-q', '--cached', '.');
+    sh(dir, 'reset', '-q', '--hard');
+  }
   const git = PlainGit.create();
   initMemory(dir, { git: git.runner() });
   const open = (env: EnvironmentParts, more: ProcessOptions = {}): ProcessContext => {

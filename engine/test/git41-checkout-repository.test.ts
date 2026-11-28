@@ -18,8 +18,8 @@ import { PlainGit, shellQuote } from '../src/git/plainGit.ts';
 import { AttributeEvaluator, readTransformDescription } from '../src/git/representation.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir, type GitContext } from '../src/git/workspace.ts';
 import { initMemory, openMemory, type Memory } from '../src/memory/index.ts';
-import { fixture, sh, write } from './git41-fixtures.ts';
-import { tempDir } from './memory-fixtures.ts';
+import { fixture, removeOwnedCheckouts, sh, write } from './git41-fixtures.ts';
+import { FIXTURE_EOL, initFixtureRepo, tempDir } from './memory-fixtures.ts';
 
 /** git in a checkout, as a declared command runs it (the test process's environment). */
 function inCheckout(dir: string, ...args: string[]): { readonly code: number | null; readonly out: string } {
@@ -75,7 +75,7 @@ test('attribute repository init ignores a global refusing reference-transaction 
 function cloneProject(origin: string, args: readonly string[]): { readonly dir: string; readonly ctx: GitContext; readonly m: Memory; cleanup(): void } {
   const base = tempDir('mp-clone-');
   const dir = join(base, 'project');
-  execFileSync('git', ['clone', '-q', ...args, pathToFileURL(origin).href, dir], { stdio: 'ignore' });
+  execFileSync('git', ['clone', '-q', '-c', FIXTURE_EOL.join('='), ...args, pathToFileURL(origin).href, dir], { stdio: 'ignore' });
   const git = PlainGit.create();
   initMemory(dir, { git: git.runner() });
   const m = openMemory(dir, { git: git.runner() });
@@ -85,6 +85,7 @@ function cloneProject(origin: string, args: readonly string[]): { readonly dir: 
     m,
     cleanup() {
       try {
+        removeOwnedCheckouts({ memory: m, git });
         m.close();
       } finally {
         rmSync(base, { recursive: true, force: true });
@@ -222,7 +223,7 @@ test('a SHA-256 repository: the checkout’s repository has its object format', 
   const base = tempDir('mp-sha256-');
   const dir = join(base, 'project');
   mkdirSync(dir);
-  sh(dir, 'init', '-q', '-b', 'main', '--object-format=sha256');
+  initFixtureRepo(dir, '-b', 'main', '--object-format=sha256');
   write(dir, 'a.txt', 'a\n');
   sh(dir, 'add', '-A');
   sh(dir, 'commit', '-q', '-m', 'first');
@@ -238,6 +239,7 @@ test('a SHA-256 repository: the checkout’s repository has its object format', 
     assert.equal(ok(co, 'rev-parse', 'HEAD'), head);
     assert.equal(ok(co, 'status', '--porcelain'), '');
   } finally {
+    removeOwnedCheckouts({ memory: m, git });
     m.close();
     rmSync(base, { recursive: true, force: true });
   }

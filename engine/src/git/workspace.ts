@@ -48,7 +48,7 @@ import { holdOwner, moveToTrash, ownedTempDir, releaseOwner, removeOwned } from 
 import { decodePath, discoverRepo, gitOid, gitObjectId, readObjects, lsTree, treeOfCommit, NonUtf8PathError, type FileMode, type Ident, type RepoLayout } from './objects.ts';
 import { GitError, GitExitError, type PlainGit } from './plainGit.ts';
 import { attachCheckoutRepository, checkoutSetupGit } from './checkoutRepository.ts';
-import { linkedGitDirs } from './worktreeRecord.ts';
+import { linkedGitDirs, nativeGitPath } from './worktreeRecord.ts';
 import {
   AttributeEvaluator,
   materializeSnapshot,
@@ -127,11 +127,11 @@ function real(p: string): string {
   }
 }
 
-/** The worktrees git has registered for the repository, by real path. */
+/** The worktrees git has registered for the repository, by real path (native form, also for a registration whose directory is gone). */
 function registeredWorktreePaths(ctx: GitContext): Set<string> {
   const r = ctx.git.okSync(['worktree', 'list', '--porcelain', '-z'], { cwd: ctx.memory.projectDir });
   const out = new Set<string>();
-  for (const rec of r.stdout.toString('utf8').split('\0')) if (rec.startsWith('worktree ')) out.add(real(rec.slice('worktree '.length)));
+  for (const rec of r.stdout.toString('utf8').split('\0')) if (rec.startsWith('worktree ')) out.add(real(nativeGitPath(rec.slice('worktree '.length))));
   return out;
 }
 

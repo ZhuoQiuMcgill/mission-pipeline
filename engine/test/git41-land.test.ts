@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -14,7 +14,7 @@ import { PlainGit } from '../src/git/plainGit.ts';
 import { id, type StopId } from '../src/common/ids.ts';
 import { commitStop, initMemory, intentInfo, openIntents, openMemory, recordDelivery } from '../src/memory/index.ts';
 import { commitOn, fixture, gitWrapper, holdGitWrites, M, recordedDelivery, rejectsCode, sh, words, write, type Fixture } from './git41-fixtures.ts';
-import { kinds, tempDir } from './memory-fixtures.ts';
+import { initFixtureRepo, kinds, tempDir } from './memory-fixtures.ts';
 
 const CHILD = fileURLToPath(new URL('./git41-land-child.ts', import.meta.url));
 const POSIX = process.platform !== 'win32';
@@ -268,7 +268,8 @@ test('a project folder in a linked worktree (§11.15): its own branch is not ext
   const base = tempDir('mp-linked-');
   const main = join(base, 'main');
   const wt = join(base, 'wt');
-  sh(base, 'init', '-q', '-b', 'main', main);
+  mkdirSync(main);
+  initFixtureRepo(main, '-b', 'main');
   repo_commit(main);
   sh(main, 'worktree', 'add', '-q', '-b', 'feature', wt);
   initMemory(wt);

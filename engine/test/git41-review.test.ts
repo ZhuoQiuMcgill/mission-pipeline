@@ -17,7 +17,7 @@ import { land, recoverLandings } from '../src/git/land.ts';
 import { discoverRepo, lsTree } from '../src/git/objects.ts';
 import { detachDuplicateCheckout } from '../src/git/pmActions.ts';
 import { GitTimeoutError, PlainGit } from '../src/git/plainGit.ts';
-import { AttributeEvaluator, materializeSnapshot, nameCollisions, readTransformDescription, RepresentationError, resolveConversion, transformDescriptionHash } from '../src/git/representation.ts';
+import { AttributeEvaluator, materializeSnapshot, nameCollisions, probeNameFolding, readTransformDescription, RepresentationError, resolveConversion, transformDescriptionHash } from '../src/git/representation.ts';
 import { checkoutCommit, collectCandidate, compareToCommit, ensureWorkspace, removeWorkspace, runCheckoutDir } from '../src/git/workspace.ts';
 import { appendRecords, claimDispatch, commitStop, deliveryInfo, finishIntent, intentInfo, landingState, openIntents, queueTask } from '../src/memory/index.ts';
 import { commitOn, fixture, gitWrapper, holdGitWrites, IDENT, M, recordedDelivery, rejectsCode, sh, words, write, type Fixture } from './git41-fixtures.ts';
@@ -447,9 +447,18 @@ test('#12 names that fold together on a case- or normalization-insensitive files
         materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out'), folding: { case: true, normalization: true } }),
         (e: unknown) => e instanceof RepresentationError && e.code === 'path-collision' && e.paths.includes('A.txt') && e.paths.includes('a.txt'),
       );
-      // On this (case-sensitive) filesystem the probe finds no folding: both files are written.
-      const ok = await materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out2') });
-      assert.equal(ok.entries.length, 3);
+      // Without a stated folding the destination is probed. 4.4.1: a case-sensitive filesystem
+      // (Linux) folds nothing, and both files are written; a case-insensitive one (Windows, macOS)
+      // folds the two names, and the commit is refused there the same way.
+      if (probeNameFolding(scratch).case) {
+        await assert.rejects(
+          materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out2') }),
+          (e: unknown) => e instanceof RepresentationError && e.code === 'path-collision' && e.paths.includes('A.txt') && e.paths.includes('a.txt'),
+        );
+      } else {
+        const ok = await materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out2') });
+        assert.equal(ok.entries.length, 3);
+      }
     } finally {
       attributes.dispose();
       rmSync(scratch, { recursive: true, force: true });
@@ -546,7 +555,7 @@ test('r2 #4 a submodule checked out at another commit than its gitlink is not "m
     // Not checked out: as a clean checkout has it.
     assert.deepEqual(await compareToCommit(f.ctx, f.dir, B), { state: 'match' });
     const next = commitOn(f.dir, f.base, { 'file.txt': 'another child commit\n' });
-    f.git('update-ref', 'refs/heads/aux', next);
+    f.git('update-ref', 'refs/heads/side', next); // not "aux": a reserved device name on Windows (aux.lock cannot be made)
     const sub = join(f.dir, 'sub');
     f.git('clone', '-q', '--no-hardlinks', '--no-checkout', f.dir, sub);
     sh(sub, 'checkout', '-q', '--detach', next);

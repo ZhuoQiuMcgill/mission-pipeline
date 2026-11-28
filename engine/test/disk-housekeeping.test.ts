@@ -390,15 +390,20 @@ test('a run checkout that cannot be removed does not fail its run: its owner rec
   const base = q.git('rev-parse', 'HEAD');
   const dir = runCheckoutDir(q.ctx.memory.paths, 'run-stuck');
   await checkoutCommit(q.ctx.gitCtx, { commit: base, dir });
-  // a directory whose entries cannot be unlinked stands in for a file still in use
+  // a directory whose entries cannot be unlinked stands in for a file still in use; 4.4.1 (Windows):
+  // a directory's mode does not stop that there, so a file really held open does (a database
+  // opened without delete sharing, as a scanner or a test runner holds one)
   mkdirSync(join(dir, 'held'), { recursive: true });
   writeFileSync(join(dir, 'held', 'f'), 'x');
-  fs.chmodSync(join(dir, 'held'), 0o500);
+  const inUse = process.platform === 'win32' ? new DatabaseSync(join(dir, 'held', 'in-use.db')) : null;
+  if (inUse !== null) inUse.exec('CREATE TABLE t (x)');
+  else fs.chmodSync(join(dir, 'held'), 0o500);
   try {
     assert.deepEqual(removeCheckout(q.ctx.gitCtx, dir), { removed: false }, 'no throw: the run records its results');
     assert.ok(existsSync(ownerLockFile(q.ctx.memory.paths, dir)), 'the owner record is kept for the sweep');
   } finally {
-    fs.chmodSync(join(dir, 'held'), 0o700);
+    if (inUse !== null) inUse.close();
+    else fs.chmodSync(join(dir, 'held'), 0o700);
   }
   const r = sweepTmp(q.ctx, { budgetMs: 60_000 });
   assert.ok(r.removed.some((x) => x.path === 'run-stuck' && x.done !== false), JSON.stringify(r));

@@ -172,6 +172,15 @@ export function copiedWorktrees(commonDir: string, from: string, to: string, pru
   return result;
 }
 
+/**
+ * A path as git writes it into a worktree link file. 4.4.1 (Windows): git writes "C:/x/y" and
+ * strips only "/.git" from a worktree's gitdir file, so a link written with backslashes made git
+ * list the worktree at ".../.git" and every copied worktree was held as unverified.
+ */
+export function gitLinkPath(p: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? p.replace(/\\/g, '/') : p;
+}
+
 /** Repair and verify every link without reading/writing HEAD, the index or worktree contents.
  * Older git can exit zero without repairing a copy: rewrite its two link files, then verify
  * again. commondir is verified, never guessed. A partial rewrite is safe to retry on next open. */
@@ -205,8 +214,8 @@ export function repairWorktrees(git: GitRunner, projectDir: string, worktrees: r
       for (const { dotgit, admin } of plans) {
         // The commondir must already identify this copy; never write through an external path.
         if (real(resolve(admin, readFileSync(join(admin, 'commondir'), 'utf8').trim())) !== real(common)) throw new Error(`${admin}/commondir does not resolve to the copied common directory`);
-        writeAtomic(dotgit, `gitdir: ${admin}\n`);
-        writeAtomic(join(admin, 'gitdir'), `${dotgit}\n`);
+        writeAtomic(dotgit, `gitdir: ${gitLinkPath(admin)}\n`);
+        writeAtomic(join(admin, 'gitdir'), `${gitLinkPath(dotgit)}\n`);
       }
     }
     if (!linksValid()) throw new Error('worktree links still disagree after direct repair');
