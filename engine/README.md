@@ -1,6 +1,6 @@
-# Mission Pipeline 4.3 engine
+# Mission Pipeline 4.4 engine
 
-Version 4.3.0. What 4.4 changes is in [the 4.4 PM design](../docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md) and [the 4.4 repair plan](../docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md) as the PM design amends it (the PM design rules where they differ); [the post-release backlog](../docs/design/Backlog_4.4_PostRelease.md) lists what was built differently and what is left.
+Version 4.4.0. What 4.4 changes is in [the 4.4 PM design](../docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md) and [the 4.4 repair plan](../docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md) as the PM design amends it (the PM design rules where they differ); [the post-release backlog](../docs/design/Backlog_4.4_PostRelease.md) lists what was built differently and what is left.
 The role split and word rules are in [the 4.3 design](../docs/design/DesignDoc_PMSecretary_2026-11-06_v03.md); Appendix A supersedes the named text and Appendix B wins over A.
 The [4.1 design](../docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md) still governs the unchanged process (section numbers below refer to it).
 Where it says "v51 unchanged", the [4.0 design](../docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md) applies.
@@ -277,7 +277,7 @@ Linux, Windows and macOS with Node 22.12+ (the built-in `node:sqlite`) and git. 
 - No test may touch the repository's `data/` directory.
 - Product documents (both handbooks, WI pages, role descriptions, README, CLI text) are in English.
 
-## Known limitations of 4.3
+## Known limitations of 4.4
 
 - **A copy taken while `mp` writes is not supported.** The checks after a move catch a broken event chain, missing or edited leaves and missing commits, but a copy that is internally consistent and simply older than its source cannot be told from a deliberate older copy.
 - Work moves while the Secretary session runs. Questions for the PM wait while no PM session is open; other work continues. Word recording still depends on the PM's discipline; the optional hook only reminds it.
@@ -292,4 +292,4 @@ Linux, Windows and macOS with Node 22.12+ (the built-in `node:sqlite`) and git. 
 - A judgment that rests only on data outside the commit, citing no run, is not re-reviewed after an environment change; `mp read show evidence <id> --check-data` says whether the data changed.
 - Two defects of 4.3 remain: the option `restart` never restarts a step (the question returns to the PM), and a plan-review waiver granted under an authorization goes on applying after `mp pm requirement withdraw` of that authorization (withdraw the waiver too). The [post-release backlog](../docs/design/Backlog_4.4_PostRelease.md) lists the rest.
 - Tested on Linux (WSL2). Windows and macOS use the same code (Node, git, SQLite file locks) but have not been through the scenario suites yet.
-- 4.3 does not read 4.0.x ledgers; a field PM migrates missions by the new rules.
+- 4.4 does not read 4.0.x ledgers; a field PM migrates missions by the new rules.

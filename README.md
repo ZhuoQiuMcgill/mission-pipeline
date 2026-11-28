@@ -3,7 +3,7 @@
 Mission Pipeline exists so that agents produce results that are responsible to the user.
 You talk to one PM, your anchor: it understands your logic and needs, keeps the plan aligned and makes big decisions on your recorded words.
 A resident Secretary runs the loop, dispatches seats, handles exceptions and decides most field matters within the plan.
-Version 4.3.0 is in [`engine/`](engine/).
+Version 4.4.0 is in [`engine/`](engine/).
 It keeps the PM the user's anchor on long missions: each decision reaches the PM with the Secretary's brief, a question of design goes to an Architect in one step, and the Secretary and the Architect write what reaches a task.
 A new requirement is recorded as one (`mp pm extend`) and takes a repair's light path; holds, notes and what is left open at the review cap are on the record for anyone to read; seats get the material they need, a Constructor can stop and ask, and a standard says how it is checked.
 
@@ -93,7 +93,7 @@ An object constraint added during or after plan review can leave a proof gap; it
 
 ## Earlier versions
 
-4.0 (a Claude Code plugin with a ledger service and sandboxed seats) is at tag [v4.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v4.0.0); 3.x at [v3.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v3.0.0). 4.3 does not read 4.0 ledgers.
+4.0 (a Claude Code plugin with a ledger service and sandboxed seats) is at tag [v4.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v4.0.0); 3.x at [v3.0.0](https://github.com/ZhuoQiuMcgill/mission-pipeline/tree/v3.0.0). 4.4 does not read 4.0 ledgers.
 
 ### The 3.0 workflow (historical)
 
