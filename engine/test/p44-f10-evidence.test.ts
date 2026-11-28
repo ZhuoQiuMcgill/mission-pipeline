@@ -27,6 +27,7 @@ import { artifactLines, renderSeatCard, type ReviewerCard } from '../src/seat/ca
 import '../src/seat/cards/index.ts';
 import { addDetailedPlan, CHECK_JS, ENV_A, ENV_B, handBack, processProject, readAll, readyOf, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 import { project43 } from './p43-fixtures.ts';
+import { needsSymlink } from './link-probe.ts';
 
 const sha = (b: string | Buffer): string => createHash('sha256').update(b).digest('hex');
 
@@ -161,12 +162,28 @@ test('keeping a file is bounded and never throws: over the size or the count, a 
     assert.deepEqual(await keepFile(root, join(base, 'a.log'), keepBudget()), { kept: `files/${sha('a\n')}`, sha256: sha('a\n'), size: 2 });
     assert.match((await keepFile(root, join(base, 'a.log'), { files: 0, bytes: 1 << 20 }) as { why: string }).why, /^more than 20 files/);
     assert.match((await keepFile(root, join(base, 'a.log'), keepBudget(), { sha256: '0'.repeat(64), size: 2 }) as { why: string }).why, /the file changed after it was checked/);
-    symlinkSync(join(base, 'a.log'), join(base, 'link.log'));
-    assert.equal((await keepFile(root, join(base, 'link.log'), keepBudget()) as { why: string }).why, 'it is a link, not a regular file');
+    // a link to a folder (on Windows a junction, which any account may make; the link to a file: the next test)
+    mkdirSync(join(base, 'folder'));
+    symlinkSync(join(base, 'folder'), join(base, 'link-dir'), 'junction');
+    assert.equal((await keepFile(root, join(base, 'link-dir'), keepBudget()) as { why: string }).why, 'it is a link, not a regular file');
     writeFileSync(join(base, 'big.bin'), '');
     truncateSync(join(base, 'big.bin'), 64 * 1024 * 1024 + 1);
     assert.match((await keepFile(root, join(base, 'big.bin'), keepBudget()) as { why: string }).why, /over the 64 MiB a kept file may have/);
     assert.equal((await keepFile(root, join(base, 'none.log'), keepBudget()) as { why: string }).why, 'no such file');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('keeping a file: a link to a file is not followed, recorded with why', needsSymlink(), async () => {
+  const { keepBudget, keepFile } = await import('../src/process/keptFiles.ts');
+  const { mkdtempSync, symlinkSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const base = mkdtempSync(join(tmpdir(), 'mp-keep-'));
+  try {
+    const root = join(base, 'memory');
+    mkdirSync(root);
+    writeFileSync(join(base, 'a.log'), 'a\n');
+    symlinkSync(join(base, 'a.log'), join(base, 'link.log'));
+    assert.equal((await keepFile(root, join(base, 'link.log'), keepBudget()) as { why: string }).why, 'it is a link, not a regular file');
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -187,7 +204,9 @@ async function reviewedOnRun(p: ProcessProject, plan: unknown): Promise<{ judgme
 }
 
 test('review p9-2: after an environment change, a pass on a run whose command names files is renewed only when the rerun writes the same files', async () => {
-  for (const [command, renews] of [['node src/check.js > check.log', true], ['node src/check.js > check.log && date +%N >> check.log', false]] as const) {
+  // 4.4.1 (Windows): the commands run under cmd.exe there too, so the file's changing part is written by node, not by date(1)
+  const stamp = `node -e "require('fs').appendFileSync('check.log', String(process.hrtime.bigint()))"`;
+  for (const [command, renews] of [['node src/check.js > check.log', true], [`node src/check.js > check.log && ${stamp}`, false]] as const) {
     const p = project43();
     try {
       const { judgment } = await reviewedOnRun(p, artifactPlan([{ id: 'check', command, artifacts: ['check.log'] }]));
@@ -269,7 +288,9 @@ test('review p9-5, p9-6: a Reviewer\'s cited file in its own folder is copied be
 });
 
 test('review p9-2 (round 2): a renewal is mechanical only when the record shows the rerun repeated the file: no recorded hash, or a file not shown to be written by the command, goes to a new review', async () => {
-  for (const [command, file] of [['truncate -s 70M big.bin', 'big.bin'], ['node src/check.js', 'README.md']] as const) {
+  // 4.4.1 (Windows): a file over the 64 MiB a kept file may have, written by node rather than truncate(1), so cmd.exe runs it too
+  const big = `node -e "require('fs').writeFileSync('big.bin', ''); require('fs').truncateSync('big.bin', 70 * 1024 * 1024)"`;
+  for (const [command, file] of [[big, 'big.bin'], ['node src/check.js', 'README.md']] as const) {
     const p = project43();
     try {
       const { judgment } = await reviewedOnRun(p, artifactPlan([{ id: 'check', command, artifacts: [file] }]));
@@ -328,7 +349,7 @@ test('review F2-3: two runs of one command on one commit that named different fi
   } finally { p.cleanup(); }
 });
 
-test('review F2-4: a Reviewer\'s cited path outside its folder that is a link to a file in it: the bytes it was checked against are copied before the folder is removed', async () => {
+test('review F2-4: a Reviewer\'s cited path outside its folder that is a link to a file in it: the bytes it was checked against are copied before the folder is removed', needsSymlink(), async () => {
   const q = project43();
   try {
     const ctx = q.ctx;
@@ -449,7 +470,7 @@ test('review p9-r2-3, p9-7 (round 2): a file there before a command is compared 
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
-test('review p9-5 (round 2): a Reviewer\'s cited path in its folder that is a link to a file elsewhere: the bytes it was checked against are copied and recorded', async () => {
+test('review p9-5 (round 2): a Reviewer\'s cited path in its folder that is a link to a file elsewhere: the bytes it was checked against are copied and recorded', needsSymlink(), async () => {
   const q = project43();
   try {
     const ctx = q.ctx;

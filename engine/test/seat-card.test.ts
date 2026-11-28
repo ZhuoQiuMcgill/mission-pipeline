@@ -201,7 +201,9 @@ describe('handed-back results (8.1 program rules)', () => {
     assert.deepEqual(resultProblems(c, allYes(['file:src/parse.ts']), CTX), [], 'a whole-file pointer to an existing file');
   });
 
-  test('finding 14: pointers are checked against the real snapshot without following links', () => {
+  // 4.4.1: snapshotFiles opens each component through /proc/self/fd, which only Linux has (elsewhere it finds no file);
+  // the engine checks hand-back pointers against the commit with git (process/seat.ts commitFiles), not with it
+  test('finding 14: pointers are checked against the real snapshot without following links', { skip: process.platform !== 'linux' ? 'snapshotFiles reads through /proc/self/fd, which only Linux has' : false }, () => {
     const root = tmp();
     const snap = join(root, 'snap');
     mkdirSync(join(snap, 'src'), { recursive: true });
