@@ -28,6 +28,8 @@ import { acceptedProduct } from '../src/flow/execution.ts';
 import { DetailedPlanDoc } from '../src/flow/plandoc.ts';
 import { cal1Pass, cal2Pass, feasible } from '../src/flow/scripted.ts';
 import { appendRecords, factById } from '../src/memory/index.ts';
+import { memoryProofView } from '../src/delivery/memoryView.ts';
+import { compose, COMPOSITIONS } from '../src/process/actions.ts';
 import { pmDeliver, pmDispatch, pmLand, pmNext, pmPlan, pmRequirement, pmSay } from '../src/process/index.ts';
 import { FakeProofView, fakeObject, obj } from './delivery-fixtures.test.ts';
 import { addPlan, handBack, processProject, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
@@ -418,5 +420,50 @@ describe('the manifest takes stacked versions as one line of work', () => {
     const apart = buildManifest(view, [obj('a1'), obj('c1')]);
     assert.equal(apart.kind, 'incompatible', 'c1 rests on none of them');
     if (apart.kind === 'incompatible') assert.deepEqual(apart.conflicts.map((c) => [c.kind, c.path ?? c.module]), [['same-path', 'b/shared.ts'], ['same-module', 'b']]);
+  });
+});
+
+describe('4.4 (F14): a pass with nothing new composes nothing again', () => {
+  it('the kept products of a fast plan: the second pass builds no closure; a new version makes the next one build them again, with the same answers', async () => {
+    p = await stackedPair();
+    await construct(p, 'use', USE);
+    const words = pmSay(p.ctx, 'Build the library and the application on it with an add function. The details are yours to decide.').words;
+    // a new requirement makes the plan stale; the next plan, in fast mode, keeps every card
+    await pmRequirement(p.ctx, { mission: M, item: 'd1', type: 'decision', text: 'The application uses the add function', quote: 'the application on it', words });
+    const nextPm = addPlan(M, words) as { elements: Array<{ text: string; items: string[] }> };
+    nextPm.elements[0]!.items.push('d1');
+    await pmPlan(p.ctx, { mission: M, plan: { ...nextPm, round: 2 }, words: [words], changedItems: ['d1'], mode: 'fast' });
+    await step(p.ctx, 'calibrator-1', (c) => cal1Pass(c));
+    await step(p.ctx, 'architect-decompose', () => plan());
+    if ((await pmNext(p.ctx)).ready.some((r) => r.kind === 'architect-feasibility')) await step(p.ctx, 'architect-feasibility', () => feasible());
+    const actions = p.ctx.actions();
+    const composition = actions.composition;
+    const asked: string[][] = [];
+    actions.composition = async (products) => {
+      asked.push([...products]);
+      return composition(products);
+    };
+    const pass = async (): Promise<{ built: number; notices: string[] }> => {
+      const before = COMPOSITIONS.built;
+      const next = await pmNext(p!.ctx);
+      return { built: COMPOSITIONS.built - before, notices: next.notices.filter((n) => n.category === 'kept-product-not-rebound').map((n) => n.id).sort() };
+    };
+    // the plan takes effect at the last review's hand-back, whose passes compare the kept products first
+    const start = COMPOSITIONS.built;
+    await step(p.ctx, 'calibrator-2', (c) => cal2Pass(c));
+    const first = await pass();
+    assert.ok(COMPOSITIONS.built > start, 'the kept products are compared through their closures');
+    assert.ok(first.notices.length > 0, 'fast mode tells the PM about the kept products');
+    const lists = asked.length;
+    const second = await pass();
+    assert.ok(asked.length > lists, 'the second pass asks for the closures again');
+    assert.equal(second.built, 0, 'nothing was recorded since: no closure is built again');
+    assert.deepEqual(second.notices, first.notices);
+    // each answer is the one a closure built afresh gives (as 4.3 built it: a view at the head, on every call)
+    const view = () => memoryProofView(p!.ctx.memory, { revision: p!.ctx.memory.head(), recomputing: false, recomputingIn: () => false, labelOf: () => 'unaccepted', decidingRuns: () => [] });
+    for (const xs of asked) assert.deepEqual(await composition(xs), compose(view(), xs).entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id), JSON.stringify(xs));
+    // a version recorded since: the next pass builds the closures again
+    await p.ctx.actions().rebind({ mission: M, of: prod('zeta'), object: `${prod('zeta')}.x1` as ObjectVersionId, prerequisites: [], reviews: record(p, prod('zeta')).reviews });
+    assert.ok((await pass()).built > 0, 'the closures are built again');
   });
 });

@@ -1559,10 +1559,14 @@ function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t
  */
 async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
   if (depIds.length === 0) return false;
+  // only a repair's reopen of a dependency can hold the attempt: while there is none, the plan's history (every
+  // plan in effect so far, read for the repairs the work answers) is not read, on every pass of every task
+  const requests = (await reopenRequests(ctx)).filter((r) => r.source.kind === 'repair' && depIds.includes(r.task));
+  if (requests.length === 0) return false;
   const causing = causingRepairs((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t, line);
   if (causing.size === 0) return false;
-  for (const r of await reopenRequests(ctx)) {
-    if (r.source.kind !== 'repair' || !causing.has(r.source.repair) || !depIds.includes(r.task)) continue;
+  for (const r of requests) {
+    if (r.source.kind !== 'repair' || !causing.has(r.source.repair)) continue;
     if (await waitingRequest(ctx, await readLine(ctx, r.task), r)) return true;
   }
   return false;
