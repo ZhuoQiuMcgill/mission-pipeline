@@ -43,6 +43,7 @@ export {
   pmRelease,
   pmRenew,
   pmRepair,
+  pmExtend,
   type RepairChange,
   type RepairChanged,
   pmRequirement,

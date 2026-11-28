@@ -364,6 +364,23 @@ export function taskRequirementItems(items: readonly CurrentItem[], task: Pick<D
   return task.requirementItems.map((line) => ({ id: line, text: items.find((i) => i.line === line)?.text ?? '(this item is not in force)' }));
 }
 
+/**
+ * 4.4 (G9, E-4, P-7): the requirement items a Reviewer's judgment is bound to (the item versions among its binding's
+ * bases), with their text; `was`, the text the task's previous judgment was bound to, when the item changed since.
+ * Every task that carries requirement items gets them, not only a new requirement's. Pure (queue time and claim).
+ */
+export function reviewerItems(events: readonly FlowEvent[], bases: readonly string[], previous: readonly string[] | null): Array<{ id: string; version: string; text: string; was?: string }> {
+  const versions = new Map<string, { line: string; text: string }>();
+  for (const e of events) if (e.line === 'requirements' && e.event === 'item') { const b = e.body as { line: string; version: string; text: string }; versions.set(b.version, b); }
+  return bases.flatMap((v) => {
+    const b = versions.get(v);
+    if (b === undefined) return [];
+    const before = (previous ?? []).find((p) => versions.get(p)?.line === b.line);
+    const was = before !== undefined && before !== v ? versions.get(before)?.text : undefined;
+    return [{ id: b.line, version: v, text: b.text, ...(was !== undefined ? { was } : {}) }];
+  });
+}
+
 export function reviewerDecisionQuotes(mission: string, items: readonly CurrentItem[], events: readonly FlowEvent[], task: DetailedTask, constraints: readonly ConstraintBody[], attempt: number, referencePlan: string | undefined) {
   const answers = events.filter((e) => e.line === `task:${task.id}` && e.event === 'reanswer' && e.key.startsWith(`${attempt}:`)).map((e) => (e.body as { decision: string }).decision);
   return [...taskDecisionQuotes(items, events, task, constraintsForTask(constraints, task, mission), referencePlan), ...answers];

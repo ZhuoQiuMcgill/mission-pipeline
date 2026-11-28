@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -66,7 +66,7 @@ import {
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
 import { attach, constructorClaims, pausedHandBack, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
-import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REQUIREMENTS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
@@ -854,7 +854,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       taskType: t.kind,
       // Old dispatches lack a trustworthy pin: keep the record conservative, never substitute current dependencies.
       prerequisites: dispatched.prerequisites ?? [],
-      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, ix) as never, reliesOn: [dispatched.dplan] as never }],
+      // 4.4 (G9): with the requirement items a filing's reopen binds this attempt to
+      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, ix, await attemptItems(ctx, t.id, line, k)) as never, reliesOn: [dispatched.dplan] as never }],
       predecessor: dispatched.predecessor !== undefined ? dispatched.predecessor : (prev?.object ?? null),
       ...(dispatched.origin !== undefined ? { origin: dispatched.origin } : {}),
       });
@@ -1175,7 +1176,7 @@ async function integrationStart(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTas
       writeScope: [],
       taskType: t.kind,
       prerequisites: products,
-      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx)) as never, reliesOn: [eff.dplan] as never }],
+      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx), await attemptItems(ctx, t.id, await readLine(ctx, t.id), k)) as never, reliesOn: [eff.dplan] as never }],
       predecessor: null,
       // its start is the snapshot itself: the dependencies' products laid over the base (not the
       // commit's parent), so its start holds them on the final tree (delivery, ruling 2)
@@ -2441,7 +2442,7 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const n = rebinds.length + 1;
   const key = `${k}:b${n}`;
   const object = safeId(`${cur.original}.b${n}`);
-  const contract: ReviewContract = { review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx)) as never, reliesOn: [eff.dplan] as never };
+  const contract: ReviewContract = { review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx), await attemptItems(ctx, t.id, line, k)) as never, reliesOn: [eff.dplan] as never };
   try {
     await ctx.ports.scheduler.rebind({ mission: ctx.mission, of: cur.product, object, prerequisites: have, reviews: [contract] });
   } catch (e) {
@@ -2679,9 +2680,40 @@ async function actionRefused(ctx: FlowCtx, key: string, e: unknown): Promise<voi
   });
 }
 
-/** The contract's basis lines of a product (10.1): the task's standards and the items that exist. */
-function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typeof basisIndex>>): string[] {
-  return reviewContractLines(ctx.mission, t, ix);
+/**
+ * The contract's basis lines of a product (10.1): the task's standards and the items that exist. 4.4 (G9): with the
+ * items a repair's reopen binds the attempt to (`attempt`, attemptItems), in force, after the card's own.
+ */
+function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typeof basisIndex>>, attempt: readonly string[] = []): string[] {
+  const own = reviewContractLines(ctx.mission, t, ix);
+  return [...own, ...attempt.filter((l) => !own.includes(l) && ix.current.has(l) && !ix.withdrawn.has(l))];
+}
+
+/**
+ * 4.4 (G9): the requirement items a filing's reopen binds attempt k of a task to: those its decision gave the reopen (a
+ * filing with one item: that item), on the fresh loop the reopen opened, until one of its attempts is accepted (attempt k
+ * itself may be the accepted one). None for any other attempt, and for every reopen decided before 4.4.
+ */
+export async function attemptItems(ctx: FlowCtx, task: string, line: Line, k: number): Promise<string[]> {
+  const repair = attemptReopenRepair(line.events, k);
+  if (repair === null) return [];
+  const decided = await eventOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided', repair);
+  return [...(decided?.body.reopen.find((x) => x.task === task)?.items ?? [])];
+}
+
+/** 4.4 (G9): a task's card with the items an attempt also carries (the card's own first). */
+export function withAttemptItems<T extends Pick<DetailedTask, 'requirementItems'>>(t: T, items: readonly string[]): T {
+  const extra = items.filter((l) => !t.requirementItems.includes(l));
+  return extra.length === 0 ? t : { ...t, requirementItems: [...t.requirementItems, ...extra] };
+}
+
+/** 4.4 (G9): the repair whose reopen opened the fresh loop attempt k is on (null: none, or one of its attempts before k was accepted). Pure: the claim refresh reads it too. */
+export function attemptReopenRepair(events: Line['events'], k: number): string | null {
+  const line = new Line(events);
+  const fresh = line.all<ReworkBody>('rework').filter((r) => r.body.loop !== undefined && r.body.k <= k).at(-1);
+  if (fresh === undefined || fresh.body.reopen?.kind !== 'repair') return null;
+  for (let j = fresh.body.k; j < k; j++) if (line.one('accepted', String(j)) !== null) return null;
+  return fresh.body.reopen.repair;
 }
 
 /** A Reviewer rework: counted (initial + the cap, config `loops.rework`); exhausted → WI-08 and the Secretary. */
@@ -3238,7 +3270,8 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     workspace,
     goal: t.goal,
     standards: cardStandards(t),
-    requirementItems: taskRequirementItems(items, t),
+    // 4.4 (G9): with the items a filing's reopen binds this attempt to
+    requirementItems: taskRequirementItems(items, withAttemptItems(t, await attemptItems(ctx, t.id, line, k))),
     readableFiles: [...t.readableFiles],
     interpreter: t.interpreter,
     verificationCommands: t.verificationCommands.map((c) => ({ ...c })),
@@ -3378,6 +3411,11 @@ async function submitReviewer(
   // 4.4 (F10, E-4): the files the runs kept, and the files outside the commit the Constructor handed in, with its attempt
   const kept = new Map((await ctx.ports.ledger.events<KeptArtifactsBody>({ mission: ctx.mission, line: ARTIFACTS_LINE, event: KEPT_ARTIFACTS })).map((e) => [e.key, e.body.artifacts] as const));
   const handedIn = startOnlyAttempt ? [] : (conView?.handBack?.data ?? []).map((d) => ({ pointer: d.pointer, attempt: product.k, dispatch: conView!.handBack!.dispatch, label: d.label, ...(d.kept !== undefined ? { kept: `.mission-pipeline/${d.kept}` } : { notKept: d.notKept ?? 'no copy was made' }) }));
+  // 4.4 (G9, E-4): the text of the requirement items the judgment is bound to, and the text the previous judgment was bound to where it changed
+  const bases = currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')));
+  const before = line.all<ReviewBody>('review').filter((r) => r.body.task !== task).at(-1);
+  const beforeJ = before === undefined ? null : await judgmentRecordOf(ctx, before.body.judgment);
+  const items = reviewerItems(await ctx.ports.ledger.events({ mission: ctx.mission, line: REQUIREMENTS_LINE, event: 'item' }), bases, beforeJ === null ? null : c.getList(beforeJ.bases));
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
@@ -3386,6 +3424,7 @@ async function submitReviewer(
       constraints: [...cardConstraintsList, ...await cardConstraints(ctx, t, new Set(['instruction']))],
     }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
+    ...(items.length > 0 ? { requirementItems: items } : {}),
     seat: 'reviewer',
     workspace: { snapshot: product.snapshot, writablePaths: [] },
     target: product.object,
@@ -3411,7 +3450,7 @@ async function submitReviewer(
     ...attach([claims]),
     binding: {
       judgment: `j.${task}`,
-      bases: c.putList(currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')))),
+      bases: c.putList(bases),
       constraints: c.putList([...new Set(checks)].sort()),
       // the objects the version's contract relies on (v51 §5.2: a judgment conforms to the contract fixed with
       // its target), which for a version recorded under an earlier plan is that plan, not the one in effect

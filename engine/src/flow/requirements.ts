@@ -23,7 +23,10 @@ import type { BaseRecord, BasisVersionRecord, ConstraintScope } from '../common/
 import { canonicalJson } from '../common/hash.ts';
 import { basisIndex, commit, ev, eventsOf, flowCtx, nextBasisVersion, safeId, shortHash, type BasisIndex, type FlowCtx } from './context.ts';
 import { REQUIREMENTS_LINE } from './plandoc.ts';
-import type { FlowEvent, FlowPorts } from './ports.ts';
+import type { FlowEvent, FlowEventInput, FlowPorts } from './ports.ts';
+import { newRequirementsLine, newRequirementsTermLine, nextSetVersion, setSnapshot, setVersionsFor } from '../memory/domain/requirementSets.ts';
+
+export { newRequirementsLine, newRequirementsTermLine, termLines } from '../memory/domain/requirementSets.ts';
 
 export type ItemType = 'goal' | 'limit' | 'authorization' | 'acceptance' | 'decision';
 
@@ -122,21 +125,23 @@ export async function currentItems(ctx: FlowCtx): Promise<CurrentItem[]> {
   return resolveItems(await basisIndex(ctx), await eventsOf(ctx, REQUIREMENTS_LINE));
 }
 
-/** The requirement set's new version: a snapshot of the item versions in force (all five types). */
-async function requirementSetVersion(ctx: FlowCtx, items: readonly { line: string; version: string }[]): Promise<BaseRecord> {
+/**
+ * The requirement-set versions an item write makes (4.4, G9: memory/domain/requirementSets.ts): `reqset.<m>` for an
+ * item the plan is checked against, a snapshot of those items in force (4.3's record when no item was recorded by
+ * `mp pm extend`); the item's term line and `reqnew.<m>` for an item recorded by `mp pm extend` (`term`: a new one).
+ */
+async function requirementSetVersions(ctx: FlowCtx, change: { readonly line: string; readonly version: string | null; readonly term?: string }): Promise<BaseRecord[]> {
   const ix = await basisIndex(ctx);
-  const line = requirementSetLine(ctx.mission);
-  const prev = ix.current.get(line);
-  const n = prev === undefined ? 1 : Number(prev.slice(prev.lastIndexOf('.v') + 2)) + 1;
-  return {
+  const inForce = (await currentItems(ctx)).map((i) => ({ line: i.line, version: i.version }));
+  return setVersionsFor(ix, (r) => ctx.ports.ledger.content.getList(r), ctx.mission, change, inForce).map((s) => ({
     kind: 'basis.version',
     basisKind: 'requirement-set',
-    line: line as BasisLineId,
-    version: safeId(`${line}.v${n}`) as BasisVersionId,
+    line: s.line as BasisLineId,
+    version: safeId(s.version) as BasisVersionId,
     mission: ctx.mission,
     scope: null,
-    snapshot: ctx.ports.ledger.content.putList(items.map((i) => i.version).sort()),
-  };
+    snapshot: ctx.ports.ledger.content.putList(s.snapshot),
+  }));
 }
 
 /**
@@ -193,14 +198,49 @@ export async function recordItem(
     notifyCondition: req.notifyCondition ?? null,
     ...(req.tasks !== undefined ? { tasks: [...req.tasks] } : {}),
   };
-  const items = (await currentItems(ctx)).filter((i) => i.line !== line).map((i) => ({ line: i.line, version: i.version }));
-  items.push({ line, version });
   const rec: BaseRecord = { kind: 'basis.version', basisKind: BASIS_KIND[req.type], line: line as BasisLineId, version: version as BasisVersionId, mission: req.mission, scope: null };
-  await commit(ctx, `flow:item:${req.mission}:${version}`, { events: [ev(ctx, REQUIREMENTS_LINE, 'item', version, body)], records: [rec, await requirementSetVersion(ctx, items)] });
+  // 4.4 (G9): a revision of an item recorded by `mp pm extend` stays in its term: the plans that were not checked against it keep their proof
+  await commit(ctx, `flow:item:${req.mission}:${version}`, { events: [ev(ctx, REQUIREMENTS_LINE, 'item', version, body)], records: [rec, ...await requirementSetVersions(ctx, { line, version })] });
   return version;
 }
 
-/** Withdraw an item (3.1): the line is withdrawn and the requirement set gets a new version. */
+/**
+ * 4.4 (G9, `mp pm extend`): the records of new requirement items outside the set the plan was checked against: each item's
+ * event and basis version, and one version of their term line and of `reqnew.<m>` listing them. The caller commits them
+ * with the filing (one write). Each id must be new to the mission (none in force, none withdrawn): refused otherwise.
+ */
+export async function newItemRecords(
+  ctx: FlowCtx,
+  term: number,
+  items: ReadonlyArray<{ readonly item: string; readonly type: ItemType; readonly text: string; readonly source: ItemSource }>,
+): Promise<{ readonly events: FlowEventInput[]; readonly records: BaseRecord[]; readonly versions: string[] }> {
+  const ix = await basisIndex(ctx);
+  const events: FlowEventInput[] = [];
+  const records: BaseRecord[] = [];
+  const versions: string[] = [];
+  for (const i of items) {
+    const line = itemLine(ctx.mission, i.item);
+    if (ix.current.has(line) || ix.withdrawn.has(line)) throw Object.assign(new Error(`mission ${ctx.mission} already has requirement item ${i.item}${ix.withdrawn.has(line) ? ' (withdrawn)' : ''}: a new requirement gets a new id (to change that item: mp pm requirement add; for work it falls short of: mp pm repair … --item ${i.item}). Nothing was recorded`), { code: 'item-exists', detail: { item: i.item, line } });
+    const version = safeId(`${line}.v1`);
+    const body: ItemVersionBody = { line, version, type: i.type, text: i.text, source: i.source, restatement: null, confirmedBy: null, notifyCondition: null };
+    events.push(ev(ctx, REQUIREMENTS_LINE, 'item', version, body));
+    records.push({ kind: 'basis.version', basisKind: BASIS_KIND[i.type], line: line as BasisLineId, version: version as BasisVersionId, mission: ctx.mission, scope: null });
+    versions.push(version);
+  }
+  const termLine = newRequirementsTermLine(ctx.mission, term);
+  const sets = [termLine, newRequirementsLine(ctx.mission)].map((line) => ({
+    kind: 'basis.version' as const,
+    basisKind: 'requirement-set' as const,
+    line: line as BasisLineId,
+    version: safeId(nextSetVersion(ix, line)) as BasisVersionId,
+    mission: ctx.mission,
+    scope: null,
+    snapshot: ctx.ports.ledger.content.putList([...setSnapshot(ix, (r) => ctx.ports.ledger.content.getList(r), line), ...versions].sort()),
+  }));
+  return { events, records: [...records, ...sets], versions };
+}
+
+/** Withdraw an item (3.1): the line is withdrawn and the requirement set gets a new version (4.4, G9: its term's, for an item recorded by `mp pm extend`). */
 export async function withdrawItem(ports: FlowPorts, req: { readonly mission: MissionId; readonly item: string; readonly reason: string }): Promise<void> {
   const ctx = flowCtx(ports, req.mission);
   const line = itemLine(req.mission, req.item);
@@ -208,11 +248,24 @@ export async function withdrawItem(ports: FlowPorts, req: { readonly mission: Mi
   if (ix.withdrawn.has(line)) return; // already withdrawn: a retry
   // only an existing requirement item of this mission (review r3): anything else is refused, nothing written
   if (checkKind(ix, line, 'a requirement item', ITEM_KINDS, req.mission) === null) throw new Error(`mission ${req.mission} has no requirement item ${req.item}: nothing was withdrawn`);
-  const items = (await currentItems(ctx)).filter((i) => i.line !== line).map((i) => ({ line: i.line, version: i.version }));
   await commit(ctx, `flow:withdraw:${req.mission}:${line}`, {
     events: [ev(ctx, REQUIREMENTS_LINE, 'withdrawn', line, { line, reason: req.reason })],
-    records: [{ kind: 'basis.withdrawn', line: line as BasisLineId }, await requirementSetVersion(ctx, items)],
+    records: [{ kind: 'basis.withdrawn', line: line as BasisLineId }, ...await requirementSetVersions(ctx, { line, version: null })],
   });
+}
+
+/**
+ * 4.4 (G9): the requirement-set lines a PM plan's check is bound to (the set lines its Calibrator ① contract names), and
+ * the item lines they list now: the items the plan is checked against. A plan submitted under 4.3 names `reqset.<m>`
+ * alone; one submitted later also the term lines of the items recorded by `mp pm extend` before it.
+ */
+export function planSetLines(plan: Pick<import('../common/records.ts').ObjectVersionRecord, 'reviews'>, ix: Pick<BasisIndex, 'current' | 'records'>): string[] {
+  return (plan.reviews.find((r) => r.review === 'calibrator-1')?.basisLines ?? []).filter((l) => ix.records.get(ix.current.get(l) ?? '')?.basisKind === 'requirement-set');
+}
+export function planSetItems(plan: Pick<import('../common/records.ts').ObjectVersionRecord, 'reviews'>, ix: BasisIndex, getList: (ref: never) => readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const l of planSetLines(plan, ix)) for (const v of setSnapshot(ix, getList, l)) { const line = ix.lineOf.get(v); if (line !== undefined) out.add(line); }
+  return out;
 }
 
 /** Mark an item contested, or release it (3.3: not used downstream while contested). */

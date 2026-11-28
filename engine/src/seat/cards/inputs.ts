@@ -117,7 +117,9 @@ export function auditBasisTexts(ix: BasisIndex, events: readonly import('../../f
     const rec = ix.records.get(v);
     if (rec?.basisKind !== 'requirement-set' || ix.withdrawn.has(line)) continue;
     const members = content.getList(rec.snapshot).map((iv) => versions.get(iv));
-    if (members.every((i) => i !== undefined)) out.set(line, `the mission's requirement set (${members.length} item(s) in force): ${members.map((i) => `[${i!.line}] ${itemText(i!)}`).join('; ')}`);
+    // 4.4 (G9): a reqnew line lists the items `mp pm extend` recorded (outside the set the plans before them were checked against)
+    const what = line.startsWith('reqnew.') ? `the requirement items recorded as new requirements (mp pm extend)${/\.t[0-9]+$/.test(line) ? ` while PM plan version ${line.slice(line.lastIndexOf('.t') + 2)} was the latest` : ''}` : "the mission's requirement set";
+    if (members.every((i) => i !== undefined)) out.set(line, `${what} (${members.length} item(s) in force): ${members.map((i) => `[${i!.line}] ${itemText(i!)}`).join('; ')}`);
   }
   for (const e of events) if (e.line.startsWith('exploration:') && (e.event === 'defined' || e.event === 'redefined')) {
     const b = e.body as { basisLine?: string; definition: { goal: string; exploration: string } };
