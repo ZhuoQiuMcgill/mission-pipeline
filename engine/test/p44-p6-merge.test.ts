@@ -100,7 +100,10 @@ describe('p6 with p7: a reopen 4.4 decided is done by its records', () => {
     assert.ok(rw3 !== undefined && rw3.body.reason === 'respec' && lastSpec.revision > (await events(ports, 'repairs', REOPEN_CARRIED))[0]!.revision, 'the card changed after the reopen');
     assert.equal(await acceptedProduct(flowCtx(ports, M), 'impl'), 'prod.con.m1.impl.3');
     const r = repair(ports, 'R-1');
-    assert.equal(r.reopened[0]?.state, 'reopened at attempt 2; accepted at attempt 3 (prod.con.m1.impl.3)');
+    // final review (F1-4, F3-1): credited with the attempt that carried the issue (2), done for good; the re-planned card's
+    // acceptance (3) is said as what came later, never credited to the repair
+    assert.equal(r.reopened[0]?.state, 'reopened at attempt 2; accepted at attempt 2 (prod.con.m1.impl.2); later changed by a plan; accepted at attempt 3 (prod.con.m1.impl.3)');
+    assert.deepEqual(r.reopened[0]?.credited, { attempt: 2, product: 'prod.con.m1.impl.2', risk: null });
     assert.equal(r.done, true);
     // the attempt under the new card still answers the repair whose fix it holds
     assert.deepEqual(claimed<ConstructorCard>(ports, 'con.m1.impl.3').repairs?.map((x) => x.id), ['R-1']);

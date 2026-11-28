@@ -16,7 +16,7 @@ import type { DetailedPlanDoc, DetailedTask } from '../src/flow/plandoc.ts';
 import { withdrawItem } from '../src/flow/requirements.ts';
 import { detailedPlan, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { appendRecords, listDispatches } from '../src/memory/index.ts';
-import { pmExtend, pmRepair, pmRequirement } from '../src/process/pm.ts';
+import { pmExtend, pmRepair, pmRequirement, readSteps } from '../src/process/pm.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
 import '../src/seat/cards/index.ts';
@@ -185,7 +185,13 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     // the Architect step is claimed and works; meanwhile the user takes it back
     await engine.reconcile(M);
     const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    ports.scheduler.dispatchOf(step);
+    assert.ok(repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1'))).includes('\n    its Architect step is in flight\n'));
     await withdrawItem(ports, { mission: M, item: 'g2', reason: 'the user took it back' });
+    // (wording, verification second run) ended before its hand-back came: one that arrives later will be kept and not applied
+    await engine.reconcile(M);
+    const before = repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')));
+    assert.ok(before.includes('ended: every item of it was withdrawn before its amendment was applied; a hand-back of its Architect step that arrives later will be kept and not applied'), before);
     await ports.scheduler.run(step, { handBack: { reopen: [], add: [JSON_TASK], note: 'a new task' } });
     await drive(engine, ports.scheduler, happyScript(M));
     const ended = await ports.ledger.events<{ repair: string; arch: string | null }>({ mission: M, line: 'repairs', event: 'ended' });
@@ -610,5 +616,86 @@ describe('4.4 G9 with the verification follow-up of p6: a new requirement read b
     assert.ok(lines.startsWith('[R-2] new requirement, the user\'s words W-3: superseded'), lines);
     const g2 = itemStateLines(readItems(ports.ctx, 'm1').find((v) => v.id === 'g2')!).join('\n');
     assert.match(g2, /came with new requirement R-2/);
+  });
+});
+
+describe('final review F4-1: a requirement item is credited only with work reviewed against it', () => {
+  it('X filed and impl reopened for it; attempt 2 needs a decision; a plain repair changes impl\'s card without X; attempt 3 passes: X reads no accepted work bound to it and names impl, never accepted or proven', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'Rows keep their order', quote: 'keep the rows in order' }], 'Please keep the rows in order.');
+    await drive(engine, ports.scheduler, (t, s) => {
+      if (t.card.seat === 'architect-repair') return { handBack: { reopen: [{ task: 'impl', issue: 'keep the rows in order' }], add: [], note: 'impl writes the rows' } };
+      if (t.task === 'rev.m1.impl.2') return { handBack: reviewer(t.card as never, 'needs-decision') };
+      if (t.card.seat === 'secretary') return null;
+      return happyScript(M)(t, s);
+    });
+    assert.ok((await ports.ledger.events({ mission: M, line: 'task:impl', event: 'review' })).length >= 2, 'attempt 2 was reviewed');
+    // a plain repair changes impl's card, leaving X out (X came with the reopen)
+    await pmRepair(ports.ctx, { mission: M, words: say(ports, 'The parser is too slow.'), kind: 'defect', text: 'too slow', about: 'impl' });
+    const impl = (await planInEffect(flowCtx(ports, M)))!.plan.tasks.find((t) => t.id === 'impl')!;
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [], change: [{ ...impl, goal: `${impl.goal}, fast` }], note: 'faster' } } : t.card.seat === 'secretary' ? null : happyScript(M)(t, s)));
+    const accepted = (await ports.ledger.events<{ k: number; product: string }>({ mission: M, line: 'task:impl', event: 'accepted' })).at(-1)!;
+    assert.equal(accepted.body.k, 3);
+    assert.ok(!(await contractOf(ports, accepted.body.product)).includes('item.m1.g2'), 'attempt 3\'s review was not bound to X');
+    const g2 = readItems(ports.ctx, 'm1').find((v) => v.id === 'g2')!;
+    assert.equal(g2.state, 'no accepted work bound to it');
+    assert.equal(g2.proof, null, 'no proof');
+    const lines = itemStateLines(g2).join('\n');
+    assert.ok(lines.includes('no accepted work of task impl is bound to it, though that task was meant to carry it'), lines);
+    assert.doesNotMatch(lines, /accepted after a passing review|proof: proven/);
+    const r1 = ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')).repairs.find((r) => r.id === 'R-1')!;
+    assert.deepEqual([r1.done, r1.reopened[0]?.superseded], [false, 'R-2'], 'the reopen was superseded by R-2\'s card before it was accepted');
+    assert.ok(repairsText({ mission: 'm1', repairs: [r1] }).includes('decided; done or superseded: see R-2'));
+  });
+});
+
+describe('final review F4-4: a filing taken back asks nobody', () => {
+  it('its queued Architect step is held in the ready list and cannot be claimed in the window before a pass cancels it', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }], 'Please export JSON.');
+    await engine.reconcile(M);
+    const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    assert.ok(readSteps(ports.ctx).ready.some((r) => r.step === step), 'ready while its item is in force');
+    // (wording, verification second run) what it waits for, never the bare state word
+    const text = repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')));
+    assert.ok(text.includes('\n    waiting for its Architect step\n') && !text.includes('\n    architect\n'), text);
+    await withdrawItem(ports, { mission: M, item: 'g2', reason: 'taken back' });
+    const steps = readSteps(ports.ctx);
+    assert.ok(!steps.ready.some((r) => r.step === step), 'not ready once every item is withdrawn');
+    assert.match(steps.held.find((h) => h.step === step)?.why ?? '', /new requirement R-1 was taken back: every item of it was withdrawn \(the next pass records its end\), so its Architect step is not run/);
+    assert.throws(() => ports.scheduler.dispatchOf(step), /is held: new requirement R-1 was taken back/);
+    await engine.reconcile(M);
+    assert.equal(ports.scheduler.tasks.get(step)?.state, 'abandoned', 'the next pass cancels it');
+  });
+
+  it('a pass that read a question-only hand-back while the item was in force posts no question once another pass ended the filing', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }], 'Please export JSON.');
+    await engine.reconcile(M);
+    const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    assert.deepEqual(await ports.scheduler.run(step, { handBack: { reopen: [], add: [], change: [], note: 'Should the JSON keep the header row?' } }), []);
+    type Append = World['ledger']['append'];
+    const append: Append = ports.ledger.append.bind(ports.ledger);
+    const ledger = ports.ledger as { append: Append };
+    let raced = false;
+    ledger.append = async (op, entries) => {
+      if (!raced && op.startsWith(`flow:escalation:${M}:`) && (entries.events ?? []).some((e) => (e.body as { source?: string }).source === 'repair-question')) {
+        raced = true;
+        ledger.append = append;
+        // meanwhile: the user takes the item back, and another pass records the end of the filing
+        await withdrawItem(ports, { mission: M, item: 'g2', reason: 'taken back meanwhile' });
+        await engine.reconcile(M);
+        ledger.append = async (o, x) => append(o, x);
+      }
+      return append(op, entries);
+    };
+    await engine.reconcile(M);
+    ledger.append = append;
+    assert.ok(raced, 'the question was about to be posted');
+    assert.deepEqual((await ports.ledger.events({ mission: M, line: 'repairs', event: 'ended' })).map((e) => e.key), ['R-1']);
+    const asked = (await ports.ledger.events<{ source: string }>({ mission: M, line: 'secretary', event: 'escalation' })).filter((e) => e.body.source === 'repair-question');
+    assert.deepEqual(asked, [], 'no question for the PM whose answer nothing would take');
+    await engine.reconcile(M);
+    assert.equal((await ports.ledger.events<{ source: string }>({ mission: M, line: 'secretary', event: 'escalation' })).filter((e) => e.body.source === 'repair-question').length, 0, 'nor on the next pass');
   });
 });

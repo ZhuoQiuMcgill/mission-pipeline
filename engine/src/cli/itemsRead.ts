@@ -15,18 +15,29 @@ import { currentRiskEscalation, lineAcceptance } from '../flow/execution.ts';
 import { REPAIRS_LINE, REQUIREMENTS_LINE, cardChangedBy, repairOfTask, type RepairDecidedBody } from '../flow/plandoc.ts';
 import { VERIFIED, VERIFIED_LINE, acceptanceOf, riskCountText, riskRecord, stillOpen, type RiskRecord, type VerifiedBody } from '../flow/riskItems.ts';
 import { deliveryDocument } from '../delivery/delivery.ts';
-import { currentDelivery, type Db } from '../memory/index.ts';
+import { currentDelivery, factById, type Db } from '../memory/index.ts';
+import type { ObjectVersionRecord } from '../common/records.ts';
 import { missionEvents, planInEffectOf } from '../process/openItems.ts';
 import { repairsRead } from './workReads.ts';
 
-/** superseded (a repair's): every part done or superseded, at least one superseded (mp read repairs says by what). */
-export type WorkState = 'not planned' | 'planned' | 'in work' | 'accepted after a passing review' | 'accepted with risk' | 'abandoned' | 'delivered' | 'landed' | 'superseded';
+/**
+ * superseded (a repair's): every part done or superseded, at least one superseded (mp read repairs says by what).
+ * 4.4 (final review F4-1): "no accepted work bound to it" (a requirement item's): the tasks meant to carry it were
+ * accepted under cards whose review did not bind it, or their attempts that carried it were superseded.
+ */
+export type WorkState = 'not planned' | 'planned' | 'in work' | 'accepted after a passing review' | 'accepted with risk' | 'abandoned' | 'delivered' | 'landed' | 'superseded' | 'no accepted work bound to it';
 
 export interface TaskStateView {
   readonly task: string;
   /** superseded: a repair's changed card another card replaced before it was accepted (mp read repairs). */
-  readonly state: 'planned' | 'in work' | 'accepted' | 'accepted with risk' | 'abandoned' | 'not in the plan in effect' | 'not done for this repair' | 'superseded';
+  readonly state: 'planned' | 'in work' | 'accepted' | 'accepted with risk' | 'abandoned' | 'not in the plan in effect' | 'not done for this repair' | 'superseded' | 'not bound to it';
   readonly product: string | null;
+  /**
+   * 4.4 (final review F3-1): the accepted attempt this row is credited with and the escalation it was accepted with risk
+   * on (null: none), when it is not the task's current one (a repair's credited attempt). Absent: the current acceptance.
+   */
+  readonly attempt?: number;
+  readonly risk?: string | null;
   /** The output's proof as the close reads it (null: not accepted). */
   readonly label: string | null;
   /** A repair's task: what `mp read repairs` says of it. */
@@ -60,6 +71,8 @@ export interface ItemStateView {
   readonly came?: { readonly filing: string; readonly checked: { readonly plan: string; readonly inside: boolean } | null };
   /** 4.4 (G9): a filing's tasks on which its Architect named none of its items (bound to none). */
   readonly unnamed?: readonly string[];
+  /** 4.4 (final review F4-1): the tasks meant to carry a requirement item with no accepted work bound to it. */
+  readonly meant?: readonly string[];
 }
 
 type Ev = { revision: number; line: string; event: string; key: string; body: unknown };
@@ -121,11 +134,11 @@ function openOn(record: RiskRecord, tasks: readonly TaskStateView[], lines: Read
   const notRecorded = new Set<string>();
   for (const t of tasks) {
     if (t.state === 'accepted' || t.state === 'accepted with risk') {
-      const k = lineAcceptance(lines.get(`task:${t.task}`) ?? []).k;
+      const k = t.attempt ?? lineAcceptance(lines.get(`task:${t.task}`) ?? []).k;
       for (const i of record.items) if (i.why === 'person' && i.task === t.task && i.attempt === k && i.state === 'open') open.add(i.id);
     }
     if (t.state !== 'accepted with risk') continue;
-    const esc = currentRiskEscalation(lines.get(`task:${t.task}`) ?? []);
+    const esc = t.risk !== undefined ? t.risk : currentRiskEscalation(lines.get(`task:${t.task}`) ?? []);
     const a = esc === null ? undefined : acceptanceOf(record, t.task, esc);
     if (a === undefined) continue;
     // p10-r2-1, v1-4: one classification with every read: open (recorded by 4.4), and apart the sentences before 4.4 nobody acted on
@@ -147,8 +160,19 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
     const plan = eff?.plan.tasks ?? [];
     const inPlan = new Set(plan.map((t) => t.id));
     // p10-2: the proof as the close reads it: the current label (recomputing while the evaluator is), and the delivery's own result
-    const products = [...new Set([...lines.values()].flatMap((l) => { const p = lineAcceptance(l).product; return p === null ? [] : [p]; }))];
+    // 4.4 (final review F3-1): the repairs as `mp read repairs` credits them (one read), whose credited products are labelled too
+    const repairs = repairsRead(db, data, mission).repairs;
+    const credited = repairs.flatMap((r) => [...r.added, ...r.changed, ...r.reopened].flatMap((x) => (x.credited === undefined ? [] : [x.credited.product])));
+    const products = [...new Set([...[...lines.values()].flatMap((l) => { const p = lineAcceptance(l).product; return p === null ? [] : [p]; }), ...credited])];
     const labels = products.length === 0 ? {} : decisionLabels(db, products);
+    // 4.4 (final review F4-1): whether a product's fixed review contract binds an item line (its review read that item)
+    // (a product with no record of its own, which a memory written by the engine always has, is not judged: read as before)
+    const contracts = new Map<string, readonly string[] | null>();
+    const binds = (product: string, line: string): boolean => {
+      if (!contracts.has(product)) { const o = factById(db, 'object.version', product)?.record as ObjectVersionRecord | undefined; contracts.set(product, o === undefined ? null : o.reviews.filter((r) => r.review === 'reviewer').flatMap((r) => r.basisLines as readonly string[])); }
+      const c = contracts.get(product)!;
+      return c === null || c.includes(line);
+    };
     const cur = currentDelivery(db, mission as MissionId);
     const dd = cur === null ? null : deliveryDocument(data, cur);
     const delivered = new Set((dd?.entries ?? []).map((e) => e.id));
@@ -177,8 +201,7 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
       else if (e.event === 'withdrawn' && latest.has(e.key)) latest.set(e.key, { ...latest.get(e.key)!, withdrawn: true });
     }
     const prefix = `item.${mission}.`;
-    // 4.4 (G9): the filings (one read of repairs): what each added or changed, and the reopens their decisions bound to an item
-    const repairs = repairsRead(db, data, mission).repairs;
+    // 4.4 (G9): the filings: what each added or changed, and the reopens their decisions bound to an item
     const what = (id: string): string => (repairs.find((r) => r.id === id)?.entry === 'extend' ? 'new requirement' : 'repair');
     const cameOf = (task: string): string | undefined => {
       const added = repairOfTask(eff?.amendments, task);
@@ -193,25 +216,41 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
     }
     for (const [line, i] of latest) {
       const id = line.startsWith(prefix) ? line.slice(prefix.length) : line;
-      const linked = plan.filter((t) => t.requirementItems.includes(line)).map((t): TaskStateView => { const s = taskStateOf(t.id, lines, true, proof); const came = cameOf(t.id); return came !== undefined ? { ...s, came } : s; });
-      // 4.4 (G9): a task a filing's reopen bound to the item, credited as `mp read repairs` credits it
+      // 4.4 (final review F4-1): an acceptance, its proof and its delivery count for the item only from a product whose
+      // fixed review contract binds it; a task accepted under a card that did not is meant to carry it and does not
+      const unbound = (s: TaskStateView, product: string, at: number | undefined): TaskStateView => ({ task: s.task, state: 'not bound to it', product: null, label: null, detail: `accepted${at !== undefined ? ` at attempt ${at}` : ''} (${product}) under a card whose review was not bound to it`, ...(s.came !== undefined ? { came: s.came } : {}) });
+      const linked = plan.filter((t) => t.requirementItems.includes(line)).map((t): TaskStateView => {
+        const s = taskStateOf(t.id, lines, true, proof);
+        const came = cameOf(t.id);
+        const v = came !== undefined ? { ...s, came } : s;
+        return v.product !== null && !binds(v.product, line) ? unbound(v, v.product, undefined) : v;
+      });
+      // 4.4 (G9): a task a filing's reopen bound to the item, credited as `mp read repairs` credits it: with the attempt
+      // that carried the reopen and that attempt's product (final review F3-1)
       const reopened = (reopensOf.get(line) ?? []).filter((x) => !linked.some((t) => t.task === x.task)).flatMap((x): TaskStateView[] => {
         const rr = repairs.find((r) => r.id === x.repair)?.reopened.find((t) => t.task === x.task);
         if (rr === undefined) return [];
         const s = taskStateOf(x.task, lines, inPlan.has(x.task), proof);
         const came = `reopened by ${what(x.repair)} ${x.repair}`;
-        return [s.state === 'abandoned' || s.state === 'not in the plan in effect' || rr.done ? { ...s, detail: rr.state, came } : { task: x.task, state: 'not done for this repair', product: null, label: null, detail: rr.state, came }];
+        if (s.state === 'abandoned' || s.state === 'not in the plan in effect') return [{ ...s, detail: rr.state, came }];
+        const c = rr.credited;
+        if (rr.done && c !== undefined) return [binds(c.product, line) ? { task: x.task, state: c.risk !== null ? 'accepted with risk' : 'accepted', product: c.product, label: proof(c.product), detail: rr.state, came, attempt: c.attempt, risk: c.risk } : unbound({ ...s, came }, c.product, c.attempt)];
+        if (rr.superseded !== undefined) return [{ task: x.task, state: 'superseded', product: null, label: null, detail: rr.state, came }];
+        return [{ task: x.task, state: 'not done for this repair', product: null, label: null, detail: rr.state, came }];
       });
       const tasks = [...linked, ...reopened];
       const work = i.type !== 'authorization' && i.type !== 'decision';
+      // the tasks meant to carry it with no accepted work bound to it: their acceptance does not settle it
+      const meant = tasks.filter((t) => t.state === 'not bound to it' || t.state === 'superseded');
+      const rest = tasks.filter((t) => !meant.includes(t));
       // a reopen not carried out yet keeps the item in work (its other tasks' acceptance does not settle it)
-      const settled = tasks.filter((t) => t.state !== 'not done for this repair');
+      const settled = rest.filter((t) => t.state !== 'not done for this repair');
       const base = together(settled, delivered, landed);
-      const state = i.withdrawn ? 'withdrawn' : !work ? 'not work' : settled.length < tasks.length && base !== 'abandoned' ? 'in work' : base;
+      const state = i.withdrawn ? 'withdrawn' : !work ? 'not work' : meant.length > 0 && rest.filter((t) => t.state !== 'not in the plan in effect').length === 0 ? 'no accepted work bound to it' : settled.length < rest.length && base !== 'abandoned' ? 'in work' : base;
       // 4.4 (G9): a new requirement's item says which filing it came with and whether the plan in effect's check covers it
       const filing = repairs.find((r) => r.entry === 'extend' && r.items.some((x) => x.id === line));
       const came = filing === undefined ? {} : { came: { filing: filing.id, checked: filing.checkedBy === null ? null : { plan: filing.checkedBy.plan, inside: filing.checkedBy.inside.includes(line) } } };
-      out.push({ kind: 'requirement', id, type: i.type, text: i.text, words: i.words, state, ...openOn(record, tasks, lines), tasks, proof: proofOf(tasks), verified: statements.get(`item:${id}`) ?? [], ...came });
+      out.push({ kind: 'requirement', id, type: i.type, text: i.text, words: i.words, state, ...openOn(record, tasks, lines), tasks, proof: proofOf(tasks), verified: statements.get(`item:${id}`) ?? [], ...came, ...(meant.length > 0 && work && !i.withdrawn ? { meant: meant.map((t) => t.task) } : {}) });
     }
     // p10-3: repairs, with the tasks credited to each exactly as `mp read repairs` credits them (the one function)
     for (const r of repairs) {
@@ -219,7 +258,13 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
         const s = taskStateOf(x.task, lines, inPlan.has(x.task), proof);
         // an acceptance, a delivery or a proof counts for this repair only when the repair read says its work is done;
         // p10-r2-3: a task the plan in effect dropped keeps that state (it is no progress)
-        if (s.state === 'abandoned' || s.state === 'not in the plan in effect' || x.done) return { ...s, detail: x.state };
+        // p10-r2-3: a task the plan in effect dropped keeps that state (it is no progress)
+        if (s.state === 'not in the plan in effect') return { ...s, detail: x.state };
+        // final review (F3-1, F1-4): a part done is credited with the attempt that carried it, for good: its product, the
+        // risk it was accepted with, its proof and its delivery (never a later attempt's)
+        const c = x.credited;
+        if (x.done && c !== undefined) return { task: x.task, state: c.risk !== null ? 'accepted with risk' : 'accepted', product: c.product, label: proof(c.product), detail: x.state, attempt: c.attempt, risk: c.risk };
+        if (s.state === 'abandoned' || x.done) return { ...s, detail: x.state };
         // 4.4 (v1): a changed card replaced before it was accepted gives the repair no acceptance and no proof
         if (x.superseded !== undefined) return { task: x.task, state: 'superseded', product: null, label: null, detail: x.state };
         return { task: x.task, state: 'not done for this repair', product: null, label: null, detail: x.state };
@@ -258,6 +303,8 @@ export function itemStateLines(v: ItemStateView): string[] {
     `  ${v.text}`,
     ...came,
     ...(v.unnamed !== undefined ? [`  tasks on which its Architect named none of its items (bound to none): ${v.unnamed.join(', ')}`] : []),
+    // final review (F4-1): never an acceptance or a proof the item's own review did not give
+    ...(v.meant !== undefined ? [`  no accepted work of task${v.meant.length === 1 ? '' : 's'} ${v.meant.join(', ')} is bound to it, though ${v.meant.length === 1 ? 'that task was' : 'those tasks were'} meant to carry it`] : []),
     ...v.verified.map((w) => `  the user's statement on ${w}: checked in the field and holds (the user's words, not proof)`),
   ];
 }
