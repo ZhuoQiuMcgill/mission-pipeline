@@ -477,7 +477,7 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   const added = result.add;
   const change = result.change ?? [];
   // 4.4 (G4): a hand-back with no edit is the Architect's question; the repair waits undecided for the PM's answer
-  if (result.reopen.length === 0 && added.length === 0 && change.length === 0) return askPm(ctx, r, a, task, result.note);
+  if (result.reopen.length === 0 && added.length === 0 && change.length === 0) return askPm(ctx, r, a, task, result.note, lines.length > 0 ? withdrawals.at(-1)?.revision ?? null : undefined);
   // the mechanical checks only (D-10): the plan in effect with the changed cards (4.1.3), plus the added tasks.
   // 4.4 (F13, p7-5, p7-4): kept per plan in effect (its revision) and per repairs decided (the latest one's revision),
   // so a decision retried on a plan another repair amended since, or after another repair was decided, is checked
@@ -603,18 +603,20 @@ async function unseenCards(ctx: FlowCtx, view: Extract<Awaited<ReturnType<typeof
  * stays undecided. When the PM (or the user) answers with "answer", the answer is carried out in the same write
  * as the repair's next Architect attempt, whose card carries the question and the answer.
  */
-async function askPm(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, task: string, question: string): Promise<void> {
+async function askPm(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, task: string, question: string, withdrawnRead?: number | null): Promise<void> {
   const id = repairQuestionId(task);
   const short = question.replace(/\s+/g, ' ').trim();
   // 4.4 (G4, p6-7): posted only while this attempt is the repair's latest and its plan is the one in effect, checked
   // inside the write: another pass that moved the repair on (a new plan, its next attempt) leaves no orphan question
   const effective = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).at(-1);
   if (effective === undefined || effective.body.dplan !== a.dplan) return;
+  // 4.4 (G9, final review F4-4): and, for a filing with items, it did not end and no item of it was withdrawn since the
+  // pass read them (a filing taken back asks nobody; its answer would have no consumer)
   const guard = {
-    absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: 'attempt', key: `${r.id}#${a.k + 1}` }],
-    latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: effective.revision }],
+    absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: 'attempt', key: `${r.id}#${a.k + 1}` }, { mission: ctx.mission, line: REPAIRS_LINE, event: REPAIR_ENDED, key: r.id }],
+    latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: effective.revision }, ...(withdrawnRead !== undefined ? [{ mission: ctx.mission, line: REQUIREMENTS_LINE, event: 'withdrawn', revision: withdrawnRead }] : [])],
     code: 'STALE_REQUEST',
-    message: `repair ${r.id} moved on (a new plan, or its next Architect attempt) while its Architect's question was being posted: nothing was posted`,
+    message: `repair ${r.id} moved on (a new plan, or its next Architect attempt${withdrawnRead !== undefined ? ', or an item of it was withdrawn, or it ended' : ''}) while its Architect's question was being posted: nothing was posted`,
   };
   await raiseEscalation(ctx, {
     id,
