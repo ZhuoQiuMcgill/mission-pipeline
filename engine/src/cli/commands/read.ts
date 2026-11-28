@@ -13,6 +13,7 @@ import { buildGraph, chain, resolveNodes, tree, walk } from '../tree.ts';
 import { fullRunMarkers } from '../../process/index.ts';
 import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
+import { constraintsRead, constraintsText, repairsRead, repairsText } from '../workReads.ts';
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -203,4 +204,15 @@ const notesRead: Command = {
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+// 4.4 (G3): who wrote each constraint and what it reaches, so a PM that writes for tasks again can be seen
+const constraintsReadCmd: Command = {
+  group: 'read', name: ['constraints'], summary: 'the constraints in force for a mission, each with its author (PM or Secretary) and its address or scope; --reach adds the task cards each reaches, its size and the Reviewers\' answers', usage: 'mp read constraints <mission> [--reach]', flags: {reach: 'boolean'},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const reach = flagBool(a, 'reach'); const r = p.ctx.memory.read((db) => constraintsRead(db, p.ctx.memory.data, m, reach)); return ok(constraintsText(r, reach), r);},
+};
+// 4.4 (the plan's F13): each repair, what it did and whether it is done
+const repairsReadCmd: Command = {
+  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs: kind, words, subject and the Architect\'s note; the tasks each added, changed and reopened with their state; its dispatches; and whether it is done', usage: 'mp read repairs <mission>', flags: {},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const r = p.ctx.memory.read((db) => repairsRead(db, p.ctx.memory.data, m)); return ok(repairsText(r), r);},
+};
+
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, constraintsReadCmd, repairsReadCmd, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];

@@ -404,6 +404,8 @@ export interface RepairDecidedBody {
   readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
+  /** 4.4 (G3, F2): the Architect's note on its decision, printed on the cards of the tasks it added, changed or reopened (absent: a 4.3 decision). */
+  readonly note?: string;
 }
 /** A repair as a card shows it (every card of the work it caused). */
 export interface RepairRef {

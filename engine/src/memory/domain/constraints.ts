@@ -86,8 +86,12 @@ export function constraintApplies(c: { readonly scope: ConstraintScope }, obj: {
     && obj.scope.paths.some((path) => c.scope.paths.some((pattern) => pattern === '**' || pattern === path || (pattern.endsWith('/**') && (path === pattern.slice(0, -3) || path.startsWith(pattern.slice(0, -2))))));
 }
 
-/** A withdrawn constraint keeps its full history; the label path removes its proof duty. */
-export async function withdrawConstraint(ports: import('../../flow/ports.ts').FlowPorts, req: { constraint: string; words: string }): Promise<void> {
+/**
+ * A withdrawn constraint keeps its full history; the label path removes its proof duty. 4.4 (G3): the
+ * Secretary withdraws an instruction of its own with a reason and no words (`by: "secretary"`); the PM's
+ * withdrawal writes the 4.3 body.
+ */
+export async function withdrawConstraint(ports: import('../../flow/ports.ts').FlowPorts, req: { constraint: string; words: string } | { constraint: string; by: 'secretary'; reason: string }): Promise<void> {
   const { basisIndex, flowCtx, commit, ev } = await import('../../flow/context.ts');
   const { constraintLine } = await import('../../flow/requirements.ts');
   const ctx = flowCtx(ports, 'project' as import('../../common/ids.ts').MissionId);
@@ -98,5 +102,6 @@ export async function withdrawConstraint(ports: import('../../flow/ports.ts').Fl
   if (rec === undefined || (rec.basisKind !== 'constraint' && rec.basisKind !== 'instruction')) throw new Error(`No constraint ${req.constraint}: nothing was withdrawn.`);
   if (ix.withdrawn.has(line)) return;
   const owner = flowCtx(ports, rec.mission ?? ctx.mission);
-  await commit(owner, `flow:constraint-withdraw:${line}`, { events: [ev(owner, 'requirements', 'constraint-withdrawn', line, { line, version: current, words: req.words })], records: [{ kind: 'basis.withdrawn', line: rec.line }] });
+  const body = 'words' in req ? { line, version: current, words: req.words } : { line, version: current, by: req.by, reason: req.reason };
+  await commit(owner, `flow:constraint-withdraw:${line}`, { events: [ev(owner, 'requirements', 'constraint-withdrawn', line, body)], records: [{ kind: 'basis.withdrawn', line: rec.line }] });
 }

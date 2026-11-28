@@ -158,6 +158,8 @@ export function sourceOutcome(e: EscalationBody, o: DecisionOption): string | nu
   if (e.source === 'calibrator-2' && o === 'accept') return 'the detailed plan is accepted as it is (the ruling overrules Calibrator ②) and takes effect';
   if (e.source === 'loop-exhausted' && o === 'grant' && facts['loop'] === 'mechanical-return') return e.subject.startsWith('repair:') ? 'the repair\'s Architect gets the returns granted and amends the plan again' : 'the Architect gets the returns granted and decomposes again';
   if (e.source === 'loop-exhausted' && o === 'grant' && facts['loop'] === 'rework') return `the rework loop gets the attempts granted, and the Constructor starts the next attempt; ${REOPEN_GRANTS}`;
+  // 4.4 (G4): repair.ts askPm carries it out as the repair's next Architect attempt
+  if (e.source === 'repair-question' && o === 'answer') return 'the question and the answer go on the card of the repair\'s next Architect step, which decides the repair; until it hands back, the repair is undecided';
   return null;
 }
 
@@ -209,8 +211,16 @@ export async function raiseEscalation(ctx: FlowCtx, spec: EscalationSpec): Promi
   const body: EscalationBody = { ...spec, id, task: escalationTask(id) };
   await commit(ctx, `flow:escalation:${ctx.mission}:${id}`, { events: [ev(ctx, SECRETARY_LINE, 'escalation', id, body)] });
   if (spec.source === 'plan-structure-change' || spec.source === 'plan-restarts-work') await escalateToUser(ctx, id, spec.summary, null);
+  // 4.4 (G4): a repair Architect's question goes to the PM, whose filing on the user's words the repair is
+  else if (spec.source === 'repair-question') await escalateToUser(ctx, id, REPAIR_QUESTION_TO_PM, null);
   else await submitSecretary(ctx, body);
 }
+
+/** 4.4 (G4): why a repair Architect's question reaches the PM, and how its answer goes back (the inbox brief prints it). */
+export const REPAIR_QUESTION_TO_PM = 'the repair is your filing on the user\'s words, so its Architect\'s question comes to you, not to the Secretary. Answer with --option answer --instructions "…" (on the user\'s words, or --no-words): the repair\'s next Architect step gets the question and your answer on its card, and the repair stays undecided until that step hands back.';
+
+/** 4.4 (G4): escalations the flow hands to the PM (and the user) directly, with no Secretary step. */
+export const DIRECT_TO_PM: ReadonlySet<string> = new Set(['plan-structure-change', 'plan-restarts-work', 'repair-question']);
 
 async function submitSecretary(ctx: FlowCtx, e: EscalationBody): Promise<void> {
   if ((await ctx.ports.scheduler.status(e.task)) !== null) return;
@@ -286,7 +296,7 @@ async function secretaryRound(ctx: FlowCtx, esc: EscalationBody): Promise<{ esc:
 /** Process every open escalation of the mission: start its Secretary, record its decision, tell the PM. */
 export async function secretaryStep(ctx: FlowCtx): Promise<void> {
   for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
-    if (e.body.source === 'plan-structure-change' || e.body.source === 'plan-restarts-work') continue;
+    if (DIRECT_TO_PM.has(e.body.source)) continue;
     const round = await secretaryRound(ctx, e.body);
     const esc = round.esc;
     // closed before its Secretary decided (its owner left scope: superseded), or decided by the user

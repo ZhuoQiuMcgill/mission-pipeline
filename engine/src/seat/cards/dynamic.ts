@@ -1,6 +1,6 @@
 import type { CurrentItem, ConstraintBody, ItemVersionBody } from '../../flow/requirements.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
-import { elementsOf, type DetailedTask } from '../../flow/plandoc.ts';
+import { elementsOf, repairOfTask, type AmendmentEntry, type DetailedTask, type RepairDecidedBody } from '../../flow/plandoc.ts';
 import type { DecisionBody, EscalationBody } from '../../flow/secretary.ts';
 import { scopesOverlap } from '../../flow/mechanical.ts';
 import { xid } from '../../flow/exploration/definition.ts';
@@ -30,6 +30,8 @@ export function constraintsForTask(constraints: readonly ConstraintBody[], task:
   return constraints.filter((c) => {
     const paths = scopesOverlap(c.scope.paths, task.writeScope).length > 0;
     if (c.scope.mission !== undefined && c.scope.mission !== mission) return false;
+    // 4.4 (G3): an addressed instruction reaches only what it names (addressedForTask), never by its scope
+    if (isAddressed(c)) return false;
     // a write scope is a set of patterns: overlap decides, never a display string as a concrete path
     return c.kind === 'object' ? (c.scope.taskTypes.length === 0 || c.scope.taskTypes.includes(task.kind)) && paths
       : c.scope.taskTypes.length > 0 ? c.scope.taskTypes.includes(task.kind) || (c.scope.paths.some((p) => p !== '**') && paths) : paths || c.scope.paths.includes('**');
@@ -60,9 +62,151 @@ export function constraintsForExploration(constraints: readonly ConstraintBody[]
   return constraints.filter((c) => lines.has(c.line)).map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
 }
 
-/** The constraints an Architect's card shows (4.1.2, item 7): every object constraint and instruction in the mission's scope (a plan covers every path). */
+/**
+ * The constraints an Architect's card shows (4.1.2, item 7): every object constraint and instruction in the
+ * mission's scope (a plan covers every path). 4.4 (G3): an addressed instruction is not among them: the
+ * Architect's card prints those of the repair in hand in full (addressedForPlanning) and the rest as an index.
+ */
 export function planningConstraints(constraints: readonly ConstraintBody[], mission: string): Array<{ id: string; text: string; kind: 'object' | 'instruction' }> {
-  return constraints.filter((c) => c.scope.mission === undefined || c.scope.mission === mission).map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
+  return constraints.filter((c) => (c.scope.mission === undefined || c.scope.mission === mission) && !isAddressed(c)).map((c) => ({ id: c.line, text: c.text, kind: c.kind }));
+}
+
+// ---------------------------------------------------------------- 4.4 (G3): addressed instructions
+
+/** 4.4 (G3): an instruction with an address (tasks or repairs of its mission); it reaches only what it names. */
+export function isAddressed(c: Pick<ConstraintBody, 'kind' | 'scope'>): boolean {
+  return c.kind === 'instruction' && ((c.scope.tasks?.length ?? 0) > 0 || (c.scope.repairs?.length ?? 0) > 0);
+}
+
+/** An instruction on a card's "Instructions for this task" (with its version and, for the Secretary's, who wrote it). */
+export interface AddressedRef { readonly id: string; readonly version: string; readonly text: string; readonly by?: 'secretary' }
+
+const addressedRef = (c: ConstraintBody): AddressedRef => ({ id: c.line, version: c.version, text: c.text, ...(c.author !== undefined ? { by: c.author } : {}) });
+
+/**
+ * 4.4 (G3): the addressed instructions of a task's cards: those of its mission naming the task, and those
+ * naming a repair this work answers (the repair that added the task, changed its card or reopened it).
+ */
+export function addressedForTask(constraints: readonly ConstraintBody[], mission: string, task: string, repairs: readonly string[] = []): AddressedRef[] {
+  return constraints.filter((c) => isAddressed(c) && c.scope.mission === mission && ((c.scope.tasks ?? []).includes(task) || (c.scope.repairs ?? []).some((r) => repairs.includes(r)))).map(addressedRef);
+}
+
+/** One index line of an addressed instruction on an Architect's card (F1: id, version, addressee, first line, size). */
+export interface AddressedIndexEntry { readonly id: string; readonly version: string; readonly to: string; readonly first: string; readonly bytes: number }
+
+/** Whom an addressed instruction names, in words. */
+export function addressee(scope: Pick<ConstraintBody['scope'], 'tasks' | 'repairs'>): string {
+  return [(scope.tasks ?? []).length > 0 ? `task${scope.tasks!.length === 1 ? '' : 's'} ${scope.tasks!.join(', ')}` : '', (scope.repairs ?? []).length > 0 ? `repair${scope.repairs!.length === 1 ? '' : 's'} ${scope.repairs!.join(', ')}` : ''].filter((x) => x !== '').join('; ');
+}
+
+/**
+ * 4.4 (G3, F1): an Architect's card prints in full the addressed instructions of the repair in hand or of
+ * the task it is about; the mission's other addressed instructions appear as an index.
+ */
+export function addressedForPlanning(constraints: readonly ConstraintBody[], mission: string, inHand: { readonly repair?: string; readonly about?: string } = {}): { full: AddressedRef[]; index: AddressedIndexEntry[] } {
+  const full: AddressedRef[] = [];
+  const index: AddressedIndexEntry[] = [];
+  for (const c of constraints) {
+    if (!isAddressed(c) || c.scope.mission !== mission) continue;
+    const mine = (inHand.repair !== undefined && (c.scope.repairs ?? []).includes(inHand.repair)) || (inHand.about !== undefined && (c.scope.tasks ?? []).includes(inHand.about));
+    if (mine) full.push(addressedRef(c));
+    else index.push({ id: c.line, version: c.version, to: addressee(c.scope), first: line(c.text.split('\n')[0] ?? '', 100), bytes: Buffer.byteLength(c.text, 'utf8') });
+  }
+  return { full, index };
+}
+
+/** The card fields of an Architect's addressed instructions (nothing when there are none). */
+export function addressedIndexOf(index: readonly AddressedIndexEntry[], full: readonly AddressedRef[] = []): { addressed?: AddressedRef[]; addressedIndex?: AddressedIndexEntry[] } {
+  return { ...(full.length > 0 ? { addressed: [...full] } : {}), ...(index.length > 0 ? { addressedIndex: [...index] } : {}) };
+}
+
+/**
+ * 4.4 (G3, F1): the instructions a plan review's card gets: unaddressed ones whose task types name "pm-plan"
+ * (Calibrator ①) or "detailed-plan" (Calibrator ② and the feasibility reviewer), in the mission's scope.
+ */
+export function planReviewInstructions(constraints: readonly ConstraintBody[], mission: string, of: 'pm-plan' | 'detailed-plan'): Array<{ id: string; text: string; kind: 'instruction' }> {
+  return constraints.filter((c) => c.kind === 'instruction' && !isAddressed(c) && (c.scope.mission === undefined || c.scope.mission === mission) && c.scope.taskTypes.includes(of)).map((c) => ({ id: c.line, text: c.text, kind: 'instruction' as const }));
+}
+
+/**
+ * 4.4 (G3, F2): the repairs a task's work answers: the repair that added the task (every attempt), every repair
+ * whose amendment changed its card, and every repair that reopened it under its current card at this attempt
+ * or before (the reopened attempt and every later one). 4.3 showed the adding repair and this attempt's reopen only.
+ */
+export function repairsOfTaskWork(amendments: readonly AmendmentEntry[] | undefined, task: string, line: readonly { readonly event: string; readonly key: string; readonly body: unknown; readonly revision: number }[], k: number): string[] {
+  const ids: string[] = [];
+  const add = (r: string): void => { if (!ids.includes(r)) ids.push(r); };
+  const added = repairOfTask(amendments, task);
+  if (added !== null) add(added);
+  for (const a of amendments ?? []) if ((a.changed ?? []).some((t) => t.id === task)) add(a.repair);
+  const spec = line.filter((e) => e.event === 'spec').at(-1)?.revision ?? 0;
+  for (const e of line) {
+    const reopen = (e.body as { reopen?: { kind?: string; repair?: string } }).reopen;
+    if (e.event === 'rework' && e.revision > spec && Number(e.key) <= k && reopen?.kind === 'repair' && typeof reopen.repair === 'string') add(reopen.repair);
+  }
+  return ids;
+}
+
+/** 4.4 (G3): a recorded text of an Architect and the tasks it names. */
+export interface ArchitectText { readonly from: string; readonly repair: string | null; readonly tasks: readonly string[]; readonly text: string }
+
+/**
+ * 4.4 (G3): the Architect's recorded texts: the note of each repair decision, naming the tasks it added,
+ * changed or reopened. A later source (an Architect's answer on an escalation, fix G1) is added here.
+ */
+export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
+  const out: ArchitectText[] = [];
+  for (const e of events) {
+    if (e.line !== 'repairs' || e.event !== 'decided') continue;
+    const d = e.body as RepairDecidedBody;
+    if (typeof d.note !== 'string' || d.note.trim() === '') continue;
+    out.push({ from: `repair ${d.repair}, the Architect's note on its decision`, repair: d.repair, tasks: [...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)], text: d.note });
+  }
+  return out;
+}
+
+/** 4.4 (G3): the Architect's texts printed on a task's cards: those naming it; a repair's only while it is among the repairs its work answers. */
+export function architectNotesFor(events: readonly FlowEvent[], task: string, repairs: readonly string[]): Array<{ from: string; text: string }> {
+  return architectTexts(events).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair))).map((t) => ({ from: t.from, text: t.text }));
+}
+
+/**
+ * 4.4 (G3): what was written for a task's work, as its Constructor and Reviewer cards carry it (built alike at
+ * queue time and at the claim): the instructions addressed to it or to a repair it answers, the Architect's
+ * notes, and the answers given under its earlier cards. A field with nothing in it is left out.
+ */
+export function writtenForTask(constraints: readonly ConstraintBody[], events: readonly FlowEvent[], mission: string, task: string, repairs: readonly string[]): { addressed?: AddressedRef[]; architectNotes?: Array<{ from: string; text: string }>; earlierAnswers?: string[] } {
+  const addressed = addressedForTask(constraints, mission, task, repairs);
+  const notes = architectNotesFor(events, task, repairs);
+  const earlier = earlierTaskAnswers(events, task);
+  return { ...(addressed.length > 0 ? { addressed } : {}), ...(notes.length > 0 ? { architectNotes: notes } : {}), ...(earlier.length > 0 ? { earlierAnswers: earlier } : {}) };
+}
+
+/** The answer in effect on one escalation of a task (the user's first, then the PM's latest round, then the Secretary's), when it was carried out as an answer. */
+function carriedAnswer(events: readonly FlowEvent[], esc: EscalationBody): DecisionBody | null {
+  const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id);
+  const what = applied?.body as { what?: { option?: string }; by?: string } | undefined;
+  if (what?.what?.option !== 'answer') return null;
+  const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
+  const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
+  return d?.option === 'answer' && d.by === what.by && d.instructions !== '' ? d : null;
+}
+
+/**
+ * 4.4 (G3): the answers carried out on a task's escalations under its earlier cards (raised before its
+ * current spec), one line each. 4.3 dropped them at the next spec without a trace.
+ */
+export function earlierTaskAnswers(events: readonly FlowEvent[], task: string): string[] {
+  const spec = events.filter((e) => e.line === `task:${task}` && e.event === 'spec').at(-1)?.revision ?? 0;
+  const out: string[] = [];
+  for (const e of events) {
+    if (e.line !== 'secretary' || e.event !== 'escalation' || e.revision >= spec) continue;
+    const esc = e.body as EscalationBody;
+    if (esc.subject !== `task:${task}`) continue;
+    const d = carriedAnswer(events, esc);
+    if (d !== null) out.push(`[${esc.id}] ${d.by}: ${line(d.instructions, 200)}`);
+  }
+  return out;
 }
 
 /** Shared selection for queued and dispatched cards, including answers under the current spec only. */
@@ -76,6 +220,11 @@ export function taskDecisionQuotes(items: readonly CurrentItem[], events: readon
   for (const i of items) {
     if (i.type !== 'decision' || i.state !== 'valid') continue;
     if (i.source.kind === 'authorization' && !items.some((a) => a.line === (i.source as { line: string }).line && a.type === 'authorization' && a.state === 'valid')) continue;
+    // 4.4 (G3): a decision that names its tasks is printed on theirs only
+    if (i.tasks !== undefined) {
+      if (i.tasks.includes(task.id)) out.push(i.text);
+      continue;
+    }
     const recorded = events.find((e) => e.line === 'requirements' && e.event === 'item' && (e.body as ItemVersionBody).version === i.version)?.revision ?? 0;
     const after = effective > 0 && recorded > effective;
     const linked = related.has(i.line) || i.source.kind === 'authorization' || constraints.some((c) => c.text.includes(i.line));
@@ -85,14 +234,15 @@ export function taskDecisionQuotes(items: readonly CurrentItem[], events: readon
     if (e.line !== 'secretary' || e.event !== 'escalation' || e.revision <= (spec?.revision ?? 0)) continue;
     const esc = e.body as EscalationBody;
     if (esc.subject !== `task:${task.id}`) continue;
-    const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id);
-    const what = applied?.body as { what?: { option?: string }; by?: string } | undefined;
-    if (what?.what?.option !== 'answer') continue;
-    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
-    const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
-    if (d?.option === 'answer' && d.by === what.by && d.instructions !== '') out.push(d.instructions);
+    const d = carriedAnswer(events, esc);
+    if (d !== null) out.push(d.instructions);
   }
   return [...new Set(out)];
+}
+
+/** 4.4 (G3): whether a decision item is printed for an escalation: one that names its tasks, only about one of them (or when the escalation names it). */
+export function decisionConcerns(i: Pick<CurrentItem, 'line' | 'tasks'>, e: Pick<EscalationBody, 'subject' | 'items'>): boolean {
+  return i.tasks === undefined || (e.items ?? []).includes(i.line) || i.tasks.some((t) => e.subject === `task:${t}`);
 }
 
 export function taskRequirementItems(items: readonly CurrentItem[], task: Pick<DetailedTask, 'requirementItems'>) {
@@ -113,9 +263,11 @@ export function secretaryRoundInputs(esc: EscalationBody, events: readonly FlowE
 
 /** The Secretary's involved items and current facts belong to its builder, at queue and claim. */
 export function secretaryInputs(mission: string, e: EscalationBody, items: readonly CurrentItem[], allConstraints: readonly ConstraintBody[], events: readonly FlowEvent[], task: DetailedTask | undefined, grantAvailable: boolean, put: (text: string) => string) {
-  const constraints = task === undefined ? allConstraints.filter((c) => c.scope.mission === undefined || c.scope.mission === mission) : constraintsForTask(allConstraints, task, mission);
+  // 4.4 (G3): a decision card about a task gets the instructions addressed to that task; addressed ones reach nobody else
+  const constraints = task === undefined ? allConstraints.filter((c) => (c.scope.mission === undefined || c.scope.mission === mission) && !isAddressed(c)) : constraintsForTask(allConstraints, task, mission);
+  const addressed = task === undefined ? [] : addressedForTask(allConstraints, mission, task.id);
   const auths = items.filter((i) => i.type === 'authorization' && i.state === 'valid');
-  const involved = items.filter((i) => (e.items ?? []).includes(i.line) || i.type === 'decision');
+  const involved = items.filter((i) => (e.items ?? []).includes(i.line) || (i.type === 'decision' && decisionConcerns(i, e)));
   const decisions = involved.filter((i) => i.type === 'decision' && i.state === 'valid' && (i.source.kind !== 'authorization' || auths.some((a) => i.source.kind === 'authorization' && a.line === i.source.line)));
   const selectedItems = involved.filter((i) => i.type !== 'decision' || decisions.includes(i));
   const decisionAuthorities = new Set(decisions.flatMap((i) => i.source.kind === 'authorization' ? [i.source.line] : []));
@@ -129,6 +281,7 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
     // 4.4 (F16): each decision is printed once on the card: in its items, with its id
     decisionQuotes: [],
     constraints: constraints.map((c) => ({ id: c.line, kind: c.kind, text: c.text })),
+    ...(addressed.length > 0 ? { addressed } : {}),
     authorizations: auths.map((a) => ({ id: a.line, version: a.version, quote: a.source.kind === 'words' ? a.source.quote : a.text, notifyCondition: a.notifyCondition })),
     items: selectedItems.map((i) => ({ id: i.line, text: i.text })),
     contextItems: [...auths, ...decisions].map((i) => ({ line: i.line, version: i.version, type: decisionAuthorities.has(i.line) ? 'decision-authority' : i.type })),

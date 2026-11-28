@@ -268,7 +268,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       else if (f.event === 'constraint') {
         const id = String(b['version'] ?? f.key);
         const n = node('constraint', id, f.mission, f.rev, `${String(b['kind'] ?? '')}: ${clip(String(b['text'] ?? ''), 120)}`);
-        n.by = pmBy.get(n.key) ?? 'the PM via `mp pm constraint add`';
+        // 4.4 (G3): the author of the version (a 4.3 one is the PM's)
+        n.by = b['author'] === 'secretary' ? 'the Secretary via `mp sec instruct`' : pmBy.get(n.key) ?? 'the PM via `mp pm constraint add`';
         n.state = 'recorded';
         n.leaves.push(...leafOf(f.rev, /requirements\.md#|constraints\.md#/));
         latestConstraint.set(String(b['line'] ?? ''), n);
@@ -283,7 +284,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         // a 4.3 tagging wrote the words into its fixed reason only ("withdrawn with words tags by W-n")
         const words = typeof b['words'] === 'string' ? b['words'] : /^withdrawn with words tags by (W-[0-9]+)$/.exec(String(b['reason'] ?? ''))?.[1];
         if (n !== undefined) {
-          n.state = `withdrawn${words !== undefined ? ` on ${words}` : ''}`;
+          n.state = `withdrawn${words !== undefined ? ` on ${words}` : b['by'] === 'secretary' ? ' by the Secretary' : ''}`;
           if (words !== undefined) {
             node('words', words, null, 0);
             edge(n.key, `words:${words}`, 'was withdrawn on');

@@ -11,7 +11,8 @@ import { summarizeWords, tagWords, tagsReportLines, taggedWords } from '../../me
 import { keepNextReport, secNextSeen, storedNextReport, type SecretaryNext } from '../../process/secretary.ts';
 import { escalationsNamedIn, pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary, type InboxBrief } from '../../process/secretary.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
-import { renderNext, PM_COMMANDS } from './pm.ts';
+import { renderNext, PM_COMMANDS, reachLines } from './pm.ts';
+import { secInstruct, secWithdrawInstruction } from '../../process/pm.ts';
 
 function P(c: RunContext) {if (c.project === null) throw usage('this command needs an initialized project'); return c.project;}
 function op(c: RunContext): string {return c.op!;}
@@ -108,6 +109,21 @@ const decide: Command = {
     const head = r.repeated ? `Decision ${r.dispatch} was already recorded: nothing new.` : r.outcome !== 'accepted' ? `Decision ${r.dispatch} recorded but not accepted.` : `Decision ${r.dispatch} on ${positional(a, 0, 'escalation')}: ${r.decision?.text ?? 'recorded'}`;
     return ok([head, ...r.notes].join('\n'), r);},
 };
+// 4.4 (G3): the Secretary says once what it would otherwise answer many times: an instruction of its own, within the plan
+const instruct: Command = {
+  group: 'sec', name: ['instruct'], summary: 'record an instruction of your own for one mission\'s work (a ruling within the plan, never a proof input), addressed to tasks or a repair or by its scope; --withdraw takes one of yours back',
+  usage: 'mp sec instruct <mission> <id> --text "<instruction>" [--tasks <id,...>] [--repair <R-n,...>] [--paths <pattern,...>] [--task-types <type,...>]\n       mp sec instruct --withdraw <id> --reason "<why it no longer holds>"\n       (addressed: printed on those tasks\' cards, or on the repair\'s Architect card and the cards of the tasks it added, changed or reopened, and nowhere else)',
+  flags: {text: 'string', tasks: 'list', repair: 'list', paths: 'list', 'task-types': 'list', withdraw: 'string', reason: 'string'},
+  async run(c, a) {
+    const p = P(c); const w = flagStr(a, 'withdraw');
+    if (w !== null) {await secWithdrawInstruction(p.ctx, {constraint: w, reason: flagStr(a, 'reason') ?? ''}); return ok(`Instruction ${w} withdrawn by the Secretary; its record is kept.`, {constraint: w, withdrawn: true});}
+    const mission = positional(a, 0, 'mission'), id = positional(a, 1, 'instruction id');
+    const text = flagStr(a, 'text'); if (text === null || text.trim() === '') throw usage('--text: the instruction');
+    const address = {...given('tasks', flagList(a, 'tasks')), ...given('repairs', flagList(a, 'repair'))};
+    const r = await secInstruct(p.ctx, {mission, constraint: id, text, paths: flagList(a, 'paths'), taskTypes: flagList(a, 'task-types'), ...address});
+    return ok([`Instruction ${id} recorded as ${r.version}, the Secretary's: a ruling within the plan, never a proof input${r.scopeChanged ? ' (the same text: the version is kept and its scope is changed)' : ''}.`, ...reachLines('instruction', r.reach, {mission, ...address})].join('\n'), {mission, constraint: id, version: r.version, scopeChanged: r.scopeChanged, reach: r.reach});
+  },
+};
 const reply: Command = {group: 'sec', name: ['reply'], summary: 'answer a PM progress question', usage: 'mp sec reply <Q-n> "<text>"', flags: {}, async run(c, a) {const id = positional(a, 0, 'question'); secReply(P(c).ctx, {op: op(c), id, text: a.positionals.slice(1).join(' ')}); return ok(`${id} answered.`, {id});}};
 const askPm: Command = {group: 'sec', name: ['ask-pm'], summary: 'ask the PM an operational question without an escalation', usage: 'mp sec ask-pm "<question>" [--about <notice or item id>]', flags: {about: 'string'}, async run(c, a) {const id = secQuestion(P(c).ctx, {op: op(c), text: a.positionals.join(' '), about: flagStr(a, 'about')}); return ok(`Question ${id} sent to the PM inbox.`, {id});}};
 const pmReplyCommand: Command = {group: 'pm', name: ['reply'], summary: 'answer a Secretary question', usage: 'mp pm reply <SQ-n> "<text>" [--words W-n]', flags: {words: 'string'}, async run(c, a) {const id = positional(a, 0, 'question'); pmReply(P(c).ctx, {op: op(c), id, text: a.positionals.slice(1).join(' '), words: flagStr(a, 'words')}); return ok(`${id} answered; the Secretary sees it in next/wait.`, {id});}};
@@ -171,4 +187,4 @@ const summary: Command = {
 };
 
 export const RESIDENT_PM_COMMANDS: readonly Command[] = [secretary, note, question, pmReplyCommand, inbox, tag, retag, summary];
-export const SEC_COMMANDS: readonly Command[] = [session, handbook, next, wait, card, read, decide, askPm, reply, ack, ...['dispatch', 'release', 'drain', 'renew', 'alerts', 'ack'].map((name) => ({...PM_COMMANDS.find((c) => c.name[0] === name)!, group: 'sec' as const, usage: PM_COMMANDS.find((c) => c.name[0] === name)!.usage.replaceAll('mp pm ', 'mp sec ')}))];
+export const SEC_COMMANDS: readonly Command[] = [session, handbook, next, wait, card, read, decide, instruct, askPm, reply, ack, ...['dispatch', 'release', 'drain', 'renew', 'alerts', 'ack'].map((name) => ({...PM_COMMANDS.find((c) => c.name[0] === name)!, group: 'sec' as const, usage: PM_COMMANDS.find((c) => c.name[0] === name)!.usage.replaceAll('mp pm ', 'mp sec ')}))];

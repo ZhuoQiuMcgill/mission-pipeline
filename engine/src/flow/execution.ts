@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan, repairsOfTaskWork, writtenForTask } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -126,6 +126,8 @@ interface ReviewBody {
   readonly deferred?: readonly string[];
   /** An integration review's reopen (D-6): the dependencies whose work causes the failure. */
   readonly reopen?: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly evidence?: string }>;
+  /** 4.4 (G3): the Reviewer's answer to each instruction addressed to this work (it never changes the verdict). Absent: none on the card. */
+  readonly instructions?: ReadonlyArray<{ readonly instruction: string; readonly response: 'followed' | 'not-followed' | 'unclear'; readonly reason: string }>;
 }
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
@@ -1509,16 +1511,17 @@ async function reopenRequests(ctx: FlowCtx): Promise<Array<{ task: string; attem
   return requests;
 }
 
-/** The repairs a task's work answers (D-10): the repair that added the task, and the one that reopened this attempt. */
-async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<RepairRef[]> {
-  const ids = new Set<string>();
-  const added = repairOfTask(eff.amendments, t.id);
-  if (added !== null) ids.add(added);
-  const rw = line.one<ReworkBody>('rework', String(k));
-  if (rw?.reopen?.kind === 'repair') ids.add(rw.reopen.repair);
-  if (ids.size === 0) return [];
-  const all = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
-  return all.filter((r) => ids.has(r.key)).map((r) => repairRef(r.body));
+/**
+ * The repairs a task's work answers (D-10) and what was written for it: 4.4 (G3, F2) the repair that added the
+ * task, those that changed its card, and those that reopened it at this attempt or before (seat/cards/dynamic.ts
+ * repairsOfTaskWork); the instructions addressed to it or to those repairs, the Architect's notes and the answers
+ * given under its earlier cards (writtenForTask).
+ */
+async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<{ readonly repairs: RepairRef[]; readonly written: ReturnType<typeof writtenForTask> }> {
+  const ids = repairsOfTaskWork(eff.amendments, t.id, line.events, k);
+  const all = ids.length === 0 ? [] : await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
+  const written = writtenForTask(await currentConstraints(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), ctx.mission, t.id, ids);
+  return { repairs: all.filter((r) => ids.includes(r.key)).map((r) => repairRef(r.body)), written };
 }
 
 /** A Reviewer's accepted hand-back as the task line's "review" event (null: it carries no judgment, a defect told to the PM). */
@@ -1536,7 +1539,8 @@ async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string,
   ];
   const deferred = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`);
   const reopen = (r.reopen ?? []).map((x) => ({ task: x.task, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) }));
-  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}) };
+  const answers = (r.instruction_responses ?? []).map((i) => ({ instruction: i.instruction, response: i.response, reason: i.reason }));
+  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}), ...(answers.length > 0 ? { instructions: answers } : {}) };
   for (const answer of r.issue_responses.filter((i) => i.response === 'deferred')) {
     await notify(ctx, {
       category: 'reviewer-issue-deferred',
@@ -2528,7 +2532,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   ].join('\n');
   // the Constructor's worktree is created at this commit when it is dispatched (§5.3); the write paths are the task's write scope
   const workspace = { snapshot: snap.commit, writablePaths: [...t.writeScope] };
-  const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3): a later attempt gets its past: the review of the attempt it carries on, and that attempt's own hand-back (optional)
   const was = attemptPast(line.events, k);
   const past = was === null ? [] : [
@@ -2538,6 +2542,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: await decisionQuotes(ctx, t), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...written,
     seat: 'constructor',
     workspace,
     goal: t.goal,
@@ -2667,7 +2672,7 @@ async function submitReviewer(
   const integration = t.kind === 'integration' ? { hasConstructor: !startOnlyAttempt, dependencies: await dependencyProducts(ctx, plan, t) } : undefined;
   const rw = await reworkAt(ctx, t, line, k);
   const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
-  const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
   const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });
   // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
@@ -2694,6 +2699,7 @@ async function submitReviewer(
     ...(previousReview !== null ? { previousReview } : {}),
     ...(integration !== undefined ? { integration } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...written,
     ...planData(formats),
     ...attach([claims]),
     binding: {

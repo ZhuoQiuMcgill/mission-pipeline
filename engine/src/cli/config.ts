@@ -33,6 +33,8 @@
 //                           committer defaults to the author
 //   mustReadWarnPages       (4.4) a dispatch whose must-read material has more pages warns whoever
 //                           dispatches it; default 6; it refuses nothing
+//   cardWarnBytes           (4.4) a dispatch whose card is larger warns whoever dispatches it, naming
+//                           its largest sections; default 65536; it refuses nothing
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -89,6 +91,8 @@ export const ConfigSchema = z
     startOnHandback: z.array(z.string().min(1).max(200)).max(200).optional(),
     // 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (the Secretary while one is live); default 6
     mustReadWarnPages: z.number().int().min(1).max(10_000).optional(),
+    // 4.4 (G3): above this many bytes a dispatch's card warns whoever dispatches it, naming its largest sections; default 65536
+    cardWarnBytes: z.number().int().min(1024).max(1_000_000_000).optional(),
   })
   .strict();
 
