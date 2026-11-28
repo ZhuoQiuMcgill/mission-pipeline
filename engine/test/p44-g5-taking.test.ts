@@ -147,6 +147,10 @@ describe('4.4 G5: an item is taken by a re-plan or a repair', () => {
     const [first, second] = items as [RiskItemBody, RiskItemBody];
     const words = say(w, 'Trying it: the second one is fine as it is.');
     await assert.rejects(pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'the second one is fine as it is', openItems: ['nope'] }), /nope is not an item left at the cap in mission m1/);
+    // filed, then run again (an interrupted command, no --op): the same repair, nothing filed twice
+    const filed = await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'the second one is fine as it is', openItems: [first.id] });
+    const again = await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'the second one is fine as it is', openItems: [first.id] });
+    assert.deepEqual([again.repair, again.repeated], [filed.repair, true]);
     const r = await cli(w.dir, ['pm', 'open-item', 'close', `m1/${second.id}`, '--words', words, '--reason', 'the user accepts it as it is', '--op', 'close-a']);
     assert.equal(r.code, 0, r.err);
     assert.match(r.out, new RegExp(`Open item m1/${second.id.replace(/\./g, '\\.')} \\(task impl, attempt ${second.attempt}\\) closed on the user's words ${words}\\.`));

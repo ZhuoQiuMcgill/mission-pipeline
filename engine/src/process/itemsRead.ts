@@ -47,9 +47,9 @@ export interface ItemStateView {
 
 type Ev = { revision: number; line: string; event: string; key: string; body: unknown };
 
-/** One task's state, from its line. */
-function taskStateOf(task: string, events: readonly Ev[], inPlan: boolean, labels: (p: string) => string | null): TaskStateView {
-  const line = events.filter((e) => e.line === `task:${task}`);
+/** One task's state, from its line (the mission's task lines read once, by line). */
+function taskStateOf(task: string, lines: ReadonlyMap<string, readonly Ev[]>, inPlan: boolean, labels: (p: string) => string | null): TaskStateView {
+  const line = lines.get(`task:${task}`) ?? [];
   const sel = lineAcceptance(line);
   if (!inPlan) return { task, state: 'not in the plan in effect', product: sel.product, label: sel.product === null ? null : labels(sel.product) };
   if (sel.abandoned) return { task, state: 'abandoned', product: null, label: null };
@@ -98,6 +98,8 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
   return ctx.memory.read((db) => {
     const data = ctx.memory.data;
     const events = missionEvents(db, data, mission);
+    const lines = new Map<string, Ev[]>();
+    for (const e of events) if (e.line.startsWith('task:')) (lines.get(e.line) ?? (lines.set(e.line, []), lines.get(e.line)!)).push(e);
     const eff = planInEffectOf(db, data, events);
     const plan = eff?.plan.tasks ?? [];
     const inPlan = new Set(plan.map((t) => t.id));
@@ -131,7 +133,7 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
     const prefix = `item.${mission}.`;
     for (const [line, i] of latest) {
       const id = line.startsWith(prefix) ? line.slice(prefix.length) : line;
-      const tasks = plan.filter((t) => t.requirementItems.includes(line)).map((t) => taskStateOf(t.id, events, true, labels));
+      const tasks = plan.filter((t) => t.requirementItems.includes(line)).map((t) => taskStateOf(t.id, lines, true, labels));
       const work = i.type !== 'authorization' && i.type !== 'decision';
       const state = i.withdrawn ? 'withdrawn' : !work ? 'not work' : together(tasks, delivered, landed);
       out.push({ kind: 'requirement', id, type: i.type, text: i.text, words: i.words, state, ...openOn(tasks), tasks, proof: proofOf(tasks), verified: statements.get(`item:${id}`) ?? [] });
@@ -144,11 +146,11 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
       const d = decided.get(r.id);
       const ids = d === undefined ? [] : [...new Set([...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)])];
       const tasks = ids.map((t) => {
-        const s = taskStateOf(t, events, inPlan.has(t), labels);
+        const s = taskStateOf(t, lines, inPlan.has(t), labels);
         // a reopened task counts as this repair's work once an attempt after the one it reopened is accepted
         const reopened = d?.reopen.find((x) => x.task === t);
         if (reopened === undefined || (s.state !== 'accepted' && s.state !== 'accepted with risk')) return s;
-        return lineAcceptance(events.filter((x) => x.line === `task:${t}`)).k > reopened.attempt ? s : { ...s, state: 'planned' as const, product: null, label: null };
+        return lineAcceptance(lines.get(`task:${t}`) ?? []).k > reopened.attempt ? s : { ...s, state: 'planned' as const, product: null, label: null };
       });
       const state = r.about?.kind === 'exploration' ? 'about an exploration' : together(tasks, delivered, landed);
       out.push({ kind: 'repair', id: r.id, type: r.kind, text: r.text, words: r.words, state, ...openOn(tasks), tasks, proof: proofOf(tasks), verified: statements.get(`repair:${r.id}`) ?? [] });
