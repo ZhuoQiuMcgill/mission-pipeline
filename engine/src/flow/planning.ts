@@ -99,7 +99,8 @@ import type { FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, currentConstraints, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
-import { itemIds, riskItemsOf } from './riskItems.ts';
+import { itemIds, recordOnAct, riskItemsOf } from './riskItems.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE } from './openItems.ts';
 import { currentSettle, settledArtifactProven } from './exploration/step.ts';
 import { planReviewsWaiver, waiverLabel, type PlanReviewsWaiver } from './waivers.ts';
 
@@ -1200,7 +1201,10 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const body: EffectiveBody = { dplan, pmPlan: b.plan, n: b.n, round: b.round, mode: b.mode, tasks: plan.tasks.map((t) => t.id), risks, ...(reviewsWaived !== null ? { reviewsWaived } : {}) };
     const carries = [close, ...(structureCarry === null ? [] : [structureCarry])];
     const guard = carryGuard([...carries, {id: `structure-input:${dplan}`, events: [], records: [], absent: [], latest: structureInput}]);
-    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...carries.flatMap((c) => c.events)], records: [...records, ...carries.flatMap((c) => c.records)], ...(guard !== undefined ? { guard } : {}) });
+    // v1-4: a risk sentence of an acceptance made before 4.4 that a task of this plan takes is recorded in this write
+    const named = plan.tasks.flatMap((t) => t.openItems ?? []);
+    const acted = named.length === 0 ? [] : recordOnAct(await ctx.ports.ledger.events({ mission: ctx.mission }), named).map((x) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.id, x));
+    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...carries.flatMap((c) => c.events), ...acted], records: [...records, ...carries.flatMap((c) => c.records)], ...(guard !== undefined ? { guard } : {}) });
     await cancelSecretarySteps(ctx, moot);
     // stable mode reads the waived plan as settled by the waiver (execution's gate): its tasks start on it,
     // and their products read "not fully proven" (the plan has no review to prove it)
@@ -1479,9 +1483,10 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const previousWaiver = revision && a.previous !== null ? await planReviewsWaiver(ctx, a.previous) : null;
   const nextWaiver = await planReviewsWaiver(ctx, dplan);
   const feasReport = revision ? await returnedFeasibility(ctx, a) : null;
-  // 4.4 (G5): the open items no task of the plan it revises takes, so a re-plan can give them to a task
+  // 4.4 (G5): the open items no task of the plan it revises takes, so a re-plan can give them to a task; v1-4: those
+  // recorded by 4.4 only (a risk sentence of an acceptance made before 4.4 is listed once someone acts on it)
   const taken = new Set((previous?.plan.tasks ?? []).flatMap((t) => t.openItems ?? []));
-  const left = riskItemsOf(await ctx.ports.ledger.events({ mission: ctx.mission })).filter((i) => i.closed === null && !taken.has(i.id));
+  const left = riskItemsOf(await ctx.ports.ledger.events({ mission: ctx.mission })).filter((i) => i.state === 'open' && !taken.has(i.id));
   const listed = left.slice(0, OPEN_ITEMS_LISTED).map((i) => ({ id: i.id, kind: i.kind, text: i.text.length > 200 ? `${i.text.slice(0, 199)}…` : i.text, from: `task ${i.task}, attempt ${i.attempt}` }));
   const card: ArchitectDecomposeCard = {
     ...cardBase(ctx, task, {

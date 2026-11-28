@@ -15,6 +15,7 @@ import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
 import { constraintsRead, constraintsText, repairsRead, repairsText } from '../workReads.ts';
 import { closureText, listAllItems, type RiskItemView } from '../../process/openItems.ts';
+import { beforeText, notRecordedByTask } from '../../flow/riskItems.ts';
 import { itemStateLines, readItems } from '../itemsRead.ts';
 import { age } from '../render.ts';
 import { reviewHealth, reviewRows, sharesLine } from '../../process/reviews.ts';
@@ -220,16 +221,23 @@ const repairsReadCmd: Command = {
 };
 
 // 4.4 (F4; G5): what is left open and what became of it, from the record: the questions put off, and what
-// was left at the cap (an acceptance with risk's items, a Reviewer's deferrals, the risk sentences of 4.3)
+// was left at the cap (an acceptance with risk's items, a Reviewer's deferrals, the risk sentences of 4.3).
+// v1-4: three things are counted apart (items recorded by 4.4 that are open; those answered or closed; the risk
+// sentences of acceptances made before 4.4 nobody acted on, whose fate is not recorded), and only the first is
+// called open. The 4.4 items are listed in full; the sentences before 4.4 as a count per task (`--all` lists them).
 const openItemsRead: Command = {
-  group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later (who answers each, its answer), and what was left at the cap (each risk an acceptance with risk took on, each deferred issue; kind verify: a standard that could not be verified, with what is needed, or one a person checks), with its age, how often it was carried, what took it and what became of it', usage: 'mp read open-items <mission> [--open]   (--open: only those still open)', flags: { open: 'boolean' },
+  group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later (who answers each, its answer), and what was left at the cap (each risk an acceptance with risk took on, each deferred issue; kind verify: a standard that could not be verified, with what is needed, or one a person checks), with its age, how often it was carried, what took it and what became of it; the risk sentences of acceptances made before 4.4 that nobody acted on are counted apart (what became of them is not recorded) and listed per task', usage: 'mp read open-items <mission> [--open | --all]   (--open: only what 4.4 records as open; --all: the risk sentences of acceptances made before 4.4 in full too)', flags: { open: 'boolean', all: 'boolean' },
   async run(c, a) {
     const m = positional(a, 0, 'mission');
     const p = P(c);
-    const all = listAllItems(p.ctx, m);
     const only = flagBool(a, 'open');
+    const full = flagBool(a, 'all');
+    if (only && full) throw usage('choose --open (only what 4.4 records as open) or --all (the risk sentences of acceptances made before 4.4 in full too)');
+    const all = listAllItems(p.ctx, m);
     const questions = only ? all.questions.filter((q) => q.answer === null) : all.questions;
-    const risks = only ? all.items.filter((i) => i.closed === null) : all.items;
+    const recorded = all.items.filter((i) => i.state !== 'not recorded');
+    const before = all.items.filter((i) => i.state === 'not recorded');
+    const risks = only ? recorded.filter((i) => i.state === 'open') : full ? all.items : recorded;
     const now = p.ctx.now();
     // 4.4 (G1): a question answered by the Architect's answer carried out on its escalation
     const who = (x: 'secretary' | 'pm' | 'user' | 'architect'): string => (x === 'pm' ? 'the PM' : x === 'user' ? 'the user' : x === 'architect' ? 'the Architect' : 'the Secretary');
@@ -238,19 +246,25 @@ const openItemsRead: Command = {
       ...questions.map((i) => ({ revision: i.revision, text: `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt}, ${i.why === 'later' ? 'raised as later' : 'put off by its answer'}): ${i.answer === null ? `open; ${who(i.decider)} answers it` : `answered by ${who(i.answer.by)}${i.answer.words !== undefined ? ` on ${i.answer.words}` : ''}`}\n  ${i.text}${i.answer !== null ? `\n  Answer: ${i.answer.answer}` : ''}${i.superseded !== undefined ? `\n  (the answer carried out on its escalation took precedence over ${who(i.superseded.by)}'s earlier answer: ${i.superseded.answer})` : ''}` })),
       ...risks.map((i) => ({ revision: i.revision, text: riskItemLine(i, old(i.at)) })),
     ].sort((x, y) => x.revision - y.revision).map((x) => x.text);
-    const open = questions.filter((i) => i.answer === null).length + risks.filter((i) => i.closed === null).length;
-    const total = questions.length + risks.length;
-    return ok(total === 0 ? `Mission ${m} has no open items.` : [`Open items of mission ${m}: ${open} open, ${total - open} answered or closed`, ...lines].join('\n'), {mission: m, items: [...questions, ...risks].sort((x, y) => x.revision - y.revision)});
+    // the header counts the mission's items whatever the flags: open (4.4), answered or closed (4.4), and apart the sentences before 4.4
+    const open = all.questions.filter((i) => i.answer === null).length + recorded.filter((i) => i.state === 'open').length;
+    const done = all.questions.length + recorded.length - open;
+    if (all.questions.length + all.items.length === 0) return ok(`Mission ${m} has no open items.`, { mission: m, items: [] });
+    const head = `Open items of mission ${m}: ${open} open, ${done} answered or closed${before.length > 0 ? `; ${beforeText(before.length)}` : ''}`;
+    const byTask = !only && !full ? notRecordedByTask(all.items) : [];
+    const grouped = byTask.length === 0 ? [] : [`Risk sentences of acceptances made before 4.4, per task (what became of them is not recorded; mp read open-items ${m} --all lists them):`, ...byTask.map((t) => `  task ${t.task}: ${t.count} risk sentence${t.count === 1 ? '' : 's'} accepted before 4.4`)];
+    return ok([head, ...lines, ...grouped].join('\n'), { mission: m, items: [...questions, ...risks].sort((x, y) => x.revision - y.revision), ...(byTask.length > 0 ? { notRecorded: byTask } : {}) });
   },
 };
 
 /** 4.4 (G5): one item left at the cap, from its record: where it was left, its state, and what took it. */
 function riskItemLine(i: RiskItemView, old: string): string {
   // 4.4 (F10): a standard a person checks is written when its task is accepted (one that could not be verified says in its text what is needed)
-  const left = i.why === 'deferred' ? `deferred by its Reviewer ${i.review ?? ''}`.trimEnd() : i.why === 'person' ? 'a standard a person checks, written when the task was accepted' : `accepted with risk on ${i.escalation}`;
+  // v1-4: a sentence of an acceptance made before 4.4 that someone acted on is recorded since, and says so
+  const left = i.why === 'deferred' ? `deferred by its Reviewer ${i.review ?? ''}`.trimEnd() : i.why === 'person' ? 'a standard a person checks, written when the task was accepted' : `accepted with risk on ${i.escalation}${i.before44 === true && i.state !== 'not recorded' ? ' before 4.4, recorded when it was acted on' : ''}`;
   // p10-5: a fix that did not reach the fix tracker is said so (the issue of a 4.3 finding could not be recovered)
   const tracker = i.trackerTold === false ? ' (the fix tracker was not told: the issue this item is about could not be found)' : '';
-  const state = i.closed !== null ? `closed, ${closureText(i.closed)}${tracker}` : !i.recorded ? 'not recorded as an item (an acceptance with risk made before 4.4): what became of it is not recorded' : 'open';
+  const state = i.closed !== null ? `closed, ${closureText(i.closed)}${tracker}` : i.state === 'not recorded' ? 'not recorded as an item (an acceptance with risk made before 4.4): what became of it is not recorded' : 'open';
   const took = i.takenBy.length > 0 ? `; taken by ${i.takenBy.map((t) => `task ${t.task} (${t.by})`).join(', ')}` : i.closed === null ? '; taken by no task' : '';
   const named = i.namedBy.length > 0 ? `; named by repair ${i.namedBy.join(', ')}` : '';
   const answer = i.answer !== null && i.closed?.how !== 'fixed' ? `\n  At the acceptance of task ${i.answer.task} (attempt ${i.answer.attempt}) its Reviewer answered it ${i.answer.response}: ${i.answer.reason}` : '';

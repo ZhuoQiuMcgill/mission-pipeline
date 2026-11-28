@@ -13,7 +13,7 @@ import type { ProcessContext } from '../process/context.ts';
 import { decisionLabels } from '../evaluator/index.ts';
 import { currentRiskEscalation, lineAcceptance } from '../flow/execution.ts';
 import { REQUIREMENTS_LINE } from '../flow/plandoc.ts';
-import { VERIFIED, VERIFIED_LINE, acceptanceOf, riskRecord, stillOpen, type RiskRecord, type VerifiedBody } from '../flow/riskItems.ts';
+import { VERIFIED, VERIFIED_LINE, acceptanceOf, riskCountText, riskRecord, stillOpen, type RiskRecord, type VerifiedBody } from '../flow/riskItems.ts';
 import { deliveryDocument } from '../delivery/delivery.ts';
 import { currentDelivery, type Db } from '../memory/index.ts';
 import { missionEvents, planInEffectOf } from '../process/openItems.ts';
@@ -42,7 +42,7 @@ export interface ItemStateView {
   readonly words: string | null;
   /** withdrawn: a requirement item withdrawn; "not work": an authorization or a decision; about an exploration: a repair of one. */
   readonly state: WorkState | 'withdrawn' | 'not work' | 'about an exploration';
-  /** Its acceptances with risk: the distinct items they created or carried that are still open, and the risk sentences of 4.3 acceptances (not recorded). */
+  /** Its acceptances with risk: the distinct items they created or carried that are open (recorded by 4.4), and apart the risk sentences of acceptances made before 4.4 nobody acted on (not recorded). */
   readonly open: number;
   readonly notRecorded: number;
   /** 4.4 (F10): of the open ones, those to verify (kind verify: a standard that could not be verified, or one a person checks). */
@@ -110,22 +110,22 @@ function landedOf(db: Db, mission: string, delivery: string): boolean {
 function openOn(record: RiskRecord, tasks: readonly TaskStateView[], lines: ReadonlyMap<string, readonly Ev[]>): { open: number; notRecorded: number; toVerify: number } {
   const byId = new Map(record.items.map((i) => [i.id, i]));
   const open = new Set<string>();
-  let notRecorded = 0;
+  const notRecorded = new Set<string>();
   for (const t of tasks) {
     if (t.state === 'accepted' || t.state === 'accepted with risk') {
       const k = lineAcceptance(lines.get(`task:${t.task}`) ?? []).k;
-      for (const i of record.items) if (i.why === 'person' && i.task === t.task && i.attempt === k && i.closed === null) open.add(i.id);
+      for (const i of record.items) if (i.why === 'person' && i.task === t.task && i.attempt === k && i.state === 'open') open.add(i.id);
     }
     if (t.state !== 'accepted with risk') continue;
     const esc = currentRiskEscalation(lines.get(`task:${t.task}`) ?? []);
     const a = esc === null ? undefined : acceptanceOf(record, t.task, esc);
     if (a === undefined) continue;
+    // p10-r2-1, v1-4: one classification with every read: open (recorded by 4.4), and apart the sentences before 4.4 nobody acted on
     const s = stillOpen(a, byId);
-    // p10-r2-1: only the 4.3 sentences no closure resolved are of unknown fate
-    if (s.legacy) notRecorded += s.open.length;
-    else for (const id of s.open) open.add(id);
+    for (const id of s.open) open.add(id);
+    for (const id of s.notRecorded) notRecorded.add(id);
   }
-  return { open: open.size, notRecorded, toVerify: [...open].filter((id) => byId.get(id)?.kind === 'verify').length };
+  return { open: open.size, notRecorded: notRecorded.size, toVerify: [...open].filter((id) => byId.get(id)?.kind === 'verify').length };
 }
 
 /** `mp read items <mission>`: one line per requirement item and one per repair, with its state (one snapshot). */
@@ -202,7 +202,7 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
 export function itemStateLines(v: ItemStateView): string[] {
   // 4.4 (F10): an accepted item with a standard a person checks still open says so too
   const risk = v.state === 'accepted with risk' || v.tasks.some((t) => t.state === 'accepted with risk') || v.open > 0
-    ? ` (${v.open} open${v.toVerify > 0 ? `, ${v.toVerify} of them to verify` : ''}${v.notRecorded > 0 ? `, ${v.notRecorded} risk sentence(s) of acceptances made before 4.4: what became of them is not recorded` : ''})`
+    ? ` (${riskCountText(v.open, v.notRecorded, v.toVerify)})`
     : '';
   const head = v.kind === 'requirement' ? `[${v.id}] ${v.type}${v.words !== null ? `, ${v.words}` : ''}` : `[${v.id}] repair (${v.type}), the user's words ${v.words}`;
   const tasks = v.tasks.length === 0 ? '' : `; tasks: ${v.tasks.map((t) => `${t.task} ${t.detail !== undefined ? `(${t.detail})` : t.state}`).join(', ')}`;
