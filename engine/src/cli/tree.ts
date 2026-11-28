@@ -44,6 +44,7 @@ import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
 import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
+import { acceptanceSummary, riskRecord, withRiskText, type RiskRecord } from '../flow/riskItems.ts';
 import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverBy, waiverEnds, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { pmNotes } from '../process/secretary.ts';
@@ -223,6 +224,11 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       flows.push({ mission: r.mission, line: r.line, event: r.event, key: r.key, body: parse(r.body) ?? {}, rev: Number(r.revision) });
     }
 
+    // 4.4 (G5): what became of the risks an acceptance with risk took on (its open items), per mission
+    // (p10-4): the items the acceptance created or carried, by the one function status and mp read items use
+    const riskRecords = new Map<string, RiskRecord>();
+    const riskOf = (m: string): RiskRecord => riskRecords.get(m) ?? (riskRecords.set(m, riskRecord(flows.filter((f) => f.mission === m).map((f) => ({ revision: f.rev, line: f.line, event: f.event, key: f.key, body: f.body })))), riskRecords.get(m)!);
+    const riskLine = (f: FlowRow): string => `${withRiskText(riskOf(f.mission), acceptanceSummary(riskOf(f.mission), f.line, f.event, f.key))} (mp read open-items ${f.mission})`;
     const decisionHistory = new Map<string, string[]>();
     const decisionRev = new Map<string, number>();
     const byKey = new Map<string, FlowRow>();
@@ -508,7 +514,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           if (n !== undefined) {
             const dec = (b['decision'] ?? null) as Json | null;
             // 4.1.3 (E-1): accepted by a decision with its risks: whose decision, and the open findings it took on
-            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : dec['by'] === 'pm' ? 'the PM' : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${((b['risks'] ?? []) as unknown[]).length} open finding(s) on the risk list`);
+            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : dec['by'] === 'pm' ? 'the PM' : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${riskLine(f)}`);
             else addCheck(n, `accepted (${String(b['judgment'] ?? '')})`);
             // the acceptance names its judgment; the judgment names its Reviewer dispatch and the runs it cites
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
@@ -521,7 +527,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'rebound' && typeof b['product'] === 'string') {
           const n = nodes.get(objKey(b['product']));
           if (n !== undefined) {
-            addCheck(n, `accepted (${String(b['judgment'] ?? '')}${b['how'] === 'carried' ? ', the judgment carried over' : ''})`);
+            const dec = (b['decision'] ?? null) as Json | null;
+            // 4.4 (G5): a re-bound version accepted with its risk (#57) says so, as an acceptance with risk does
+            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? 'the user' : dec['by'] === 'pm' ? 'the PM' : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${riskLine(f)}`);
+            else addCheck(n, `accepted (${String(b['judgment'] ?? '')}${b['how'] === 'carried' ? ', the judgment carried over' : ''})`);
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
           }
         }

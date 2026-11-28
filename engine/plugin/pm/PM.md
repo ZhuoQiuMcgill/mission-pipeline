@@ -111,6 +111,10 @@ For the no-words default, use `--by pm --no-words --reason "..."` instead.
 For the user's own answer: `mp pm answer <mission> <escalation> --option <option> --by user --words W-<n>`.
 Choose only an offered option; add instructions or extra rounds as the card requires.
 An answer to a Constructor's questions may put some off (`--defer <n,…>`): each stays an open item, listed by `mp read open-items <mission>` and on the task's cards; `mp pm open-item answer <[mission/]item> --answer "…" [--words W-n]` answers one at any time, and the answer reaches the task's next cards.
+An acceptance with risk leaves one open item per risk it took on; `mp read open-items <mission> [--open]` lists them with their age, how often they were carried and what took them. Nobody assigns one and nothing waits for one.
+Something to verify is an item of kind `verify`: a standard the Reviewer could not verify, accepted with what would be needed, and a standard a person checks, written when its task is accepted; `mp read items` counts them with the others.
+An item is taken when a re-plan or a repair gives it to a task (`mp pm repair … --open-items <ids>` names the ones a repair is for); that task's Reviewer answers it, and it closes when the task is accepted with it fixed.
+On the user's words: `mp pm open-item close <item> --words W-n --reason "…"` closes one; `mp pm verified <mission> <item|R-n> --words W-n [--open-items <ids>]` records that the user checked it in the field and it holds (their statement, never proof) and closes the items it names; where an item and a repair share an id, name `item:<id>` or `repair:<id>`.
 `mp pm inbox --asked-user <item>` marks your question pending, with no words; record the user's answer on the spot and answer with its words.
 
 A revised detailed plan with a changed task set (added, dropped, split or merged), declared interfaces, data formats or storage raises `plan-structure-change` with a structural diff.
@@ -226,7 +230,7 @@ It delivers accepted products of the effective plan and repairs, lands and close
 It fast-forwards from the recorded base and never merges.
 A landing failure leaves the mission open with its delivery; send the exception to the Secretary and retry on the same consent once resolved.
 A moved base is rebuilt once by default; running the same finish again lands the rebuild and closes.
-Closing records labels, unproven and unfinished work, open and deferred issues, start risks, older-environment evidence, repairs and full-run status; it never refuses on the state of the work.
+Closing records labels, unproven and unfinished work, open and deferred issues, start risks, older-environment evidence, repairs, every open item and full-run status; it never refuses on the state of the work.
 Tell the user what matters to their direction.
 Separate steps remain: `mp pm deliver`, `mp pm land`, `mp pm close`, on the same consent.
 
@@ -253,6 +257,7 @@ Every stop has an exit their words can take: accept, change, run again or drop.
 
 "How is it going?": `mp read status`, one query: layer 0 and only subtasks changed since the last ask; no changes means layer 0 only.
 "Why is it not done?": `mp read blocked`, with reasons and next steps; a held step names its hold (`mp read holds`).
+"How far is each thing I asked for?": `mp read items <mission>`, one line per requirement item and per repair with its state; "accepted with risk (n open)" is told apart from "accepted", and a statement of the user's (`mp pm verified`) is shown as theirs, not as proof.
 What takes the disk: `mp read scratch`; config `limits: { worktrees, freeBytes }` holds new Constructor steps while one is passed (none by default; claims at the same moment can exceed a limit by a few).
 "The details of X": `mp read show <kind> <id>`, only X; evidence: `mp read leaf <id>`.
 "Why was this done?": `mp read why <id>`; what rests on it: `mp read from <id>`; one dispatch: `mp read chain <dispatch>`; a mission: `mp read tree <mission>`.

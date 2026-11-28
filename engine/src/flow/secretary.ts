@@ -637,7 +637,10 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
     const neg = await judgmentRecordOf(ctx, esc.position.revokes);
     const jid = rulingJudgmentId(esc.id, by);
     if (neg !== null && (await judgmentRecordOf(ctx, jid)) === null) {
-      records.push(deciderJudgment({ escalation: esc.id, by, target: esc.position.target, review: esc.position.review, inputs: neg, revokes: neg.judgment }));
+      // 4.4 (G5): a task's acceptance with risk keeps the Reviewer's answers on the accepted product, so the fix
+      // tracker reads them (4.3 carried an empty list: every issue read "not fixed")
+      const keep = what['option'] === 'accept-risk' && esc.subject.startsWith('task:');
+      records.push(deciderJudgment({ escalation: esc.id, by, target: esc.position.target, review: esc.position.review, inputs: neg, revokes: neg.judgment, ...(keep ? { issues: neg.issues } : {}) }));
       ruling = jid;
     }
   }
@@ -765,7 +768,7 @@ export function rulingJudgmentId(escalation: string, by: Decider, suffix?: strin
  * negation it overrules (carryOut), or the position's latest judgment it stands beside (an exploration's
  * plain "accept", exploration/step.ts). `revokes`: the negation it revokes, or null.
  */
-export function deciderJudgment(o: { readonly escalation: string; readonly by: Decider; readonly suffix?: string; readonly target: string; readonly review: string; readonly inputs: JudgmentRecord; readonly revokes: string | null }): JudgmentRecord {
+export function deciderJudgment(o: { readonly escalation: string; readonly by: Decider; readonly suffix?: string; readonly target: string; readonly review: string; readonly inputs: JudgmentRecord; readonly revokes: string | null; readonly issues?: JudgmentRecord['issues'] }): JudgmentRecord {
   const b = o.inputs;
   const rec: JudgmentRecord = {
     kind: 'judgment',
@@ -778,7 +781,7 @@ export function deciderJudgment(o: { readonly escalation: string; readonly by: D
     bases: b.bases,
     constraints: b.constraints,
     reliesOn: b.reliesOn,
-    issues: [],
+    issues: o.issues === undefined ? [] : o.issues.map((i) => ({ ...i })),
     revokes: o.revokes as JudgmentId | null,
     evidenceUse: { fields: [...b.evidenceUse.fields], statisticalOrExternal: b.evidenceUse.statisticalOrExternal },
     superseded: [],

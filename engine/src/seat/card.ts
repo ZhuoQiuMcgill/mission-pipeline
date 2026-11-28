@@ -31,9 +31,18 @@ const Question = z.object({
   by: z.string().optional(),
 });
 
+/**
+ * 4.4 (G5): an open item the task took (its card names it: an Architect's re-plan or repair), left at an
+ * earlier acceptance with risk or deferred: where it was left and its text. Absent on a card: none (or a
+ * card queued before 4.4 and not claimed).
+ */
+const TakenItem = z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string(), from: z.string(), issue: z.string().optional() });
+
 export const ConstructorCardSchema = z.object({
   ...commonCardFields,
   seat: z.literal('constructor'),
+  /** 4.4 (G5): the open items this task took: fix them too; the Reviewer answers each. */
+  openItems: z.array(TakenItem).optional(),
   /**
    * snapshot: the base commit its worktree is created at, and its candidate is taken against;
    * writablePaths: the write paths (§5.3). 4.4 (F4): `start`, a continuation after a pause: the parked
@@ -143,6 +152,8 @@ export const ReviewerCardSchema = z.object({
   materials: z.array(Material).optional(),
   /** 4.4 (F4): the Constructor's questions of the attempt under review and those left open on the task, with their answers. */
   questions: z.array(Question).optional(),
+  /** 4.4 (G5): the open items this task took: answer each (item_responses). */
+  openItems: z.array(TakenItem).optional(),
   /**
    * 4.4 (G9, E-4): the requirement items the judgment is bound to (its binding's item versions), with their text; `was`, the
    * text the task's previous judgment was bound to, when the item changed since. Absent: none, or a card queued before 4.4.
@@ -199,6 +210,7 @@ export function renderCard(c: SeatCard): string {
       list('Interfaces to call', c.interfaces.calls.map((i) => `${i.name}: ${i.definition}`)) +
       renderPlanData(c) +
       list('Exclusive resources leased to you', c.exclusive ?? []) +
+      list('Open items this task took (left open earlier: fix each; your Reviewer answers it)', (c.openItems ?? []).map(takenLine)) +
       renderQuestions(c.questions ?? []) +
       renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
     );
@@ -220,6 +232,7 @@ export function renderCard(c: SeatCard): string {
     list('Scratch paths (a rerun may write here; nothing written is kept)', c.workspace.scratchPaths ?? []) +
     list("The Constructor's self-reported gaps (answer every one)", c.selfReportedGaps.map((g) => `[${g.id}] ${g.text}`)) +
     list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`)) +
+    list('Open items this task took (answer every one in item_responses: fixed, not-fixed or unclear)', (c.openItems ?? []).map(takenLine)) +
     renderQuestions(c.questions ?? []) +
     renderPreviousReview(c) +
     renderIntegration(c) +
@@ -228,6 +241,9 @@ export function renderCard(c: SeatCard): string {
 }
 
 const WHO: Readonly<Record<string, string>> = { secretary: 'the Secretary', pm: 'the PM', user: 'the user' };
+
+/** 4.4 (G5): one open item the task took. */
+const takenLine = (i: z.infer<typeof TakenItem>): string => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`;
 
 /** 4.4 (F4): the Constructor's questions on the task, each with its state and answer. */
 function renderQuestions(qs: ReadonlyArray<z.infer<typeof Question>>): string {

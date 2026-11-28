@@ -36,6 +36,7 @@ import { answerText } from './openItems.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, missionClosed, nextBasisVersion, notify, objectRecord, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
+import { itemIds, riskItemsOf, takenItems } from './riskItems.ts';
 import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REPAIR_ENDED, REPAIR_KINDS, REQUIREMENTS_LINE, amendedPlan, amendedTaskIds, cardChangedBy, explorationLine, repairOfTask, repairRef, taskCardHash, taskLine, type AmendmentEntry, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairEndedBody, type RepairKind, type RepairRef } from './plandoc.ts';
 import { detailedPlanOf, explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { acceptedProduct, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
@@ -173,6 +174,8 @@ export async function recordRepair(
     readonly again?: boolean;
     /** 4.4 (F13, p7-8): with `again`, the PM operation filing it: recorded with the repair, so its retry returns that repair. */
     readonly op?: string;
+    /** 4.4 (G4, G5): `--open-items`: the open items left at the cap this repair is for (absent or empty: none, as 4.3). */
+    readonly openItems?: readonly string[];
     /** 4.4 (G9): `--item`: the requirement item (id) the repair falls short of; its work is bound to it. */
     readonly item?: string;
   },
@@ -186,7 +189,9 @@ export async function recordRepair(
     const line = itemLine(req.mission, req.item);
     if (!(await currentItems(ctx)).some((i) => i.line === line)) throw new Error(`mission ${req.mission} has no requirement item ${req.item} in force: --item names the item the repair falls short of (mp read items lists them). Nothing was filed`);
   }
-  const items = req.item !== undefined ? [req.item] : undefined;
+  const named = req.item !== undefined ? [req.item] : undefined;
+  const items = [...new Set(req.openItems ?? [])].sort();
+  if (items.length > 0 && req.about?.kind === 'exploration') throw new Error('--open-items goes with a repair of the plan in effect: an exploration has no task to take an open item');
   const existing = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
   const pie = await planInEffect(ctx);
   // 4.4 (F13, p7-8): the operation filed it already (a retry after its receipt was lost): that repair, whatever became of it since
@@ -203,8 +208,8 @@ export async function recordRepair(
   let same: string | undefined;
   for (const e of existing) {
     const r = e.body;
-    // 4.4 (G9): a new requirement's filing is never the same repair; the item a repair names is part of it (none: as 4.3)
-    if (r.words !== req.words || r.kind !== req.kind || r.text !== req.text || canonicalJson(r.about) !== canonicalJson(req.about) || r.entry !== undefined || canonicalJson(r.items ?? null) !== canonicalJson(items ?? null)) continue;
+    // 4.4 (G5): the open items it is for are part of what it is (none named on either: as 4.3); G9: a new requirement's filing is never the same repair, and the item a repair names is part of it
+    if (r.words !== req.words || r.kind !== req.kind || r.text !== req.text || canonicalJson(r.about) !== canonicalJson(req.about) || canonicalJson(r.openItems ?? []) !== canonicalJson(items) || r.entry !== undefined || canonicalJson(r.items ?? null) !== canonicalJson(named ?? null)) continue;
     if (mine !== undefined) {
       if (e.key !== mine.key && e.revision < mine.revision) same = r.id;
       continue;
@@ -225,8 +230,10 @@ export async function recordRepair(
   }
   const again = same !== undefined && req.again === true ? { over: same } : {};
   if (mine !== undefined) return { id: mine.key, repeated: false, ...again };
+  // checked only when filed anew (a repeated filing returns what was filed, whatever became of its items since)
+  if (items.length > 0) await openItemsProblem(ctx, items);
   const id = `R-${existing.length + 1}`;
-  const body: RepairBody = { id, words: req.words, kind: req.kind, text: req.text, about: req.about, ...(op !== undefined ? { op } : {}), ...(items !== undefined ? { items } : {}) };
+  const body: RepairBody = { id, words: req.words, kind: req.kind, text: req.text, about: req.about, ...(op !== undefined ? { op } : {}), ...(items.length > 0 ? { openItems: items } : {}), ...(named !== undefined ? { items: named } : {}) };
   const event = ev(ctx, REPAIRS_LINE, 'repair', id, body);
   if (req.about?.kind === 'exploration') {
     const x = req.about.id;
@@ -301,6 +308,20 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
     guard: { absent: [{ mission: req.mission, line: PLAN_LINE, event: 'pm-batch', key: `b${term + 1}` }], code: 'STALE_REQUEST', message: `a PM plan version was submitted while the new requirement was being recorded: nothing was recorded; run the command again` },
   });
   return { id, repeated: false, term, versions: recs.versions };
+}
+
+/**
+ * 4.4 (G4, G5): the open items a repair names must be items left at the cap in its mission, still open, and the
+ * repair must be about the plan in effect (an exploration has no task to take one). A new option: refused with the
+ * reason, never a refusal of a repair filed without it.
+ */
+async function openItemsProblem(ctx: FlowCtx, ids: readonly string[]): Promise<void> {
+  const known = new Map(riskItemsOf(await ctx.ports.ledger.events({ mission: ctx.mission })).map((i) => [i.id, i]));
+  for (const id of ids) {
+    const i = known.get(id);
+    if (i === undefined) throw new Error(`${id} is not an item left at the cap in mission ${ctx.mission} (mp read open-items ${ctx.mission} lists them; a question is answered, not repaired)`);
+    if (i.closed !== null) throw new Error(`open item ${id} is closed already: a repair is for what is still open`);
+  }
 }
 
 // ---------------------------------------------------------------- the repair step
@@ -415,7 +436,16 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
       amendment: { added: new Set(added.map((t) => t.id)), ...(before.size > 0 ? { changed: before } : {}) },
       // the tasks earlier repairs added stay outside the integration rule (S3)
       amended: amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)),
+      // 4.4 (G5): the open items an added or changed task may take (read only when one names one)
+      ...([...added, ...change].some((t) => (t.openItems ?? []).length > 0) ? { openItems: itemIds(await ctx.ports.ledger.events({ mission: ctx.mission })) } : {}),
     });
+    // 4.4 (G5): a reopened task takes only open items of the mission too
+    const reopenNames = result.reopen.flatMap((x) => (x.open_items ?? []).map((id) => ({ task: x.task, id })));
+    if (reopenNames.length > 0) {
+      const known = itemIds(await ctx.ports.ledger.events({ mission: ctx.mission }));
+      const bad = reopenNames.filter((x) => !known.has(x.id)).map((x) => `open items: the reopen of task ${x.task} takes "${x.id}", which is not an open item of the mission`);
+      if (bad.length > 0) mc = { ...mc, ok: false, failures: [...mc.failures, ...bad] };
+    }
     await commit(ctx, `flow:repair-mechanical:${ctx.mission}:${mcKey}`, { events: [ev(ctx, REPAIRS_LINE, 'mechanical-check', mcKey, mc)] });
   }
   if (!mc.ok) return repairReturn(ctx, r, a, task, mc.failures);
@@ -597,7 +627,9 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     const sel = lineAcceptance(events);
     // 4.4 (F12 b): the tasks of this repair the reopen comes after (absent when none: the 4.3 shape)
     const after = [...new Set(x.after ?? [])];
-    const extra = { ...(after.length > 0 ? { after } : {}), ...reopenItems(x) };
+    // 4.4 (G5): the open items the reopened task takes (absent when none)
+    const items = [...new Set(x.open_items ?? [])];
+    const extra = { ...(after.length > 0 ? { after } : {}), ...(items.length > 0 ? { openItems: items } : {}), ...reopenItems(x) };
     if (sel.product !== null && (await acceptedProduct(ctx, x.task)) !== null) {
       reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product, ...extra });
       continue;
@@ -661,8 +693,8 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   // is, and its waits could close a circle with these), and (p7-r3-1) each task recorded as not carried out still has
   // the card it was read under (a new card revives a task given up). Any one changed: read again on the next pass
   // 4.4 (G9, P-3): and, for a filing with items, no item was withdrawn since they were read (the user may have taken it back)
-  const items = filing.length > 0 ? [{ mission: ctx.mission, line: REQUIREMENTS_LINE, event: 'withdrawn', revision: read.withdrawn }] : [];
-  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records, guard: { latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.effective }, { mission: ctx.mission, line: REPAIRS_LINE, event: 'decided', revision: read.decided }, ...specsRead, ...items], absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: REPAIR_ENDED, key: r.id }], code: 'STALE_REQUEST', message: `the plan in effect, the repairs decided, or the card of a task it reopens changed while repair ${r.id}'s decision was being recorded${filing.length > 0 ? ' (or an item of it was withdrawn, or it ended)' : ''}; nothing was written (the next pass reads it again)` } });
+  const itemsRead = filing.length > 0 ? [{ mission: ctx.mission, line: REQUIREMENTS_LINE, event: 'withdrawn', revision: read.withdrawn }] : [];
+  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records, guard: { latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.effective }, { mission: ctx.mission, line: REPAIRS_LINE, event: 'decided', revision: read.decided }, ...specsRead, ...itemsRead], absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: REPAIR_ENDED, key: r.id }], code: 'STALE_REQUEST', message: `the plan in effect, the repairs decided, or the card of a task it reopens changed while repair ${r.id}'s decision was being recorded${filing.length > 0 ? ' (or an item of it was withdrawn, or it ended)' : ''}; nothing was written (the next pass reads it again)` } });
   await tellOnce(ctx, REPAIRS_LINE, {
     category: 'repair-decided',
     wi: null,
@@ -704,6 +736,8 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
   const addressed = addressedForPlanning(constraints, ctx.mission, { repair: r.id, ...(r.about?.kind === 'task' ? { about: r.about.id } : {}) });
   // 4.4 (G4): the questions this repair's Architect asked, and the answers that came back
   const answers = (await attemptsOf(ctx, r.id)).flatMap((x) => (x.answered !== undefined ? [{ question: x.answered.question, answer: x.answered.answer, by: x.answered.by }] : []));
+  // 4.4 (G4, G5): the open items the repair is for, still open, for the Architect to give to tasks
+  const openItems = (r.openItems ?? []).length === 0 ? [] : takenItems(await ctx.ports.ledger.events({ mission: ctx.mission }), r.openItems);
   // 4.4 (G9): the filing's items and, by reference, the limits and acceptance items the user set for the mission
   const itemsBlock = repairItemsBlock(ctx.mission, r, await currentItems(ctx), (await eventsOf<ItemVersionBody>(ctx, REQUIREMENTS_LINE, 'item')).map((e) => e.body));
   const card: ArchitectRepairCard = {
@@ -730,6 +764,7 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
     revision: a.mechanicalFailures.length > 0 ? { mechanicalFailures: [...a.mechanicalFailures] } : null,
     projectCommands: projectCommandsOf(ctx),
     materials: [repairPlanMaterial((d) => ctx.ports.ledger.content.put(d), eff.dplan, plan)],
+    ...(openItems.length > 0 ? { openItems } : {}),
   };
   await ctx.ports.scheduler.submit({
     task,

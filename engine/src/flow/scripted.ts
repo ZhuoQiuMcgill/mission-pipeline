@@ -112,6 +112,8 @@ export function reviewer(c: ReviewerCard, verdict: ReviewerResult['verdict'], o:
     gap_responses: c.selfReportedGaps.map((g) => ({ gap: g.id, response: 'noted' })),
     issue_responses: c.openIssues.map((i) => ({ issue: i.issue, response: verdict === 'pass' ? 'fixed' : 'not-fixed', reason: 'checked' })),
     findings: o.findings ?? [],
+    // 4.4 (G5): the open items the task took
+    ...((c.openItems ?? []).length > 0 ? { item_responses: c.openItems!.map((i) => ({ item: i.id, response: verdict === 'pass' ? 'fixed' as const : 'not-fixed' as const, reason: 'checked' })) } : {}),
     verdict,
   };
 }

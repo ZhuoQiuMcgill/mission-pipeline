@@ -11,6 +11,7 @@ import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
 import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
+import { cardItemNames, riskItemsOf, type RiskItem } from '../../flow/riskItems.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -408,6 +409,13 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
   const batches = events.filter((b) => b.line === 'plan' && b.event === 'pm-batch');
   const taskLine = task === undefined ? [] : events.filter((x) => x.line === `task:${task.id}`);
   const openItems = task === undefined ? [] : openItemsOf(events).filter((i) => i.task === task.id);
+  // 4.4 (G5): what was left at earlier caps on this task, or that it took, still open (its own block; one line each)
+  // (p10-8): what the escalated attempt takes is resolved as its Constructor's and Reviewer's cards resolve it (its
+  // card's, and a repair's reopen of this work), beside what originates on the task
+  const attempt = (e.facts as { attempt?: unknown } | undefined)?.attempt;
+  const current = 1 + taskLine.filter((x) => x.event === 'rework').length;
+  const taking = task === undefined ? [] : cardItemNames(events, task, typeof attempt === 'number' ? attempt : current);
+  const left = task === undefined ? [] : riskItemsOf(events).filter((i) => i.closed === null && (i.task === task.id || taking.includes(i.id)));
   return {
     // 4.1.2 (item 7): the earlier decisions on the same line, so a ruling is not made again blind
     earlierDecisions: earlierDecisionsOf(e, events),
@@ -425,7 +433,7 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('alignment', 'Alignment record (PM batches)', batches.map((b) => `${b.key}: user messages ${(b.body as { userWords: string[] }).userWords.join(', ') || 'none'}`).join('\n') || '(none)', 'record'),
       // 4.4 (F16, P5): a digest that can be read, in place of every event of the task line in full; the
       // constraints are on the card already and are not repeated here
-      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, openItems), 'record'),
+      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, openItems, left), 'record'),
       // 4.4 (F4, review r2): the task's open items in full, with their answers, when it has any
       ...(task === undefined ? [] : [material('task-line', `Task ${task.id}: its card and every event of its line, in full (not must-read)`, canonicalJson({ task, events: taskLine.map((x) => ({ event: x.event, key: x.key, body: x.body })), ...(openItems.length > 0 ? { openItems: openItems.map((i) => ({ id: i.id, attempt: i.attempt, when: i.when, question: i.text, answer: i.answer })) } : {}) }), 'record', false)]),
     ],
@@ -448,7 +456,7 @@ function cut(text: string, n: number): string {
  * 4.4 (F16): the Secretary's current facts as a digest: the escalation, the selected items by id and one
  * line, the authorizations, the task's goal and standards, one line per event of the task line.
  */
-function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[], open: readonly OpenItem[] = []): string {
+function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[], open: readonly OpenItem[] = [], left: readonly RiskItem[] = []): string {
   const section = (title: string, lines: readonly string[]): string => `${title}:\n${lines.length === 0 ? '(none)' : lines.map((l) => `- ${l}`).join('\n')}`;
   return [
     `Escalation ${e.id} (${e.source}) on ${e.subject}: ${line(e.summary, 300)} (its reasons and facts in full: material request)`,
@@ -459,6 +467,8 @@ function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths
       section('Its standards', task.standards.map((s) => `[${s.id}] ${line(s.text, 300)}`)),
       // 4.4 (F4; G5): a Constructor's question left open is listed on every card of its task, and its answer on the next ones
       ...(open.length > 0 ? [section('Its open items (questions left open, and their answers)', open.map((i) => `[${i.id}] attempt ${i.attempt}, ${i.when}: ${cut(i.text, 160)}${i.answer === null ? ': open' : `: answered by ${i.answer.by === 'pm' ? 'the PM' : i.answer.by === 'user' ? 'the user' : 'the Secretary'}: ${cut(i.answer.answer, 300)}`}`))] : []),
+      // 4.4 (G5): an acceptance with risk leaves these open; a question of design among them is the Architect's or a re-plan's, not an acceptance's
+      ...(left.length > 0 ? [section('What is left open on this task (items of earlier acceptances with risk, deferrals, items it took)', left.map((i) => `[${i.id}] ${i.kind}, attempt ${i.attempt}${i.task !== task.id ? ` of task ${i.task}, taken by this task` : ''}${i.carried > 0 ? `, carried ${i.carried}` : ''}${!i.recorded ? ', what became of it is not recorded' : ''}: ${line(i.text, 200)}`))] : []),
       section(`Its line, one event each (in full: material task-line)`, taskLine.map((x) => `${x.event} ${x.key}: ${line(canonicalJson(x.body), 120)}`)),
     ]),
   ].join('\n\n');

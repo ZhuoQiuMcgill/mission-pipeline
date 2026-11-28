@@ -90,6 +90,11 @@ export const ReviewerResultShape = {
     response: z.enum(['followed', 'not-followed', 'unclear']),
     reason: z.string().describe('Why, in a sentence.'),
   })).optional().describe('4.4: one answer per instruction under "Instructions for this task" (leave it out when the card lists none). It is recorded and shown; it never changes the verdict: what must hold for a pass is a standard.'),
+  // 4.4 (G5): the open items the task took, each answered; one not fixed goes back with the review's issues
+  item_responses: z
+    .array(z.object({ item: z.string().min(1), response: z.enum(['fixed', 'not-fixed', 'unclear']), reason: z.string() }))
+    .optional()
+    .describe('4.4: one answer per open item listed on the card as taken by this task (fixed, not-fixed or unclear, with the reason). Omit when the card lists none.'),
   verdict: z.enum(['pass', 'rework', 'needs-decision']).describe('pass: every standard you judge is met. A review whose only open standards are cannot-verify (and nothing else open) goes to a decider, not back to the Constructor: hand it back as needs-decision.'),
   reopen: z
     .array(z.object({ task: z.string().min(1).describe('A dependency listed on your card.'), issue: z.string().min(1).describe('What is wrong in its work.'), evidence: z.string().optional().describe('The run or file that shows it.') }))
@@ -291,6 +296,15 @@ function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultCont
     if (i.response === 'deferred' && (!i.owner?.trim() || !i.reason.trim())) out.push(`issue_responses: deferred issue "${i.issue}" needs an owner and a reason`);
   }
   if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes' && !byPerson.has(j.standard))) out.push(r.judgments.every((j) => j.met === 'yes' || j.met === 'cannot-verify' || byPerson.has(j.standard)) ? 'verdict: "pass" leaves a standard that cannot be verified: hand back "needs-decision"; a decider settles it' : 'verdict: "pass" leaves a standard not met or unclear');
+  // 4.4 (G5): every open item on the card is answered once (a card without the list asks for none)
+  const items = (card.openItems ?? []).map((i) => i.id);
+  const itemAnswers = (r.item_responses ?? []).map((i) => i.item);
+  for (const i of items) if (!itemAnswers.includes(i)) out.push(`item_responses: open item "${i}" has no answer (fixed, not-fixed or unclear)`);
+  for (const i of new Set(itemAnswers)) {
+    if (!items.includes(i)) out.push(`item_responses: "${i}" is not an open item on the card`);
+    else if (itemAnswers.filter((x) => x === i).length > 1) out.push(`item_responses: open item "${i}" is answered more than once`);
+  }
+  for (const i of r.item_responses ?? []) if (i.response !== 'fixed' && i.reason.trim() === '') out.push(`item_responses: give the reason open item "${i.item}" is ${i.response}`);
   out.push(...reopenProblems(card, r));
   // 4.4 (G3): every instruction addressed to this work is answered (followed or not, it blocks nothing)
   const addressed = (card.addressed ?? []).map((a) => a.id);
@@ -348,11 +362,14 @@ export function judgmentRecord(card: ReviewerCard, r: ReviewerResult, evidenceLi
     bases: card.binding.bases as ListRef,
     constraints: card.binding.constraints as ListRef,
     reliesOn: card.binding.reliesOn as ListRef,
-    issues: r.issue_responses.map((i): IssueResponse => ({
-      issue: i.issue as IssueId,
-      response: i.response,
-      ...(i.response === 'deferred' ? { owner: i.owner!, reason: sha256(deferredReasonDocument(i)) as ContentHash } : {}),
-    })),
+    issues: [
+      ...r.issue_responses.map((i): IssueResponse => ({
+        issue: i.issue as IssueId,
+        response: i.response,
+        ...(i.response === 'deferred' ? { owner: i.owner!, reason: sha256(deferredReasonDocument(i)) as ContentHash } : {}),
+      })),
+      ...takenFixes(card, r),
+    ],
     revokes: card.binding.revokes as JudgmentId | null,
     evidenceUse: card.binding.evidenceUse,
     superseded: card.binding.superseded,
@@ -360,6 +377,23 @@ export function judgmentRecord(card: ReviewerCard, r: ReviewerResult, evidenceLi
   };
   validateRecord(rec);
   return rec;
+}
+
+/**
+ * 4.4 (G5, p10-5): an open item the task took that names an issue, answered fixed: the Reviewer's answer to that
+ * issue too, so the fix tracker reads it on the accepted product (and a ruling over other risks keeps it). An
+ * explicit response to the same issue stands; each issue is answered once.
+ */
+function takenFixes(card: ReviewerCard, r: ReviewerResult): IssueResponse[] {
+  const answered = new Set(r.issue_responses.map((i) => i.issue));
+  const out: IssueResponse[] = [];
+  for (const a of r.item_responses ?? []) {
+    const issue = (card.openItems ?? []).find((i) => i.id === a.item)?.issue;
+    if (a.response !== 'fixed' || issue === undefined || answered.has(issue)) continue;
+    answered.add(issue);
+    out.push({ issue: issue as IssueId, response: 'fixed' });
+  }
+  return out;
 }
 
 /** The reason is content-addressed in the judgment and saved with the hand-back's findings. */

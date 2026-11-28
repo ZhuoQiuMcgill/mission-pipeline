@@ -18,6 +18,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - On an integration task: its dependencies with the paths their accepted products changed, and whether a Constructor ran (with nothing to write, none runs: the candidate is the dependencies' work laid together).
 - The project constraints (an instruction is labelled "Instruction (follow it; not a proof input)": follow it) and relevant decisions; materials, read page by page.
 - "Instructions for this task": instructions addressed to this task or to a repair it answers; the Architect's notes on this work; earlier decisions on this task.
+- "Open items this task took": what an earlier acceptance with risk (or a deferral) left open and a re-plan or a repair gave to this task, with where it was left.
 - On a step dispatched again: "Runs already made for this step", the runs an earlier dispatch had `mp` make, with their results.
 
 Of the Constructor's reasoning you get its hand-back only, as claims to check. You do not get the plan, the user's words or other modules: judge the product against the standards, with the requirement items as what they answer.
@@ -39,6 +40,7 @@ Of the Constructor's reasoning you get its hand-back only, as claims to check. Y
   - an answer to every self-reported gap; a response to every open issue (fixed / not-fixed / deferred, with the reason; for deferred, also name the `owner` who takes responsibility. Use `{"issue":"<id>","response":"deferred","owner":"<owner>","reason":"<why>"}`. Subsequent cards show it as "deferred to <owner>" outside this task's fix list);
   - findings outside the standards (they become issue records);
   - an answer to every instruction under "Instructions for this task": followed, not-followed or unclear, with a reason. It is recorded and shown; it never decides the verdict, which rests on the standards;
+  - an answer to every open item under "Open items this task took" (`item_responses`): fixed, not-fixed or unclear, with the reason. One answered fixed is closed once this attempt is accepted; one not fixed goes back with your issues;
   - exactly one verdict: `pass` only when every standard you judge is met; `rework` when the Constructor should fix something (your judgments say what); `needs-decision` when the standards themselves are unclear or in conflict;
   - on an integration task, with `rework`: `reopen`, the dependencies whose work causes the failure, each with the issue and the evidence.
 
