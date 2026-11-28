@@ -110,6 +110,16 @@ export interface AppendGuard {
   readonly latest?: readonly {readonly mission: string; readonly line: string; readonly event: string; readonly revision: number | null}[];
   readonly openMissions?: readonly string[];
   readonly words?: readonly {readonly id: string; readonly fingerprint: string; readonly mission: string}[];
+  /**
+   * 4.4 (G3): the version in force of each constraint line must still be the one read (null: none recorded),
+   * and the line not withdrawn: a write that scopes, replaces or withdraws a line acts on what its caller checked.
+   */
+  readonly constraints?: ReadonlyArray<{ readonly line: string; readonly version: string | null }>;
+  /**
+   * 4.4 (G9, p12-r2-3): the latest version of each basis line must still be the one read (null: none recorded), so a
+   * write rests on exactly the set versions its caller saw.
+   */
+  readonly bases?: ReadonlyArray<{ readonly line: string; readonly version: string | null }>;
   readonly absent: ReadonlyArray<{ readonly mission: string; readonly line: string; readonly event: string; readonly key: string }>;
   readonly code: string;
   readonly message: string;
@@ -409,6 +419,8 @@ export interface FlowProject {
   readonly planReviewsWaived?: readonly string[];
   /** Missions whose tasks start on their dependencies' verified hand-backs (config `startOnHandback`). */
   readonly startOnHandback?: readonly string[];
+  /** 4.4 (F10): above this many standards on a task the feasibility reviewer and the PM are told (config `standardsWarn`). Absent: 7. */
+  readonly standardsWarn?: number;
 }
 
 /** The three ports together, plus the clock and the project's declared commands. */

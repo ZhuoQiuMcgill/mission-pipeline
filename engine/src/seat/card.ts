@@ -9,7 +9,7 @@
 
 import { z } from 'zod';
 import type { MissionId, ModuleId } from '../common/ids.ts';
-import { Command, Continuation, Interface, Item, ListRefSchema, Material, Workspace, commonCardFields, list, renderCommon, renderMaterials } from './cards/common.ts';
+import { Command, Continuation, Interface, Item, ListRefSchema, Material, Standard, Workspace, commonCardFields, list, renderCommon, renderMaterials, standardCheck, standardText } from './cards/common.ts';
 import { SEAT_COMMANDS, seatCardEntry, type SeatCommand } from './cards/registry.ts';
 import { roleText } from './cards/roles.ts';
 import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
@@ -31,9 +31,18 @@ const Question = z.object({
   by: z.string().optional(),
 });
 
+/**
+ * 4.4 (G5): an open item the task took (its card names it: an Architect's re-plan or repair), left at an
+ * earlier acceptance with risk or deferred: where it was left and its text. Absent on a card: none (or a
+ * card queued before 4.4 and not claimed).
+ */
+const TakenItem = z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string(), from: z.string(), issue: z.string().optional() });
+
 export const ConstructorCardSchema = z.object({
   ...commonCardFields,
   seat: z.literal('constructor'),
+  /** 4.4 (G5): the open items this task took: fix them too; the Reviewer answers each. */
+  openItems: z.array(TakenItem).optional(),
   /**
    * snapshot: the base commit its worktree is created at, and its candidate is taken against;
    * writablePaths: the write paths (§5.3). 4.4 (F4): `start`, a continuation after a pause: the parked
@@ -43,7 +52,7 @@ export const ConstructorCardSchema = z.object({
   /** 4.4 (F4): the Constructor's questions on this task, with their answers. */
   questions: z.array(Question).optional(),
   goal: z.string().min(1),
-  standards: z.array(Item).min(1),
+  standards: z.array(Standard).min(1),
   requirementItems: z.array(Item),
   readableFiles: z.array(z.string()),
   interpreter: z.string(),
@@ -58,6 +67,38 @@ export const ConstructorCardSchema = z.object({
   materials: z.array(Material).optional(),
 });
 
+/**
+ * 4.4 (F10): a file a declared command wrote, as mp kept it with the run: its path in the checkout, and
+ * the copy's place in the memory folder (`kept`, relative to the project), or why there is none.
+ */
+export const RunArtifact = z.object({
+  path: z.string().min(1),
+  sha256: z.string().optional(),
+  size: z.number().int().nonnegative().optional(),
+  kept: z.string().optional(),
+  why: z.string().optional(),
+  /**
+   * Review p9-7: the file was there before the command ran and is unchanged: that the command wrote it is not
+   * established. Review p9-r2-3: unknown, it was there before and the two states cannot be compared.
+   */
+  origin: z.enum(['not-established', 'unknown']).optional(),
+});
+export type RunArtifactT = z.infer<typeof RunArtifact>;
+
+/**
+ * 4.4 (F10, ruling E-4): a file outside the commit the Constructor's hand-back named, as mp checked it:
+ * the pointer as cited, the attempt and dispatch that handed it in, the check's label, and the copy mp
+ * kept of it (relative to the project), or why none was kept.
+ */
+export const HandedInFile = z.object({
+  pointer: z.string().min(1),
+  attempt: z.number().int().positive(),
+  dispatch: z.string().min(1),
+  label: z.string().min(1),
+  kept: z.string().optional(),
+  notKept: z.string().optional(),
+});
+
 export const ReviewerCardSchema = z.object({
   ...commonCardFields,
   seat: z.literal('reviewer'),
@@ -68,11 +109,13 @@ export const ReviewerCardSchema = z.object({
   /** The object version judged, and the review position on it. */
   target: z.string().min(1),
   review: z.string().min(1),
-  standards: z.array(Item).min(1),
+  standards: z.array(Standard).min(1),
   interfaces: z.array(Interface),
   candidate: z.object({ changedPaths: z.array(z.string()) }),
-  /** The program's verification runs on this candidate: the only evidence besides the Reviewer's own reruns (7.2). */
-  verificationRuns: z.array(z.object({ evidence: z.string().min(1), command: z.string(), summary: z.string() })),
+  /** The program's verification runs on this candidate: the only evidence besides the Reviewer's own reruns (7.2). 4.4 (F10): with the files each kept. */
+  verificationRuns: z.array(z.object({ evidence: z.string().min(1), command: z.string(), summary: z.string(), artifacts: z.array(RunArtifact).optional() })),
+  /** 4.4 (F10, E-4): the files outside the commit the Constructor's hand-back of the attempt under review named. */
+  handedIn: z.array(HandedInFile).optional(),
   /** Commands the Reviewer may have `mp` rerun on the candidate (`mp seat <id> rerun`). */
   declaredCommands: z.array(Command),
   selfReportedGaps: z.array(Item),
@@ -83,7 +126,8 @@ export const ReviewerCardSchema = z.object({
       review: z.string().min(1),
       attempt: z.number().int().positive(),
       verdict: z.enum(['pass', 'rework', 'needs-decision']),
-      unmet: z.array(z.object({ standard: z.string(), met: z.enum(['no', 'unclear']), reason: z.string() })),
+      /** 4.4 (F10): `cannot-verify`, the fourth answer, with what would be needed. */
+      unmet: z.array(z.object({ standard: z.string(), met: z.enum(['no', 'unclear', 'cannot-verify']), reason: z.string() })),
       findings: z.array(z.string()),
     })
     .optional(),
@@ -108,6 +152,14 @@ export const ReviewerCardSchema = z.object({
   materials: z.array(Material).optional(),
   /** 4.4 (F4): the Constructor's questions of the attempt under review and those left open on the task, with their answers. */
   questions: z.array(Question).optional(),
+  /** 4.4 (G5): the open items this task took: answer each (item_responses). */
+  openItems: z.array(TakenItem).optional(),
+  /**
+   * 4.4 (G9, E-4): the requirement items the judgment is bound to (its binding's item versions), with their text; `was`, the
+   * text the task's previous judgment was bound to, when the item changed since; `withdrawn`, an item withdrawn since that the
+   * binding keeps (p12-2). Absent: none, or a card queued before 4.4.
+   */
+  requirementItems: z.array(z.object({ id: z.string().min(1), version: z.string().min(1), text: z.string(), was: z.string().optional(), withdrawn: z.literal(true).optional() })).optional(),
   /** The judgment's binding inputs, fixed by the card's contract (5.2). */
   binding: z.object({
     judgment: z.string().min(1),
@@ -147,18 +199,19 @@ export function renderCard(c: SeatCard): string {
     return (
       renderCommon(c) +
       `## Goal\n${c.goal}\n\n` +
-      list('Acceptance standards', c.standards.map((s) => `[${s.id}] ${s.text}`)) +
+      list('Acceptance standards', c.standards.map(standardText)) +
       list('Requirement items', c.requirementItems.map((s) => `[${s.id}] ${s.text}`)) +
       (c.workspace.writablePaths.length > 0
         ? list('Write paths (relative to the repository root)', c.workspace.writablePaths)
         : '## Write paths\nNone: this task only reads and runs. Change no file; a hand-back with any change is refused.\n\n') +
       list('Files to read first', c.readableFiles) +
       (c.interpreter !== '' ? `## Interpreter\n${c.interpreter}\n\n` : '') +
-      list('Verification commands mp runs on your candidate', c.verificationCommands.map((v) => `[${v.id}] ${v.command}${v.cwd !== undefined ? ` (in ${v.cwd})` : ''}`)) +
+      list('Verification commands mp runs on your candidate', c.verificationCommands.map((v) => `[${v.id}] ${v.command}${v.cwd !== undefined ? ` (in ${v.cwd})` : ''}${(v.artifacts ?? []).length > 0 ? `; mp keeps the files it writes for the Reviewer: ${v.artifacts!.join(', ')}` : ''}`)) +
       list('Interfaces to implement', c.interfaces.implements.map((i) => `${i.name}: ${i.definition}`)) +
       list('Interfaces to call', c.interfaces.calls.map((i) => `${i.name}: ${i.definition}`)) +
       renderPlanData(c) +
       list('Exclusive resources leased to you', c.exclusive ?? []) +
+      list('Open items this task took (left open earlier: fix each; your Reviewer answers it)', (c.openItems ?? []).map(takenLine)) +
       renderQuestions(c.questions ?? []) +
       renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
     );
@@ -166,15 +219,21 @@ export function renderCard(c: SeatCard): string {
   return (
     renderCommon(c) +
     `## Target\n${c.target} (review position: ${c.review})\n\n` +
-    list('Acceptance standards (answer every one)', c.standards.map((s) => `[${s.id}] ${s.text}`)) +
+    // 4.4 (F10): a standard a person checks is never put to the Reviewer as met or not met
+    list('Acceptance standards (answer every one)', c.standards.filter((s) => standardCheck(s) !== 'person').map(standardText)) +
+    list('Standards a person checks (not yours to judge: leave them out of your judgments)', c.standards.filter((s) => standardCheck(s) === 'person').map((s) => `[${s.id}] ${s.text}`)) +
+    // 4.4 (G9): what the judgment is bound to; the duty stays the standards
+    list('Requirement items this task carries (your judgment is bound to them; judge each standard as above, and if the standards no longer answer an item, hand back "needs-decision" saying so)', (c.requirementItems ?? []).map((i) => `[${i.id}] ${i.text}${i.was !== undefined ? `\n  changed since this task was last judged; it read: ${i.was}` : ''}${i.withdrawn === true ? '\n  withdrawn by the user since the task took it: a decider settles the work done for it; judge the standards as above' : ''}`)) +
     list('Interfaces', c.interfaces.map((i) => `${i.name}: ${i.definition}`)) +
     renderPlanData(c) +
     list('Changed paths in the candidate', c.candidate.changedPaths) +
-    list('Verification runs mp made on this candidate (cite as evidence:<id>)', c.verificationRuns.map((r) => `[${r.evidence}] ${r.command}: ${r.summary}`)) +
+    list('Verification runs mp made on this candidate (cite as evidence:<id>)', c.verificationRuns.map((r) => `[${r.evidence}] ${r.command}: ${r.summary}${artifactLines(r.artifacts ?? [])}`)) +
+    renderHandedIn(c.handedIn ?? []) +
     list('Declared commands you may rerun (by id)', c.declaredCommands.map((d) => `[${d.id}] ${d.command}`)) +
     list('Scratch paths (a rerun may write here; nothing written is kept)', c.workspace.scratchPaths ?? []) +
     list("The Constructor's self-reported gaps (answer every one)", c.selfReportedGaps.map((g) => `[${g.id}] ${g.text}`)) +
     list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`)) +
+    list('Open items this task took (answer every one in item_responses: fixed, not-fixed or unclear)', (c.openItems ?? []).map(takenLine)) +
     renderQuestions(c.questions ?? []) +
     renderPreviousReview(c) +
     renderIntegration(c) +
@@ -182,11 +241,36 @@ export function renderCard(c: SeatCard): string {
   );
 }
 
-const WHO: Readonly<Record<string, string>> = { secretary: 'the Secretary', pm: 'the PM', user: 'the user' };
+const WHO: Readonly<Record<string, string>> = { secretary: 'the Secretary', pm: 'the PM', user: 'the user', architect: 'the Architect' };
+
+/** 4.4 (G5): one open item the task took. */
+const takenLine = (i: z.infer<typeof TakenItem>): string => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`;
 
 /** 4.4 (F4): the Constructor's questions on the task, each with its state and answer. */
 function renderQuestions(qs: ReadonlyArray<z.infer<typeof Question>>): string {
   return list('Questions on this task and their answers', qs.map((q) => `[${q.id}] attempt ${q.attempt}, ${q.when}: ${q.text}\n  ${q.state === 'answered' ? `Answered${q.by !== undefined ? ` by ${WHO[q.by] ?? q.by}` : ''}: ${q.answer ?? ''}` : q.state === 'open' ? 'Open: not answered yet (an open item)' : 'Not answered yet: its decision is pending'}`));
+}
+
+/** 4.4 (F10): the files a run kept, one line each under its run: where the copy is, or why there is none. */
+export function artifactLines(artifacts: readonly RunArtifactT[]): string {
+  // review p9-7, p9-r2-3: a file is called written by the command only when the record shows it; one not kept is attributed to none
+  const what = (a: RunArtifactT): string =>
+    a.kept === undefined
+      ? 'file it names, not kept'
+      : a.origin === 'not-established'
+        ? 'file there after it, unchanged from before it ran (that it wrote it is not established)'
+        : a.origin === 'unknown'
+          ? 'file there after it (it was there before, and whether it wrote it is unknown)'
+          : 'file it wrote';
+  return artifacts.map((a) => `\n  ${what(a)}: ${a.path}${a.kept !== undefined ? ` (sha256 ${a.sha256 ?? '?'}, ${a.size ?? '?'} bytes), kept at ${a.kept}` : ` (${a.why ?? 'no reason recorded'})`}`).join('');
+}
+
+/** 4.4 (F10, E-4): the files outside the commit the Constructor handed in, with the attempt that handed each in. */
+function renderHandedIn(files: ReadonlyArray<z.infer<typeof HandedInFile>>): string {
+  return list(
+    'Files the Constructor handed in, outside the commit (whether one shows this candidate is your judgment; cite one as written here)',
+    files.map((f) => `${f.pointer}\n  handed in with attempt ${f.attempt} (dispatch ${f.dispatch}); ${f.label}; ${f.kept !== undefined ? `a copy is kept at ${f.kept}` : `no copy is kept: ${f.notKept ?? 'no reason recorded'}`}`),
+  );
 }
 
 /** 4.4 (F3): the plan's data formats and storage (plan-level lists, short), as the Architect's cards show them. */
@@ -199,7 +283,7 @@ function renderPreviousReview(c: ReviewerCard): string {
   if (p === undefined) return '';
   return (
     `## The previous review of this task\n${p.review} (attempt ${p.attempt}) handed back "${p.verdict}".\n` +
-    (p.unmet.length > 0 ? `${p.unmet.map((u) => `- [${u.standard}] ${u.met === 'no' ? 'not met' : 'unclear'}: ${u.reason}`).join('\n')}\n` : '') +
+    (p.unmet.length > 0 ? `${p.unmet.map((u) => `- [${u.standard}] ${u.met === 'no' ? 'not met' : u.met === 'unclear' ? 'unclear' : 'cannot be verified'}: ${u.reason}`).join('\n')}\n` : '') +
     (p.findings.length > 0 ? `${p.findings.map((f) => `- finding: ${f}`).join('\n')}\n` : '') +
     '\n'
   );
@@ -348,8 +432,9 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         break;
       case 'checkout':
         lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
-        // 4.4 (F3): the accepted products a repair may reopen are the plan's state, readable at their commits
-        if (card.seat === 'architect-repair') lines.push(`\`mp seat ${dispatch} checkout --product <task>\`: the same for the accepted product of a task on the accepted list, at its commit.`);
+        // 4.4 (F3): the accepted products a repair may reopen are the plan's state, readable at their commits;
+        // 4.4 (G1): an Architect asked a question reads the task's accepted product the same way
+        if (card.seat === 'architect-repair' || (card.seat === 'architect-answer' && ((card['accepted'] as readonly unknown[] | undefined) ?? []).length > 0)) lines.push(`\`mp seat ${dispatch} checkout --product <task>\`: the same for the accepted product of a task on the accepted list, at its commit.`);
         break;
       case 'rerun':
         lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunnableCommands(card, o).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite. It prints the result and the last lines of the output.`);

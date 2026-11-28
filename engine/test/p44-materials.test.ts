@@ -67,10 +67,11 @@ describe("4.4 F3: the Reviewer reads the Constructor's hand-back as claims to ch
     assert.ok(rendered.includes("- [constructor-claims] The Constructor's claims: to check, not proof (attempt 1): 1 page\n"), 'listed by pointer, not must read');
     assert.ok(!rendered.includes('I ran the tests by hand'), 'the report is not inlined into the card');
     assert.ok(rendered.includes('`mp seat d-test read <material> [--page <n>]`'), 'the Reviewer gets the read command');
-    // the claims are read, never cited: a pointer to them is refused, and a judgment on the candidate is accepted
+    // the claims are read, never cited for these standards: a pointer to them is refused, and a judgment on the candidate is accepted
+    // (4.4, F10: they may be cited only for a standard checked by report: test/p44-f10-standards.test.ts)
     const citing = reviewer(rev, 'pass');
     const bad = resultProblems(rev, { ...citing, judgments: citing.judgments.map((j) => ({ ...j, evidence: ['material:constructor-claims'] })) }, { snapshot: { lines: () => null } });
-    assert.ok(bad.some((x) => x.includes("material:constructor-claims: the Constructor's claims and other materials are read, not cited")), bad.join('\n'));
+    assert.ok(bad.some((x) => x.includes("material:constructor-claims: the Constructor's report is cited only for a standard checked by report")), bad.join('\n'));
     assert.ok(resultProblems(rev, { ...citing, judgments: citing.judgments.map((j) => ({ ...j, evidence: ['report:S1'] })) }, { snapshot: { lines: () => null } }).some((x) => x.includes('report:S1: ')));
     held = false;
     const problems = await ports.scheduler.run('rev.m1.impl.1', { handBack: reviewer(rev, 'pass'), materialsRead: new Set() });

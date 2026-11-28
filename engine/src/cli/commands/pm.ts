@@ -41,7 +41,10 @@ import {
   pmClose,
   pmAnswer,
   pmConstraint,
+  pmConstraintScope,
   pmWithdrawConstraint,
+  cardSizeLine,
+  type ConstraintReach,
   pmDeliver,
   pmDispatchChecked,
   pmDrain,
@@ -62,6 +65,7 @@ import {
   pmRelease,
   pmRenew,
   pmRepair,
+  pmExtend,
   type RepairChange,
   type RepairChanged,
   pmRequirement,
@@ -86,7 +90,7 @@ import { describeScope, detectStop, parseScope, stopScopeFor, stopWords } from '
 import { planTemplate } from '../templates.ts';
 import { pmCoreText, pmHandbookPath, wiDir } from '../wi.ts';
 import { fullRunLines } from './seat.ts';
-import { answerOpenItem, type AnsweredItem } from '../../process/openItems.ts';
+import { answerOpenItem, closeOpenItem, recordVerified, type AnsweredItem } from '../../process/openItems.ts';
 
 const WORDS = /^W-[1-9][0-9]*$/;
 
@@ -237,6 +241,8 @@ const dispatch: Command = {
       `Hand-back files: ${d.files.report}, ${d.files.result}`,
       // 4.4 (F16): the size of what the seat must fetch, to whoever dispatches (nothing waits on it)
       ...(d.size.mustReadPages > 0 ? [`Must-read: ${d.size.mustReadPages} page${d.size.mustReadPages === 1 ? '' : 's'}`] : []),
+      // 4.4 (G3): the card's size and its largest sections, to whoever dispatches (no notice to the PM)
+      ...(cardSizeLine(d.size) !== null ? [cardSizeLine(d.size)!] : []),
       ...d.size.warnings.map((w) => `Warning: ${w}`),
       '',
       'Start a sub-agent in your harness with exactly this prompt:',
@@ -503,8 +509,8 @@ const requirement: Command = {
   name: ['requirement'],
   summary: 'requirement items: add one quoting the user verbatim (or resting on an authorization), or withdraw one (§6.1)',
   usage:
-    'mp pm requirement add <mission> <item> --type goal|limit|authorization|acceptance|decision --text "<item>" (--quote "<verbatim>" --words W-<n> | --authorization <item>) [--restatement "<text>"] [--confirmed-by W-<n>] [--notify "<condition>"] | mp pm requirement withdraw <mission> <item> --words W-<n> [--reason "<text>"]',
-  flags: { type: 'string', text: 'string', quote: 'string', words: 'string', authorization: 'string', restatement: 'string', 'confirmed-by': 'string', notify: 'string', reason: 'string' },
+    'mp pm requirement add <mission> <item> --type goal|limit|authorization|acceptance|decision --text "<item>" (--quote "<verbatim>" --words W-<n> | --authorization <item>) [--restatement "<text>"] [--confirmed-by W-<n>] [--notify "<condition>"] [--tasks <id,...>] | mp pm requirement withdraw <mission> <item> --words W-<n> [--reason "<text>"]\n       (--tasks: a decision names the tasks it concerns and is printed as a decision on their cards only; a task whose own card links the item still lists its current text under its requirement items, which its work is bound to)',
+  flags: { type: 'string', text: 'string', quote: 'string', words: 'string', authorization: 'string', restatement: 'string', 'confirmed-by': 'string', notify: 'string', reason: 'string', tasks: 'list' },
   async run(c, args) {
     const p = P(c);
     const sub = positional(args, 0, 'add or withdraw');
@@ -535,8 +541,10 @@ const requirement: Command = {
       ...(flagStr(args, 'restatement') !== null ? { restatement: flagStr(args, 'restatement')! } : {}),
       ...(confirmed !== null ? { confirmedBy: confirmed } : {}),
       ...(flagStr(args, 'notify') !== null ? { notifyCondition: flagStr(args, 'notify')! } : {}),
+      ...given('tasks', flagList(args, 'tasks')),
     });
-    return ok(`Requirement item ${item} (${type}) of ${m} recorded as ${r.version}.`, { mission: m, item, version: r.version });
+    const tasks = flagList(args, 'tasks');
+    return ok(`Requirement item ${item} (${type}) of ${m} recorded as ${r.version}${tasks.length > 0 ? `; as a decision it is printed on the cards of ${tasks.join(', ')} only (a task whose card links the item still lists it under its requirement items)` : ''}.`, { mission: m, item, version: r.version });
   },
 };
 
@@ -567,8 +575,10 @@ const repair: Command = {
     '       --attempts: add or replace registered attempts (a JSON array in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)\n' +
     '       --answers R-<n>: with --attempts, this change also settles that earlier repair (its author turn is taken back); without it, a change while the method is back with its author is refused\n' +
     '       --rerun: run registered attempts again on the same method version; --resnapshot: the exploration reads the target branch as it is now\n' +
-    '       --again: file it as a new repair although the same repair (words, kind, text, subject) was decided (about an exploration: its round is over); one still in work is returned',
-  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean', again: 'boolean' },
+    '       --again: file it as a new repair although the same repair (words, kind, text, subject) was decided (about an exploration: its round is over); one still in work is returned\n' +
+    '       --open-items <id>[,<id>...]: the items left at the cap this repair is for (mp read open-items lists them); its Architect gives each to a task, whose Reviewer answers it\n' +
+    '       --item <id>: the requirement item the repair falls short of: its Architect sees it, and the work is bound to it (optional). A missing feature is a new requirement: mp pm extend',
+  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean', again: 'boolean', 'open-items': 'list', item: 'string' },
   identity: (a) => ({
     positionals: a.positionals,
     flags: a.flags,
@@ -601,7 +611,14 @@ const repair: Command = {
     const change: RepairChange | undefined = file !== null ? { form: 'attempts', attempts: attemptsFile(file), ...(answers !== null ? { answers } : {}) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
     const again = flagBool(args, 'again');
     if (again && change !== undefined) throw usage('--again files a repair again; a change form (--attempts, --rerun, --resnapshot) is a new decision of its own');
-    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}), ...(again ? { again: true, op: c.op } : {}) });
+    // 4.4 (G4, G5): the open items this repair is for
+    const openItems = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+    if (openItems.length > 0 && change !== undefined) throw usage('--open-items goes with a repair of the plan in effect, not with a change form');
+    const item = flagStr(args, 'item');
+    if (item !== null && !ITEM_ID.test(item)) throw usage(`--item names a requirement item by its id (1 to 64 letters, digits or "-"), not ${JSON.stringify(item)}`);
+    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}), ...(again ? { again: true, op: c.op } : {}), ...(openItems.length > 0 ? { openItems } : {}), ...(item !== null ? { item } : {}) });
+    // 4.4 (G9): a missing feature is filed as a repair still (nothing is refused); the line points to the entry of its own
+    const extendLine = kind === 'missing' ? '\nA missing feature the user now wants is a new requirement: mp pm extend records it as requirement items and starts the same light path (mp help pm extend).' : '';
     if (r.changed !== undefined) {
       const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...changedLines(m, about!, words, r.changed)];
       return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: false, about: r.about, changed: r.changed });
@@ -612,7 +629,69 @@ const repair: Command = {
     const note = !r.repeated && r.over !== undefined ? ` Filed again: the same repair as ${r.over}, and ${over}.`
       : r.repeated && r.over !== undefined ? ` ${r.over} is that repair, and ${over}: --again files a new one.`
       : r.repeated && again ? ` The same repair is still in work: --again filed nothing new.` : '';
-    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
+    const items = openItems.length > 0 && !r.repeated ? ` It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.` : '';
+    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}${items}${item !== null && !r.repeated ? ` The work its Architect plans is bound to item ${item}.` : ''}${extendLine}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
+  },
+};
+
+/**
+ * 4.4 (G9, H-9): `mp pm extend`: a new requirement recorded as one. Several items: --item, --text and --quote repeated in
+ * order, one each per item; --type and --item-words, when given, once per item.
+ */
+const extend: Command = {
+  group: 'pm',
+  name: ['extend'],
+  summary:
+    "a new requirement of the user, recorded as one (H-9): requirement items for what the user now wants, quoting their words, outside the set the plan was checked against (its proof, and that of every product not bound to them, stay as they are); its work starts in the same write on a repair's light path: one Architect step under the mechanical checks, no Calibrator, no feasibility review. For work whose acceptance can be written in advance; a new exploration goes into the plan",
+  usage:
+    'mp pm extend <mission> --words W-<n> --item <id> --text "<the item>" --quote "<verbatim from W-n>" [--type goal|acceptance|limit] [--item-words W-<m>]\n' +
+    '       several items in one filing (one Architect step): repeat --item, --text and --quote in order, one each per item; --type and --item-words, when given, once per item (--item-words: the words entry of that item, where it differs from --words)\n' +
+    '       --open-items <id>[,<id>...]: items left at the cap the new work is for, as on mp pm repair (its Architect gives each to a task)',
+  flags: { words: 'string', item: 'repeat', text: 'repeat', quote: 'repeat', type: 'repeat', 'item-words': 'repeat', 'open-items': 'list' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const words = wordsArg(p.ctx, args, true)!;
+    const ids = flagList(args, 'item');
+    const texts = flagList(args, 'text');
+    const quotes = flagList(args, 'quote');
+    const types = flagList(args, 'type');
+    const own = flagList(args, 'item-words');
+    if (ids.length === 0) throw usage('--item <id>: the id of the requirement item for what the user now wants (with --text and --quote)');
+    if (texts.length !== ids.length || quotes.length !== ids.length) throw usage(`one --text and one --quote per --item, in order (${ids.length} item(s), ${texts.length} text(s), ${quotes.length} quote(s))`);
+    if (types.length !== 0 && types.length !== ids.length) throw usage('--type: none, or one per --item in order');
+    if (own.length !== 0 && own.length !== ids.length) throw usage('--item-words: none, or one per --item in order');
+    for (const id of ids) if (!ITEM_ID.test(id)) throw usage(`--item is a requirement item id (1 to 64 letters, digits or "-"), not ${JSON.stringify(id)}`);
+    for (const t of types) if (!['goal', 'acceptance', 'limit'].includes(t)) throw usage(`--type of a new requirement's item is goal, acceptance or limit, not ${JSON.stringify(t)}`);
+    const items = ids.map((item, i) => {
+      const w = own[i] ?? words;
+      if (own[i] !== undefined && (!WORDS.test(w) || p.ctx.memory.read((db) => wordsEntry(db, w)) === null)) throw usage(`--item-words of ${item}: there is no words entry ${w}`);
+      return { item, type: (types[i] ?? 'goal') as 'goal' | 'acceptance' | 'limit', text: texts[i]!, quote: quotes[i]!, words: w };
+    });
+    // 4.4 (G5 with G9): open items left at the cap, named as on a repair
+    const openItems = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+    // (p12-r2-2) with its operation id: a retry after a lost receipt returns the filing this operation made
+    const r = await pmExtend(p.ctx, { mission: m, items, ...(openItems.length > 0 ? { openItems } : {}), ...(typeof c.op === 'string' ? { op: c.op } : {}) });
+    const named = `item${r.items.length === 1 ? '' : 's'} ${r.items.join(', ')}`;
+    const lines = r.repeated
+      ? [`New requirement already recorded: ${r.repair} of ${m} (${named}): nothing new was recorded.`]
+      : r.again !== undefined
+      ? [
+          // 4.4 (G9, p12-8): its work was re-planned away: filed again against the items as recorded
+          `New requirement filed again: ${r.repair} of ${m}, ${named}: a task ${r.again} added for them is no longer in the plan in effect. The items stay as recorded (no new version).`,
+          'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it.',
+          ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
+        ]
+      : [
+          `New requirement recorded: ${r.repair} of ${m}, ${named} (from ${[...new Set(items.map((i) => i.words))].join(', ')}).`,
+          `The items are outside the set ${r.outsideOf !== null ? `PM plan ${r.outsideOf}` : 'the plan'} was checked against: its proof, and that of every product not bound to them, stay as they are; a changed plan submitted later is checked against them.`,
+          'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it. Withdrawing every item before its amendment is applied ends the filing.',
+          ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
+        ];
+    // 4.4 (G9, P-4, p12-1): an audit made before 4.4 did not see the new items: it reads out of date now; said, with what to do
+    for (const l of r.olderAudits) lines.push(`Legalization ${l} was judged before 4.4 against the items the plan was checked against alone: it does not cover these items, so its audit is no longer current (the stamp it gave stays on the record); request it again to cover them.`);
+    return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: r.repeated, items: r.items, term: r.term, outsideOf: r.outsideOf, olderAudits: r.olderAudits, ...(r.again !== undefined ? { again: r.again } : {}) });
   },
 };
 
@@ -659,20 +738,27 @@ function olderRepair(p: { readonly ctx: ProcessContext }, args: ParsedArgs, word
 const constraint: Command = {
   group: 'pm',
   name: ['constraint'],
-  summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope',
-  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>]   (a pattern is "**", an exact path, or "<folder>/**")\n       mp pm constraint withdraw <constraint> --words W-<n>',
-  flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string' },
+  summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope; an instruction may be addressed to tasks or repairs of one mission, and then reaches those cards only',
+  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>] [--tasks <id,...>] [--repair <R-n,...>]   (a pattern is "**", an exact path, or "<folder>/**")\n       mp pm constraint scope <constraint> [--tasks <id,...>] [--repair <R-n,...>] [--mission <m>]   (address an instruction: the same text keeps its version)\n       mp pm constraint withdraw <constraint> --words W-<n>',
+  flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string', tasks: 'list', repair: 'list' },
   async run(c, args) {
     const p = P(c);
-    const action = positional(args, 0, 'add or withdraw');
+    const action = positional(args, 0, 'add, scope or withdraw');
     if (action === 'withdraw') {
       const id = positional(args, 1, 'constraint id');
       await pmWithdrawConstraint(p.ctx, { constraint: id, words: wordsArg(p.ctx, args, true)! });
       return ok(`Constraint ${id} withdrawn; its record is kept.`, { constraint: id, withdrawn: true });
     }
-    if (action !== 'add') throw usage('constraint takes add or withdraw');
     const missionScope = flagStr(args, 'mission');
     if (missionScope !== null && missionIdProblem(missionScope) !== null) throw usage(`--mission: ${missionIdProblem(missionScope)}`);
+    // 4.4 (G3): an address names tasks or repairs of one mission (absent flags: the 4.3 scope and payload)
+    const address = { ...given('tasks', flagList(args, 'tasks')), ...given('repairs', flagList(args, 'repair')) };
+    if (action === 'scope') {
+      const id = positional(args, 1, 'constraint id');
+      const r = await pmConstraintScope(p.ctx, { constraint: id, ...address, ...(missionScope !== null ? { mission: missionScope } : {}) });
+      return ok([`Constraint ${id} (${r.version}) is ${r.scopeChanged ? 'now' : 'already'} addressed to ${addressText(r.scope)} of mission ${r.scope.mission}${r.scopeChanged ? ': the same text, so the version is kept and only its scope changed' : '; nothing was written'}.`, ...reachLines('instruction', r.reach, r.scope)].join('\n'), { constraint: id, version: r.version, scope: r.scope, scopeChanged: r.scopeChanged, reach: r.reach });
+    }
+    if (action !== 'add') throw usage('constraint takes add, scope or withdraw');
     const legacy = args.positionals.length === 3;
     const m = legacy ? missionArg(args, 1) : (missionScope ?? 'project') as MissionId;
     const id = positional(args, legacy ? 2 : 1, 'constraint id');
@@ -683,18 +769,42 @@ const constraint: Command = {
     const paths = flagList(args, 'paths');
     // the words the constraint came from (optional, as `withdraw` needs them): recorded with it
     const w = wordsArg(p.ctx, args, false);
-    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(missionScope !== null ? { missionScope } : {}), ...(w !== null ? { words: w } : {}), scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
-    // 4.1.3 (#36): what the scope reaches now; nothing is a warning, never a refusal
-    const reach = `${kind === 'object' ? `${r.reach.objects} current object version${r.reach.objects === 1 ? '' : 's'} and ` : ''}${r.reach.tasks.length} task${r.reach.tasks.length === 1 ? '' : 's'} of the plans in effect${r.reach.tasks.length > 0 ? ` (${r.reach.tasks.slice(0, 10).join(', ')}${r.reach.tasks.length > 10 ? ', ...' : ''})` : ''}`;
-    const none = r.reach.objects === 0 && r.reach.tasks.length === 0;
+    // 4.4 (G3): an address with no --mission takes the recording mission of the form that names one
+    const addressMission = Object.keys(address).length > 0 && missionScope === null && legacy ? m : missionScope;
+    const scope = { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')], ...address };
+    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(addressMission !== null ? { missionScope: addressMission } : {}), ...(w !== null ? { words: w } : {}), scope });
     const lines = [
       `Constraint ${id} (${kind}) recorded as ${r.version}${w !== null ? ` on ${w}` : ''}${r.scopeChanged ? ' (the same text: the version is kept and its scope is changed)' : ''}.`,
-      `Its scope matches ${reach} now.`,
-      ...(none ? ['Warning: it matches nothing now. It reaches the cards of tasks and objects its scope covers as they appear; check the paths and task types if you expected a match.'] : []),
+      ...reachLines(kind, r.reach, { ...scope, ...(addressMission !== null ? { mission: addressMission } : {}) }),
     ];
     return ok(lines.join('\n'), { mission: m, constraint: id, version: r.version, words: w, scopeChanged: r.scopeChanged, reach: r.reach });
   },
 };
+
+/** A new option enters a payload only when it is given (4.4: a 4.3 payload stays as 4.3 hashed it). */
+function given<K extends string>(key: K, list: readonly string[]): Partial<Record<K, string[]>> {
+  return list.length > 0 ? ({ [key]: [...list] } as Record<K, string[]>) : {};
+}
+
+/** 4.4 (G3): the address of an instruction, in words. */
+function addressText(s: { readonly tasks?: readonly string[]; readonly repairs?: readonly string[] }): string {
+  return [(s.tasks ?? []).length > 0 ? `task${s.tasks!.length === 1 ? '' : 's'} ${s.tasks!.join(', ')}` : '', (s.repairs ?? []).length > 0 ? `repair${s.repairs!.length === 1 ? '' : 's'} ${s.repairs!.join(', ')}` : ''].filter((x) => x !== '').join(' and ');
+}
+
+/** What a constraint's scope reaches now (4.1.3, #36), in lines: nothing is a warning, never a refusal. 4.4 (G3): an address reaches what it names. */
+export function reachLines(kind: 'object' | 'instruction', reach: ConstraintReach, scope: { readonly mission?: string | null; readonly tasks?: readonly string[]; readonly repairs?: readonly string[] }): string[] {
+  const tasks = `${reach.tasks.length} task${reach.tasks.length === 1 ? '' : 's'}${reach.tasks.length > 0 ? ` (${reach.tasks.slice(0, 10).join(', ')}${reach.tasks.length > 10 ? ', ...' : ''})` : ''}`;
+  if ((scope.tasks ?? []).length > 0 || (scope.repairs ?? []).length > 0) {
+    const architects = reach.repairs ?? [];
+    return [
+      `It is addressed to ${addressText(scope)} of mission ${scope.mission}: it reaches the work it names (now the cards of ${tasks}${architects.length > 0 ? ` and the Architect card of repair ${architects.join(', ')}` : ''}) and no other work.`,
+      ...((reach.unknown ?? []).length > 0 ? [`Warning: mission ${scope.mission} has no ${reach.unknown!.join(', ')} now. The instruction reaches ${reach.unknown!.length === 1 ? 'it' : 'them'} when ${reach.unknown!.length === 1 ? 'it appears' : 'they appear'} (a task a repair adds, or a repair filed later); check the ids if you expected a match.`] : []),
+    ];
+  }
+  const reachText = `${kind === 'object' ? `${reach.objects} current object version${reach.objects === 1 ? '' : 's'} and ` : ''}${tasks} of the plans in effect`;
+  const none = reach.objects === 0 && reach.tasks.length === 0;
+  return [`Its scope matches ${reachText} now.`, ...(none ? ['Warning: it matches nothing now. It reaches the cards of tasks and objects its scope covers as they appear; check the paths and task types if you expected a match.'] : [])];
+}
 
 const plan: Command = {
   group: 'pm',
@@ -794,7 +904,7 @@ const answer: Command = {
   group: 'pm',
   name: ['answer'],
   summary: 'the PM\'s or the user\'s decision on an escalation in the PM inbox; carried out like a Secretary decision, by the Secretary\'s next pass while one is live (WI-24)',
-  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>"\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]] [--defer <n>[,<n>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)\n       (an answer to a Constructor's questions: --defer names the questions it puts off by number; each stays an open item, answered later with mp pm open-item answer)`,
+  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>"\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]] [--defer <n>[,<n>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)\n       (an answer to a Constructor's questions: --defer names the questions it puts off by number; each stays an open item, answered later with mp pm open-item answer)\n       (--option ask-architect --by pm --instructions "<what you ask>": one Architect step answers a question of design; its answer is carried out, any other reply returns to the Secretary's next round; you may answer over a pending ask; not the user's own answer)`,
   flags: { option: 'string', words: 'string', by: 'string', 'no-words': 'boolean', reason: 'string', instructions: 'string', extra: 'string', findings: 'string', defer: 'list' },
   async run(c, args) {
     const p = P(c);
@@ -847,16 +957,51 @@ export function openItemAnswered(r: AnsweredItem): string {
 const openItem: Command = {
   group: 'pm',
   name: ['open-item'],
-  summary: 'answer an open item (a Constructor\'s question put off or raised as later); the answer goes onto the task\'s next cards. The PM may answer any',
-  usage: 'mp pm open-item answer <[mission/]item> --answer "<text>" [--words W-<n>]   (mp read open-items <mission> lists them)',
-  flags: { answer: 'string', words: 'string' },
+  summary: 'answer an open item (a Constructor\'s question put off or raised as later; the answer goes onto the task\'s next cards; the PM may answer any), or close one left at the cap on the user\'s words (the way through: it is otherwise closed when a task that takes it is accepted with it answered fixed)',
+  usage: 'mp pm open-item answer <[mission/]item> --answer "<text>" [--words W-<n>]\n       mp pm open-item close <[mission/]item> --words W-<n> --reason "<why, from the user\'s words>"   (mp read open-items <mission> lists them)',
+  flags: { answer: 'string', words: 'string', reason: 'string' },
   async run(c, args) {
     const p = P(c);
-    if (positional(args, 0, 'answer') !== 'answer') throw usage('mp pm open-item answer <[mission/]item> --answer "<text>"');
+    const sub = positional(args, 0, 'answer|close');
+    if (sub === 'close') {
+      // 4.4 (G5, E-1): an item left at the cap closed on the user's words
+      const ref = positional(args, 1, 'open item');
+      const w = wordsArg(p.ctx, args, true)!;
+      const r = closeOpenItem(p.ctx, { op: c.op!, ref, words: w, reason: flagStr(args, 'reason') ?? '' });
+      return ok(r.repeated ? `Open item ${r.mission}/${r.item.id} was closed already on ${w} with this reason: nothing new.` : `Open item ${r.mission}/${r.item.id} (task ${r.item.task}, attempt ${r.item.attempt}) closed on the user's words ${w}. The reads list it as closed, with the reason.`, r);
+    }
+    if (sub !== 'answer') throw usage('mp pm open-item answer <[mission/]item> --answer "<text>", or mp pm open-item close <[mission/]item> --words W-<n> --reason "…"');
     const ref = positional(args, 1, 'open item');
     const w = wordsArg(p.ctx, args, false);
     const r = answerOpenItem(p.ctx, { op: c.op!, ref, by: 'pm', answer: flagStr(args, 'answer') ?? '', words: w });
     return ok(openItemAnswered(r), r);
+  },
+};
+
+// 4.4 (the plan's F15, G5): the user's statement that something was checked in the field and holds
+const verified: Command = {
+  group: 'pm',
+  name: ['verified'],
+  summary: 'record the user\'s statement that a requirement item or a repair was checked in the field and holds: shown as the user\'s statement on those words, never as proof (no proof label changes); it closes the open items it names',
+  usage: 'mp pm verified <mission> <item-id|R-<n>|item:<id>|repair:<id>> --words W-<n> [--open-items <id>[,<id>...]]   (a bare id names the requirement item or the repair of that id; where both exist, say which; mp read items <mission> shows it)',
+  flags: { words: 'string', 'open-items': 'list' },
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const subject = positional(args, 1, 'item or repair');
+    const w = wordsArg(p.ctx, args, true)!;
+    const items = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+    const r = recordVerified(p.ctx, { op: c.op!, mission: m, subject, words: w, items });
+    // the subject as the write resolved it (p10-6)
+    const what = `${r.subject.startsWith('repair:') ? 'repair' : 'requirement item'} ${r.subject.slice(r.subject.indexOf(':') + 1)}`;
+    const lines = r.repeated
+      ? [`The user's statement on ${w} about ${what} was recorded already: nothing new.`]
+      : [
+          `Recorded: the user's statement on ${w} that ${what} was checked in the field and holds. It is the user's statement, not proof: no proof label changes.`,
+          ...(r.closed.length > 0 ? [`Open items closed on it: ${r.closed.join(', ')}.`] : []),
+          ...(r.already.length > 0 ? [`Closed already, kept as they were: ${r.already.join(', ')}.`] : []),
+        ];
+    return ok(lines.join('\n'), r);
   },
 };
 
@@ -1383,11 +1528,13 @@ export const PM_COMMANDS: readonly Command[] = [
   mission,
   requirement,
   repair,
+  extend,
   constraint,
   plan,
   waive,
   answer,
   openItem,
+  verified,
   grant,
   legalize,
   deliver,

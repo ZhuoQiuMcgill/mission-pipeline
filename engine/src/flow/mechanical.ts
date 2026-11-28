@@ -117,6 +117,8 @@ export interface MechanicalInputs {
    * outside it in every later check (a later repair, a revision that carries them).
    */
   readonly amended?: ReadonlySet<string>;
+  /** 4.4 (G5): the ids of the mission's open items (recorded, or sentences of an acceptance with risk): a task's `openItems` name only these. */
+  readonly openItems?: ReadonlySet<string>;
 }
 
 /** Rule 6: a task that writes nothing, other than an integration task or an experiment. */
@@ -157,6 +159,8 @@ export async function mechanicalCheck(i: MechanicalInputs): Promise<MechanicalRe
     if (ro !== null) failures.push(`writes: ${ro}`);
     const fs = fullSuiteProblem(t, i.fullSuite ?? []);
     if (fs !== null) failures.push(`full suite: ${fs}`);
+    // 4.4 (G5): a task takes only open items of the mission (a new field: a name that is not one goes back)
+    for (const id of t.openItems ?? []) if (!(i.openItems?.has(id) ?? false)) failures.push(`open items: task ${t.id} takes "${id}", which is not an open item of the mission`);
   }
 
   // 1. coverage and provenance (a task may cover several elements: each counts)

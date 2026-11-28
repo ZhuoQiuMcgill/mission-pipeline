@@ -26,7 +26,7 @@ import { auditPositionInputs, auditBasisTexts, auditNodeConstraints, auditChainI
 
 import { canonicalJson } from '../../common/hash.ts';
 import type { MissionId, ObjectVersionId, OpId } from '../../common/ids.ts';
-import { type EvidenceRecord, type JudgmentRecord, type ObjectVersionRecord, type ProofUnitRecord, type ReviewContract } from '../../common/records.ts';
+import { type BaseRecord, type EvidenceRecord, type JudgmentRecord, type ObjectVersionRecord, type ProofUnitRecord, type ReviewContract } from '../../common/records.ts';
 import { type Label } from '../../evaluator/semantics.ts';
 import { runCounts } from '../../evaluator/runs.ts';
 import { SEAMS_ON_CARD, seamTable, type AuditChainCard, type AuditChainResult, type AuditNodeCard, type AuditNodeResult, type AuditPositionT } from '../../seat/cards/auditor.ts';
@@ -37,7 +37,7 @@ import { handleFailure } from '../failures.ts';
 import { detailedPlanOf, type EffectiveBody } from '../planning.ts';
 import { amendedPlan } from '../plandoc.ts';
 import { PLAN_LINE, REQUIREMENTS_LINE } from '../plandoc.ts';
-import { currentConstraints, currentItems, requirementSetLine } from '../requirements.ts';
+import { currentConstraints, currentItems, newRequirementsLine, requirementSetLine } from '../requirements.ts';
 import { cancelSecretarySteps, carryGuard, closing, markApplied, openEscalations } from '../secretary.ts';
 import { lineageSource, nextGeneration, walkLineage, type Lineage, type LineageNode } from './lineage.ts';
 
@@ -383,7 +383,11 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
       canonicalJson({ format: 'mp4.chain-acceptance.v1', legalization: l, endpoint: plan.endpoint, nodes: plan.chain, words: items.map((i) => i.version).sort(), request: req.words }),
     );
     const object = aid.chainObject(mission, l);
-    const contract: ReviewContract = { review: 'auditor-chain', basisLines: ix.current.has(reqset) ? [reqset as never] : [], reliesOn: plan.chain as never };
+    // 4.4 (G9): the audit covers every item in force, so it binds the items `mp pm extend` records too (reqnew.<m>, an
+    // empty first version written with the object when there is none): any item change takes it off, as in 4.3
+    const reqnew = newRequirementsLine(mission);
+    const first: BaseRecord[] = ix.current.has(reqnew) ? [] : [{ kind: 'basis.version', basisKind: 'requirement-set', line: reqnew as never, version: `${reqnew}.v1` as never, mission, scope: null, snapshot: ports.ledger.content.putList([]) }];
+    const contract: ReviewContract = { review: 'auditor-chain', basisLines: [...(ix.current.has(reqset) ? [reqset as never] : []), reqnew as never], reliesOn: plan.chain as never };
     const rec: ObjectVersionRecord = {
       kind: 'object.version',
       object: object as ObjectVersionId,
@@ -395,7 +399,7 @@ async function step(ports: FlowPorts, mission: MissionId, l: string, s: Legaliza
       scope: { paths: [`legalization/${l}`], taskType: 'legalization' },
       reviews: [contract],
     };
-    await ports.ledger.append(aid.op(mission, l, 'chain'), { events: [{ mission, line, event: 'chain', key: 'object', body: { object, content } }], records: [rec] });
+    await ports.ledger.append(aid.op(mission, l, 'chain'), { events: [{ mission, line, event: 'chain', key: 'object', body: { object, content } }], records: [...first, rec] });
     return null;
   }
 

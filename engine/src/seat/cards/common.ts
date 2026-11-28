@@ -16,8 +16,27 @@ export const CARD_FORMAT = 'mp41.seat-card.v1' as const;
 
 export const Item = z.object({ id: z.string().min(1), text: z.string().min(1) });
 export const Interface = z.object({ name: z.string().min(1), definition: z.string() });
-/** A command the card declares (§6.5: `sampled` makes its runs sampling runs; `network` makes them other runs). */
-export const Command = z.object({ id: z.string().min(1), command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional() });
+/**
+ * 4.4 (F10): how a standard is checked: by a declared command, by reading the candidate, by a statement
+ * the Constructor's hand-back must make, by a file a declared run writes outside the commit, or by a
+ * person (never put to the Reviewer as met or not met). A standard of a 4.3 plan has none: reading.
+ */
+export const STANDARD_CHECKS = ['command', 'reading', 'report', 'artifact', 'person'] as const;
+export type StandardCheck = (typeof STANDARD_CHECKS)[number];
+export function standardCheck(s: { readonly check?: StandardCheck | undefined }): StandardCheck {
+  return s.check ?? 'reading';
+}
+/** A card's acceptance standard; 4.4 (F10): with how it is checked (absent on a card built from a 4.3 plan). */
+export const Standard = Item.extend({ check: z.enum(STANDARD_CHECKS).optional() });
+/** 4.4 (F10): a standard as a card line: its id, its text and, when the plan names one, how it is checked. */
+export function standardText(s: { readonly id: string; readonly text: string; readonly check?: StandardCheck | undefined }): string {
+  return `[${s.id}] ${s.text}${s.check !== undefined ? ` (check: ${s.check})` : ''}`;
+}
+/**
+ * A command the card declares (§6.5: `sampled` makes its runs sampling runs; `network` makes them other runs).
+ * 4.4 (F10): `artifacts`, the files it writes (relative to the repository root) that mp keeps with its run.
+ */
+export const Command = z.object({ id: z.string().min(1), command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional(), artifacts: z.array(z.string().min(1)).optional() });
 export const ListRefSchema = z.object({ hash: z.string().regex(/^[0-9a-f]{64}$/), count: z.number().int().nonnegative() });
 export const Hash = z.string().regex(/^[0-9a-f]{64}$/);
 
@@ -150,7 +169,7 @@ export const commonCardFields = {
   allowAsyncEvidence: z.boolean().optional(),
   continuation: Continuation.optional(),
   /** 4.1.2 (D-10): the repairs this work answers: the user's reason verbatim, its kind and words entry. */
-  repairs: z.array(z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string().min(1), words: z.string().min(1) })).optional(),
+  repairs: z.array(z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string().min(1), words: z.string().min(1), entry: z.literal('extend').optional() })).optional(),
   /**
    * 4.1.3 (E-4): the data outside the commit that this work's materials cite (data:<path>…), each
    * with the check mp made when it was handed back (full, or partial for a file over 2 GiB), as
@@ -159,7 +178,33 @@ export const commonCardFields = {
   dataChecked: z.array(z.object({ pointer: z.string().min(1), check: z.enum(['full', 'partial']), label: z.string().min(1) })).optional(),
   /** 4.4 (F3): one line for each optional material that could not be attached (too large to store), saying where its report is. */
   materialsNotAttached: z.array(z.string()).optional(),
+  /**
+   * 4.4 (G3): "Instructions for this task": the instructions addressed to this task or to a repair this work
+   * answers, each with its version (and `by` for the Secretary's). Never a proof input. Absent: none.
+   */
+  addressed: z.array(z.object({ id: z.string().min(1), version: z.string().min(1), text: z.string(), by: z.enum(['secretary']).optional() })).optional(),
+  /** 4.4 (G3): the Architect's recorded notes on this work (a repair decision's note), each with where it comes from. */
+  architectNotes: z.array(z.object({ from: z.string().min(1), text: z.string() })).optional(),
+  /** 4.4 (G3): the answers given on this task's escalations under its earlier cards, one line each. */
+  earlierAnswers: z.array(z.string()).optional(),
+  /** 4.4 (G3, F1): an Architect's card: the mission's instructions addressed to other work, as an index. */
+  addressedIndex: z.array(z.object({ id: z.string().min(1), version: z.string().min(1), to: z.string(), first: z.string(), bytes: z.number().int().nonnegative() })).optional(),
 };
+
+/** 4.4 (G3): the version number of a constraint version id ("constraint.x.v3.<hash>" is v3). */
+function versionNo(version: string): string {
+  return /\.v(\d+)(?:\.|$)/.exec(version)?.[1] ?? version;
+}
+
+/** 4.4 (G3): the card blocks of the instructions addressed to this work, the Architect's notes, and earlier answers. */
+export function renderAddressed(c: { addressed?: readonly { id: string; version: string; text: string; by?: string }[] | undefined; architectNotes?: readonly { from: string; text: string }[] | undefined; earlierAnswers?: readonly string[] | undefined; addressedIndex?: readonly { id: string; version: string; to: string; first: string; bytes: number }[] | undefined }): string {
+  return (
+    list('Instructions for this task (follow them; not a proof input)', (c.addressed ?? []).map((a) => `[${a.id}, v${versionNo(a.version)}${a.by === 'secretary' ? ', the Secretary\'s' : ''}] ${a.text}`)) +
+    list("The Architect's notes on this work", (c.architectNotes ?? []).map((n) => `[${n.from}] ${n.text}`)) +
+    list('Earlier decisions on this task (made under an earlier card)', c.earlierAnswers ?? []) +
+    list('Instructions addressed to other work (an index; each reaches only what it names)', (c.addressedIndex ?? []).map((x) => `[${x.id}, v${versionNo(x.version)}] for ${x.to}: ${x.first} (${x.bytes} bytes)`))
+  );
+}
 
 /** "## Title\n- a\n- b" (empty string when there is nothing to list). */
 export function list(title: string, items: readonly string[]): string {
@@ -167,14 +212,17 @@ export function list(title: string, items: readonly string[]): string {
 }
 
 /** The common head of every card body. */
-export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string; kind?: string }[]; decisionQuotes: readonly string[]; seat?: string; authorizations?: readonly { id: string; quote: string; notifyCondition: string | null }[]; continuation?: ContinuationT | undefined; repairs?: readonly { id: string; kind: string; text: string; words: string }[] | undefined; dataChecked?: readonly { pointer: string; label: string }[] | undefined }): string {
+export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string; kind?: string }[]; decisionQuotes: readonly string[]; seat?: string; authorizations?: readonly { id: string; quote: string; notifyCondition: string | null }[]; continuation?: ContinuationT | undefined; repairs?: readonly { id: string; kind: string; text: string; words: string; entry?: string | undefined }[] | undefined; dataChecked?: readonly { pointer: string; label: string }[] | undefined } & Parameters<typeof renderAddressed>[0]): string {
   const k = c.continuation;
   return (
     (c.duties.trim() !== '' ? `## Your duties on this task\n${c.duties.trim()}\n\n` : '') +
-    list("Repairs this work answers (the user's reason, verbatim)", (c.repairs ?? []).map((r) => `[${r.id}] ${r.kind} (${r.words}): "${r.text}"`)) +
+    // 4.4 (G9): a new requirement's filing says so (its items' text is on the card with the requirement items)
+    list("Repairs this work answers (the user's reason, verbatim)", (c.repairs ?? []).map((r) => `[${r.id}] ${r.entry === 'extend' ? 'new requirement' : r.kind} (${r.words}): "${r.text}"`)) +
     (k !== undefined
       ? `## This card continues task ${k.previous}\nYou asked for evidence; here is what came back. Your previous notes${k.notes !== null ? ` are material ${k.notes}` : ' were not saved'}.\n\n${k.evidence.trim()}\n\n`
       : '') +
+    // 4.4 (G3): what was written for this work comes before the project's constraints
+    renderAddressed(c) +
     list('Project constraints', c.constraints.map((x) => `[${x.id}] ${x.kind === 'instruction' ? 'Instruction (follow it; not a proof input): ' : ''}${x.text}`)) +
     list('Relevant decisions (verbatim)', c.decisionQuotes) +
     (c.seat === 'secretary' ? '' : list('Authorizations currently in force (verbatim)', (c.authorizations ?? []).map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition === null ? '' : ` (tell the user when: ${a.notifyCondition})`}`))) +

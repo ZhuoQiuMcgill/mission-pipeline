@@ -295,6 +295,27 @@ function requeueGrantedDispatches(tx: WriteTx, lineage: string, loop: LoopKind):
   }
 }
 
+/**
+ * 4.4 (G3): the version in force of a constraint line, read inside a write: the key of its latest "constraint"
+ * event in any mission (constraints are the project's, 9.5), "withdrawn" once it is withdrawn, null when none.
+ * A version id is "<line>.v<n>.<hash>" (constraint ids hold no "."), so a key range finds the line's versions.
+ */
+/** 4.4 (G9, p12-r2-3): the latest version of a basis line in the log (null: none). */
+export function basisVersionNow(tx: Db, line: string): string | null {
+  const row = tx.stmt("SELECT record FROM log WHERE kind = 'basis.version' AND json_extract(record, '$.line') = ? ORDER BY rev DESC LIMIT 1").get(line) as { record: string } | undefined;
+  return row === undefined ? null : String((JSON.parse(row.record) as { version: string }).version);
+}
+
+export function constraintVersionNow(tx: Db, line: string): string | null {
+  let latest: { key: string; revision: number } | null = null;
+  for (const m of flowMissions(tx)) {
+    if (flowEventExists(tx, { mission: m, line: REQUIREMENTS_LINE, event: 'constraint-withdrawn', key: line })) return 'withdrawn';
+    const row = tx.stmt('SELECT key, revision FROM flow_events WHERE mission = ? AND line = ? AND event = ? AND key >= ? AND key < ? ORDER BY revision DESC LIMIT 1').get(m, REQUIREMENTS_LINE, 'constraint', `${line}.v`, `${line}.w`) as { key: string; revision: number } | undefined;
+    if (row !== undefined && (latest === null || Number(row.revision) > latest.revision)) latest = { key: row.key, revision: Number(row.revision) };
+  }
+  return latest?.key ?? null;
+}
+
 export class MemoryFlowLedger implements FlowLedgerPort {
   readonly content: FlowContent;
   private readonly ctx: ProcessContext;
@@ -333,6 +354,10 @@ export class MemoryFlowLedger implements FlowLedgerPort {
         return row.revision !== g.revision;
       })) throw Object.assign(new Error(guard.message), {code: guard.code});
       if (guard !== undefined && guard.absent.some((g) => flowEventExists(tx, g))) throw Object.assign(new Error(guard.message), { code: guard.code });
+      // 4.4 (G3): the constraint version its caller read is still the one in force (an edit, a scope or a withdrawal acts on it alone)
+      if (guard?.constraints?.some((g) => constraintVersionNow(tx, g.line) !== g.version)) throw Object.assign(new Error(guard.message), { code: guard.code });
+      // 4.4 (G9, p12-r2-3): the basis versions its caller read are still the latest of their lines
+      if (guard?.bases?.some((g) => basisVersionNow(tx, g.line) !== g.version)) throw Object.assign(new Error(guard.message), { code: guard.code });
       appendRecords(tx, [...events.map((e) => flowRecord(tx.data, e)), ...records.filter((r) => r.kind !== 'notice.delivery')]);
       for (const r of records) {
         if (r.kind === 'notice.delivery') markNotice(tx, r);
@@ -674,5 +699,5 @@ export class MemoryFlowEvaluator implements FlowEvaluatorPort {
 
 /** The three ports over one process context. */
 export function memoryFlowPorts(ctx: ProcessContext): FlowPorts {
-  return { resident: () => liveSecretary(ctx.memory) !== null, readOnly: () => ctx.pureRead || (ctx.secretary === null && liveSecretary(ctx.memory) !== null), wordsAuthority: (id, mission) => wordsAuthority(ctx.memory, ctx.memory.data, id, mission), ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite, planReviewsWaived: ctx.planReviewsWaived, startOnHandback: ctx.startOnHandback } };
+  return { resident: () => liveSecretary(ctx.memory) !== null, readOnly: () => ctx.pureRead || (ctx.secretary === null && liveSecretary(ctx.memory) !== null), wordsAuthority: (id, mission) => wordsAuthority(ctx.memory, ctx.memory.data, id, mission), ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite, planReviewsWaived: ctx.planReviewsWaived, startOnHandback: ctx.startOnHandback, standardsWarn: ctx.standardsWarn } };
 }

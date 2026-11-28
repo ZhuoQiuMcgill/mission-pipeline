@@ -6,9 +6,21 @@
 //   - the detailed plan (3.4): the Architect's hand-back, stored as the plan object's content;
 //   - flow lines and event names other flows read or write.
 
+import { posix } from 'node:path';
 import { z } from 'zod';
 import { ITEM_ID, wellFormed, type MissionId } from '../common/ids.ts';
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { STANDARD_CHECKS } from '../seat/cards/common.ts';
+
+/**
+ * 4.4 (F10): a file a declared command writes, as the plan names it: relative to the repository root,
+ * normalized, no glob, never inside .git. mp keeps it with the run's record (process/runs.ts).
+ */
+const ArtifactPath = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((p) => !posix.isAbsolute(p) && !/^[A-Za-z]:/.test(p) && posix.normalize(p) === p && p !== '..' && !p.startsWith('../') && !p.split('/').includes('.git') && !/[*?[\]\\]/.test(p), 'a file path relative to the repository root (normalized, no glob, not in .git)');
 
 /** An exploration's round budget when its definition sets none (4.1 §6.3, U-6). */
 export const EXPLORATION_ROUNDS_DEFAULT = 3;
@@ -176,7 +188,19 @@ export const DetailedTask = z.object({
   /** The module it builds (interface, implementation); null for integration and experiments. */
   module: z.string().nullable(),
   goal: z.string().min(1),
-  standards: z.array(z.object({ id: FreeId, text: z.string().min(1) })).min(1),
+  /** 4.4 (F10): each standard may say how it is checked; one without `check` (every 4.3 plan) reads as `reading`. */
+  standards: z
+    .array(
+      z.object({
+        id: FreeId,
+        text: z.string().min(1),
+        check: z
+          .enum(STANDARD_CHECKS)
+          .optional()
+          .describe('How it is checked: command (a verification command shows it), reading (reading the candidate), report (a statement the Constructor\'s hand-back must make), artifact (a file a verification command writes; name it in that command\'s artifacts), person (someone must look or run it where mp cannot; never judged by the Reviewer). Absent: reading.'),
+      }),
+    )
+    .min(1),
   /** Requirement item lines the task rests on. */
   requirementItems: z.array(z.string()),
   /**
@@ -192,9 +216,10 @@ export const DetailedTask = z.object({
   /**
    * Run by `mp` on a clean checkout of the candidate (4.1 §5.3). `sampled`: one observation among
    * possible others (a benchmark, a flaky-test probe: a sampling run, never reused); `network`: it
-   * needs the network (another run, never reused or renewed) (§6.5).
+   * needs the network (another run, never reused or renewed) (§6.5). 4.4 (F10): `artifacts`, the files the
+   * command writes that mp keeps with the run's record (absent: none, as in every 4.3 plan).
    */
-  verificationCommands: z.array(z.object({ id: FreeId, command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional() })),
+  verificationCommands: z.array(z.object({ id: FreeId, command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional(), artifacts: z.array(ArtifactPath).max(20).optional().describe('Files this command writes (relative to the repository root, e.g. a report or a log) that mp keeps with its run, so the Reviewer reads them and cites the run. At most 20.') })),
   implements: z.array(z.string()),
   calls: z.array(z.string()),
   /** Scheduling dependencies: tasks that must be accepted first (interface definitions before their users). */
@@ -203,6 +228,8 @@ export const DetailedTask = z.object({
   exclusive: z.array(z.string()),
   estimate: z.object({ durationMs: z.number().int().nonnegative(), costMicros: z.number().int().nonnegative(), basis: z.string().min(1) }),
   provenance: TaskProvenance,
+  /** 4.4 (G5): the open items this task takes (absent: none, every card before 4.4); its cards list them and its Reviewer answers each. */
+  openItems: z.array(z.string().min(1)).optional().describe('4.4: the ids of open items left earlier (on your card\'s list of open items, or named on the repair) that this task takes: its cards list them, its Constructor fixes them, its Reviewer answers each. Omit when it takes none.'),
 });
 export type DetailedTask = z.infer<typeof DetailedTask>;
 
@@ -375,6 +402,19 @@ export const taskLine = (task: string): string => `task:${task}`;
 export const explorationLine = (exploration: string): string => `exploration:${exploration}`;
 
 /**
+ * 4.4 (F10): the files a run kept (process/keptFiles.ts): line "artifacts", event "kept", key the run's
+ * evidence id, written with the run's record; the Reviewer's card reads them by the evidence it lists.
+ */
+export const ARTIFACTS_LINE = 'artifacts';
+export const KEPT_ARTIFACTS = 'kept';
+export interface KeptArtifactsBody {
+  readonly evidence: string;
+  readonly run: string;
+  readonly command: string;
+  readonly artifacts: readonly import('../seat/card.ts').RunArtifactT[];
+}
+
+/**
  * Repairs (4.1.2, D-9, D-10): a problem the user found when trying the product, recorded by the PM
  * (`mp pm repair`) with the user's reason verbatim from a words entry and the kind the PM chose. Line
  * "repairs", event "repair", key the repair id (R-<n>). About an exploration, the exploration is
@@ -395,6 +435,23 @@ export interface RepairBody {
   readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
   /** 4.4 (F13, p7-8): filed with `--again`: the PM operation that filed it (its retry returns this repair). Absent otherwise. */
   readonly op?: string;
+  /** 4.4 (G4, G5): the open items this repair is for (`--open-items`); its decision says which task takes each. Absent: none named. */
+  readonly openItems?: readonly string[];
+  /**
+   * 4.4 (G9): the requirement items (ids) the filing's work is bound to: those `mp pm extend` recorded with it, or the one a
+   * repair falls short of (`mp pm repair … --item`). Absent: none (every 4.3 repair, and a repair that names no item).
+   */
+  readonly items?: readonly string[];
+  /** 4.4 (G9): "extend": the filing of a new requirement (`mp pm extend`), on a repair's light path. Absent: a repair. */
+  readonly entry?: 'extend';
+}
+/** 4.4 (G9): a filing whose every item was withdrawn before its amendment was applied ends (line "repairs", event "ended", key the filing). */
+export const REPAIR_ENDED = 'ended';
+export interface RepairEndedBody {
+  readonly repair: string;
+  readonly items: readonly string[];
+  /** The Architect step whose hand-back, if one comes, is kept on the record and not applied. */
+  readonly arch: string | null;
 }
 /** The Architect repair step's outcome, once its amendment passed the mechanical checks (event "decided", key the repair id). */
 export interface RepairDecidedBody {
@@ -408,9 +465,11 @@ export interface RepairDecidedBody {
    * and then opens the next). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every
    * reopen before 4.4).
    */
-  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[]; readonly openItems?: readonly string[]; readonly items?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
+  /** 4.4 (G3, F2): the Architect's note on its decision, printed on the cards of the tasks it added, changed or reopened (absent: a 4.3 decision). */
+  readonly note?: string;
   /**
    * 4.4 (F13, p7-1): its reopens are tracked requests (requested, carried out, not carried out: execution.ts): one
    * whose task moved on waits for the open attempt and opens the next, or is told as not carried out, and an
@@ -419,14 +478,25 @@ export interface RepairDecidedBody {
    */
   readonly tracked?: true;
 }
-/** A repair as a card shows it (every card of the work it caused). */
+/**
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (execution.ts writes and reads them; the
+ * cards and the read of repairs read them too, seat/cards/dynamic.ts reopenRecordState). Each is keyed
+ * "<repair>:<task>#<n>", n its place among the request's records. Pinned: it waits for that attempt of the task to be
+ * accepted. Carried: that attempt was opened with the repair's issue on its card. Not carried: the task was given up
+ * or left the plan; told to the PM.
+ */
+export const REOPEN_PINNED = 'reopen-pinned';
+export const REOPEN_CARRIED = 'reopen-carried';
+export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
+/** A repair as a card shows it (every card of the work it caused). 4.4 (G9): `entry` "extend", a new requirement's filing. */
 export interface RepairRef {
   readonly id: string;
   readonly kind: RepairKind;
   readonly text: string;
   readonly words: string;
+  readonly entry?: 'extend';
 }
-export const repairRef = (r: RepairBody): RepairRef => ({ id: r.id, kind: r.kind, text: r.text, words: r.words });
+export const repairRef = (r: RepairBody): RepairRef => ({ id: r.id, kind: r.kind, text: r.text, words: r.words, ...(r.entry !== undefined ? { entry: r.entry } : {}) });
 
 /**
  * The event the decision layer writes when a PM plan version passes Calibrator ① (line "plan",

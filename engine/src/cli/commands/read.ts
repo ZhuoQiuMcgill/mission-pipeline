@@ -13,7 +13,12 @@ import { buildGraph, chain, resolveNodes, tree, walk } from '../tree.ts';
 import { fullRunMarkers } from '../../process/index.ts';
 import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
-import { listOpenItems } from '../../process/openItems.ts';
+import { constraintsRead, constraintsText, repairsRead, repairsText } from '../workReads.ts';
+import { closureText, listAllItems, type RiskItemView } from '../../process/openItems.ts';
+import { beforeText, notRecordedByTask } from '../../flow/riskItems.ts';
+import { itemStateLines, readItems } from '../itemsRead.ts';
+import { age } from '../render.ts';
+import { reviewHealth, reviewRows, sharesLine } from '../../process/reviews.ts';
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -204,17 +209,102 @@ const notesRead: Command = {
   },
 };
 
-// 4.4 (F4; G5): what is left open and what became of it, from the record (p10 adds the items of an acceptance with risk)
+// 4.4 (G3): who wrote each constraint and what it reaches, so a PM that writes for tasks again can be seen
+const constraintsReadCmd: Command = {
+  group: 'read', name: ['constraints'], summary: 'the constraints in force for a mission, each with its author (PM or Secretary) and its address or scope; --reach adds the task cards each reaches, its size and the Reviewers\' answers', usage: 'mp read constraints <mission> [--reach]', flags: {reach: 'boolean'},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const reach = flagBool(a, 'reach'); const r = p.ctx.memory.read((db) => constraintsRead(db, p.ctx.memory.data, m, reach)); return ok(constraintsText(r, reach), r);},
+};
+// 4.4 (the plan's F13): each repair, what it did and whether it is done
+const repairsReadCmd: Command = {
+  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs and new requirements (mp pm extend): kind, words, subject and the Architect\'s note; the items each is bound to and whether the plan in effect was checked against them; a repair that added tasks and names no item; whether it was filed again (--again, or a new requirement whose work was re-planned away); the tasks each added, changed and reopened with their state (a reopen waiting for an attempt, carried out, or not carried out and why; a changed card superseded by the repair or plan that replaced it before any acceptance under it); its dispatches; and whether it is done, or done or superseded, or which parts are open (a repair decided under 4.3: "decided under 4.3" with its parts open or not recorded)', usage: 'mp read repairs <mission>', flags: {},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const r = p.ctx.memory.read((db) => repairsRead(db, p.ctx.memory.data, m)); return ok(repairsText(r), r);},
+};
+
+// 4.4 (F4; G5): what is left open and what became of it, from the record: the questions put off, and what
+// was left at the cap (an acceptance with risk's items, a Reviewer's deferrals, the risk sentences of 4.3).
+// v1-4: three things are counted apart (items recorded by 4.4 that are open; those answered or closed; the risk
+// sentences of acceptances made before 4.4 nobody acted on, whose fate is not recorded), and only the first is
+// called open. The 4.4 items are listed in full; the sentences before 4.4 as a count per task (`--all` lists them).
 const openItemsRead: Command = {
-  group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later, each with its task, its state, who answers it and its answer', usage: 'mp read open-items <mission>', flags: {},
+  group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later (who answers each, its answer), and what was left at the cap (each risk an acceptance with risk took on, each deferred issue; kind verify: a standard that could not be verified, with what is needed, or one a person checks), with its age, how often it was carried, what took it and what became of it; the risk sentences of acceptances made before 4.4 that nobody acted on are counted apart (what became of them is not recorded) and listed per task', usage: 'mp read open-items <mission> [--open | --all]   (--open: only what 4.4 records as open; --all: the risk sentences of acceptances made before 4.4 in full too)', flags: { open: 'boolean', all: 'boolean' },
   async run(c, a) {
     const m = positional(a, 0, 'mission');
-    const items = listOpenItems(P(c).ctx, m);
-    const who = (x: 'secretary' | 'pm' | 'user'): string => (x === 'pm' ? 'the PM' : x === 'user' ? 'the user' : 'the Secretary');
-    const lines = items.map((i) => `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt}, ${i.why === 'later' ? 'raised as later' : 'put off by its answer'}): ${i.answer === null ? `open; ${who(i.decider)} answers it` : `answered by ${who(i.answer.by)}${i.answer.words !== undefined ? ` on ${i.answer.words}` : ''}`}\n  ${i.text}${i.answer !== null ? `\n  Answer: ${i.answer.answer}` : ''}${i.superseded !== undefined ? `\n  (the answer carried out on its escalation took precedence over ${who(i.superseded.by)}'s earlier answer: ${i.superseded.answer})` : ''}`);
-    const open = items.filter((i) => i.answer === null).length;
-    return ok(items.length === 0 ? `Mission ${m} has no open items.` : [`Open items of mission ${m}: ${open} open, ${items.length - open} answered`, ...lines].join('\n'), {mission: m, items});
+    const p = P(c);
+    const only = flagBool(a, 'open');
+    const full = flagBool(a, 'all');
+    if (only && full) throw usage('choose --open (only what 4.4 records as open) or --all (the risk sentences of acceptances made before 4.4 in full too)');
+    const all = listAllItems(p.ctx, m);
+    const questions = only ? all.questions.filter((q) => q.answer === null) : all.questions;
+    const recorded = all.items.filter((i) => i.state !== 'not recorded');
+    const before = all.items.filter((i) => i.state === 'not recorded');
+    const risks = only ? recorded.filter((i) => i.state === 'open') : full ? all.items : recorded;
+    const now = p.ctx.now();
+    // 4.4 (G1): a question answered by the Architect's answer carried out on its escalation
+    const who = (x: 'secretary' | 'pm' | 'user' | 'architect'): string => (x === 'pm' ? 'the PM' : x === 'user' ? 'the user' : x === 'architect' ? 'the Architect' : 'the Secretary');
+    const old = (at: number | null | undefined): string => (at == null ? '' : `, ${age(now - at)} old`);
+    const lines = [
+      ...questions.map((i) => ({ revision: i.revision, text: `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt}, ${i.why === 'later' ? 'raised as later' : 'put off by its answer'}): ${i.answer === null ? `open; ${who(i.decider)} answers it` : `answered by ${who(i.answer.by)}${i.answer.words !== undefined ? ` on ${i.answer.words}` : ''}`}\n  ${i.text}${i.answer !== null ? `\n  Answer: ${i.answer.answer}` : ''}${i.superseded !== undefined ? `\n  (the answer carried out on its escalation took precedence over ${who(i.superseded.by)}'s earlier answer: ${i.superseded.answer})` : ''}` })),
+      ...risks.map((i) => ({ revision: i.revision, text: riskItemLine(i, old(i.at)) })),
+    ].sort((x, y) => x.revision - y.revision).map((x) => x.text);
+    // the header counts the mission's items whatever the flags: open (4.4), answered or closed (4.4), and apart the sentences before 4.4
+    const open = all.questions.filter((i) => i.answer === null).length + recorded.filter((i) => i.state === 'open').length;
+    const done = all.questions.length + recorded.length - open;
+    if (all.questions.length + all.items.length === 0) return ok(`Mission ${m} has no open items.`, { mission: m, items: [] });
+    const head = `Open items of mission ${m}: ${open} open, ${done} answered or closed${before.length > 0 ? `; ${beforeText(before.length)}` : ''}`;
+    const byTask = !only && !full ? notRecordedByTask(all.items) : [];
+    const grouped = byTask.length === 0 ? [] : [`Risk sentences of acceptances made before 4.4, per task (what became of them is not recorded; mp read open-items ${m} --all lists them):`, ...byTask.map((t) => `  task ${t.task}: ${t.count} risk sentence${t.count === 1 ? '' : 's'} accepted before 4.4`)];
+    return ok([head, ...lines, ...grouped].join('\n'), { mission: m, items: [...questions, ...risks].sort((x, y) => x.revision - y.revision), ...(byTask.length > 0 ? { notRecorded: byTask } : {}) });
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, openItemsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+/** 4.4 (G5): one item left at the cap, from its record: where it was left, its state, and what took it. */
+function riskItemLine(i: RiskItemView, old: string): string {
+  // 4.4 (F10): a standard a person checks is written when its task is accepted (one that could not be verified says in its text what is needed)
+  // v1-4: a sentence of an acceptance made before 4.4 that someone acted on is recorded since, and says so
+  const left = i.why === 'deferred' ? `deferred by its Reviewer ${i.review ?? ''}`.trimEnd() : i.why === 'person' ? 'a standard a person checks, written when the task was accepted' : `accepted with risk on ${i.escalation}${i.before44 === true && i.state !== 'not recorded' ? ' before 4.4, recorded when it was acted on' : ''}`;
+  // p10-5: a fix that did not reach the fix tracker is said so (the issue of a 4.3 finding could not be recovered)
+  const tracker = i.trackerTold === false ? ' (the fix tracker was not told: the issue this item is about could not be found)' : '';
+  const state = i.closed !== null ? `closed, ${closureText(i.closed)}${tracker}` : i.state === 'not recorded' ? 'not recorded as an item (an acceptance with risk made before 4.4): what became of it is not recorded' : 'open';
+  const took = i.takenBy.length > 0 ? `; taken by ${i.takenBy.map((t) => `task ${t.task} (${t.by})`).join(', ')}` : i.closed === null ? '; taken by no task' : '';
+  const named = i.namedBy.length > 0 ? `; named by repair ${i.namedBy.join(', ')}` : '';
+  const answer = i.answer !== null && i.closed?.how !== 'fixed' ? `\n  At the acceptance of task ${i.answer.task} (attempt ${i.answer.attempt}) its Reviewer answered it ${i.answer.response}: ${i.answer.reason}` : '';
+  return `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt}, ${left}): ${state}${old}${i.carried > 0 ? `; carried ${i.carried}` : ''}${took}${named}\n  ${i.text}${answer}`;
+}
+
+// 4.4 (the plan's F15, G5): the user's question "how far is each thing I asked for", from one read
+const itemsRead: Command = {
+  group: 'read', name: ['items'], summary: 'one line per requirement item and one per repair, with its state (not planned, planned, in work, accepted after a passing review, accepted with risk (n open), abandoned, delivered, landed; a repair: superseded, when every part is done or replaced before it was accepted), its proof label and the user\'s statements that it was checked in the field (the user\'s words, never proof); a new requirement\'s item with the filing it came with and whether the plan in effect was checked against it, each task a filing brought, and a filing\'s tasks that name no item', usage: 'mp read items <mission>', flags: {},
+  async run(c, a) {
+    const m = positional(a, 0, 'mission');
+    const xs = readItems(P(c).ctx, m);
+    const req = xs.filter((x) => x.kind === 'requirement');
+    const rep = xs.filter((x) => x.kind === 'repair');
+    const text = xs.length === 0 ? `Mission ${m} has no requirement item and no repair.` : [
+      `Requirement items of mission ${m}: ${req.length}`, ...req.flatMap(itemStateLines),
+      ...(rep.length > 0 ? [`Repairs: ${rep.length}`, ...rep.flatMap(itemStateLines)] : []),
+    ].join('\n');
+    return ok(text, { mission: m, items: xs });
+  },
+};
+
+// 4.4 (F10, P12): the health of the review seat, read in one snapshot
+const reviewsRead: Command = {
+  group: 'read', name: ['reviews'], summary: 'the health of a mission\'s review seat: the share of pass, rework and needs-decision of its Reviewer hand-backs, per filler of the Reviewer seat and per week (UTC), and each change of filler', usage: 'mp read reviews <mission>', flags: {},
+  async run(c, a) {
+    const p = P(c);
+    const m = positional(a, 0, 'mission');
+    const h = p.ctx.memory.read((db) => reviewHealth(m, reviewRows(db, p.ctx.memory.data, m)));
+    if (h.all.reviews === 0) return ok(`Mission ${m} has no accepted Reviewer hand-back.`, h);
+    const lines = [
+      `Reviews of mission ${m}: ${sharesLine(h.all)}`,
+      'By filler of the Reviewer seat:',
+      ...h.byFiller.map((f) => `  ${f.filler}: ${sharesLine(f)}`),
+      'By week (UTC):',
+      ...h.byWeek.map((w) => `  ${w.week}: ${sharesLine(w)}`),
+      ...(h.changes.length === 0 ? ['The filler of the Reviewer seat did not change.'] : ['Changes of filler:', ...h.changes.map((x) => `  review ${x.at} (${x.dispatch}): ${x.from} to ${x.to}; the ${x.before.reviews} before: pass ${x.before.reviews === 0 ? 0 : Math.round((100 * x.before.pass) / x.before.reviews)}%; the ${x.since.reviews} since (latest): pass ${x.since.reviews === 0 ? 0 : Math.round((100 * x.since.pass) / x.since.reviews)}%${x.fell ? ' (under half of the share before)' : ''}`)]),
+    ];
+    return ok(lines.join('\n'), h);
+  },
+};
+
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, constraintsReadCmd, repairsReadCmd, openItemsRead, itemsRead, reviewsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];

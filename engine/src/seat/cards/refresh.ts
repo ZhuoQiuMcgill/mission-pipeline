@@ -1,6 +1,6 @@
 // Claim-time selection is owned by the queue-time builders; refresh adds no seat context.
 import { liveSecretary } from '../../memory/resident.ts';
-import type { BaseRecord, ObjectVersionRecord, ProofUnitRecord, ListRef } from '../../common/records.ts';
+import type { BaseRecord, IssueRecord, ObjectVersionRecord, ProofUnitRecord, ListRef } from '../../common/records.ts';
 import type { BasisIndex } from '../../flow/context.ts';
 import { predecessorMaterials, predecessorsFrom, withPredecessorMaterials } from '../../flow/exploration/predecessors.ts';
 import { decidingViews, labelStatus } from '../../evaluator/index.ts';
@@ -8,11 +8,13 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { attemptPast, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage } from '../../flow/execution.ts';
+import { attemptPast, attemptReopenRepairs, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage, withAttemptItems } from '../../flow/execution.ts';
 import { acceptedEntry } from '../../flow/repair.ts';
 import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
-import { repairPlanMaterial } from './architect.ts';
+import { repairItemsBlock, repairPlanMaterial } from './architect.ts';
+import type { ItemVersionBody } from '../../flow/requirements.ts';
 import { cardQuestions, taskQuestions, withoutAnswers } from '../../flow/openItems.ts';
+import { cardItemNames, issueResolver, itemIssue, riskItemsOf, takenItems, type IssueNote } from '../../flow/riskItems.ts';
 import type { MaterialRef } from './common.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
@@ -20,10 +22,13 @@ import type { FlowEvent } from '../../flow/ports.ts';
 import { secretaryOptions, type EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
-import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints } from './dynamic.ts';
+import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints, addressedForPlanning, planReviewInstructions, repairsOfTaskWork, writtenForTask, noteOfHandBack } from './dynamic.ts';
+import { repairRef, type RepairBody } from '../../flow/plandoc.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
 import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectRepairCard } from './architect.ts';
+import { answerPlanMaterial, type ArchitectAnswerCard } from './architectAnswer.ts';
+import { askStanding, earlierReplies } from '../../flow/architectAnswers.ts';
 import type { SecretaryCard } from './secretary.ts';
 import type { AuditNodeCard, AuditChainCard } from './auditor.ts';
 import type { AuthorCard, ReaderCard, InterpreterCard } from './researcher.ts';
@@ -31,7 +36,7 @@ import type { ExperimentCard } from './experiment.ts';
 import type { CrititorCard } from './crititor.ts';
 import type { StabilizerCard } from './stabilizer.ts';
 
-type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
+type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | ArchitectAnswerCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
 
 /** A card's constraint that is a project constraint (a basis line of `mp pm constraint`), not an exploration definition's own. */
 function projectConstraint(ix: BasisIndex, id: string): boolean {
@@ -64,6 +69,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
   // explorations planned before it are selected below. Blind cards exclude intent (§4.3).
   switch (card.seat) {
     case 'architect-repair':
+    case 'architect-answer':
     case 'researcher-author':
     case 'researcher-reader':
     case 'researcher-interpreter':
@@ -120,6 +126,26 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     else l.push(e);
   }
   const lineOf = (id: string): FlowEvent[] => lines.get(`task:${id}`) ?? [];
+  // 4.4 (G9): the requirement items a filing's reopen binds attempt k of a task to (flow/execution.ts attemptItems, from the same records)
+  const reopenItemsOf = (id: string, k: number): string[] => {
+    const out: string[] = [];
+    for (const repair of attemptReopenRepairs(lineOf(id), k)) {
+      const d = events.find((e) => e.line === 'repairs' && e.event === 'decided' && e.key === repair)?.body as { reopen?: ReadonlyArray<{ task: string; items?: readonly string[] }> } | undefined;
+      for (const l of d?.reopen?.find((x) => x.task === id)?.items ?? []) if (!out.includes(l)) out.push(l);
+    }
+    return out;
+  };
+  // 4.4 (G5, p10-5): the items a card lists, each with the issue it is about (a finding of a 4.3 acceptance: its issue record)
+  const cardItems = (names: readonly string[]) => {
+    const need = riskItemsOf(events).some((i) => names.includes(i.id) && i.kind === 'finding' && itemIssue(i) === undefined);
+    const notes: IssueNote[] = !need ? [] : pages((after) => recordsByKind(db, { kinds: ['issue'], after })).map((r) => {
+      const rec = r.record as IssueRecord;
+      let text: string | null = null;
+      try { if (rec.text !== undefined) text = (JSON.parse(data.text(rec.text)) as { text?: string }).text ?? null; } catch { /* not readable */ }
+      return { issue: rec.issue as string, observedOn: data.getList(rec.observedOn), text };
+    });
+    return takenItems(events, names, need ? issueResolver(events, notes) : itemIssue);
+  };
   // 4.4 (F3): a material the card lacks (it was queued by 4.3, or its hand-back was not readable then), from the recorded hand-backs
   const put = (d: string): string => data.put(d);
   const readers = o.handBack !== undefined && o.leaf !== undefined ? { handBack: o.handBack, leaf: o.leaf } : null;
@@ -138,6 +164,28 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     const a = attach([m], c);
     if (a.materials !== undefined) c.materials = a.materials;
     if (a.materialsNotAttached !== undefined) c.materialsNotAttached = a.materialsNotAttached;
+  };
+  // 4.4 (G3): the repairs a task's work answers and what was written for it, by the queue-time builder's
+  // derivation (a card queued by 4.3 gets them here); `k` null: the attempt is not known, the card's repairs stand
+  const writtenFor = (c: ConstructorCard | ReviewerCard, t: DetailedTask, k: number | null): void => {
+    const ids = k === null ? (c.repairs ?? []).map((r) => r.id) : repairsOfTaskWork(mission, planInEffect(events)?.amendments, t.id, lineOf(t.id), events.filter((e) => e.line === 'secretary'), events.filter((e) => e.line === 'repairs'), k);
+    const refs = events.filter((e) => e.line === 'repairs' && e.event === 'repair' && ids.includes(e.key)).map((e) => repairRef(e.body as RepairBody));
+    if (refs.length > 0) c.repairs = refs;
+    else delete c.repairs;
+    delete c.addressed;
+    delete c.architectNotes;
+    delete c.earlierAnswers;
+    // a 4.3 decision's note, from its Architect's accepted hand-back (one not readable is left out, never refusing the claim)
+    const note43 = readers === null ? undefined : (step: string): string | null => noteOfHandBack(readers.handBack(step));
+    Object.assign(c, writtenForTask(constraints, events, mission, t.id, ids, note43));
+  };
+  // 4.4 (G3, F1): an Architect's card prints the addressed instructions of the repair in hand (or its task) in full, the rest as an index
+  const planningAddressed = (c: ArchitectRepairCard | ArchitectDecomposeCard | ArchitectAnswerCard, inHand: { repair?: string; about?: string }): void => {
+    const a = addressedForPlanning(constraints, mission, inHand);
+    delete c.addressed;
+    delete c.addressedIndex;
+    if (a.full.length > 0) c.addressed = a.full;
+    if (a.index.length > 0) c.addressedIndex = a.index;
   };
   const feasibility = (c: WithMaterials, dplan: string): void => {
     const r = readers === null ? null : returnedFeasibilityOf(events, attemptOfPlan(events, dplan));
@@ -158,6 +206,16 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const plan = amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
       const queued = new Set(card.accepted.map((a) => a.product));
       card.constraints = planningConstraints(constraints, mission);
+      planningAddressed(card, { repair: card.repair.id, ...(card.repair.about?.startsWith('task ') === true ? { about: card.repair.about.slice('task '.length) } : {}) });
+      // 4.4 (G9): the filing's items as they stand at the claim (one withdrawn since says so) and the limits in force
+      const filing = events.find((e) => e.line === 'repairs' && e.event === 'repair' && e.key === card.repair.id)?.body as RepairBody | undefined;
+      if (filing !== undefined) {
+        delete card.entry;
+        delete card.items;
+        delete card.limits;
+        delete card.limitsMore;
+        Object.assign(card, repairItemsBlock(mission, filing, items, events.filter((e) => e.line === 'requirements' && e.event === 'item').map((e) => e.body as ItemVersionBody)));
+      }
       card.plan = plan;
       card.accepted = plan.tasks.flatMap((t) => {
         const sel = lineAcceptance(lineOf(t.id));
@@ -177,6 +235,40 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const tasks = new Set(events.filter((e) => e.line === 'plan' && e.event === 'effective').flatMap((e) => (e.body as EffectiveBody).tasks));
       card.owners = ownersOfPaths(new Map([...tasks].map((id) => [id, lineOf(id)])), about).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
       card.materials = [repairPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')];
+      // 4.4 (G4, G5): the open items the repair is for, as they stand at the claim (one closed meanwhile is not listed)
+      const named = (events.find((e) => e.line === 'repairs' && e.event === 'repair' && e.key === card.repair.id)?.body as { openItems?: readonly string[] } | undefined)?.openItems;
+      const listed = takenItems(events, named);
+      if (listed.length > 0) card.openItems = listed;
+      else delete card.openItems;
+      break;
+    }
+    case 'architect-answer': {
+      // 4.4 (G1): an ask no longer current (answered by another decider, carried out, closed, its round closed) is not
+      // claimed: the flow's next pass cancels the step; a reply of it would change nothing (flow/architectAsk.ts)
+      const moot = askStanding(events.filter((e) => e.line === 'secretary'), { escalation: card.escalation.id, by: card.asked.by, round: card.asked.round });
+      if (moot !== null) throw new ProcessError('NOT_READY', `Architect step ${spec.task} was superseded: ${moot}; run mp pm next.`);
+      // review p11-7 (F5): the card is current when it is claimed: rebuilt from the records in force now, by the
+      // queue-time builder's selections. A new card of its task makes the question moot: not claimed
+      const eff = planInEffect(events);
+      const stored = eff === undefined ? undefined : object(eff.dplan);
+      const plan = stored === undefined || eff === undefined ? undefined : amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
+      const now = plan?.tasks.find((t) => t.id === card.taskCard.id);
+      if (eff === undefined || plan === undefined || now === undefined || taskCardHash(now) !== taskCardHash(card.taskCard)) throw new ProcessError('NOT_READY', `Architect step ${spec.task} was superseded: task ${card.taskCard.id} has a new card, or is not in the plan in effect; run mp pm next.`);
+      // the constraints in force at the claim, those addressed to its task in full (G3), the decisions, the requirement texts
+      card.constraints = planningConstraints(constraints, mission);
+      planningAddressed(card, { about: now.id });
+      card.decisionQuotes = taskDecisionQuotes(items, events, now, constraintsForTask(constraints, now, mission), eff.dplan);
+      card.requirementItems = taskRequirementItems(items, now);
+      // the plan in effect, the tasks an answer may name, the earlier replies
+      card.dplan = eff.dplan;
+      card.tasks = plan.tasks.map((t) => t.id).filter((t) => t !== now.id);
+      card.earlier = earlierReplies(events.filter((e) => e.line === 'secretary'), card.escalation.id);
+      // a material that cannot be stored never refuses the claim: the queued one stays
+      try { card.materials = [answerPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')]; } catch { /* the queued plan material stays */ }
+      // the task's accepted product as it stands (an unpinned start the queue-time builder took stays; another by the resolver's rule with no recorded prerequisite)
+      const sel = lineAcceptance(lineOf(now.id));
+      const queuedProducts = new Set(card.accepted.map((a) => a.product));
+      card.accepted = sel.product === null || (!sel.pinned && !queuedProducts.has(sel.product) && !noRecordedPrerequisites(sel.product)) ? [] : [acceptedEntry(now.id, lineOf(now.id), sel.product, object(sel.product)?.source?.commit)];
       break;
     }
     case 'researcher-author':
@@ -230,11 +322,18 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       Object.assign(card, planData(plan));
       // 4.4 (F3): a later attempt's past, when the card lacks it
       const k = (lineOf(task.id).find((e) => e.event === 'dispatched' && e.key === spec.task)?.body as { k?: number } | undefined)?.k;
+      // 4.4 (G9): with the items a filing's reopen binds this attempt to, as the queue-time builder lists them
+      if (k !== undefined) card.requirementItems = taskRequirementItems(items, withAttemptItems(task, reopenItemsOf(task.id, k)));
+      writtenFor(card, task, k ?? null);
       // 4.4 (F4; G5): the questions as they stand at the claim: an answer given since the step was queued reaches this card
       const qs = k === undefined ? [] : taskQuestions(events, task.id, k);
       card.decisionQuotes = withoutAnswers(card.decisionQuotes, qs);
       if (qs.length > 0) card.questions = cardQuestions(qs);
       else delete card.questions;
+      // 4.4 (G5): the open items the card takes, as they stand at the claim (one closed meanwhile is not listed)
+      const taken = k === undefined ? [] : cardItems(cardItemNames(events, task, k));
+      if (taken.length > 0) card.openItems = taken;
+      else delete card.openItems;
       const was = k === undefined ? null : attemptPast(lineOf(task.id), k);
       const review = was?.review ?? null;
       if (was !== null && review !== null && lacks(card, PREVIOUS_REVIEW_MATERIAL)) plus(card, PREVIOUS_REVIEW_MATERIAL, review, () => previousReviewMaterial(put, sourceAt(readers!, review), { review, attempt: was.attempt }));
@@ -249,17 +348,28 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const versions = contractLines(obj.mission, task!, ix, fixed).map((line) => ix.current.get(line));
       const standardChanged = changedBoundLines(ix, previous).some((line) => ix.records.get(ix.current.get(line)!)?.basisKind === 'standard');
       if (!standardChanged && versions.every((v) => v !== undefined)) card.binding.bases = data.putList([...new Set(versions as string[])].sort());
+      // 4.4 (G9): the text of the items the judgment is bound to, as the binding stands now (a card queued by 4.3 gets them here)
+      const before = task === undefined ? undefined : lineOf(task.id).filter((e) => e.event === 'review' && (e.body as { task?: string }).task !== spec.task).at(-1)?.body as { judgment?: string } | undefined;
+      const prior = before?.judgment === undefined ? undefined : factById(db, 'judgment', before.judgment)?.record as { bases?: ListRef } | undefined;
+      const bound = reviewerItems(events, data.getList(card.binding.bases as ListRef), prior?.bases === undefined ? null : data.getList(prior.bases));
+      if (bound.length > 0) card.requirementItems = bound;
+      else delete card.requirementItems;
       const input = objectConstraints(constraints, obj);
       card.binding.constraints = data.putList(input.checks);
       card.constraints = [...input.list, ...(task === undefined ? [] : constraintsForTask(constraints, task, mission).filter((c) => c.kind === 'instruction').map((c) => ({ id: c.line, text: c.text, kind: c.kind })))];
       if (task !== undefined) {
         const attempt = productAttempt(events.filter((e) => e.line === `task:${task!.id}`), card.target);
         if (attempt !== null) card.decisionQuotes = reviewerDecisionQuotes(mission, items, events, task, constraints, attempt, taskReferencePlan(events, fixed));
+        writtenFor(card, task, attempt);
         // 4.4 (F4): the questions of the attempt under review and their answers, as they stand at the claim
         const qs = attempt === null ? [] : taskQuestions(events, task.id, attempt);
         card.decisionQuotes = withoutAnswers(card.decisionQuotes, qs);
         if (qs.length > 0) card.questions = cardQuestions(qs);
         else delete card.questions;
+        // 4.4 (G5): the open items the card takes, as they stand at the claim: each listed one is answered
+        const taken = attempt === null ? [] : cardItems(cardItemNames(events, task, attempt));
+        if (taken.length > 0) card.openItems = taken;
+        else delete card.openItems;
       }
       // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
       const relied = taskReferencePlan(events, fixed);
@@ -277,6 +387,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       if (e === undefined) throw new ProcessError('NOT_READY', `Missing escalation ${card.request.id}; rebuild the step.`);
       const round = secretaryRoundInputs(e, events);
       if (round.esc.task !== spec.task) throw new ProcessError('NOT_READY', `Secretary step ${spec.task} was superseded; run mp pm next.`);
+      delete card.addressed;
       Object.assign(card, secretaryInputs(mission, round.esc, items, constraints, events, task, !loopState(db, card.request.lineage, 'env-retry').secretaryGrantUsed, (text) => data.put(text)));
       card.options = secretaryOptions(round.esc, liveSecretary(db) !== null);
       break;
@@ -286,7 +397,12 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     case 'architect-feasibility':
     case 'architect-decompose': {
       // the Architect's card shows the constraints in force (4.1.2, item 7), by the queue-time builder's selection
-      if (card.seat === 'architect-decompose') card.constraints = planningConstraints(constraints, mission);
+      if (card.seat === 'architect-decompose') {
+        card.constraints = planningConstraints(constraints, mission);
+        planningAddressed(card, {});
+      }
+      // 4.4 (G3, F1): a plan review gets the instructions whose task types name its plan; its object constraints stay as bound
+      if (card.seat !== 'architect-decompose') card.constraints = [...card.constraints.filter((c) => c.kind === 'object'), ...planReviewInstructions(constraints, mission, card.seat === 'calibrator-1' ? 'pm-plan' : 'detailed-plan')];
       const obj = card.seat === 'architect-decompose' ? undefined : object(card.target);
       const withdrawn = obj === undefined ? null : withdrawnPlanReason(obj, ix);
       if (withdrawn !== null) throw new ProcessError('NOT_READY', withdrawn);

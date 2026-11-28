@@ -1,6 +1,6 @@
 import { reviewInputVersions, objectConstraints, boundObjectConstraints, changedPlanningInputs, planningContext, type PlanningInputs, withdrawnPlanReason, standardLine } from '../seat/cards/inputs.ts';
 export { standardLine } from '../seat/cards/inputs.ts';
-import { productionDisputed, planningConstraints } from '../seat/cards/dynamic.ts';
+import { productionDisputed, planningConstraints, addressedForPlanning, addressedIndexOf, planReviewInstructions } from '../seat/cards/dynamic.ts';
 // The decision layer (design 3.1–3.10): PM plan → Calibrator ① → Architect (decomposition) →
 // program mechanical checks → feasibility review → Calibrator ② → the plan's tasks released;
 // Secretary escalations on the way; the plan grows by rounds.
@@ -42,7 +42,7 @@ import { productionDisputed, planningConstraints } from '../seat/cards/dynamic.t
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId, ObjectVersionId } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
 import type { BaseRecord, JudgmentRecord, ObjectVersionRecord, UserWordsRecord } from '../common/records.ts';
-import { PREVIOUS_PLAN_MATERIAL, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
+import { OPEN_ITEMS_LISTED, PREVIOUS_PLAN_MATERIAL, manyStandards, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
 import { normalizeCommand } from '../common/fullSuite.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
@@ -95,10 +95,12 @@ import {
   type StoredDetailedPlan,
   taskLine,
 } from './plandoc.ts';
-import type { FlowEventInput, FlowPorts } from './ports.ts';
-import { currentItems, currentConstraints, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
+import type { AppendGuard, FlowEventInput, FlowPorts } from './ports.ts';
+import { currentItems, currentConstraints, itemLine, newRequirementsLine, planSetItems, planSetLines, requirementSetLine, setContested, termLines, type CurrentItem } from './requirements.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
+import { itemIds, recordOnAct, riskItemsOf } from './riskItems.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE } from './openItems.ts';
 import { currentSettle, settledArtifactProven } from './exploration/step.ts';
 import { planReviewsWaiver, waiverLabel, type PlanReviewsWaiver } from './waivers.ts';
 
@@ -116,6 +118,11 @@ export interface PmBatchBody {
   /** The mission's default (4.1, maintainer: one default per task, exceptions by goal). */
   readonly mode: 'stable' | 'fast';
   readonly requirementSet?: string;
+  /**
+   * 4.4 (G9): the versions of the other requirement-set lines the plan is checked against (the term lines of the items
+   * `mp pm extend` recorded before it), part of the request's identity with `requirementSet`. Absent: none (every 4.3 batch).
+   */
+  readonly planSets?: readonly string[];
 }
 
 /**
@@ -131,6 +138,8 @@ export interface RecheckBody {
   readonly n: number;
   readonly m: number;
   readonly requirementSet?: string;
+  /** 4.4 (G9): as on the batch (absent: none). */
+  readonly planSets?: readonly string[];
   readonly mode?: 'stable' | 'fast';
   readonly userWords: readonly string[];
   readonly changedItems: readonly string[];
@@ -233,8 +242,24 @@ const cal2Task = (dplan: string, full: boolean): string => safeId(`cal2.${dplan}
  */
 export async function submitPmBatch(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly plan: unknown; readonly userWords: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' },
+  req: PmBatchRequest,
 ): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
+  // 4.4 (G9, p12-4, p12-r2-3): the write is checked against the version of reqnew.<m> read with the term lines (every item
+  // write of `mp pm extend` makes one); one written in between refuses it, and the batch is built again from a fresh read
+  // (bounded: another such writer each time). Nothing else refuses it: an ordinary repair touches no requirement set
+  for (let tries = 1; ; tries++) {
+    try {
+      return await submitPmBatchOnce(ports, req);
+    } catch (e) {
+      if (tries >= PM_BATCH_TRIES || (e as { code?: unknown }).code !== 'STALE_REQUEST') throw e;
+    }
+  }
+}
+
+type PmBatchRequest = { readonly mission: MissionId; readonly plan: unknown; readonly userWords: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' };
+const PM_BATCH_TRIES = 3;
+
+async function submitPmBatchOnce(ports: FlowPorts, req: PmBatchRequest): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
   const ctx = flowCtx(ports, req.mission);
   const doc = PmPlanDoc.parse(req.plan);
   if (doc.mission !== req.mission) throw new Error(`the plan names mission ${doc.mission}, not ${req.mission}`);
@@ -253,6 +278,8 @@ export async function submitPmBatch(
   const dependent = (req.dependentItems ?? []).map(lineOf);
   const ix = await basisIndex(ctx);
   const requirementSet = ix.current.get(requirementSetLine(req.mission)) ?? `${requirementSetLine(req.mission)}.v1`;
+  // 4.4 (G9): the versions of the term lines a plan is checked against besides reqset (null: none, a 4.3 plan or no extension)
+  const setsOf = (lines: readonly string[]): string[] | null => { const vs = lines.filter((l) => l !== requirementSetLine(req.mission)).flatMap((l) => { const v = ix.current.get(l); return v === undefined ? [] : [v]; }); return vs.length > 0 ? vs : null; };
   const mode = req.mode ?? last?.mode ?? 'stable';
   if (last !== null && last.doc === docHash) {
     // the plan document is the latest version's: a retry of the latest request about it, or (once
@@ -260,12 +287,14 @@ export async function submitPmBatch(
     const effective = (await eventOf(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, last.plan)) !== null;
     const rechecks = effective ? (await eventsOf<RecheckBody>(ctx, PLAN_LINE, CAL1_RECHECK)).filter((e) => e.body.plan === last.plan).map((e) => e.body) : [];
     const latestRequest: PmBatchBody | RecheckBody = rechecks.at(-1) ?? last;
-    if (latestRequest.requirementSet === requirementSet && (latestRequest.mode ?? last.mode) === mode && canonicalJson(latestRequest.dependentItems) === canonicalJson(dependent) && canonicalJson(latestRequest.userWords) === canonicalJson(req.userWords) && canonicalJson(latestRequest.changedItems) === canonicalJson(changed)) {
+    const lastObj = await objectRecord(ctx, last.plan);
+    const planSets = lastObj === null ? null : setsOf(planSetLines(lastObj, ix));
+    if (latestRequest.requirementSet === requirementSet && canonicalJson(latestRequest.planSets ?? null) === canonicalJson(planSets) && (latestRequest.mode ?? last.mode) === mode && canonicalJson(latestRequest.dependentItems) === canonicalJson(dependent) && canonicalJson(latestRequest.userWords) === canonicalJson(req.userWords) && canonicalJson(latestRequest.changedItems) === canonicalJson(changed)) {
       return { batch: latestRequest.batch, plan: last.plan, ...(latestRequest !== last ? { recheck: true } : {}) };
     }
     if (effective && (req.mode === undefined || req.mode === last.mode)) {
       const m = rechecks.length + 1;
-      const body: RecheckBody = { batch: `${last.batch}.c${m}`, plan: last.plan, n: last.n, m, requirementSet, mode, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent };
+      const body: RecheckBody = { batch: `${last.batch}.c${m}`, plan: last.plan, n: last.n, m, requirementSet, ...(planSets !== null ? { planSets } : {}), mode, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent };
       await commit(ctx, `flow:cal1-recheck:${req.mission}:${last.plan}:${m}`, { events: [ev(ctx, PLAN_LINE, CAL1_RECHECK, `${last.plan}#c${m}`, body)] });
       return { batch: body.batch, plan: last.plan, recheck: true };
     }
@@ -273,6 +302,11 @@ export async function submitPmBatch(
   const n = (last?.n ?? 0) + 1;
   const plan = pmPlanObject(req.mission, n);
   const authLines = doc.authorizations.map(lineOf);
+  // 4.4 (G9): a plan is checked against every item in force: besides reqset, the term lines of the items `mp pm extend`
+  // recorded before it (none: 4.3's contract). The items recorded after it fall in its own term, outside its check
+  const terms = termLines(ix, req.mission);
+  // (p12-r2-3) the version of reqnew.<m> the term lines were read with (absent: none yet)
+  const reqnewRead = ix.current.get(newRequirementsLine(req.mission)) ?? null;
   const rec: ObjectVersionRecord = {
     kind: 'object.version',
     object: plan as ObjectVersionId,
@@ -282,10 +316,11 @@ export async function submitPmBatch(
     content: docHash,
     prerequisites: ports.ledger.content.putList([]),
     scope: { paths: [PM_PLAN_PATH], taskType: 'pm-plan' },
-    reviews: [{ review: 'calibrator-1', basisLines: [requirementSetLine(req.mission), ...authLines] as BasisLineId[], reliesOn: [] }],
+    reviews: [{ review: 'calibrator-1', basisLines: [requirementSetLine(req.mission), ...terms, ...authLines] as BasisLineId[], reliesOn: [] }],
     ...(last !== null ? { predecessor: last.plan as ObjectVersionId } : {}),
   };
-  const body: PmBatchBody = { batch: `b${n}`, n, plan, predecessor: last?.plan ?? null, round: doc.round, doc: docHash, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent, mode, requirementSet };
+  const planSets = setsOf(terms);
+  const body: PmBatchBody = { batch: `b${n}`, n, plan, predecessor: last?.plan ?? null, round: doc.round, doc: docHash, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent, mode, requirementSet, ...(planSets !== null ? { planSets } : {}) };
   const records: BaseRecord[] = [rec];
   // the calibrator-1 contract needs a requirement-set version, even an empty one (v31 5.2)
   const setLine = requirementSetLine(req.mission);
@@ -297,8 +332,13 @@ export async function submitPmBatch(
   const stale: string[] = [];
   for (const o of batches) for (const e of await openEscalations(ctx, `plan:${o.body.plan}`)) stale.push(e.id);
   const close = closing(ctx, stale, `PM plan ${plan} (batch b${n}) was submitted: a decision on the earlier batch is not carried out`);
-  const guard = carryGuard([close]);
-  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, ...(guard !== undefined ? { guard } : {}) });
+  const carry = carryGuard([close]);
+  // (p12-4, p12-r2-3) the term lines the contract lists are the ones there are at the write: reqnew.<m> as it was read
+  const sets = [{ line: newRequirementsLine(req.mission), version: reqnewRead }];
+  const guard: AppendGuard = carry !== undefined
+    ? { ...carry, bases: sets, message: `${carry.message} (or a requirement item of mp pm extend was recorded meanwhile)` }
+    : { absent: [], bases: sets, code: 'STALE_REQUEST', message: `a requirement item of mp pm extend was recorded while PM plan ${plan} was being recorded; nothing was written (the batch is built again with it)` };
+  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, guard });
   await cancelSecretarySteps(ctx, stale);
   return { batch: body.batch, plan };
 }
@@ -733,8 +773,12 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
   const obj = await objectRecord(ctx, b.plan);
   if (obj === null) throw new Error(`Missing plan object ${b.plan}`);
   const constraints = objectConstraints(await currentConstraints(ctx), obj);
-  const items = await currentItems(ctx);
-  const contractLines = [requirementSetLine(ctx.mission), ...doc.authorizations.map((a) => itemLine(ctx.mission, a))];
+  // 4.4 (G9): the items the plan is checked against: those its contract's requirement-set lines list (every item in force
+  // in 4.3); the items `mp pm extend` recorded after it are outside its check, so a re-check leaves them aside
+  const inSet = planSetItems(obj, ix, (r) => ctx.ports.ledger.content.getList(r));
+  const items = (await currentItems(ctx)).filter((i) => inSet.has(i.line));
+  // the plan's own contract (a 4.3 plan's names reqset and its authorizations, as recomputed before 4.4)
+  const contractLines = [...(obj.reviews.find((r) => r.review === 'calibrator-1')?.basisLines ?? [requirementSetLine(ctx.mission), ...doc.authorizations.map((a) => itemLine(ctx.mission, a))])];
   // the pass a continuation extends: the previous version's, or (a re-check) the plan's own before it
   const prevBatch = recheck !== null ? b : b.predecessor === null ? null : (batches.find((x) => x.plan === b.predecessor) ?? null);
   const j0 = forceFull || prevBatch === null ? null : await cal1PassOf(ctx, prevBatch.plan);
@@ -752,7 +796,7 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
     const j0Bases = ctx.ports.ledger.content.getList(j0rec.bases);
     const j0Lines = j0Bases.map((v) => ix.lineOf.get(v)).filter((l): l is string => l !== undefined);
     changedLines = [...new Set([...j0Lines.filter((l) => !j0Bases.includes(ix.current.get(l) ?? '')), ...contractLines.filter((l) => !j0Lines.includes(l))])];
-    const diff = requirementSetChanges(ctx, ix, j0Bases);
+    const diff = requirementSetChanges(ctx, ix, j0Bases, contractLines);
     for (const l of diff.changed) touched.add(l);
     withdrawnSince = diff.withdrawn;
     const versions = new Map((await eventsOf<import('./requirements.ts').ItemVersionBody>(ctx, 'requirements', 'item')).map((e) => [e.body.version, e.body]));
@@ -798,7 +842,8 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
       ? `Re-check the PM plan in effect (${b.plan}, unchanged) against the requirement items as they are now (batch ${recheck.batch}): judge whether each focus element still holds against the changed items and the user's words; report every item the plan now leaves out or goes against; ask what only the user can decide.`
       : "Audit the direction of this PM plan batch against the user's words; report every finding; ask what only the user can decide.";
   const card: Calibrator1Card = {
-    ...cardBase(ctx, task, { duties, constraints: constraints.list }),
+    // 4.4 (G3, F1): with the instructions whose task types name "pm-plan" (never a proof input)
+    ...cardBase(ctx, task, { duties, constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'pm-plan')] }),
     seat: 'calibrator-1',
     target: b.plan,
     review: 'calibrator-1',
@@ -835,18 +880,17 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
  * The requirement items that changed between the requirement-set version among `bases` (a
  * judgment's) and the current one: added or revised lines, and lines no longer in force.
  */
-function requirementSetChanges(ctx: FlowCtx, ix: Awaited<ReturnType<typeof basisIndex>>, bases: readonly string[]): { readonly changed: string[]; readonly withdrawn: string[]; readonly entries: Array<{ line: string; old: string | undefined; current: string | undefined }> } {
-  const line = requirementSetLine(ctx.mission);
-  const then = bases.find((v) => ix.lineOf.get(v) === line);
-  const nowV = ix.current.get(line);
-  const snapshot = (v: string | undefined): Map<string, string> => {
+function requirementSetChanges(ctx: FlowCtx, ix: Awaited<ReturnType<typeof basisIndex>>, bases: readonly string[], contract: readonly string[] = [requirementSetLine(ctx.mission)]): { readonly changed: string[]; readonly withdrawn: string[]; readonly entries: Array<{ line: string; old: string | undefined; current: string | undefined }> } {
+  const snapshot = (v: string | undefined, into: Map<string, string>): void => {
     const rec = v === undefined ? undefined : ix.records.get(v);
-    const out = new Map<string, string>();
-    if (rec?.basisKind === 'requirement-set') for (const iv of ctx.ports.ledger.content.getList(rec.snapshot)) out.set(ix.lineOf.get(iv) ?? iv, iv);
-    return out;
+    if (rec?.basisKind === 'requirement-set') for (const iv of ctx.ports.ledger.content.getList(rec.snapshot)) into.set(ix.lineOf.get(iv) ?? iv, iv);
   };
-  const a = snapshot(then);
-  const b = snapshot(nowV);
+  // 4.4 (G9): over every requirement-set line the plan is checked against (reqset alone in 4.3), as bound then and as they are now
+  const setLine = (l: string): boolean => ix.records.get(ix.current.get(l) ?? '')?.basisKind === 'requirement-set';
+  const a = new Map<string, string>();
+  const b = new Map<string, string>();
+  for (const v of bases) if (setLine(ix.lineOf.get(v) ?? '')) snapshot(v, a);
+  for (const l of contract) if (setLine(l)) snapshot(ix.current.get(l), b);
   return { changed: [...b].filter(([l, v]) => a.get(l) !== v).map(([l]) => l).sort(), withdrawn: [...a.keys()].filter((l) => !b.has(l)).sort(), entries: [...new Set([...a.keys(), ...b.keys()])].filter((l) => a.get(l) !== b.get(l)).sort().map((line) => ({ line, old: a.get(line), current: b.get(line) })) };
 }
 
@@ -1030,12 +1074,16 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
     // tasks repairs added stay outside the integration rule when a revision carries them (4.1.2, D-10)
     const amended = amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body));
-    mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }), fullSuite: ctx.ports.project?.fullSuite ?? [], ...(amended.size > 0 ? { amended } : {}) });
+    // 4.4 (G5): the open items a task may take (read only when a task names one)
+    const named = plan.tasks.some((t) => (t.openItems ?? []).length > 0);
+    mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }), fullSuite: ctx.ports.project?.fullSuite ?? [], ...(amended.size > 0 ? { amended } : {}), ...(named ? { openItems: itemIds(await ctx.ports.ledger.events({ mission: ctx.mission })) } : {}) });
     await commit(ctx, `flow:mechanical:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'mechanical-check', dplan, mc)] });
     // before its reviews, the PM learns which work the plan would restart once in effect (told once, with the check)
 
   }
   if (mc.ok) await restartNotice(ctx, dplan, plan);
+  // 4.4 (F10): a warning, not a refusal: the PM is told once per plan version which tasks carry many standards
+  if (mc.ok) await manyStandardsNotice(ctx, dplan, plan);
   if (!mc.ok) {
     await planReturn(ctx, b, a, dplan, 'mechanical', { mechanicalFailures: mc.failures }, `mech:${shortHash([...mc.failures].sort())}`, 'mechanical');
     return;
@@ -1194,7 +1242,10 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const body: EffectiveBody = { dplan, pmPlan: b.plan, n: b.n, round: b.round, mode: b.mode, tasks: plan.tasks.map((t) => t.id), risks, ...(reviewsWaived !== null ? { reviewsWaived } : {}) };
     const carries = [close, ...(structureCarry === null ? [] : [structureCarry])];
     const guard = carryGuard([...carries, {id: `structure-input:${dplan}`, events: [], records: [], absent: [], latest: structureInput}]);
-    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...carries.flatMap((c) => c.events)], records: [...records, ...carries.flatMap((c) => c.records)], ...(guard !== undefined ? { guard } : {}) });
+    // v1-4: a risk sentence of an acceptance made before 4.4 that a task of this plan takes is recorded in this write
+    const named = plan.tasks.flatMap((t) => t.openItems ?? []);
+    const acted = named.length === 0 ? [] : recordOnAct(await ctx.ports.ledger.events({ mission: ctx.mission }), named).map((x) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.id, x));
+    await commit(ctx, `flow:effective:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'effective', dplan, body), ...carries.flatMap((c) => c.events), ...acted], records: [...records, ...carries.flatMap((c) => c.records)], ...(guard !== undefined ? { guard } : {}) });
     await cancelSecretarySteps(ctx, moot);
     // stable mode reads the waived plan as settled by the waiver (execution's gate): its tasks start on it,
     // and their products read "not fully proven" (the plan has no review to prove it)
@@ -1473,6 +1524,11 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const previousWaiver = revision && a.previous !== null ? await planReviewsWaiver(ctx, a.previous) : null;
   const nextWaiver = await planReviewsWaiver(ctx, dplan);
   const feasReport = revision ? await returnedFeasibility(ctx, a) : null;
+  // 4.4 (G5): the open items no task of the plan it revises takes, so a re-plan can give them to a task; v1-4: those
+  // recorded by 4.4 only (a risk sentence of an acceptance made before 4.4 is listed once someone acts on it)
+  const taken = new Set((previous?.plan.tasks ?? []).flatMap((t) => t.openItems ?? []));
+  const left = riskItemsOf(await ctx.ports.ledger.events({ mission: ctx.mission })).filter((i) => i.state === 'open' && !taken.has(i.id));
+  const listed = left.slice(0, OPEN_ITEMS_LISTED).map((i) => ({ id: i.id, kind: i.kind, text: i.text.length > 200 ? `${i.text.slice(0, 199)}…` : i.text, from: `task ${i.task}, attempt ${i.attempt}` }));
   const card: ArchitectDecomposeCard = {
     ...cardBase(ctx, task, {
       duties: revision
@@ -1481,6 +1537,8 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
       // 4.1.2 (item 7): the project constraints that apply, so the plan respects them from the start
       constraints: planningConstraints(await currentConstraints(ctx), ctx.mission),
     }),
+    // 4.4 (G3, F1): the instructions addressed to tasks or repairs, as an index (each reaches only what it names)
+    ...addressedIndexOf(addressedForPlanning(await currentConstraints(ctx), ctx.mission).index),
     seat: 'architect-decompose',
     workspace: { snapshot: snap.path, writablePaths: [] },
     pmPlan: {
@@ -1508,6 +1566,8 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
     },
     projectCommands: projectCommandsOf(ctx),
     ...(previousWaiver !== null || nextWaiver !== null ? { planReviews: { previous: previousWaiver === null ? null : waiverLabel(previousWaiver), next: nextWaiver === null ? null : waiverLabel(nextWaiver) } } : {}),
+    ...(listed.length > 0 ? { openItems: listed } : {}),
+    ...(left.length > listed.length ? { openItemsMore: left.length - listed.length } : {}),
   };
   // the elements tab must not be empty (a plan with only explorations has nothing to decompose yet)
   if (card.pmPlan.elements.length === 0) return;
@@ -1536,7 +1596,8 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
   // 4.4 (F3): the report of the review that returned the plan this one revises (optional)
   const report = await returnedFeasibility(ctx, a);
   const card: ArchitectFeasibilityCard = {
-    ...cardBase(ctx, task, { constraints: constraints.list, duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
+    // 4.4 (G3, F1): with the instructions whose task types name "detailed-plan" (never a proof input)
+    ...cardBase(ctx, task, { constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'detailed-plan')], duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
     seat: 'architect-feasibility',
     workspace: { snapshot: snap.path, writablePaths: [] },
     target: dplan,
@@ -1546,10 +1607,37 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
     earlierFindings: [...a.feasibilityFindings],
     binding: binding(ctx, { judgment: `j.${task}`, constraints: constraints.checks, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'feasibility', b.plan) }),
     ...attach([report]),
+    // 4.4 (F10): the card names the tasks with more standards than this
+    standardsWarn: standardsWarnOf(ctx),
   };
   await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });
   ctx.progressed = true;
+}
+
+/** 4.4 (F10): the standards on a task above which the feasibility reviewer and the PM are told (config `standardsWarn`, default 7). */
+export const STANDARDS_WARN_DEFAULT = 7;
+function standardsWarnOf(ctx: FlowCtx): number {
+  return ctx.ports.project?.standardsWarn ?? STANDARDS_WARN_DEFAULT;
+}
+
+/**
+ * 4.4 (F10, P10): rework rises with the number of standards on a task. A plan whose tasks
+ * carry more than `standardsWarn` tells the PM once per plan version (a notice, idempotent by its key);
+ * nothing is refused or held.
+ */
+async function manyStandardsNotice(ctx: FlowCtx, dplan: string, plan: DetailedPlanDoc): Promise<void> {
+  const limit = standardsWarnOf(ctx);
+  const many = manyStandards(plan, limit);
+  if (many.length === 0) return;
+  await notify(ctx, {
+    category: 'many-standards',
+    wi: null,
+    key: dplan,
+    trigger: `detailed plan ${dplan} has tasks with more than ${limit} standards (standardsWarn): ${many.join(', ')}`,
+    defaultAction: 'nothing is held or refused; rework rises with the number of standards on a task, so a plan revision with the user may split or tighten them',
+    detail: { dplan, limit, tasks: plan.tasks.filter((t) => t.standards.length > limit).map((t) => ({ task: t.id, standards: t.standards.length })) },
+  });
 }
 
 async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody, dplan: string, plan: DetailedPlanDoc, task: string, forceFull: boolean): Promise<void> {
@@ -1581,7 +1669,7 @@ async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a
     material(ctx, 'authorizations', 'Authorizations (verbatim)', renderItems(items.filter((i) => i.type === 'authorization')) || '(none)', true, 'authorizations'),
   ];
   const card: Calibrator2Card = {
-    ...cardBase(ctx, task, { constraints: constraints.list, duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
+    ...cardBase(ctx, task, { constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'detailed-plan')], duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
     seat: 'calibrator-2',
     target: dplan,
     review: 'calibrator-2',

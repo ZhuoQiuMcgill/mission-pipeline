@@ -51,12 +51,15 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof } from '../evaluator/index.ts';
 import { flowCtx } from '../flow/context.ts';
-import { bySeat, taskLineage } from '../flow/execution.ts';
+import { bySeat, currentRiskEscalation, taskLineage } from '../flow/execution.ts';
+import { OPEN_ITEMS_LINE } from '../flow/openItems.ts';
+import { acceptanceOf, riskRecord, withRiskText, type RiskRecord } from '../flow/riskItems.ts';
 import { latestEffective } from '../flow/planning.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import type { SettleRecord } from '../flow/exploration/machine.ts';
 import { PLAN_LINE, PM_PLAN_EFFECTIVE, REQUIREMENTS_LINE, SECRETARY_LINE, explorationLine, taskLine } from '../flow/plandoc.ts';
 import { decisionFor } from '../flow/secretary.ts';
+import { askTask } from '../flow/architectAsk.ts';
 import { activeStopScopes, stopCovers, type Db } from '../memory/index.ts';
 import { purposeOf, readSteps, type ProcessContext } from '../process/index.ts';
 import { age, clip } from './render.ts';
@@ -167,7 +170,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     const flows: Flow[] = (
       db.stmt('SELECT mission, line, event, key, body, revision FROM flow_events ORDER BY revision').all() as Array<{ mission: string; line: string; event: string; key: string; body: string; revision: number }>
     )
-      .filter((r) => r.line === REQUIREMENTS_LINE || r.line === PLAN_LINE || r.line === SECRETARY_LINE || r.line.startsWith('task:') || r.line.startsWith('exploration:'))
+      .filter((r) => r.line === REQUIREMENTS_LINE || r.line === PLAN_LINE || r.line === SECRETARY_LINE || r.line === OPEN_ITEMS_LINE || r.line.startsWith('task:') || r.line.startsWith('exploration:'))
       .map((r) => ({ mission: r.mission, line: r.line, event: r.event, key: r.key, body: parse(r.body), rev: Number(r.revision) }));
     const steps: Step[] = (db.stmt('SELECT task, lineage, mission, card, state, queued_rev, queued_at FROM tasks ORDER BY queued_rev').all() as Array<Json>).map((r) => ({
       task: String(r['task']),
@@ -267,6 +270,16 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     return true;
   };
 
+  // 4.4 (G5): an acceptance with risk is told apart from one after a pass, with what it left still open
+  // (p10-4): the items its current acceptance created or carried, by the one function the tree and mp read items use
+  const riskByMission = new Map<string, RiskRecord>();
+  const risksOf = (m: string): RiskRecord => riskByMission.get(m) ?? (riskByMission.set(m, riskRecord(raw.flows.filter((f) => f.mission === m).map((f) => ({ revision: f.rev, line: f.line, event: f.event, key: f.key, body: f.body })))), riskByMission.get(m)!);
+  const withRisk = (m: string, id: string, fs: readonly Flow[], label: string): string => {
+    const esc = currentRiskEscalation(fs.map((f) => ({ revision: f.rev, event: f.event, key: f.key, body: f.body })));
+    if (esc === null || !label.startsWith('accepted')) return label;
+    const r = risksOf(m);
+    return `accepted with risk (${withRiskText(r, acceptanceOf(r, id, esc))})${label.slice('accepted'.length)}`;
+  };
   for (const [m, ids] of taskIds) {
     for (const id of ids) {
       const fs = flowsByLine.get(`${m}\n${taskLine(id)}`) ?? [];
@@ -277,7 +290,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       stepsOf.set(k, steps);
       for (const s of steps) owner.set(s.task, k);
       const last = fs.at(-1);
-      let label = last === undefined ? 'planned' : (TASK_LABEL[last.event]?.(last.body) ?? last.event);
+      let label = last === undefined ? 'planned' : withRisk(m, id, fs, TASK_LABEL[last.event]?.(last.body) ?? last.event);
       let rev = last?.rev ?? 0;
       // an attempt that a rework started says so (a Reviewer's rejection is a change of state)
       const attempt = Math.max(0, ...fs.map((f) => Number(f.body['k'] ?? 0)).filter((n) => Number.isFinite(n)));
@@ -395,6 +408,8 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
   const sec = (m: string, event: string, k: string): Flow | undefined => (flowsByLine.get(`${m}\n${SECRETARY_LINE}`) ?? []).find((f) => f.event === event && f.key === k);
   /** The Secretary steps of escalations the flows no longer consume: no block comes from them. */
   const orphaned = new Set<string>();
+  // 4.4 (G1): the Architect step of an ask: the PM's round, or the Secretary's (its retries so far)
+  const askStep = (m: string, id: string, d: { readonly by: string; readonly answerRound?: number }): string => askTask(m, d.by === 'pm' ? { escalation: id, by: 'pm', round: d.answerRound ?? 1 } : { escalation: id, by: 'secretary', round: (flowsByLine.get(`${m}\n${SECRETARY_LINE}`) ?? []).filter((f) => f.event === 'secretary-retry' && f.body['id'] === id).length });
   for (const e of escalations) {
     const source = String(e.body['source'] ?? '');
     const subject = String(e.body['subject'] ?? '');
@@ -413,16 +428,27 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       if (typeof e.body['task'] === 'string') owner.set(e.body['task'], k);
     }
     const id = String(e.body['id'] ?? e.key);
-    const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user');
-    const onUser = waiting.has(`${e.mission}\n${id}`);
-    const deciding = steps.inFlight.find((d) => d.step === e.body['task']);
-    const next = onUser
-      ? `ask the user; then mp pm answer ${e.mission} ${id} --option <${options.join('|')}> --words W-<n>`
-      : (await decisionFor(flowCtx(ports, e.mission as MissionId), id)) !== null
-        ? 'the decision is carried out on the next mp pm next'
-        : deciding !== undefined
-          ? `the Secretary is deciding (${deciding.dispatch} in flight): wait for its hand-back`
-          : 'the Secretary decides: dispatch its step (mp pm next)';
+    // the user's own answer: 4.4 (G1) the user does not ask the Architect (the PM does, --by pm)
+    const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user' && o !== 'ask-architect');
+    // the Secretary step of the escalation's current round (4.4, G1, review p11-r2-3: one a fresh round replaced is not deciding)
+    const roundTask = (flowsByLine.get(`${e.mission}\n${SECRETARY_LINE}`) ?? []).filter((f) => f.event === 'secretary-retry' && f.body['id'] === id).at(-1)?.body['task'] ?? e.body['task'];
+    const deciding = steps.inFlight.find((d) => d.step === roundTask);
+    // 4.4 (G1, review p11-8): the consultation in effect first: an ask of the Architect waits for its step, named with
+    // where it stands, also after an earlier hand-up to the PM (readSteps lists no pending ask as waiting on the user)
+    const current = waiting.has(`${e.mission}\n${id}`) ? null : await decisionFor(flowCtx(ports, e.mission as MissionId), id);
+    const ask = current?.option === 'ask-architect' ? askStep(e.mission, id, current) : null;
+    const onUser = ask === null && waiting.has(`${e.mission}\n${id}`);
+    const decided = onUser ? null : current;
+    const answering = ask === null ? undefined : steps.inFlight.find((d) => d.step === ask);
+    const next = ask !== null
+      ? `the Architect answers it: step ${ask} ${answering !== undefined ? `(${answering.dispatch} in flight): wait for its hand-back` : steps.ready.some((r) => r.step === ask) ? 'is ready: dispatch it (mp pm next)' : 'is queued by the next pass (mp pm next)'}`
+      : onUser
+        ? `ask the user; then mp pm answer ${e.mission} ${id} --option <${options.join('|')}> --words W-<n>`
+        : decided !== null
+          ? 'the decision is carried out on the next mp pm next'
+          : deciding !== undefined
+            ? `the Secretary is deciding (${deciding.dispatch} in flight): wait for its hand-back`
+            : 'the Secretary decides: dispatch its step (mp pm next)';
     block(k, `escalation ${id} is open (${source}: ${clip(String(e.body['summary'] ?? ''), 120)})`, next, ESCALATION_WI[source] ?? (onUser ? 'WI-24' : null));
   }
   // steps held (what mp pm next computes)

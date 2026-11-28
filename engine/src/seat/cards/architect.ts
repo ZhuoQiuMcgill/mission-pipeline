@@ -21,7 +21,7 @@ import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
 import { DetailedPlanDoc, DetailedTask, TaskProvenance, elementsOf, feasibilityRequired, planIdProblems, taskCardHash, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import { MECHANICAL_RULES } from '../../flow/mechanical.ts';
-import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, type MaterialRef } from './common.ts';
+import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, standardText, type MaterialRef } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
@@ -90,8 +90,18 @@ export const ArchitectDecomposeCardSchema = z.object({
    * this card hands back. Absent: no waiver either way.
    */
   planReviews: z.object({ previous: z.string().nullable(), next: z.string().nullable() }).optional(),
+  /**
+   * 4.4 (G5): the open items left earlier (at an acceptance with risk, or deferred) that no task of the plan it
+   * revises takes, at most OPEN_ITEMS_LISTED; `openItemsMore`, how many more there are. A task takes one by
+   * naming it in its `openItems`. Absent: none (or a card queued before 4.4).
+   */
+  openItems: z.array(z.object({ id: z.string().min(1), kind: z.string(), text: z.string(), from: z.string() })).optional(),
+  openItemsMore: z.number().int().positive().optional(),
 });
 export type ArchitectDecomposeCard = z.infer<typeof ArchitectDecomposeCardSchema>;
+
+/** 4.4 (G5): how many open items a decomposition card lists (the rest are counted). */
+export const OPEN_ITEMS_LISTED = 50;
 
 export const ArchitectDecomposeResultShape = {
   dataFormats: z.array(z.string()).optional(),
@@ -148,8 +158,15 @@ export const ArchitectFeasibilityCardSchema = z.object({
   binding: Binding,
   /** 4.4 (F3): on a revision, the previous feasibility report (optional reading). Absent before 4.4. */
   materials: z.array(Material).optional(),
+  /** 4.4 (F10): above this many standards on a task, the card names the task (config `standardsWarn`). Absent before 4.4: none named. */
+  standardsWarn: z.number().int().positive().optional(),
 });
 export type ArchitectFeasibilityCard = z.infer<typeof ArchitectFeasibilityCardSchema>;
+
+/** 4.4 (F10): the tasks of a plan with more standards than `limit`, as "task: n standards" (empty: none). */
+export function manyStandards(plan: Pick<DetailedPlanDoc, 'tasks'>, limit: number): string[] {
+  return plan.tasks.filter((t) => t.standards.length > limit).map((t) => `${t.id}: ${t.standards.length} standards`);
+}
 
 export const ArchitectFeasibilityResultShape = {
   findings: z
@@ -209,9 +226,9 @@ export function previousPlanText(id: string | null, plan: DetailedPlanDoc): stri
 
 const prov = (p: z.infer<typeof DetailedTask>['provenance']): string => (p === 'architect' ? 'architect' : `plan element${p.planElements.length === 1 ? '' : 's'} ${p.planElements.join(', ')}`);
 
-/** What a Reviewer can see, so standards are written to be judged from it (4.1.2, item 7). */
+/** What a Reviewer can see, so standards are written to be judged from it (4.1.2, item 7; 4.4, F10: with a finite check each). */
 export const REVIEWER_EVIDENCE_TEXT =
-  'What a Reviewer can see: the change, the local runs\' exit codes, durations and failing output; for the integration task, the full run. The output of passing runs is not kept: write standards a Reviewer can judge from these.';
+  'What a Reviewer can see: the change, the local runs\' exit codes, durations and failing output, and the files a verification command names as its artifacts (kept with its run); the Constructor\'s hand-back and the files it hands in; for the integration task, the full run. The output of passing runs is not kept. Give each standard a finite check and say how it is checked (check: command, reading, report, artifact or person); a standard only a person can check is never put to the Reviewer.';
 
 /** The planning rules every Architect card shows (decomposition, revision, repair): one change that covers several elements is one task; the mechanical checks; the commands; what a Reviewer sees. */
 export function renderPlanningRules(commands: ProjectCommandsT | undefined): string {
@@ -270,6 +287,7 @@ export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
     list('Requirement items', c.requirementItems.map((i) => `[${i.id}] ${i.text}`)) +
     list('Explorations that have not stood (no task may depend on them)', c.unsettledExplorations) +
     list('Settled exploration conclusions to plan from', c.explorationConclusions.map((x) => `[${x.exploration}] ${x.summary}`)) +
+    list('Open items left earlier that no task takes (a task takes one by naming its id in openItems; its Reviewer then answers it)', [...(c.openItems ?? []).map((i) => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`), ...(c.openItemsMore !== undefined ? [`and ${c.openItemsMore} more, not listed here`] : [])]) +
     `## Git history (exported)\n${c.history.gitLog || '(none)'}\n\n` +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms, ${h.costMicros} micro-dollars`)) +
     renderPlanningRules(c.projectCommands) +
@@ -298,6 +316,8 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
           taskDetail(t),
       ),
     ) +
+    // 4.4 (F10): a warning, not a refusal: rework rises with the number of standards on a task
+    (c.standardsWarn === undefined ? '' : list(`Tasks with more than ${c.standardsWarn} standards (standardsWarn; rework rises with their number: say whether each has a finite check)`, manyStandards(p, c.standardsWarn))) +
     list('Risks the Architect listed', p.risks) +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms`)) +
     list('Findings of the earlier review this revision answers', c.earlierFindings) +
@@ -308,7 +328,7 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
 /** 4.4 (F3): what the feasibility review judges of a task besides its line: its standards, requirement items, files to read and interface links. */
 function taskDetail(t: z.infer<typeof DetailedTask>): string {
   return (
-    `\n  standards: ${t.standards.map((s) => `[${s.id}] ${s.text}`).join('; ')}` +
+    `\n  standards: ${t.standards.map(standardText).join('; ')}` +
     `\n  requirement items: ${t.requirementItems.join(', ') || 'none'}` +
     `\n  files to read: ${t.readableFiles.join(', ') || 'none'}` +
     `\n  implements: ${t.implements.join(', ') || 'none'}; calls: ${t.calls.join(', ') || 'none'}`
@@ -457,8 +477,50 @@ export const ArchitectRepairCardSchema = z.object({
   revision: z.object({ mechanicalFailures: z.array(z.string()) }).nullable(),
   projectCommands: ProjectCommands.optional(),
   materials: z.array(Material).optional(),
+  /** 4.4 (G4): the questions this repair's Architect handed back with no edit, each with the answer of the PM (or the user). */
+  answers: z.array(z.object({ question: z.string(), answer: z.string(), by: z.string() })).optional(),
+  /**
+   * 4.4 (G4, G5): the open items the repair is for (`mp pm repair --open-items`), each still open: where it was left
+   * and its text. The decision gives each to a task (`openItems` on an added or changed card, `open_items` on a
+   * reopen); one given to no task stays open. Absent: none named (or a card queued before 4.4).
+   */
+  openItems: z.array(z.object({ id: z.string().min(1), kind: z.string(), text: z.string(), from: z.string() })).optional(),
+  /**
+   * 4.4 (G9): the requirement items the filing's work is bound to (a new requirement's, recorded with it by `mp pm extend`;
+   * or the one a repair falls short of, `--item`), each with the user's words and whether it is still in force. `entry`
+   * "extend": a new requirement's filing. Absent: none (a card queued before 4.4, or a repair that names no item).
+   */
+  entry: z.literal('extend').optional(),
+  items: z.array(z.object({ id: z.string().min(1), type: z.string(), text: z.string(), quote: z.string().optional(), words: z.string().optional(), withdrawn: z.boolean().optional() })).optional(),
+  /** 4.4 (G9, E-4): the limit and acceptance items in force in the mission, by reference (one line each, at most LIMITS_LISTED; `limitsMore` counts the rest). */
+  limits: z.array(z.object({ id: z.string().min(1), type: z.string(), text: z.string() })).optional(),
+  limitsMore: z.number().int().positive().optional(),
 });
 export type ArchitectRepairCard = z.infer<typeof ArchitectRepairCardSchema>;
+
+/** 4.4 (G9): the limit and acceptance items a repair Architect's card lists, at most, and the length of each line. */
+export const LIMITS_LISTED = 50;
+const LIMIT_TEXT = 200;
+
+/**
+ * 4.4 (G9, E-4): what the user already set, for a repair Architect's card: the filing's items with their state and words,
+ * and by reference the limit and acceptance items in force in the mission. Built alike when the step is queued and when it
+ * is claimed (seat/cards/refresh.ts). `inForce`: the mission's items in force; `recorded`: every item version recorded.
+ */
+export function repairItemsBlock(mission: string, filing: { readonly items?: readonly string[]; readonly entry?: 'extend' }, inForce: ReadonlyArray<{ readonly line: string; readonly type: string; readonly text: string; readonly source: { readonly kind: string; readonly words?: string; readonly quote?: string } }>, recorded: ReadonlyArray<{ readonly line: string; readonly type: string; readonly text: string; readonly source: { readonly kind: string; readonly words?: string; readonly quote?: string } }>): Pick<ArchitectRepairCard, 'entry' | 'items' | 'limits' | 'limitsMore'> {
+  const ids = filing.items ?? [];
+  if (ids.length === 0) return {};
+  const items = ids.map((id) => {
+    const line = `item.${mission}.${id}`;
+    const now = inForce.find((i) => i.line === line);
+    const b = now ?? recorded.filter((i) => i.line === line).at(-1);
+    return { id: line, type: b?.type ?? 'goal', text: b?.text ?? '(not recorded)', ...(b?.source.kind === 'words' ? { quote: b.source.quote ?? '', words: b.source.words ?? '' } : {}), ...(now === undefined ? { withdrawn: true } : {}) };
+  });
+  const own = new Set(items.map((i) => i.id));
+  const all = inForce.filter((i) => (i.type === 'limit' || i.type === 'acceptance') && !own.has(i.line));
+  const limits = all.slice(0, LIMITS_LISTED).map((i) => ({ id: i.line, type: i.type, text: i.text.length <= LIMIT_TEXT ? i.text : `${i.text.slice(0, LIMIT_TEXT - 1)}…` }));
+  return { ...(filing.entry !== undefined ? { entry: filing.entry } : {}), items, ...(limits.length > 0 ? { limits } : {}), ...(all.length > LIMITS_LISTED ? { limitsMore: all.length - LIMITS_LISTED } : {}) };
+}
 
 /** The repair card's plan material, built alike when the step is queued and when it is claimed (4.4, F5). */
 export function repairPlanMaterial(put: (doc: string) => string, dplan: string, plan: DetailedPlanDoc): MaterialRef {
@@ -474,6 +536,10 @@ export const ArchitectRepairResultShape = {
         issue: z.string().min(1).describe('What its work must fix for this repair.'),
         // 4.4 (F12 b, #59)
         after: z.array(z.string().min(1)).optional().describe('4.4: tasks this repair adds, changes or reopens whose new work this task builds on: its new attempt waits until they are accepted and starts on their work.'),
+        // 4.4 (G4, G5)
+        open_items: z.array(z.string().min(1)).optional().describe('4.4: open items listed on the card that this reopened task takes: its new attempt\'s cards list them and its Reviewer answers each. Omit when it takes none.'),
+        // 4.4 (G9)
+        items: z.array(z.string().min(1)).optional().describe('4.4: with several requirement items on the card, the items (their ids as listed) this reopen serves; its new attempts are bound to them. With one item it is bound to it by itself.'),
       }),
     )
     .describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
@@ -482,7 +548,7 @@ export const ArchitectRepairResultShape = {
     .array(DetailedTask)
     .optional()
     .describe('4.1.3: tasks of the plan in effect with no accepted product whose card the repair changes (the same id and kind; a new goal, standards, write scope, commands or dependencies). Each starts a new attempt under its new card, carrying its earlier work on. Never a task with an accepted product: reopen that one.'),
-  note: z.string().describe('Why this repair is these reopenings, changes and additions, in a few sentences.'),
+  note: z.string().describe('Why this repair is these reopenings, changes and additions, in a few sentences: it is recorded with the decision and printed on the cards of the tasks you reopen, change or add. With no reopen, add or change: your question for the PM.'),
 };
 const ArchitectRepairResultSchema = z.object(ArchitectRepairResultShape);
 export type ArchitectRepairResult = z.infer<typeof ArchitectRepairResultSchema>;
@@ -491,24 +557,49 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
   const p = c.plan;
   return (
     renderCommon(c) +
-    `## The repair\n${c.repair.id} (${c.repair.kind}${c.repair.about !== null ? `, about ${c.repair.about}` : ''}): the user's reason, verbatim from ${c.repair.words}: "${c.repair.text}"\n\n` +
+    // 4.4 (G9): a new requirement's filing shows its items; a repair its reason (and the item it falls short of, if named)
+    (c.entry === 'extend'
+      ? `## The new requirement\n${c.repair.id}: what the user now wants, recorded as requirement items. They are outside the set the plan was checked against; no Calibrator or feasibility review follows your amendment.\n\n`
+      : `## The repair\n${c.repair.id} (${c.repair.kind}${c.repair.about !== null ? `, about ${c.repair.about}` : ''}): the user's reason, verbatim from ${c.repair.words}: "${c.repair.text}"\n\n`) +
+    renderFilingItems(c) +
+    list('Your questions on this repair and the answers', (c.answers ?? []).map((x) => `You asked: ${x.question}\n  Answer (${x.by}): ${x.answer}`)) +
+    list('Open items this repair is for (give each to a task: openItems on an added or changed card, open_items on a reopen; its Reviewer then answers it; one you give to no task stays open)', (c.openItems ?? []).map((i) => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`)) +
     `## The plan in effect\nDetailed plan ${c.dplan} (PM plan ${c.pmPlan}), ${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'}${(c.materials ?? []).length > 0 ? `, in full in material ${(c.materials ?? [])[0]!.id}` : ''}.\n\n` +
     list('Tasks', p.tasks.map((t) => `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing'}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t.provenance)})`)) +
     list('PM plan elements an added task may trace to', c.elements.map((e) => `[${e.id}] (${e.kind}) ${e.text}`)) +
     list('Accepted work a repair may reopen (task: product, attempt, commit, paths it changed; read one with checkout --product <task>)', c.accepted.map((a) => `${a.task}: ${a.product} (attempt ${a.attempt}${a.commit !== undefined ? `, commit ${a.commit}` : ''}): ${a.changedPaths.join(', ') || 'no path'}`)) +
     list('Tasks with no accepted product (a repair may change their card)', p.tasks.filter((t) => !c.accepted.some((a) => a.task === t.id)).map((t) => t.id)) +
     list('Who changed the paths the repair is about', c.owners.map((o) => `${o.path}: ${o.owners.map((x) => `${x.task} (${x.product}, attempt ${x.attempt}${x.current ? '' : ', an earlier version'})`).join('; ') || 'no accepted product'}`)) +
-    '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. A task with an accepted product keeps its card. A task with no accepted product (not on the accepted list) may get a changed card under "change": the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs; it then starts a new attempt and carries its earlier work on. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect").\n\n' +
+    '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. A task with an accepted product keeps its card. A task with no accepted product (not on the accepted list) may get a changed card under "change": the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs; it then starts a new attempt and carries its earlier work on. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect"). Your note is recorded with the decision and printed on the cards of those tasks. If you cannot decide without an answer, hand back no reopen, add or change, with your question as the note: it goes to the PM, and the repair\'s next card brings the answer.\n\n' +
     renderPlanningRules(c.projectCommands) +
     (c.revision !== null ? list('Mechanical check failures of your previous hand-back to fix', c.revision.mechanicalFailures) : '') +
     renderMaterials(c.materials ?? [])
   );
 }
 
+/** 4.4 (G9): the filing's requirement items, how the work is bound to them, and the limits in force by reference. */
+function renderFilingItems(c: ArchitectRepairCard): string {
+  const items = c.items ?? [];
+  if (items.length === 0) return '';
+  // 4.4 (G9, p12-6): the rule is the one the amendment applies: by the number of the filing's items in force (this card is
+  // rebuilt at its claim, so it names them as they stand then)
+  const live = items.filter((i) => i.withdrawn !== true);
+  const ids = live.map((i) => i.id).join(', ');
+  const bound = live.length === 1
+    ? `One item of it is in force: ${ids}. Every task you add, change or reopen for it is bound to this item by itself, with no action of yours: its Reviewer judges against it. A card you change also keeps the items in force its task already carries. (The number of its items in force when your amendment is applied decides this.)`
+    : `${live.length} items of it are in force: ${ids}. Name on each task the items it serves: in \`requirementItems\` of a task you add or change, in \`items\` of a reopen (their ids as listed). A task on which you name none is bound to none of them and is shown as naming none. Name only these items; a card you change keeps the items in force its task already carries, also those you leave out; any other comes back to you as a mechanical failure. (The number of its items in force when your amendment is applied decides this.)`;
+  return (
+    list(c.entry === 'extend' ? 'Its requirement items' : 'The requirement item this repair falls short of', items.map((i) => `[${i.id}] (${i.type}) ${i.text}${i.quote !== undefined ? ` — the user's words (${i.words}): "${i.quote}"` : ''}${i.withdrawn === true ? ' (withdrawn since: plan nothing for it)' : ''}`)) +
+    (live.length > 0 ? `${bound}\n\n` : '') +
+    list('Limits and acceptance items the user set for the mission (by reference: the work respects them)', [...(c.limits ?? []).map((l) => `[${l.id}] (${l.type}) ${l.text}`), ...(c.limitsMore !== undefined ? [`and ${c.limitsMore} more (mp read items lists them)`] : [])])
+  );
+}
+
 export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult): string[] {
   const out: string[] = [];
   const change = r.change ?? [];
-  if (r.reopen.length === 0 && r.add.length === 0 && change.length === 0) out.push('reopen, add, change: a repair reopens, changes or adds at least one task');
+  // 4.4 (G4): with no edit the note is the Architect's question for the PM; with neither, nothing is handed back
+  if (r.reopen.length === 0 && r.add.length === 0 && change.length === 0 && r.note.trim() === '') out.push('reopen, add, change: a repair reopens, changes or adds at least one task; if you cannot decide, hand back none of them with your question as the note');
   const accepted = new Set(c.accepted.map((a) => a.task));
   const named = r.reopen.map((x) => x.task);
   for (const t of new Set(named)) {

@@ -11,7 +11,8 @@ import { summarizeWords, tagWords, tagsReportLines, taggedWords } from '../../me
 import { keepNextReport, secNextSeen, storedNextReport, type SecretaryNext } from '../../process/secretary.ts';
 import { escalationsNamedIn, pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary, type InboxBrief } from '../../process/secretary.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
-import { deferArg, openItemAnswered, renderNext, PM_COMMANDS } from './pm.ts';
+import { deferArg, openItemAnswered, renderNext, PM_COMMANDS, reachLines } from './pm.ts';
+import { secInstruct, secWithdrawInstruction } from '../../process/pm.ts';
 import { answerOpenItem } from '../../process/openItems.ts';
 
 function P(c: RunContext) {if (c.project === null) throw usage('this command needs an initialized project'); return c.project;}
@@ -102,13 +103,28 @@ const read: Command = {
   async run(c, a) {const p = P(c); const page = Number(flagStr(a, 'page') ?? '1'); if (!Number.isSafeInteger(page) || page < 1) throw usage('--page is a positive integer'); const r = seatRead(p.ctx, secDecisionDispatch(p.ctx, positional(a, 0, 'escalation')), positional(a, 1, 'material'), page); return ok(r.text, r);},
 };
 const decide: Command = {
-  group: 'sec', name: ['decide'], summary: 'hand the current round back with the validated decision; it is recorded and carried out in the same command, and says what happened', usage: 'mp sec decide <escalation> --option <option> --classification detail|needs-pm --reason "…" [--instructions "…"] [--extra n] [--findings <ids>] [--defer <n,…>] [--authorization <item>] [--notice "…"] [--may-matter]   (with needs-pm, --notice is the PM’s brief: the question; the options and what each leads to; the user’s words that bear on it; what you would choose and why; --defer: an answer to a Constructor’s questions puts these off, by number: each stays an open item, answered later with mp sec open-item answer)',
+  group: 'sec', name: ['decide'], summary: 'hand the current round back with the validated decision; it is recorded and carried out in the same command, and says what happened', usage: 'mp sec decide <escalation> --option <option> --classification detail|needs-pm --reason "…" [--instructions "…"] [--extra n] [--findings <ids>] [--defer <n,…>] [--authorization <item>] [--notice "…"] [--may-matter]   (with needs-pm, --notice is the PM’s brief: the question; the options and what each leads to; the user’s words that bear on it; what you would choose and why; --defer: an answer to a Constructor’s questions puts these off, by number: each stays an open item, answered later with mp sec open-item answer; --option ask-architect with --instructions: one Architect step answers a question of design, its answer is carried out and any other reply comes back to you)',
   flags: {option: 'string', classification: 'string', reason: 'string', instructions: 'string', extra: 'string', findings: 'list', defer: 'list', authorization: 'string', notice: 'string', 'may-matter': 'boolean'},
   // 4.4 (F4): `defer` enters the result only when given, so a 4.3 decision's hand-back is what 4.3 handed back
   async run(c, a) {const option = flagStr(a, 'option'); const classification = flagStr(a, 'classification') ?? (option === 'ask-pm' || option === 'ask-user' ? 'needs-pm' : 'detail'); if (!(DECISION_OPTIONS as readonly string[]).includes(option ?? '') || (classification !== 'detail' && classification !== 'needs-pm')) throw usage('choose an offered --option and --classification detail|needs-pm'); const defer = deferArg(a); const r = await secDecide(P(c).ctx, positional(a, 0, 'escalation'), {option: option as DecisionOption, classification, reason: flagStr(a, 'reason') ?? '', instructions: flagStr(a, 'instructions') ?? '', grantExtra: Number(flagStr(a, 'extra') ?? '0'), findings: [...flagList(a, 'findings')], authorization: flagStr(a, 'authorization'), notice: flagStr(a, 'notice') ?? (classification === 'needs-pm' ? flagStr(a, 'reason') ?? '' : ''), mayMatter: flagBool(a, 'may-matter'), ...(defer.length > 0 ? {defer} : {})}); if (r.kind === 'refused') throw refused('NOT_ALLOWED', r.problems.join('; '), null, {problems: r.problems});
     // 4.4 (F9): say what happened, as the seat way says it
     const head = r.repeated ? `Decision ${r.dispatch} was already recorded: nothing new.` : r.outcome !== 'accepted' ? `Decision ${r.dispatch} recorded but not accepted.` : `Decision ${r.dispatch} on ${positional(a, 0, 'escalation')}: ${r.decision?.text ?? 'recorded'}`;
     return ok([head, ...r.notes].join('\n'), r);},
+};
+// 4.4 (G3): the Secretary says once what it would otherwise answer many times: an instruction of its own, within the plan
+const instruct: Command = {
+  group: 'sec', name: ['instruct'], summary: 'record an instruction of your own for one mission\'s work (a ruling within the plan, never a proof input), addressed to tasks or a repair or by its scope; --withdraw takes one of yours back',
+  usage: 'mp sec instruct <mission> <id> --text "<instruction>" [--tasks <id,...>] [--repair <R-n,...>] [--paths <pattern,...>] [--task-types <type,...>]\n       mp sec instruct --withdraw <id> --reason "<why it no longer holds>"\n       (addressed: printed on those tasks\' cards, or on the repair\'s Architect card and the cards of the tasks it added, changed or reopened, and nowhere else)',
+  flags: {text: 'string', tasks: 'list', repair: 'list', paths: 'list', 'task-types': 'list', withdraw: 'string', reason: 'string'},
+  async run(c, a) {
+    const p = P(c); const w = flagStr(a, 'withdraw');
+    if (w !== null) {const r = await secWithdrawInstruction(p.ctx, {constraint: w, reason: flagStr(a, 'reason') ?? ''}); return ok(r.already ? `Instruction ${w} was withdrawn already; nothing was written.` : `Instruction ${w} withdrawn by the Secretary; its record is kept.`, {constraint: w, withdrawn: true, already: r.already});}
+    const mission = positional(a, 0, 'mission'), id = positional(a, 1, 'instruction id');
+    const text = flagStr(a, 'text'); if (text === null || text.trim() === '') throw usage('--text: the instruction');
+    const address = {...given('tasks', flagList(a, 'tasks')), ...given('repairs', flagList(a, 'repair'))};
+    const r = await secInstruct(p.ctx, {mission, constraint: id, text, paths: flagList(a, 'paths'), taskTypes: flagList(a, 'task-types'), ...address});
+    return ok([`Instruction ${id} recorded as ${r.version}, the Secretary's: a ruling within the plan, never a proof input${r.scopeChanged ? ' (the same text: the version is kept and its scope is changed)' : ''}.`, ...reachLines('instruction', r.reach, {mission, ...address})].join('\n'), {mission, constraint: id, version: r.version, scopeChanged: r.scopeChanged, reach: r.reach});
+  },
 };
 // 4.4 (F4; G5): the Secretary answers an open item of its own (within the plan, F-3)
 const openItem: Command = {
@@ -178,4 +194,4 @@ const summary: Command = {
 };
 
 export const RESIDENT_PM_COMMANDS: readonly Command[] = [secretary, note, question, pmReplyCommand, inbox, tag, retag, summary];
-export const SEC_COMMANDS: readonly Command[] = [session, handbook, next, wait, card, read, decide, openItem, askPm, reply, ack, ...['dispatch', 'release', 'drain', 'renew', 'alerts', 'ack'].map((name) => ({...PM_COMMANDS.find((c) => c.name[0] === name)!, group: 'sec' as const, usage: PM_COMMANDS.find((c) => c.name[0] === name)!.usage.replaceAll('mp pm ', 'mp sec ')}))];
+export const SEC_COMMANDS: readonly Command[] = [session, handbook, next, wait, card, read, decide, instruct, openItem, askPm, reply, ack, ...['dispatch', 'release', 'drain', 'renew', 'alerts', 'ack'].map((name) => ({...PM_COMMANDS.find((c) => c.name[0] === name)!, group: 'sec' as const, usage: PM_COMMANDS.find((c) => c.name[0] === name)!.usage.replaceAll('mp pm ', 'mp sec ')}))];

@@ -428,7 +428,8 @@ describe('4.4 F13: a reopen never joins an open attempt: it waits for it and ope
     assert.deepEqual([rw.reason, rw.reopen, rw.issues, rw.loop], ['reopen', { kind: 'repair', repair: 'R-2' }, ['keep quoted commas in their field'], `${taskLineage(M, 'impl')}.reopen3`]);
     const con = w.scheduler.card<ConstructorCard>('con.m1.impl.3');
     assert.ok(con.duties.includes('keep quoted commas in their field') && !con.duties.includes('keep the header row'), con.duties);
-    assert.deepEqual(con.repairs?.map((r) => r.id), ['R-2']);
+    // 4.4 (G3, F2): its work answers R-1 too (carried at attempt 2, every later attempt keeps it); only R-2's issue is on it
+    assert.deepEqual(con.repairs?.map((r) => r.id), ['R-1', 'R-2']);
     assert.deepEqual((await events(w, 'repairs', REOPEN_CARRIED)).map((e) => [e.key, e.body.attempt, e.body.from]), [['R-1:impl#1', 2, 1], ['R-2:impl#2', 3, 2]]);
     assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.3');
     assert.ok(!w.scheduler.tasks.has('con.m1.impl.4'), 'each repair reopened it once');
