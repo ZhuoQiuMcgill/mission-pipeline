@@ -8,7 +8,7 @@ import { readSteps } from '../../process/index.ts';
 import { bytesText, endsText, holdViews, parseHoldTime, placeHold, releaseHold, subjectText, timeText, type HoldSubject, type HoldView } from '../../process/holds.ts';
 import { scratchListing, type ScratchEntry } from '../../process/scratchList.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
-import { ok, type Command, type CommandResult, type Group, type RunContext } from '../command.ts';
+import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
 import { CliError, EXIT, usage } from '../errors.ts';
 import type { Project } from '../project.ts';
 import { age, section } from '../render.ts';
@@ -16,6 +16,8 @@ import { age, section } from '../render.ts';
 const WORDS = /^W-[1-9][0-9]*$/;
 /** A task, step or resource a hold names (the size of a record stays small). */
 const NAME = /^[^\u0000-\u001f\u007f]{1,200}$/;
+/** The held steps a placement names in its text (the JSON has all of them). */
+const SHOWN = 20;
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -45,11 +47,6 @@ function placedBy(v: Pick<HoldView, 'by' | 'words' | 'generation'>): string {
   return v.by === 'pm' ? `the PM${v.words !== null ? ` on ${v.words}` : ''}` : `the Secretary${v.generation !== null ? ` (${v.generation})` : ''}`;
 }
 
-/** A command's own spelling in its texts: the Secretary's are `mp sec hold`. */
-function spelled(group: Group, text: string): string {
-  return group === 'sec' ? text.replaceAll('mp pm hold', 'mp sec hold') : text;
-}
-
 async function holdRun(group: 'pm' | 'sec', c: RunContext, a: ParsedArgs): Promise<CommandResult> {
   const p = P(c);
   const sub = positional(a, 0, 'add|release');
@@ -74,18 +71,18 @@ async function holdRun(group: 'pm' | 'sec', c: RunContext, a: ParsedArgs): Promi
     const lines = [
       r.repeated ? `Hold ${r.hold} was placed already with these arguments (${stateText(view)}): nothing new was recorded.` : `Hold ${r.hold} placed by ${placedBy(view)}: ${subjectText(view)}.`,
       `Reason: ${view.reason}`,
-      `${view.state === 'in-force' ? 'In force now' : stateText(view).replace(/^./, (x) => x.toUpperCase())}. It ends when ${endsText({ hold: view.id, until: view.until, after: view.after })}.`,
-      holdsNow.length > 0 ? `It holds now: ${holdsNow.join(', ')}.` : 'It holds no queued step now.',
+      `${view.state === 'in-force' ? 'In force now' : stateText(view).replace(/^./, (x) => x.toUpperCase())}.${view.state === 'in-force' || view.state === 'waiting' ? ` It ends when ${endsText({ hold: view.id, until: view.until, after: view.after }, group)}.` : ''}`,
+      holdsNow.length > 0 ? `It holds now: ${holdsNow.slice(0, SHOWN).join(', ')}${holdsNow.length > SHOWN ? ` and ${holdsNow.length - SHOWN} more (mp read holds)` : ''}.` : 'It holds no queued step now.',
       'A hold blocks new dispatches only: dispatches in flight, hand-backs, runs, deliveries and landings go on.',
       ...r.warnings.map((w) => `Warning: ${w}.`),
     ];
-    return ok(spelled(group, lines.join('\n')), { ...r, state: view.state, note: view.note, holdsNow });
+    return ok(lines.join('\n'), { ...r, state: view.state, note: view.note, holdsNow });
   }
   if (sub === 'release') {
     const id = positional(a, 1, 'hold (H-<n>)');
     const r = releaseHold(p.ctx, { op: c.op!, hold: id, reason: flagStr(a, 'reason'), words });
     const lines = [r.released ? `Hold ${id} released by hand.` : `Hold ${id} was released before (by the ${r.releasedBy === 'pm' ? 'PM' : 'Secretary'}): nothing new was recorded.`, ...r.warnings.map((w) => `Warning: ${w}.`)];
-    return ok(spelled(group, lines.join('\n')), r);
+    return ok(lines.join('\n'), r);
   }
   throw usage(`mp ${group} hold add|release`);
 }
@@ -126,7 +123,7 @@ const readHolds: Command = {
     const shown = flagBool(a, 'all') ? all : open;
     const lines = shown.flatMap((v) => [
       `[${v.id}] ${stateText(v)}: ${subjectText(v)}; placed by ${placedBy(v)} at ${timeText(v.placedAt)}: ${v.reason}`,
-      ...(v.state === 'in-force' || v.state === 'waiting' ? [`    ends when ${endsText({ hold: v.id, until: v.until, after: v.after })}${v.from !== null && v.state === 'in-force' ? ` (in force since ${timeText(v.from)})` : ''}`, `    holds now: ${v.holdsNow.join(', ') || 'no queued step'}`] : []),
+      ...(v.state === 'in-force' || v.state === 'waiting' ? [`    ends when ${endsText({ hold: v.id, until: v.until, after: v.after }, p.ctx.secretary !== null ? 'sec' : 'pm')}${v.from !== null && v.state === 'in-force' ? ` (in force since ${timeText(v.from)})` : ''}`, `    holds now: ${v.holdsNow.join(', ') || 'no queued step'}`] : []),
     ]);
     const rest = all.length - open.length;
     const head = open.length === 0 ? 'No hold is in force or waiting for its time.' : `Holds in force or waiting: ${open.length}`;

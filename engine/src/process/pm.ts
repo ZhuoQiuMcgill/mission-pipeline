@@ -326,7 +326,7 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
         continue;
       }
       // 4.4 (G6, F6): a hold in force, or a disk limit passed for a new Constructor step (holds.ts)
-      const hold = heldByHolds(holds, disk, q, spec);
+      const hold = heldByHolds(holds, disk, q, spec, ctx.secretary !== null ? 'sec' : 'pm');
       if (hold !== null) {
         held.push({ ...base, ...hold });
         continue;
@@ -563,8 +563,8 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       const after = heldByPredecessors(tx, tx.data, spec);
       if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
       // 4.4 (G6, F6): a hold in force, or a disk limit passed, holds a new dispatch: checked in the same write
-      const hold = heldByHolds(holdsInForce(tx, tx.data, ctx.now()), disk, { task: step, mission: task.mission, lineage: spec.lineage }, spec);
-      if (hold !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${ctx.secretary !== null ? hold.why.replaceAll('mp pm hold', 'mp sec hold') : hold.why}`, { detail: { holds: hold.holds ?? [], diskLimit: hold.diskLimit === true } });
+      const hold = heldByHolds(holdsInForce(tx, tx.data, ctx.now()), disk, { task: step, mission: task.mission, lineage: spec.lineage }, spec, ctx.secretary !== null ? 'sec' : 'pm');
+      if (hold !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${hold.why}`, { detail: { holds: hold.holds ?? [], diskLimit: hold.diskLimit === true } });
       // 4.4 (F3, F5): the recorded hand-backs fill in what a card queued by 4.3 lacks; a repair card's unpinned starts as checked before this write
       spec = refreshDispatchCard(tx, tx.data, spec, {
         handBack: (t) => taskStatus(tx, tx.data, t)?.handBack ?? null,

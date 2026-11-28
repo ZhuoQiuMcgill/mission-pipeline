@@ -69,7 +69,7 @@ export function scratchListing(ctx: ProcessContext): ScratchReport {
   const ownerOf = (dispatch: string): string | null => {
     const d = dispatches.get(dispatch);
     if (d === undefined) return null;
-    const state = d.state === 'in-flight' ? 'in flight' : d.state === 'handed-back' ? 'handed back: mp pm next or mp pm clean removes it' : d.released === 'abandoned' ? 'released --abandoned: kept until --ended' : 'released: mp pm next or mp pm clean removes it';
+    const state = d.state === 'in-flight' ? 'in flight' : d.state === 'handed-back' ? 'handed back (the next pass or mp pm clean removes it)' : d.released === 'abandoned' ? 'released --abandoned: kept until --ended' : 'released (the next pass or mp pm clean removes it)';
     return `dispatch ${dispatch} (${d.seat}, ${d.mission}), ${state}`;
   };
   const byOwnerLock = (abs: string): string => {

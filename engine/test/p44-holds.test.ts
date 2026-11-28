@@ -113,7 +113,7 @@ test('G6: a task hold leaves its review; a step hold holds that one step; mp rea
     const entry = blocked.blocked.find((e: any) => e.blocked.because.includes(review));
     assert.ok(entry !== undefined, JSON.stringify(blocked.blocked));
     assert.match(entry.blocked.because, /is held: hold H-2 \(the PM\): a ruling is pending; it waits until it is released by hand \(mp pm hold release H-2\)/);
-    assert.match(entry.blocked.next, /it is dispatched once H-2 no longer holds it \(mp read holds says how each ends\)/);
+    assert.match(entry.blocked.next, /it waits while H-2 holds it \(mp read holds says how each ends\)/);
     const holds = await done(p, ['read', 'holds']);
     assert.deepEqual(holds.holds.map((x: any) => [x.id, x.state, x.holdsNow]), [['H-1', 'in-force', []], ['H-2', 'in-force', [`${review} (reviewer)`]]]);
     const shown = await text(p, ['read', 'holds']);
@@ -194,6 +194,7 @@ test('G6: the Secretary places and releases holds with no words; mp sec next lis
     const next = await done(p, ['sec', 'next'], { identity: id });
     const held = next.held.find((x: any) => x.step === constructor);
     assert.deepEqual(held.holds, [{ id: 'H-1', reason: 'its review of the interface comes first', by: 'secretary', words: null, until: null, after: null }]);
+    assert.match(held.why, /mp sec hold release H-1/, 'the Secretary is named its own command');
     assert.match(await text(p, ['sec', 'next', '--all'], { identity: id }), /hold H-1 \(the Secretary\): its review of the interface comes first; it waits until it is released by hand \(mp sec hold release H-1\)/);
     const claim = await mp(p, ['sec', 'dispatch', constructor, '--filled-by', 'test/scripted'], { identity: id });
     assert.equal(claim.error?.code, 'NOT_READY');

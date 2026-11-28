@@ -437,7 +437,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     }
     // 4.4 (G6, F6): a hold, or a disk limit passed
     const held = h.holds !== undefined
-      ? `it is dispatched once ${h.holds.map((x) => x.id).join(' and ')} no longer hold${h.holds.length === 1 ? 's' : ''} it (mp read holds says how each ends)`
+      ? `it waits while ${h.holds.map((x) => x.id).join(' and ')} hold${h.holds.length === 1 ? 's' : ''} it (mp read holds says how each ends)`
       : h.diskLimit === true
         ? 'free disk space or worktrees (mp read scratch lists them; mp pm clean removes what is over), or change limits in config.json'
         : null;

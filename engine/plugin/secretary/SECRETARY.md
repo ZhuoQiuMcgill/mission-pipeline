@@ -90,6 +90,13 @@ For `accept-risk` and reopen decisions, see Reviews and reworks.
 
 `mp sec next` shows notes until `mp sec ack-note <id>`; acknowledge after taking the recorded instruction into account.
 A note the PM replaced leaves that list; its replacement is a new note in its place (`mp read notes --all` shows both).
+Answer a recorded progress question with `mp sec reply <id> "<text>"`; its state becomes answered and the reply reaches the PM inbox.
+For an operational question without an escalation, record `mp sec ask-pm "<question>" [--about <notice or item id>]`.
+The PM answers `mp pm reply <id> "<text>" [--words W-n]`; `mp sec next` and `mp sec wait` show the reply and its words reference.
+For example, WI-19's transform alert needs `mp sec ask-pm "Was the transform change intentional?" --about <notice id>`.
+Do not turn a question into an instruction or send routine progress messages.
+A harness wake-up never substitutes for a note, question, answer or decision in memory.
+PM commands in resident mode record without reconciling; next and wait do the operational work, and wait wakes on what calls for you.
 
 ## Holds: "not this yet"
 
@@ -101,13 +108,6 @@ It ends when released by hand, at its `--until` time, or when its `--after` task
 A hold the PM placed on the user's words is the PM's to release; if you release one, the command warns: tell the PM (`mp sec ask-pm`).
 A note may still carry an order of work; carry it out with a hold of your own.
 A harness's usage threshold is a hold `--all --until <the reset time>`, or one released by hand; `mp` keeps no accounting.
-Answer a recorded progress question with `mp sec reply <id> "<text>"`; its state becomes answered and the reply reaches the PM inbox.
-For an operational question without an escalation, record `mp sec ask-pm "<question>" [--about <notice or item id>]`.
-The PM answers `mp pm reply <id> "<text>" [--words W-n]`; `mp sec next` and `mp sec wait` show the reply and its words reference.
-For example, WI-19's transform alert needs `mp sec ask-pm "Was the transform change intentional?" --about <notice id>`.
-Do not turn a question into an instruction or send routine progress messages.
-A harness wake-up never substitutes for a note, question, answer or decision in memory.
-PM commands in resident mode record without reconciling; next and wait do the operational work, and wait wakes on what calls for you.
 
 ## Stops and confirmations
 

@@ -155,9 +155,9 @@ export function subjectText(p: Pick<HoldPlaced, 'subject' | 'mission'>): string 
   }
 }
 
-/** How a hold ends: by hand always; at its end time; when its task is accepted. */
-export function endsText(p: Pick<HoldPlaced, 'hold' | 'until' | 'after'>): string {
-  return `released by hand (mp pm hold release ${p.hold})${p.until !== null ? `, at ${timeText(p.until)}` : ''}${p.after !== null ? `, or when task ${p.after} is accepted` : ''}`;
+/** How a hold ends: by hand always (with the command of who reads it: `mp pm` or `mp sec`); at its end time; when its task is accepted. */
+export function endsText(p: Pick<HoldPlaced, 'hold' | 'until' | 'after'>, group: 'pm' | 'sec' = 'pm'): string {
+  return `released by hand (mp ${group} hold release ${p.hold})${p.until !== null ? `, at ${timeText(p.until)}` : ''}${p.after !== null ? `, or when task ${p.after} is accepted` : ''}`;
 }
 
 /** The holds in force that hold one queued step. A Secretary decision is held only by a hold that names its step. */
@@ -179,18 +179,18 @@ export function holdRef(p: HoldPlaced): HoldRef {
 }
 
 /** Why a step is held, by the holds that hold it (a long reason is cut here; the hold's `reason` and `mp read holds` carry it whole). */
-export function heldWhy(hs: readonly HoldRow[]): string {
+export function heldWhy(hs: readonly HoldRow[], group: 'pm' | 'sec' = 'pm'): string {
   const cut = (s: string): string => { const one = s.replace(/\s+/g, ' ').trim(); return one.length <= 200 ? one : `${one.slice(0, 199)}…`; };
-  return hs.map(({ placed: p }) => `hold ${p.hold} (${who(p.by, p.words)}): ${cut(p.reason)}; it waits until it is ${endsText(p)}`).join('; ');
+  return hs.map(({ placed: p }) => `hold ${p.hold} (${who(p.by, p.words)}): ${cut(p.reason)}; it waits until it is ${endsText(p, group)}`).join('; ');
 }
 
 /**
  * 4.4 (G6, F6): what holds a queued step beyond 4.3's reasons: the holds in force that name it, or a disk
- * limit passed (a new Constructor step only). Null: neither.
+ * limit passed (a new Constructor step only). Null: neither. `group`: whose commands the text names.
  */
-export function heldByHolds(active: readonly HoldRow[], disk: string | null, q: { readonly task: string; readonly mission: string; readonly lineage: string }, spec: TaskSpecDoc): { readonly why: string; readonly wi: null; readonly holds?: readonly HoldRef[]; readonly diskLimit?: true } | null {
+export function heldByHolds(active: readonly HoldRow[], disk: string | null, q: { readonly task: string; readonly mission: string; readonly lineage: string }, spec: TaskSpecDoc, group: 'pm' | 'sec' = 'pm'): { readonly why: string; readonly wi: null; readonly holds?: readonly HoldRef[]; readonly diskLimit?: true } | null {
   const hs = holdsOn(active, q, spec);
-  if (hs.length > 0) return { why: heldWhy(hs), wi: null, holds: hs.map((h) => holdRef(h.placed)) };
+  if (hs.length > 0) return { why: heldWhy(hs, group), wi: null, holds: hs.map((h) => holdRef(h.placed)) };
   if (disk !== null && spec.card.seat === 'constructor') return { why: disk, wi: null, diskLimit: true };
   return null;
 }
