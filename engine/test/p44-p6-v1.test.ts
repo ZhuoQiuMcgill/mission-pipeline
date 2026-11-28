@@ -224,7 +224,7 @@ describe('v1-3: a changed card replaced before it was accepted is superseded: ne
     const specs = await ports.ledger.events<{ repair?: string }>({ mission: M, line: 'task:docs', event: 'spec' });
     assert.equal(specs.at(-1)?.body.repair, 'R-2', "R-2's card is the task's card now");
     const [r1, r2] = [repair(ports, 'R-1'), repair(ports, 'R-2')];
-    assert.deepEqual(r1.changed, [{ task: 'docs', state: "accepted under this repair's card at attempt 2; later changed by R-2; accepted at attempt 3 (prod.con.m1.docs.3)", done: true }]);
+    assert.deepEqual(r1.changed, [{ task: 'docs', state: "accepted under this repair's card at attempt 2; later changed by R-2; accepted at attempt 3 (prod.con.m1.docs.3)", done: true, credited: { attempt: 2, product: 'prod.con.m1.docs.2', risk: null } }]);
     assert.deepEqual([r1.done, r2.done], [true, true]);
     assert.ok(!repairsText(read(ports)).includes('superseded'));
     assert.notEqual(items(ports, 'R-1').state, 'superseded');

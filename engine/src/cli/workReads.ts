@@ -22,7 +22,7 @@ import type { FlowEvent } from '../flow/ports.ts';
 import type { EscalationBody } from '../flow/secretary.ts';
 import { addressee, constraintsForTask, forRepairArchitect, isAddressed, noteOfHandBack, planInEffect, repairNoteOf, repairReopensCarried, reopenRecordState, type ReopenRecordState } from '../seat/cards/dynamic.ts';
 import { taskStatus } from '../process/ports.ts';
-import { lineAcceptance, taskLineage } from '../flow/execution.ts';
+import { currentRiskEscalation, lineAcceptance, taskLineage } from '../flow/execution.ts';
 import { repairLineage } from '../flow/repair.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED } from '../flow/exploration/machine.ts';
 import { riskItemsOf } from '../flow/riskItems.ts';
@@ -159,7 +159,23 @@ export function constraintsText(r: ReturnType<typeof constraintsRead>, reach: bo
  * another card of the task replaced before any acceptance under it: the repair that replaced it, or "a later plan"),
  * `notRecorded` (a 4.3 reopen the record does not show the outcome of), `notCarried` (a reopen not carried out).
  */
-export interface RepairTaskState { readonly task: string; readonly state: string; readonly done: boolean; readonly superseded?: string; readonly notRecorded?: true; readonly notCarried?: true }
+export interface RepairTaskState {
+  readonly task: string;
+  readonly state: string;
+  readonly done: boolean;
+  readonly superseded?: string;
+  readonly notRecorded?: true;
+  readonly notCarried?: true;
+  /**
+   * 4.4 (final review F3-1, F4-1): the attempt the part is credited with (the accepted attempt that carried the repair:
+   * its card, or the repair's issue), its product and the risk it was accepted with (its escalation; null: none). A read
+   * takes the acceptance, the risk, the proof and the delivery from this product, never from a later attempt's.
+   */
+  readonly credited?: Credit;
+}
+
+/** An accepted attempt of a task, with its product and the escalation it was accepted with risk on (null: none). */
+export interface Credit { readonly attempt: number; readonly product: string; readonly risk: string | null }
 
 /** The parts of a decided repair that are not done, by what the record establishes of each. */
 export interface RepairParts {
@@ -247,7 +263,7 @@ function attemptTaken(s: Snapshot, mission: string, task: string, line: readonly
 }
 
 /** 4.4 (F13): a reopen 4.4 tracks as the read of repairs says it, from its records (seat/cards/dynamic.ts reopenRecordState). */
-function reopenState(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], st: ReturnType<typeof taskState>, rec: ReopenRecordState): RepairTaskState {
+function reopenState(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], st: ReturnType<typeof taskState>, rec: ReopenRecordState, sourceOf: (spec: FlowEvent) => string | null): RepairTaskState {
   if (rec.state === 'not-carried') return { task, state: `the reopen was not carried out: ${rec.why}; ${st.state}`, done: false, notCarried: true };
   if (rec.state === 'requested') {
     const at = st.accepted && st.k >= rec.attempt ? `attempt ${rec.attempt}${st.k > rec.attempt ? ` and the task since (attempt ${st.k})` : ''} accepted: the next pass opens attempt ${st.k + 1} with its issue`
@@ -255,7 +271,58 @@ function reopenState(s: Snapshot, mission: string, task: string, line: readonly 
     return { task, state: `the reopen is not carried out yet: ${at}; ${st.state}`, done: false };
   }
   if (!attemptTaken(s, mission, task, line, rec.attempt)) return { task, state: `the reopen opened attempt ${rec.attempt}, which no seat has taken yet; ${st.state}`, done: false };
-  return { task, state: `reopened at attempt ${rec.attempt}; ${st.state}`, done: st.accepted && st.k >= rec.attempt };
+  return carriedReopen(task, line, st, [rec.attempt], `reopened at attempt ${rec.attempt}`, '; ', sourceOf);
+}
+
+/**
+ * 4.4 (final review F3-3, F1-4): a reopen whose issue attempts `carried` carried on their cards: done once an attempt
+ * that carried it is accepted, or one that continues it under the same card (a Reviewer's rework), and done for good;
+ * an acceptance under another card never counts. Not accepted before another card replaced the attempt's: superseded
+ * by what replaced it (neither open nor done).
+ */
+function carriedReopen(task: string, line: readonly FlowEvent[], st: ReturnType<typeof taskState>, carried: readonly number[], head: string, join: string, sourceOf: (spec: FlowEvent) => string | null): RepairTaskState {
+  const cards = carried.map((a) => specOfAttempt(line, a)?.revision ?? null);
+  const carries = (k: number): boolean => carried.some((a, i) => k === a || (k > a && (specOfAttempt(line, k)?.revision ?? null) === cards[i]));
+  const lastCard = Math.max(...cards.map((c) => c ?? 0));
+  const newer = line.filter((e) => e.event === 'spec' && e.revision > lastCard && e.revision > (line.find((x) => x.event === 'rework' && (x.body as { k?: number }).k === Math.max(...carried))?.revision ?? 0));
+  const by = newer.map(sourceOf).find((x) => x !== null) ?? (newer.length > 0 ? 'a later plan' : null);
+  const credit = creditOf(line, carries);
+  if (credit !== null) return { task, state: creditedText(head, join, credit, st, by !== null ? `changed by ${by === 'a later plan' ? 'a plan' : by}` : null), done: true, credited: credit };
+  if (by !== null) return { task, state: `${head}; superseded before it was accepted, by ${by}; ${st.state}`, done: false, superseded: by };
+  return { task, state: `${head}${join}${st.state}`, done: false };
+}
+
+/**
+ * 4.4 (final review F3-2): the card attempt k of a task ran under: the latest spec before the attempt's first dispatch
+ * (else before the rework that opened it; else before its acceptance). Never the spec written last before the
+ * acceptance: a pass that read an earlier attempt's review can commit its acceptance after another process laid a
+ * newer card.
+ */
+function specOfAttempt(line: readonly FlowEvent[], k: number): FlowEvent | undefined {
+  const at = (event: string): number | undefined => line.find((e) => e.event === event && (e.body as { k?: number }).k === k)?.revision;
+  const anchor = at('dispatched') ?? at('rework') ?? line.find((e) => e.event === 'accepted' && e.key === String(k))?.revision ?? Infinity;
+  return line.filter((e) => e.event === 'spec' && e.revision < anchor).at(-1);
+}
+
+/**
+ * 4.4 (final review F3-1, F1-4): the latest accepted attempt of a task that `carries` (its card carried the repair, or
+ * it continues an attempt that did), with its product and risk: once one is accepted the part is done, whatever later
+ * attempts do. The current attempt's product is the one the task holds now (a re-bound version); an older attempt's,
+ * the one its acceptance recorded. Null: no such acceptance.
+ */
+function creditOf(line: readonly FlowEvent[], carries: (k: number) => boolean): Credit | null {
+  const sel = lineAcceptance(line);
+  const accepted = line.filter((e) => e.event === 'accepted').map((e) => e.body as { k: number; product: string; decision?: { escalation?: string; option?: string } }).filter((b) => carries(b.k));
+  const last = accepted.sort((a, b) => a.k - b.k).at(-1);
+  if (last === undefined) return null;
+  if (last.k === sel.k && sel.product !== null) return { attempt: last.k, product: sel.product, risk: currentRiskEscalation(line) };
+  return { attempt: last.k, product: last.product, risk: last.decision?.option === 'accept-risk' ? (last.decision.escalation ?? null) : null };
+}
+
+/** How a credited part reads: the current state when the credited attempt is the task's current acceptance; else the credited acceptance, and what came since. */
+function creditedText(head: string, join: string, c: Credit, st: ReturnType<typeof taskState>, since: string | null): string {
+  if (st.accepted && st.k === c.attempt) return `${head}${join}${st.state}`;
+  return `${head}${join}accepted at attempt ${c.attempt} (${c.product})${since !== null ? `; later ${since}` : ''}; ${st.state}`;
 }
 
 /** The parts of a repair (added, changed, reopened tasks) that are not done, each by what the record establishes. */
@@ -311,9 +378,42 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       state = answered ? 'answered' : 'exploration';
     }
     const decidedRev = d?.revision ?? Infinity;
-    const added = (body?.add ?? []).map((t): RepairTaskState => { const st = taskState(lineOf(s, t)); return { task: t, state: st.state, done: st.accepted }; });
     // 4.4 (F13, p6-3): the card this repair gave a changed task, as its amendment recorded it (plan and card hash)
     const amendment = body === undefined ? undefined : latestEffectiveOf<{ dplan: string; amendments?: readonly AmendmentEntry[] }>(s.events, body.dplan)?.amendments?.find((a) => a.repair === r.id);
+    // 4.4 (final review F4-1): a part of a filing with items (a new requirement, a repair naming its item) is done only with
+    // an accepted product whose fixed review contract binds the items that part carries; else no accepted work is bound to them
+    const filingLines = (r.items ?? []).map((i) => `item.${mission}.${i}`);
+    const reviewLines = (product: string): readonly string[] | null => { const o = factById(db, 'object.version', product)?.record as ObjectVersionRecord | undefined; return o === undefined ? null : o.reviews.filter((c) => c.review === 'reviewer').flatMap((c) => c.basisLines as readonly string[]); };
+    const partItems = (kind: 'add' | 'change' | 'reopen', task: string): readonly string[] => {
+      if (filingLines.length === 0) return [];
+      if (kind === 'reopen') return (body?.reopen.find((x) => x.task === task)?.items ?? []).filter((l) => filingLines.includes(l));
+      const card = (kind === 'add' ? amendment?.tasks : amendment?.changed)?.find((c) => c.id === task);
+      return (card?.requirementItems ?? []).filter((l) => filingLines.includes(l));
+    };
+    const bound = (kind: 'add' | 'change' | 'reopen') => (x: RepairTaskState): RepairTaskState => {
+      const items = partItems(kind, x.task);
+      if (!x.done || x.credited === undefined || items.length === 0) return x;
+      const lines = reviewLines(x.credited.product);
+      const missing = lines === null ? [] : items.filter((l) => !lines.includes(l));
+      return missing.length === 0 ? x : { task: x.task, state: `${x.state}; its review there was not bound to ${missing.join(', ')}: no accepted work is bound to ${missing.length === 1 ? 'it' : 'them'}`, done: false };
+    };
+    // 4.4 (final review F3-1): an added task is credited with an accepted attempt under the card this repair added (the
+    // first card the task ran under that plan, or one with its hash); one under a later card never counts for it
+    const added = (body?.add ?? []).map((t): RepairTaskState => {
+      const line = lineOf(s, t);
+      const st = taskState(line);
+      const card = amendment?.tasks.find((c) => c.id === t);
+      const hash = card === undefined ? null : taskCardHash(card);
+      const specs = line.filter((x) => x.event === 'spec');
+      const first = specs.find((x) => x.revision > decidedRev);
+      const carries = (x: FlowEvent): boolean => { const b = x.body as { dplan?: string; hash?: string; repair?: string }; return (b.repair === undefined || b.repair === r.id) && b.dplan === body!.dplan && (b.hash === hash || x === first); };
+      const credit = creditOf(line, (k) => { const sp = specOfAttempt(line, k); return sp !== undefined && carries(sp); });
+      const from = specs.filter((x) => x.revision > decidedRev && carries(x)).at(-1)?.revision ?? decidedRev;
+      const replacedBy = specs.filter((x) => x.revision > from && !carries(x)).map((x) => cardSourceOf(s.events, x, t, r.id, body!.dplan) ?? 'a later plan').at(0) ?? null;
+      if (credit !== null) return { task: t, state: st.accepted && st.k === credit.attempt ? st.state : `accepted under this repair's card at attempt ${credit.attempt} (${credit.product})${replacedBy !== null ? `; later changed by ${replacedBy === 'a later plan' ? 'a plan' : replacedBy}` : ''}; ${st.state}`, done: true, credited: credit };
+      if (replacedBy !== null && first !== undefined) return { task: t, state: `superseded before it was accepted, by ${replacedBy}; ${st.state}`, done: false, superseded: replacedBy };
+      return { task: t, state: st.state, done: false };
+    }).map(bound('add'));
     const changed = (body?.changed ?? []).map((t): RepairTaskState => {
       const line = lineOf(s, t);
       const st = taskState(line);
@@ -324,23 +424,24 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       // p6-r2-3: the card the task is (or was accepted) under is its last spec before the acceptance (the last one, when
       // not accepted); it counts when it postdates the decision and carries this repair, however often the spec was written
       const specs = line.filter((x) => x.event === 'spec');
-      const specBefore = (rev: number): FlowEvent | undefined => specs.filter((x) => x.revision < rev).at(-1);
-      const last = st.accepted ? specBefore(st.acceptedRev) : specs.at(-1);
+      // (final review F3-2) an acceptance counts under the card its attempt ran, never the card written last before it
+      const carriesAttempt = (k: number): boolean => { const sp = specOfAttempt(line, k); return sp !== undefined && sp.revision > decidedRev && carries(sp); };
+      const last = st.accepted ? specOfAttempt(line, st.k) : specs.at(-1);
       const current = last !== undefined && last.revision > decidedRev && carries(last);
-      if (st.accepted && current) return { task: t, state: st.state, done: true };
+      const credit = creditOf(line, carriesAttempt);
+      if (credit !== null && st.accepted && st.k === credit.attempt) return { task: t, state: st.state, done: true, credited: credit };
       // 4.4 (v1): what replaced this repair's card, if another card of the task did (a repair's change, or a later plan)
       const carrying = specs.filter((x) => x.revision > decidedRev && carries(x));
       const from = carrying.at(-1)?.revision ?? decidedRev;
       const replacedBy = specs.filter((x) => x.revision > from && !carries(x)).map((x) => cardSourceOf(s.events, x, t, r.id, body!.dplan)).find((by) => by !== null) ?? null;
       // accepted under this repair's own spec at an attempt: that part is done, whatever came later (another repair's or
       // a plan's card, more work on the task); an acceptance under an unrelated spec never counts for it (p6-3)
-      const under = line.filter((x) => x.event === 'accepted' && x.revision > decidedRev).find((a) => { const sp = specBefore(a.revision); return sp !== undefined && sp.revision > decidedRev && carries(sp); });
-      if (under !== undefined) return { task: t, state: `accepted under this repair's card at attempt ${(under.body as { k: number }).k}${replacedBy !== null ? `; later changed by ${replacedBy === 'a later plan' ? 'a plan' : replacedBy}` : ''}; ${st.state}`, done: true };
+      if (credit !== null) return { task: t, state: `accepted under this repair's card at attempt ${credit.attempt}${replacedBy !== null ? `; later changed by ${replacedBy === 'a later plan' ? 'a plan' : replacedBy}` : ''}; ${st.state}`, done: true, credited: credit };
       // replaced before any acceptance under it: that card will never run (not open), and its change was never accepted
       // as such (not done); said with what replaced it, so the PM looks there
       if (replacedBy !== null) return { task: t, state: `superseded before it was accepted, by ${replacedBy}; ${st.state}`, done: false, superseded: replacedBy };
       return { task: t, state: carrying.length === 0 ? `${st.state}; no card of this repair's has run yet` : `${st.state}${current ? '' : '; its card changed since this repair'}`, done: false };
-    });
+    }).map(bound('change'));
     const secretaryEvents = s.events.filter((x) => x.line === 'secretary');
     const repairsEvents = s.events.filter((x) => x.line === 'repairs');
     // 4.4 (F13): the tasks its decision reopens, and one recorded with the decision as not carried out (never in `reopen`)
@@ -353,19 +454,21 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       // done once the task is accepted at that attempt or later (a re-plan after it, or a Reviewer who carries the
       // issue on to a further attempt, does not undo it); requested or pinned: what it waits for; not carried: why
       const rec = reopenRecordState(repairsEvents, r.id, x.task);
-      if (rec !== null) return reopenState(s, mission, x.task, line, st, rec);
+      const sourceOf = (spec: FlowEvent): string | null => (body === undefined ? null : cardSourceOf(s.events, spec, x.task, r.id, body.dplan));
+      if (rec !== null) return reopenState(s, mission, x.task, line, st, rec, sourceOf);
       // a reopen of a 4.3 decision with no record: only what the record establishes (4.4 schedules nothing for it, so
       // nothing here promises a later step). 4.3 counted it on the task's loop (its marker or its verdict), or an
       // attempt's card carried its issue (repairReopensCarried: its reopen, or a grant that covered it, p6-r2-1)
+      // (final review F3-3, F1-3) the attempts whose cards carried its issue: the one its reopen opened (a rework with the
+      // reopen, wherever it is on the line), and one a grant on a used-up loop opened for it when a claimed card of that
+      // attempt shows the issue. A loop verdict alone (the loop used up, the reopen given up) carried nothing
       const decidedAt = 'attempt' in x ? x.attempt : null;
-      const counted = line.some((y) => (y.event === 'loop-return' || y.event === 'loop-verdict') && y.key === `reopen:repair:${r.id}`);
-      const carried = repairReopensCarried(mission, x.task, line, secretaryEvents, repairsEvents, { issue: (repair) => (repair === r.id ? x.issue : null), cards: (k) => attemptDuties(s, data, mission, x.task, k) }).filter((c) => c.repair === r.id);
-      if ((counted || carried.length > 0) && decidedAt !== null && st.k > decidedAt) {
-        const head = `reopened under 4.3${carried.length > 0 ? ` at attempt ${carried.map((c) => c.attempt).join(', ')}` : ''}`;
-        return st.accepted ? { task: x.task, state: `${head} and ${st.state}`, done: true } : { task: x.task, state: `${head}; ${st.state}`, done: false };
-      }
+      const opened = line.filter((y) => y.event === 'rework' && (y.body as { reopen?: { kind?: string; repair?: string } }).reopen?.kind === 'repair' && (y.body as { reopen?: { repair?: string } }).reopen?.repair === r.id).map((y) => (y.body as { k: number }).k);
+      const granted = repairReopensCarried(mission, x.task, line, secretaryEvents, repairsEvents, { issue: (repair) => (repair === r.id ? x.issue : null), cards: (k) => attemptDuties(s, data, mission, x.task, k) }).filter((c) => c.repair === r.id).map((c) => c.attempt);
+      const carried = [...new Set([...opened, ...granted])].filter((k) => decidedAt === null || k > decidedAt).sort((a, b) => a - b);
+      if (carried.length > 0) return carriedReopen(x.task, line, st, carried, `reopened under 4.3 at attempt ${carried.join(', ')}`, ' and ', sourceOf);
       return { task: x.task, state: `decided under 4.3: what became of this reopen is not recorded; ${st.state}`, done: false, notRecorded: true };
-    });
+    }).map(bound('reopen'));
     const open = escalations.find((q) => q.subject === `repair:${r.id}` && q.source === 'repair-question' && !applied.has(q.id));
     const lineage = repairLineage(mission, r.id);
     const tasks = new Set([...(body?.add ?? []), ...(body?.changed ?? []), ...(body?.reopen ?? []).map((x) => x.task)].map((t) => taskLineage(mission, t)));
@@ -435,6 +538,22 @@ function partsLine(p: RepairParts, under43: boolean): string {
   return `decided${under43 ? ' under 4.3' : ''}; ${segs.length > 0 ? segs.join('; ') : 'it added, changed and reopened no task'}`;
 }
 
+/**
+ * 4.4 (G9; verification, second run): a filing taken back: a hand-back of its Architect step that came is kept and was
+ * not applied; one in flight will be; with none (its step was cancelled before a seat took it), nothing is said of one.
+ */
+function endedLine(x: RepairRead): string {
+  const head = 'ended: every item of it was withdrawn before its amendment was applied';
+  if (x.dispatches.some((d) => d.state === 'handed-back')) return `${head} (a hand-back of its Architect step came and is kept; it was not applied)`;
+  if (x.dispatches.some((d) => d.state === 'in-flight')) return `${head}; a hand-back of its Architect step that arrives later will be kept and not applied`;
+  return head;
+}
+
+/** 4.4 (verification, second run): what an undecided repair waits for: its Architect step queued, or in flight. */
+function architectLine(x: RepairRead): string {
+  return x.dispatches.some((d) => d.state === 'in-flight') ? 'its Architect step is in flight' : 'waiting for its Architect step';
+}
+
 export function repairsText(r: ReturnType<typeof repairsRead>): string {
   if (r.repairs.length === 0) return `Mission ${r.mission} has no repair.`;
   const lines = [`Repairs of mission ${r.mission}: ${r.repairs.length}`];
@@ -442,7 +561,7 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
     const done = x.done === null ? '' : x.done ? '; done' : '; not done';
     // 4.4 (G9): how the work came in, and what it is bound to
     lines.push(`[${x.id}] ${x.entry === 'extend' ? 'new requirement' : x.kind} (${x.words})${x.about !== null ? `, about ${x.about}` : ''}: "${clip(x.text, 200)}"`);
-    lines.push(`    ${x.state === 'ended' ? 'ended: every item of it was withdrawn before its amendment was applied (a hand-back that came afterwards is kept and was not applied)' : x.parts !== null && x.done === false ? partsLine(x.parts, x.under43) : `${x.state}${done}`}`);
+    lines.push(`    ${x.state === 'ended' ? endedLine(x) : x.state === 'architect' ? architectLine(x) : x.parts !== null && x.done === false ? partsLine(x.parts, x.under43) : `${x.state}${done}`}`);
     // what the plan in effect's check is bound to, read from its contract's sets (a changed plan takes them in)
     const live = x.items.filter((i) => i.state === 'in force').map((i) => i.id);
     const outside = x.checkedBy === null ? [] : live.filter((i) => !x.checkedBy!.inside.includes(i));
