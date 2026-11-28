@@ -4,6 +4,8 @@ Mission Pipeline exists so that agents produce results that are responsible to t
 You talk to one PM, your anchor: it understands your logic and needs, keeps the plan aligned and makes big decisions on your recorded words.
 A resident Secretary runs the loop, dispatches seats, handles exceptions and decides most field matters within the plan.
 Version 4.3.0 is in [`engine/`](engine/).
+It keeps the PM the user's anchor on long missions: each decision reaches the PM with the Secretary's brief, a question of design goes to an Architect in one step, and the Secretary and the Architect write what reaches a task.
+Holds, notes and what is left open at the review cap are on the record for anyone to read; seats get the material they need, a Constructor can stop and ask, and a standard says how it is checked.
 
 [![Mission Pipeline 4.1.0 workflow: principal and PM, the decision layer, parallel execution and exploration tracks, delivery, landing, close and legalization](docs/workflow-4.1-light.png)](https://zhuoqiumcgill.github.io/mission-pipeline/workflow-4.1.html)
 
@@ -21,14 +23,16 @@ Three parts, and nothing else:
 
 ## Key ideas
 
-- **A seat is a role, not a model.** Calibrators check the plan against your words, an Architect breaks it into tasks, Constructors build them in their own git worktrees, Reviewers accept them, Researchers and Crititors run explorations with a Stabilizer after every attack round, the resident Secretary decides within the plan, an Auditor legalizes a lineage when you ask. Any model in any harness can fill any seat; who filled it is recorded and invalidates nothing.
+- **A seat is a role, not a model.** Calibrators check the plan against your words, an Architect breaks it into tasks and answers a question of design the plan left open, Constructors build them in their own git worktrees, Reviewers accept them, Researchers and Crititors run explorations with a Stabilizer after every attack round, the resident Secretary decides within the plan, an Auditor legalizes a lineage when you ask. Any model in any harness can fill any seat; who filled it is recorded and invalidates nothing.
 - **Your words are the root.** The PM shows its reading of your message type, then records it verbatim after your next message raises no objection; one-off instructions record at once, unrelated messages never do; requirement items must quote it verbatim. `mp read why <anything>` walks from a delivered commit back to the words it rests on.
-- **Proof is the program's.** Verification runs on a clean checkout of the candidate commit; the labels (proven, not fully proven, refuted, …) are computed from the records and stored. The PM decides big questions on recorded words and asks you when those words do not support a choice and impact is major.
+- **Proof is the program's.** Verification runs on a clean checkout of the candidate commit; the labels (proven, not fully proven, refuted, …) are computed from the records and stored. Each acceptance standard says how it is checked: a command, reading the change, the Constructor's report, a file a run writes, or a person. A file outside the commit is cited by path, sha256 and size and labelled "outside the commit". The PM decides big questions on recorded words and asks you when those words do not support a choice and impact is major.
+- **Each role writes what is its own.** The Secretary settles what is reversible within the plan, a question of design goes to an Architect in one step, and the Secretary and the Architect write what reaches a task. Each decision reaches the PM's inbox with the Secretary's brief, so the PM decides from it and your words, not from reports.
 - **Your words settle what you decided.** The PM carries your decision out on your words and records it; it is not sent back through a review or refused for form. You may waive a mission's plan reviews (`mp pm waive`), accept a verified task or an exploration's result with its risks, or change an exploration's method directly (`mp pm repair` with a change form). Every place where the process stops has an exit your words can take: accept, change, run again or drop. Details stay with the Secretary; PM-class decisions go to the PM inbox.
 - **You guide the direction; you never accept details.** The PM reports when the work is done. You try the result and name what to repair (`mp pm repair`), or say "close and merge" once: `mp pm finish` delivers, lands and closes on those words. Closing never refuses: the record says what is proven, what is not, and whether the full suite ran on the delivered tree.
 - **Explorations end by their state.** An exploration converges in the round its Stabilizer judges on track with nothing fatal or serious left open and no direction question waiting, the budget's last round included. Evidence may cite data outside the repository by path, sha256 and size; `mp` checks it at hand-back and labels it "outside the commit". Long experiment runs can run detached from the seat that started them.
 - **The full suite runs where it matters.** Constructors run local tests. An integration task's Reviewer runs the project's full suite (`fullSuite` in `config.json`) last, once nothing visible is wrong; a failure reopens the task that caused it. Every full run leaves a marker, and the PM decides with you whether another run is worth it before closing.
-- **Stops take effect at once.** `mp pm stop` is written before anything else; nothing in its scope is dispatched, accepted or landed afterwards.
+- **What is left open stays on the record.** An acceptance with risk at the review cap writes one open item per risk, and a question put off is one too. `mp read open-items` lists them and what became of each, `mp read items` gives the state of each thing you asked for, and the close lists every open one. Nobody is prompted, and nothing waits for one.
+- **Stops take effect at once; "not this yet" is a hold.** `mp pm stop` is written before anything else; nothing in its scope is dispatched, accepted or landed afterwards. A hold (`mp pm hold`, or the Secretary's own) keeps a task, a step, a resource or everything from starting and stops nothing in flight.
 - **Landing never merges.** A delivery fast-forwards your target branch from the base it was proven on, or leaves a delivery ref for you.
 - **Security, logins and spending are your harness's business.** No sandbox, no credentials, no metering.
 
@@ -48,7 +52,7 @@ mp init --pointer both  # adds one line to CLAUDE.md and AGENTS.md pointing the 
 Then open the project with an agent harness and tell it what you want.
 It reads `.mission-pipeline/pm/PM.md`, starts its PM session, and launches the resident Secretary with `mp pm secretary start`.
 After an engine upgrade, run `mp docs update`, read the new PM core, and start the Secretary.
-4.2 records fold without migration; without a live Secretary, the older loop names still work in 4.2 mode.
+A 4.3 memory opens with no migration (read the CHANGELOG before going back to an older engine); without a live Secretary, the older loop names still work in 4.2 mode.
 
 ## How a harness acts as the PM
 
@@ -56,16 +60,19 @@ Read the PM core and run `mp pm session --filled-by "<harness>/<model>"` for bou
 Record typed words under the deferred rule; before a PM-class decision, read subject layer 2 and all principles in force.
 Decide big questions on recorded words; ask the user only without support and with major impact.
 The minor-impact, no-words default is a PM decision with a reason, shown to the user so they can overrule.
+Each inbox item carries the Secretary's brief; decide from it and the user's words, without opening cards or reports.
+A question of design is the Architect's, asked by the Secretary; text for one task is the Secretary's or the Architect's, and the PM writes for a task only when the user said it.
 A structural detailed-plan revision waits for the PM's `approve` or `send-back` answer to `plan-structure-change`.
-The PM contacts the Secretary only for requested progress details (`mp pm ask-secretary`) or a new instruction (`mp pm note`).
-It handles stops and delivery consent; it keeps dispatch detail out of its context.
+The PM contacts the Secretary only for requested progress details (`mp pm ask-secretary`) or a new instruction (`mp pm note`); the user's "not this yet" is a hold (`mp pm hold add … --words W-<n>`).
+It handles stops and delivery consent; it keeps dispatch detail out of its context, and answers "how far is each thing I asked for" with `mp read items`.
 
 ## How a harness acts as the Secretary
 
 Start the named resident `<project>-Secretary` with the printed prompt and `MP_SECRETARY=S-<n>`; bind its harness id with `mp pm secretary handle <S-n> <id>`.
-It reads `.mission-pipeline/secretary/SECRETARY.md`, claims the generation with `mp sec session`, then loops on `mp sec next`, `mp sec dispatch` and `mp sec wait --since R`.
+It reads `.mission-pipeline/secretary/SECRETARY.md`, claims the generation with `mp sec session`, then loops on `mp sec next` (what changed since its last pass), `mp sec dispatch` and `mp sec wait --since R`.
 It starts sub-agents with the fixed prompt printed by dispatch and handles operational notices and WI pages.
-It decides within the plan; PM-class choices use `needs-pm` / `ask-pm` and wait in the PM inbox.
+It decides within the plan and settles what is reversible; a question of design goes to an Architect (`ask-architect`); it says an operating ruling once (`mp sec instruct`) and holds what must not start yet (`mp sec hold add`).
+PM-class choices use `needs-pm` / `ask-pm` with a brief in four parts (the question, the options, the user's words that bear on it, its own choice) and wait in the PM inbox.
 It answers questions, takes no direct user instructions ("please tell the PM"), and does not report progress unasked.
 
 **Claude Code 2.1.319 — to verify on your version:** `MP_SECRETARY=S-<n> claude --bg -n "<project>-Secretary" "<printed prompt>"` for launch; `claude attach` or `claude --resume` for access; `claude stop <id>` for shutdown.
@@ -77,7 +84,8 @@ An object constraint added during or after plan review can leave a proof gap; it
 
 ## Documentation
 
-- [engine/README.md](engine/README.md): install, `mp init` and `config.json` (`fullSuite`, `commit`, `shell`, `experimentShell`, `cleanupCommands`, `startOnHandback`), the PM and Secretary split, the resident loop, seats, the memory folder and its `tmp/` layout, the tree reads, harness notes, platforms and known limitations.
+- [engine/README.md](engine/README.md): install, `mp init` and `config.json` (`fullSuite`, `commit`, `shell`, `experimentShell`, `cleanupCommands`, `startOnHandback`, `loops`, `limits` and the warning thresholds), the PM and Secretary split, the resident loop, seats, the memory folder and its `tmp/` layout, the reads, harness notes, platforms and known limitations.
+- 4.4 design: [the PM design](docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md) (fixes G1 to G9, principles P-1 to P-11; it rules where the two differ) and [the repair plan](docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md) as it amends (problems P1 to P17, fixes F1 to F19); [what was built differently and what is left](docs/design/Backlog_4.4_PostRelease.md).
 - [4.3 PM/Secretary design](docs/design/DesignDoc_PMSecretary_2026-11-06_v03.md): rulings F-1 to F-9; Appendix B wins over A and the base text.
 - [`docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md`](docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md): the design contract.
 - [CHANGELOG.md](CHANGELOG.md).
