@@ -93,6 +93,8 @@ export interface ProcessOptions {
   readonly reworkCap?: number;
   /** 4.4 (F6, H-3): config.json `limits`; while one is passed, new Constructor steps are held. Default none. */
   readonly limits?: DiskLimits;
+  /** 4.4 (F10): above this many standards on a task the feasibility reviewer and the PM are told (config.json `standardsWarn`). Default 7. */
+  readonly standardsWarn?: number;
   /** Tests: the free bytes of the project's disk, instead of the file system's (statfs). */
   readonly diskFree?: () => number | null;
 }
@@ -151,6 +153,8 @@ export interface ProcessContext {
   readonly reworkCap: number;
   /** 4.4 (F6, H-3): the disk limits of config.json (empty: none). */
   readonly limits: DiskLimits;
+  /** 4.4 (F10): the standards on a task above which the feasibility reviewer and the PM are told (config.json `standardsWarn`, default 7). */
+  readonly standardsWarn: number;
   /** 4.4 (F6): the free bytes of the project's disk, or null when they cannot be read. */
   diskFree(): number | null;
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
@@ -171,6 +175,8 @@ const DEFAULT_IDENT: Ident = { name: 'Mission Pipeline', email: 'mp@localhost' }
 
 /** 4.4 (F16): the default of config.json `mustReadWarnPages`. */
 export const MUST_READ_WARN_PAGES = 6;
+/** 4.4 (F10): the default of config.json `standardsWarn`. */
+export const STANDARDS_WARN = 7;
 /** 4.4 (G3, the plan's F1 `cardWarnBytes`): the default of config.json `cardWarnBytes`. */
 export const CARD_WARN_BYTES = 64 * 1024;
 
@@ -212,6 +218,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     cardWarnBytes: o.cardWarnBytes ?? CARD_WARN_BYTES,
     reworkCap: o.reworkCap ?? LOOP_CAPS.rework,
     limits: o.limits ?? {},
+    standardsWarn: o.standardsWarn ?? STANDARDS_WARN,
     diskFree(): number | null {
       if (o.diskFree !== undefined) return o.diskFree();
       try {

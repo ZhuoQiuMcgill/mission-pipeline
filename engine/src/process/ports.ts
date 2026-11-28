@@ -691,5 +691,5 @@ export class MemoryFlowEvaluator implements FlowEvaluatorPort {
 
 /** The three ports over one process context. */
 export function memoryFlowPorts(ctx: ProcessContext): FlowPorts {
-  return { resident: () => liveSecretary(ctx.memory) !== null, readOnly: () => ctx.pureRead || (ctx.secretary === null && liveSecretary(ctx.memory) !== null), wordsAuthority: (id, mission) => wordsAuthority(ctx.memory, ctx.memory.data, id, mission), ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite, planReviewsWaived: ctx.planReviewsWaived, startOnHandback: ctx.startOnHandback } };
+  return { resident: () => liveSecretary(ctx.memory) !== null, readOnly: () => ctx.pureRead || (ctx.secretary === null && liveSecretary(ctx.memory) !== null), wordsAuthority: (id, mission) => wordsAuthority(ctx.memory, ctx.memory.data, id, mission), ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite, planReviewsWaived: ctx.planReviewsWaived, startOnHandback: ctx.startOnHandback, standardsWarn: ctx.standardsWarn } };
 }

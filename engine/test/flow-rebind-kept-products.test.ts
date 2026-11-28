@@ -528,6 +528,22 @@ describe('rebind regressions: seat authority, lineage, cancellation and deferred
     assert.equal(await current(ports, 'iface'), card.target);
   });
 
+  it('4.4 (F10, review p9-3): a re-bind review whose only open standard cannot be verified waits for its decider, not a rework, and the answer starts a second review', async () => {
+    const { ports, engine, base } = await waitingRebind();
+    const card = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1');
+    const r = reviewer(card, 'pass');
+    await ports.scheduler.run(card.task, { handBack: { ...r, verdict: 'rework', judgments: r.judgments.map((j) => ({ ...j, met: 'cannot-verify' as const, needed: 'the compiler on the new plan', evidence: [] })) } });
+    await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'secretary' || t.card.seat === 'reviewer' ? null : base(t, s));
+    const sec = ports.scheduler.queued('secretary')[0]!;
+    assert.match((sec.card as SecretaryCard).request.summary, /could not verify S1 from what it can see, and nothing else is open/);
+    assert.ok(!(await lineEvents(ports, 'iface', 'rework')).some((e) => e.key === '2'), 'not sent back to the Constructor');
+    await ports.scheduler.run(sec.task, { handBack: secretary(sec.card as SecretaryCard, 'answer', { instructions: 'The compiler is on the declared run' }) });
+    await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'reviewer' ? null : base(t, s));
+    assert.equal(ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1.r1').target, card.target, 'the same version is reviewed again');
+    await drive(engine, ports.scheduler, base);
+    assert.equal(await current(ports, 'iface'), card.target);
+  });
+
   it('a deferred hand-back is accepted, keeps its owner and reason, and is context on the next cards', async () => {
     const { ports, engine, base } = await waitingRebind();
     const first = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1');

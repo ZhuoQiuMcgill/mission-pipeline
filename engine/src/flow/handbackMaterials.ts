@@ -107,7 +107,7 @@ export function claimsMaterial(put: (doc: string) => string, s: HandBackSource |
   if (s === null || r === null || typeof r.done !== 'string') return null;
   const doc = [
     "# The Constructor's claims: to check, not proof",
-    `Task ${o.task}, attempt ${o.attempt}: what its Constructor handed back (dispatch ${s.hb.dispatch}). Check each claim against the candidate and the runs; none of it is evidence for a standard.`,
+    `Task ${o.task}, attempt ${o.attempt}: what its Constructor handed back (dispatch ${s.hb.dispatch}). Check each claim against the candidate and the runs; none of it is evidence for a standard, except a standard checked by report (cite it as report).`,
     '',
     '## What it says it did',
     r.done,
