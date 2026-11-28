@@ -218,7 +218,7 @@ Separate steps remain: `mp pm deliver`, `mp pm land`, `mp pm close`, on the same
 A problem or new question: `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user's reason, verbatim>" [--about <task or exploration>]`.
 Choose the kind; the text must occur verbatim in the words; the mission must be open.
 The same repair (words, kind, text, subject) returns the one recorded; when that one was decided and the problem is back, add `--again` to file it anew.
-A repair's reopen of a task gets a fresh rework loop (`loops.rework` in config.json, default 2), with accept-risk offered at its end.
+A repair's reopen of a task gets a fresh rework loop (`loops.rework` in config.json, default 2); at its end accept-risk is offered as for any attempt.
 An exploration's author answers a question; the Architect routes other repairs under mechanical checks, without Calibrator or feasibility review.
 A user's decision about a registered method takes effect directly, with no round or review: add `--attempts <attempts.json> [--answers R-<n>]`, `--rerun <attempt-id>[,...]` or `--resnapshot`.
 The Secretary handbook holds the operational limits and recovery for these forms.

@@ -178,6 +178,9 @@ describe('4.4 F12 (b): a reopen may wait for other work of the same repair (#59)
     assert.ok(problems.includes('reopen[impl].after: "iface" is not a task this repair adds, changes or reopens'), problems.join('\n'));
     assert.ok(problems.includes('reopen[impl].after: a task does not come after itself'));
     assert.ok(problems.includes('reopen[impl].after: it waits for work that waits for it (a circle through after and dependsOn)'));
+    // impl, reopened too, depends on iface by its card: iface coming after impl would wait for ever
+    const again = await w.scheduler.run(step, { handBack: { reopen: [{ task: 'iface', issue: 'x', after: ['impl'] }, { task: 'impl', issue: 'y' }], add: [], note: 'n' } });
+    assert.deepEqual(again, ['reopen[iface].after: it waits for work that waits for it (a circle through after and dependsOn)']);
   });
 });
 
@@ -392,6 +395,20 @@ describe('4.4 F13: two reopens of one accepted attempt are merged, not dropped',
     const n = w.ledger.notices.find((x) => x.category === 'reopen-not-carried')!;
     assert.match(n.trigger, /^repair R-2's reopen of task impl was not carried out: the task was given up/);
     assert.match(n.defaultAction, /repair R-2 does not read as done/);
+    await settled(w, engine);
+  });
+
+  it('compatibility: a second reopen 4.3 left out, its task accepted again since, is told as not carried out, not revived', async () => {
+    const { w, engine, s1 } = await bothClaimed();
+    assert.deepEqual(await w.scheduler.run(s1, reopenImpl('keep the header row')), []);
+    await drive(engine, w.scheduler, script({ 'architect-repair': () => null }));
+    assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.2');
+    // 4.3 recorded R-2's decision on attempt 1 and skipped it in silence once impl had moved on
+    await w.ledger.append('test:43-decided', { events: [{ mission: M, line: 'repairs', event: 'decided', key: 'R-2', body: { repair: 'R-2', dplan: 'dplan.m1.1.1', arch: 'arch-repair.m1.R-2.1', add: [], reopen: [{ task: 'impl', issue: 'keep quoted commas in their field', attempt: 1, product: 'prod.con.m1.impl.1' }] } }] });
+    await engine.reconcile();
+    assert.ok(!w.scheduler.tasks.has('con.m1.impl.3'), 'no attempt is opened on work accepted since');
+    assert.deepEqual((await events(w, 'repairs', REOPEN_NOT_CARRIED)).map((e) => e.key), ['R-2:impl']);
+    assert.match(w.ledger.notices.find((x) => x.category === 'reopen-not-carried')!.trigger, /accepted again at a later attempt before this reopen was carried out/);
     await settled(w, engine);
   });
 

@@ -1603,8 +1603,9 @@ async function coveredVerdict(ctx: FlowCtx, line: Line, r: ReopenRequest): Promi
  * the repair saw; when the task has moved on since (another repair's reopen, a review's, a new card), it is never
  * dropped: its issue joins the open attempt while that attempt's Constructor is not claimed (merged), else it waits
  * for that attempt and reopens it once it is accepted (pinned again). A reopen that can be neither (the task given
- * up, or no longer in the plan in effect) is told to the PM as not carried out. A reopen 4.3 already counted (a kept
- * verdict) goes on as 4.3 ran it: its escalation, or the attempt its loop allowed.
+ * up, or no longer in the plan in effect, or a reopen 4.3 left out whose task was accepted again since) is told to
+ * the PM as not carried out. A reopen 4.3 already counted (a kept verdict) goes on as 4.3 ran it: its escalation, or
+ * the attempt its loop allowed.
  */
 async function repairReopen(ctx: FlowCtx, plan: DetailedPlanDoc, r: ReopenRequest): Promise<void> {
   if (r.source.kind !== 'repair') return;
@@ -1622,11 +1623,12 @@ async function repairReopen(ctx: FlowCtx, plan: DetailedPlanDoc, r: ReopenReques
   if (line.abandoned) return reopenNotCarried(ctx, r, line.k, 'the task was given up');
   const k = line.k;
   if (k < r.attempt) return;
-  const accepted = line.one('accepted', String(k)) !== null;
   // pinned to an attempt still open (pinned again): it waits for that attempt's acceptance
-  if (k === r.attempt) return accepted ? reopenNow(ctx, t, line, r, k, []) : undefined;
+  if (k === r.attempt) return line.one('accepted', String(k)) !== null ? reopenNow(ctx, t, line, r, k, []) : undefined;
+  // accepted again past its pin: only a version before 4.4 lets a task move on and be accepted with a reopen neither
+  // carried out nor pinned again (every pass carries reopens first). Told, not revived on an attempt nobody asked about
+  if (line.all<{ k: number }>('accepted').some((a) => a.body.k > r.attempt)) return reopenNotCarried(ctx, r, k, `the task was accepted again at a later attempt before this reopen was carried out (a version before 4.4 left it out)`);
   const pin = ev(ctx, REPAIRS_LINE, REOPEN_PINNED, `${repair}:${t.id}:${k}`, { repair, task: t.id, attempt: k, from: r.attempt } satisfies ReopenPinnedBody);
-  if (accepted) return reopenNow(ctx, t, line, r, k, [pin]);
   // a reopen that waits for other work (F12 b) is not merged into an attempt whose start may already be laid: it is pinned again
   if (r.after.length === 0 && (await attemptUnclaimed(ctx, t, line, k))) {
     const merged: ReopenMergedBody = { repair, task: t.id, attempt: k, from: r.attempt, issue: r.issue };

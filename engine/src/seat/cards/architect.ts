@@ -548,8 +548,9 @@ export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult)
       else if (!own.has(a)) out.push(`reopen[${x.task}].after: "${a}" is not a task this repair adds, changes or reopens`);
     }
   }
+  // what waits for what once the amendment applies: the added and changed cards, and each reopened task's card and after
   const waits = new Map<string, readonly string[]>([...r.add, ...change].map((t) => [t.id, t.dependsOn]));
-  for (const x of r.reopen) waits.set(x.task, [...(waits.get(x.task) ?? []), ...(x.after ?? [])]);
+  for (const x of r.reopen) waits.set(x.task, [...(c.plan.tasks.find((t) => t.id === x.task)?.dependsOn ?? []), ...(x.after ?? [])]);
   const circle = (from: string): boolean => {
     const seen = new Set<string>();
     const stack = [...(waits.get(from) ?? [])];
