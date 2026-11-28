@@ -939,6 +939,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       const dplan = typeof b['dplan'] === 'string' ? b['dplan'] : null;
       const effective = dplan === null ? undefined : events.find((e) => e.event === 'effective' && e.key === dplan);
       const end = waiverEnds(events).get(Number(b['n']));
+      let appliedNow = false;
       // the plans of the mission in effect that took effect on this waiver: the outcome recorded with each plan (flow/waivers.ts)
       const tookEffectOn = events.filter((e) => e.event === 'effective' && !e.key.includes('#') && (dplan === null || e.key === dplan)).filter((eff) => {
         const recorded = planReviewsWaiverIn(events, f.mission, eff.key, ctx.planReviewsWaived, ((objects.get(eff.key)?.['reviews'] ?? null) as Json[] | null)?.map((r) => String(r['review'])) ?? null);
@@ -955,11 +956,13 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         // a closed mission takes no further plan: its words are not out of force because of that
         const closed = closedMissions.has(f.mission);
         const outOfForce = b['by'] === 'words' && wordsAuthority(db, data, String(b['ref']), f.mission) === null;
-        n.state = end !== undefined ? (end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`)
-          : closed ? `mission ${f.mission} is closed: it applies to no further plan`
-            : applied ? 'in force'
-              : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
-                : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan';
+        // the history of grants and withdrawals, by the waiver's own scope; in an open mission the planner's selection comes first
+        const history = end === undefined ? null : end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`;
+        appliedNow = !closed && applied;
+        n.state = closed ? (history ?? `mission ${f.mission} is closed: it applies to no further plan`)
+          : applied ? `in force${end === undefined ? '' : end.action === 'withdraw' ? `; ${history} in the record` : `; replaced in the record by plan-reviews#${end.n}, which the planner does not apply`}`
+            : history ?? (outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
+              : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan');
         if (tookEffectOn.length > 0) n.state = `${n.state}; ${tookEffectOn.join(', ')} took effect on it`;
       }
       if (b['by'] === 'words' && untypedWords.has(String(b['ref']))) n.state = `${n.state}; ${UNTYPED}`;
@@ -968,7 +971,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         node('words', end.ref, null, 0);
         edge(n.key, `words:${end.ref}`, 'was withdrawn on');
       }
-      const k = end === undefined ? kept.get(`waiver:${id}`) : undefined;
+      const k = end === undefined || appliedNow ? kept.get(`waiver:${id}`) : undefined;
       if (k !== undefined) n.state = `${n.state}; ${keptMark(k)}`;
       n.by = `the PM via \`mp pm waive\` ${b['by'] === 'words' ? `on ${String(b['ref'])}` : `under authorization ${String(b['ref'])}`}`;
       if (b['by'] === 'words' && typeof b['ref'] === 'string') {
