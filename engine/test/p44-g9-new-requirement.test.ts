@@ -16,7 +16,11 @@
 //   to `reqset.<m>` alone, which an extension leaves alone; nothing is rewritten.
 // - A re-check judges the set lines of the plan's own contract, so it leaves later items aside.
 // - An audit made from 4.4 on (a legalization's chain object) binds `reqset.<m>` and `reqnew.<m>`, so any item change
-//   takes it off. A chain object made before 4.4 binds `reqset.<m>` alone (residual; `mp pm extend` names it).
+//   takes it off. A chain object made before 4.4 binds `reqset.<m>` alone and is not rewritten: the label computation
+//   reads it as resting on `reqnew.<m>` too, so it reads as in 4.3 until `reqnew.<m>` first lists an item, then out of
+//   date (review r1-1); `mp pm extend` names it.
+// - A PM plan's write is checked against the filings since it read the term lines, and built again (review r1-4); an
+//   item's revision decides its set from one read and is refused by a withdrawal since (r1-5).
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
