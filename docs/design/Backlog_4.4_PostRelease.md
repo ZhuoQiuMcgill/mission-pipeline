@@ -86,6 +86,12 @@ engine README's known limitations.
 - A requirement item that is revised into an authorization keeps, by its id, the "kept" mark an earlier
   supersession gave the item, and the next supersession does not ask about it by name. What to do:
   withdraw the authorization by `--withdraw-items` when its words change.
+- A supersession that names two words entries at once, each carrying a mission-wide waiver of the plan
+  reviews, where the earlier entry keeps another tag in force, asks about the later grant only. If the
+  PM withdraws it, the withdrawal covers every grant of that scope, so no waiver applies. If the PM
+  keeps it, the plan reviews stay waived as chosen, but the grant the planner applies (and the tree
+  shows) is the earlier one. What to do: read the waiver line of `mp read tree`; withdraw by scope
+  (`mp pm waive <mission> plan-reviews --withdraw --words W-n`) to end them all.
 
 ## The loop and housekeeping (`src/process/secretary.ts`, `src/process/actions.ts`, `src/evaluator/renew.ts`)
 
@@ -102,8 +108,8 @@ engine README's known limitations.
   stop --idle` keeps refusing. The refusal names the run; the plain `mp pm secretary stop` is the way
   through.
 - An unacknowledged PM note is printed again by every `mp sec next` pass until the Secretary
-  acknowledges it (`mp sec ack-note`): on a copy of a long mission with 19 such notes, they were most of
-  what each pass repeated. What to do: acknowledge a note once its instruction is taken into account.
+  acknowledges it (`mp sec ack-note`): on a copy of a long mission, such notes were most of what each
+  pass repeated. What to do: acknowledge a note once its instruction is taken into account.
 - Sizes of the reads on a long mission (a copy of a three-week mission written by 4.3): `mp read tree`
   printed 1.6 MB in 6,117 lines, `mp read notes` (with or without `--all`) 132 KB. Both are read on
   the user's request only; what to do: read one subject (`mp read show`, `mp read why`) instead.
@@ -152,6 +158,15 @@ engine README's known limitations.
   receipt keeps every reason; `mp read show decision` shows them.
 - `mp read items` shows a delivered output's current label: when the label changes after a successful
   delivery, the row no longer shows the label at delivery. The close shows both.
+- A reopen granted under 4.3 whose step was queued at the upgrade, then claimed and accepted under 4.4:
+  when a later plan changes that task's card, `mp read repairs` goes from done to "what became of this
+  reopen is not recorded" for it. The acceptance and the product are unchanged; the read says less than
+  the record, never more.
+- A task added by one repair, its card changed by a second, under a later plan that keeps that card:
+  its cards carry the second repair's note, not the first's. `mp read repairs` shows both notes.
+- The claim of a taken-back filing's Architect step is refused with "is held: new requirement R-n was
+  taken back", while `mp pm next` lists that step neither as ready nor as held. Nothing is dispatched
+  either way; the wording differs only.
 
 ## Evidence and reviews (`src/evaluator/runs.ts`, `src/process/runs.ts`)
 
@@ -160,6 +175,13 @@ engine README's known limitations.
   environment where it already ran, the earlier run is reused, and it kept no file. The Reviewer's card
   then lists no kept file for it (it says nothing false). What to do: the Reviewer reruns the command
   (`mp seat <id> rerun`) when it needs the file.
+- At a renewal, two declared commands with the same text and directory, one that names a report file
+  and one that does not, can make one of them take the other's declaration of files. The renewal
+  then asks for a fresh review where the earlier judgment could have been renewed: the safe side.
+- A Reviewer's citation through a directory link inside its scratch folder, whose target lies outside
+  it: the file is not copied (it lies outside and stays where it is), and the cleanup removes the link,
+  so the cited path no longer opens. The content is at the link's target; what to do: cite the target's
+  own path.
 
 ## Questions, Architect answers and their bounds (`src/flow/execution.ts`, `src/flow/architectAsk.ts`, `src/process/pm.ts`)
 
