@@ -7,7 +7,7 @@ import { runCli } from '../src/cli/main.ts';
 import { beginAction } from '../src/cli/project.ts';
 import { appendRecords, cursor, raiseAlert, releaseDispatch } from '../src/memory/index.ts';
 import { listNotices, markNotices } from '../src/process/notices.ts';
-import { secCursorName, secNext, secWait, SECRETARY_WAKE } from '../src/process/secretary.ts';
+import { NEXT_REPORT_KEEP, secCursorName, secNext, secWait, SECRETARY_WAKE } from '../src/process/secretary.ts';
 import { recordSeatHandBack } from '../src/process/seat.ts';
 import { ENV_A, readAll, addMissionToReview, type ProcessProject } from './process-fixtures.ts';
 import { project43, command43, done43, live43, secretary43, escalation43 } from './p43-fixtures.ts';
@@ -142,7 +142,7 @@ test('F8: the queued steps of a closed mission are one count line', async () => 
   } finally {p.cleanup();}
 });
 
-test('F8 (review p2-2): a pass interrupted after it committed, retried with the same --op, prints the report it committed', async () => {
+test('F8 (review p2-2): a pass interrupted before it printed, retried with the same --op, prints what it had not shown; a replay prints the report kept', async () => {
   const p = project43();
   try {
     const id = await live43(p);
@@ -150,11 +150,11 @@ test('F8 (review p2-2): a pass interrupted after it committed, retried with the 
     const q = await done43(p, ['sec','ask-pm','which port does the service use?'], id);
     await done43(p, ['pm','reply',q.id,'port 8080']);
     notice(p, 'n-info', 'an informational line', {informs: true});
-    // the first attempt of `mp sec next --op pass1`: its action begun, its pass committed, interrupted before its result was recorded
+    // the first attempt of `mp sec next --op pass1`: its action begun, its report built, interrupted before it was written out
     const action = {op: 'pass1', command: 'sec next', args: {generation: id, args: {positionals: [], flags: {}}}};
     assert.equal(beginAction(p.ctx.memory, {...action, filler: null}), null);
     const sec = secretary43(p, id);
-    try {await secNext(sec, {op: 'pass1'});} finally {sec.memory.close();}
+    try {await secNext(sec, {deferSeen: true});} finally {sec.memory.close();}
     const retry = await command43(p, ['sec','next','--op','pass1'], id);
     assert.equal(retry.code, 0, JSON.stringify(retry));
     assert.deepEqual(retry.result.replies.map((r: any) => r.id), [q.id], 'before the fix the reply was a count');
@@ -167,6 +167,44 @@ test('F8 (review p2-2): a pass interrupted after it committed, retried with the 
     assert.deepEqual([later.replies.length, later.earlier.replies], [0, 1]);
     assert.ok(!later.notices.some((n: any) => n.id === 'n-info'));
   } finally {p.cleanup();}
+});
+
+test('F8 (review r2, p2-2): a plain mp sec next that dies before its output is out leaves the cursor and the marks: the next pass shows the items again', async () => {
+  const p = project43();
+  try {
+    const id = await live43(p);
+    await done43(p, ['sec','next'], id);
+    const q = await done43(p, ['sec','ask-pm','which port does the service use?'], id);
+    await done43(p, ['pm','reply',q.id,'port 8080']);
+    notice(p, 'n-act', 'a check failed');
+    const before = cursor(p.ctx.memory, secCursorName(id))?.rev;
+    // the process is killed while it writes its output
+    const died = await runCli(['sec','next'], {cwd: p.dir, env: {MP_SECRETARY: id}, process: {observe: () => ENV_A, ident: {name: 'test', email: 'test@test'}}, out: async () => {throw new Error('killed while writing')}});
+    assert.notEqual(died.exitCode, 0);
+    assert.equal(cursor(p.ctx.memory, secCursorName(id))?.rev, before, 'the cursor moved for a report nobody saw');
+    const next = await done43(p, ['sec','next'], id);
+    assert.deepEqual(next.replies.map((r: any) => r.id), [q.id], 'the unseen reply was reduced to a count');
+    assert.ok(next.notices.some((n: any) => n.id === 'n-act' && n.state === 'undelivered'));
+  } finally {p.cleanup();}
+});
+
+test('F8 (review r2-2): a report too large to keep is still printed whole; its receipt says so, and a replay prints that line', async () => {
+  const p = project43();
+  const keep = NEXT_REPORT_KEEP.maxBytes;
+  try {
+    const id = await live43(p);
+    await done43(p, ['sec','next'], id);
+    const q = await done43(p, ['sec','ask-pm','which port does the service use?'], id);
+    await done43(p, ['pm','reply',q.id,'port 8080']);
+    NEXT_REPORT_KEEP.maxBytes = 100;
+    const big = await text43(p, ['sec','next','--op','big'], id);
+    assert.match(big, /port 8080/);
+    const replay = await text43(p, ['sec','next','--op','big'], id);
+    assert.match(replay, /The report of this pass \(\d+ bytes\) was too large to keep for a replay; mp sec next --all prints everything\./);
+    assert.doesNotMatch(replay, /port 8080/);
+    NEXT_REPORT_KEEP.maxBytes = keep;
+    assert.equal((await done43(p, ['sec','next'], id)).earlier.replies, 1, 'the pass that printed it counts as seen');
+  } finally {NEXT_REPORT_KEEP.maxBytes = keep; p.cleanup();}
 });
 
 test('F8 (review p2-5): a release the report did not show lands after the revision it prints, so wait wakes for it', async () => {

@@ -12,6 +12,10 @@ import { idPart, type MissionId } from '../src/common/ids.ts';
 import type { JudgmentRecord, ObjectVersionRecord } from '../src/common/records.ts';
 import { commit, ev, flowCtx, noticeAlertId, shortHash } from '../src/flow/context.ts';
 import { listNotices } from '../src/process/notices.ts';
+import { raiseNotice } from '../src/process/ports.ts';
+import { raiseAlert, setMission } from '../src/memory/index.ts';
+import { canonicalJson } from '../src/common/hash.ts';
+import type { AlertId, ContentHash } from '../src/common/ids.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { acceptedProduct, taskLineage } from '../src/flow/execution.ts';
 import { RENEW_LINE, REVIEW_NEEDED, type DetailedPlanDoc, type ReviewNeededBody } from '../src/flow/plandoc.ts';
@@ -1550,6 +1554,40 @@ describe('4.4 (F14): re-binding with less noise', () => {
     await fastPlan(ports, 3, 'd2');
     await drive(engine, ports.scheduler, noSeats);
     assert.equal(state(current.key), 'acknowledged');
+  });
+
+  it('compatibility (review r2, p2-7): on a mission closed since, an open 4.3 notice of a superseded plan closes', async () => {
+    const { ports, engine } = await setup();
+    const state = (key: string) => listNotices(ports.ctx.memory, ports.ctx.memory.data, { includeAcknowledged: true }).find((n) => n.id === noticeAlertId({ mission: M, category: 'kept-product-not-rebound', key }))?.state;
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await fastPlan(ports, 2, 'd1');
+    await drive(engine, ports.scheduler, (t, s) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(M, keeps)(t, s));
+    // 4.3 raised a notice about the first plan while it was in effect (its own form: 4.3 raised nothing born resolved), left it open, and the mission was closed
+    const key = 'impl:prod.con.m1.impl.1:dplan.m1.1.1:fast';
+    ports.ctx.memory.write({}, (tx) => {
+      raiseAlert(tx, { alert: noticeAlertId({ mission: M, category: 'kept-product-not-rebound', key }) as AlertId, category: 'kept-product-not-rebound', informational: true, body: tx.data.put(canonicalJson({ mission: M, category: 'kept-product-not-rebound', wi: null, key, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.1.1' }, askUser: false })) as ContentHash });
+      setMission(tx, M, 'closed');
+    });
+    assert.equal(state(key), 'undelivered');
+    await engine.reconcile(M);
+    assert.equal(state(key), 'acknowledged', 'the closed mission’s pass returned before adoption and the sweep');
+  });
+
+  it('compatibility (review r2-1): 1,001 open 4.3 notices are adopted in bounded batches; the pass reaches its tasks', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    // 4.3 left 1,001 notices open for one product (one per stale set it saw)
+    for (let from = 0; from < 1001; from += 250) {
+      ports.ctx.memory.write({ op: `test:legacy-notices:${from}`, payload: from }, (tx) => {
+        for (let i = from; i < Math.min(1001, from + 250); i++) raiseNotice(tx, { mission: M, category: 'kept-product-not-rebound', wi: null, key: `impl:prod.con.m1.impl.1:dplan.m1.1.1:prerequisites:${i}`, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.1.1', stale: [`prod.old.${i}`], missing: [] } });
+      });
+    }
+    await engine.reconcile(M);
+    assert.deepEqual(ports.ledger.notices.filter((n) => n.category.startsWith('flow-')).map((n) => n.trigger), [], 'the pass failed before its first task');
+    assert.equal((await lineEvents(ports, 'impl', 'kept-notice')).length, 1001);
+    const head = ports.ledger.head;
+    await engine.reconcile(M);
+    assert.equal(ports.ledger.head, head, 'once tracked, nothing is written again');
   });
 
   it('long mission and task ids keep the lifecycle event\'s key within the ledger\'s limit (review p2-4)', async () => {

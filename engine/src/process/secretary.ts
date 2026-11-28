@@ -38,7 +38,8 @@ export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolea
       const running = (tx.stmt("SELECT mission, line, key, body FROM flow_events WHERE event = 'detached' ORDER BY revision").all() as {mission: string; line: string; key: string; body: string}[])
         .filter((e) => !flowEventExists(tx, {mission: e.mission, line: e.line, event: 'detached-end', key: e.key}) && !flowEventExists(tx, {mission: e.mission, line: e.line, event: 'run', key: String((JSON.parse(tx.data.text(e.body)) as {evidence?: unknown}).evidence)}))
         .map((e) => e.key);
-      if (open.length > 0 || flying.length > 0 || running.length > 0) notAllowed(`--idle retires the Secretary only when no mission is open and nothing is in flight (open: ${open.join(', ') || 'none'}; in flight or not confirmed ended: ${flying.join(', ') || 'none'}; detached runs still running: ${running.join(', ') || 'none'}); otherwise stop the work first and use the stop's grace or --gone`);
+      // 4.4 (F19): a worker lost without a trace (a power loss) leaves its run recorded as running: the plain stop is the way through
+      if (open.length > 0 || flying.length > 0 || running.length > 0) notAllowed(`--idle retires the Secretary only when no mission is open and nothing is in flight (open: ${open.join(', ') || 'none'}; in flight or not confirmed ended: ${flying.join(', ') || 'none'}; detached runs still running: ${running.join(', ') || 'none'})${running.length > 0 ? `; it waits for detached run${running.length === 1 ? '' : 's'} ${running.join(', ')}, which may have no result or end because its worker was lost` : ''}. mp pm secretary stop without --idle retires the generation (after the stop's 60 s grace, or with --gone)`);
     } else {
       const stops = activeStops(tx);
       const lastStop = stops.at(-1);
@@ -226,11 +227,11 @@ function replyRevisions(db: Db): Map<string, number> {
  * before, PM replies and applied decisions at or before the cursor, and the steps of closed missions are
  * counted, not printed; a delivered notice that only informs is not pending. The first pass of a
  * generation, `all` and nothing else print everything. Only this pass, whose report reaches its caller,
- * marks notices delivered and moves the cursor; `since` replaces the cursor for one pass. `op`: the command's
- * operation id; the marks, the cursor and the report commit in one write under it, so a retry after an
- * interruption prints the report the first attempt committed (what it marked is never lost to a count).
+ * marks notices delivered and moves the cursor (secNextSeen); `since` replaces the cursor for one pass.
+ * `deferSeen`: the caller commits them itself once the report is written out (`mp sec next`), so an
+ * interruption before that shows an item again and never loses one to a count.
  */
-export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; readonly since?: number | null; readonly op?: string | null} = {}): Promise<SecretaryNext> {
+export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; readonly since?: number | null; readonly deferSeen?: boolean} = {}): Promise<SecretaryNext> {
   const g = requireSecretary(ctx.memory, ctx.secretary);
   touchSecretary(ctx.memory, ctx.secretary);
   // reconcile first; then one read: the revision the report is built from and everything it prints
@@ -257,18 +258,38 @@ export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; r
     const inbox = pmInbox(ctx);
     return {...r, notices, held, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => inbox.some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...ch, replies, decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: built, since, all: o.all === true, earlier};
   });
-  const name = secCursorName(g.generation);
-  const json = canonicalJson(out);
-  const stored = ctx.memory.write(o.op != null ? {op: `sec-next:${o.op}`, payload: {op: o.op}} : {}, (tx) => {
-    for (const n of out.notices) if (n.state === 'undelivered') markNotice(tx, {notice: n.id, state: 'delivered'});
-    // the cursor never moves back (a late retry of an earlier pass)
-    if (out.revision > Number(cursor(tx, name)?.rev ?? -1)) setCursor(tx, {cursor: name, rev: out.revision});
-    return {report: tx.data.put(json)};
-  });
-  return stored.report === sha256(json) ? out : storedNextReport(ctx, stored.report);
+  if (o.deferSeen !== true) secNextSeen(ctx, out);
+  return out;
 }
 
-/** 4.4 (F8): the report a `mp sec next` committed, read back by its hash (a retry and a replay print it as it was). */
+/**
+ * 4.4 (F8): a report has reached its caller: its undelivered notices are marked delivered (in bounded
+ * writes) and then the generation's cursor moves to its revision, never back (a late replay of an earlier
+ * pass). Interrupted in between: the next pass shows those items again.
+ */
+export function secNextSeen(ctx: ProcessContext, r: Pick<SecretaryNext, 'notices' | 'revision'>): void {
+  const g = requireSecretary(ctx.memory, ctx.secretary);
+  markNotices(ctx.memory, r.notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
+  const name = secCursorName(g.generation);
+  ctx.memory.write({}, (tx) => {if (r.revision > Number(cursor(tx, name)?.rev ?? -1)) setCursor(tx, {cursor: name, rev: r.revision});});
+}
+
+/** 4.4 (F8): the largest report a `mp sec next` keeps for the replay of its operation id (a larger one leaves a receipt saying so). */
+export const NEXT_REPORT_KEEP = {maxBytes: 16 * 1024 * 1024};
+
+/** 4.4 (F8): keep a report for its replay: its data hash, or, when it is too large to keep, a receipt that says so. A pass never fails on this. */
+export function keepNextReport(ctx: ProcessContext, r: SecretaryNext): {readonly report: string} | {readonly tooLarge: true; readonly bytes: number} {
+  const json = canonicalJson(r);
+  const bytes = Buffer.byteLength(json, 'utf8');
+  if (bytes > NEXT_REPORT_KEEP.maxBytes) return {tooLarge: true, bytes};
+  try {
+    return {report: ctx.memory.write({}, (tx) => tx.data.put(json))};
+  } catch {
+    return {tooLarge: true, bytes};
+  }
+}
+
+/** 4.4 (F8): the report a `mp sec next` kept, read back by its hash (a replay prints it as it was). */
 export function storedNextReport(ctx: ProcessContext, report: string): SecretaryNext {
   return JSON.parse(ctx.memory.data.text(report)) as SecretaryNext;
 }

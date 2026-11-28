@@ -8,8 +8,7 @@ import { parseFiller, storedCard, type Dispatched } from '../../process/pm.ts';
 import { seatRead } from '../../process/seat.ts';
 import { claimSecretary, generations, notAllowed, requirePm, startSecretary, writeGeneration } from '../../memory/resident.ts';
 import { assignTags, summarizeWords, taggedWords } from '../../memory/words.ts';
-import { storedNextReport, type SecretaryNext } from '../../process/secretary.ts';
-import { canonicalJson, sha256 } from '../../common/hash.ts';
+import { keepNextReport, secNextSeen, storedNextReport, type SecretaryNext } from '../../process/secretary.ts';
 import { pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary } from '../../process/secretary.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
 import { renderNext, PM_COMMANDS } from './pm.ts';
@@ -53,10 +52,12 @@ const handbook: Command = {
 const next: Command = {
   group: 'sec', name: ['next'], summary: 'reconcile; what changed since your last pass: stops, PM exchanges, notices, ready work and dispatches (--all: everything)', usage: 'mp sec next [--all] [--since <R>]', flags: {all: 'boolean', since: 'string'}, decides: true,
   async run(c, a) {const p = P(c); const s = flagStr(a, 'since'); const since = s === null ? null : Number(s); if (since !== null && (!Number.isSafeInteger(since) || since < 0)) throw usage('--since is a nonnegative revision');
-    const [text, json] = renderSecNext(p, await secNext(p.ctx, {all: flagBool(a, 'all'), since, op: c.op})); return ok(text, json);},
-  // 4.4 (F8): the report is kept in the memory with the pass's marks and cursor; the action records its hash, a retry prints it
-  recorded: (r) => {const hash = sha256(canonicalJson(r.json)); return {exitCode: r.exitCode, text: `mp sec next: report ${hash}`, json: {report: hash}};},
+    const [text, json] = renderSecNext(p, await secNext(p.ctx, {all: flagBool(a, 'all'), since, deferSeen: true})); return ok(text, json);},
+  // 4.4 (F8): the action records the kept report's hash (or a receipt that it was too large to keep); a retry with the same --op prints it
+  recorded: (c, r) => {const kept = keepNextReport(P(c).ctx, r.json as SecretaryNext); return 'report' in kept ? {exitCode: r.exitCode, text: `mp sec next: report ${kept.report}`, json: kept} : {exitCode: r.exitCode, text: `The report of this pass (${kept.bytes} bytes) was too large to keep for a replay; mp sec next --all prints everything.`, json: kept};},
   replay: (c, prior) => {const j = prior.json as {report?: unknown} | null; if (typeof j?.report !== 'string') return prior; const p = P(c); const [text, json] = renderSecNext(p, storedNextReport(p.ctx, j.report)); return ok(text, json);},
+  // 4.4 (F8): only once the report is out are its notices marked delivered and the cursor moved: an interruption shows an item again, never loses it
+  afterOutput: (c, r) => {const j = r.json as Partial<SecretaryNext> | null; if (j !== null && typeof j.revision === 'number' && Array.isArray(j.notices)) secNextSeen(P(c).ctx, j as SecretaryNext);},
 };
 
 /** The text of a `mp sec next` report, and the report as its JSON. */
@@ -81,7 +82,7 @@ const card: Command = {
   group: 'sec', name: ['card'], summary: 'claim the current decision round and read its card', usage: 'mp sec card <escalation>', flags: {},
   async run(c, a) {const r = secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok(r.card, r);},
   // 4.4 (F17): the recorded result names the card's leaf and hash, not its text; a retry reads the leaf
-  recorded: (r) => {const {card: _text, ...rest} = r.json as Dispatched; return {exitCode: r.exitCode, text: `card ${rest.cardLeaf} (sha256 ${rest.cardSha256})`, json: rest};},
+  recorded: (_c, r) => {const {card: _text, ...rest} = r.json as Dispatched; return {exitCode: r.exitCode, text: `card ${rest.cardLeaf} (sha256 ${rest.cardSha256})`, json: rest};},
   replay: (c, prior) => {
     const j = prior.json as Partial<Dispatched> | null;
     if (j === null || typeof j.card === 'string' || typeof j.cardLeaf !== 'string' || typeof j.dispatch !== 'string') return prior;

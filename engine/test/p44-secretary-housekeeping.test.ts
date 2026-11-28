@@ -70,6 +70,8 @@ test('F19 (review p2-6): --idle checks a pending generation too, and a detached 
     const running = await command43(p, ['pm', 'secretary', 'stop', '--idle']);
     assert.equal(running.error?.code, 'NOT_ALLOWED', 'retired while a detached run was still running');
     assert.match(running.error.message, /in flight or not confirmed ended: none; detached runs still running: run-1/);
+    // (review r2-3) the refusal names the run it waits for, and the way through
+    assert.match(running.error.message, /it waits for detached run run-1, which may have no result or end because its worker was lost\. mp pm secretary stop without --idle retires the generation \(after the stop's 60 s grace, or with --gone\)/);
     // once the run has ended, the generation is idle
     p.ctx.memory.write({}, (tx) => {appendRecords(tx, [{ kind: 'flow.event', mission: 'm1' as MissionId, line, event: 'detached-end', key: 'run-1', body: tx.data.put(JSON.stringify({ run: 'run-1', outcome: 'lost', why: 'gone', at: 0 })) as ContentHash }]);});
     assert.equal((await done43(p, ['pm', 'secretary', 'stop', '--idle'])).generation, id);

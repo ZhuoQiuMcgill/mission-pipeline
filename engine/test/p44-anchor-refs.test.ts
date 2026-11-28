@@ -7,8 +7,7 @@ import { test } from 'node:test';
 import { acceptedProduct } from '../src/flow/execution.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import type { MissionId } from '../src/common/ids.ts';
-import { anchorCommit, anchorMarker } from '../src/process/actions.ts';
-import { setCursor } from '../src/memory/index.ts';
+import { anchorCommit } from '../src/process/actions.ts';
 import { pmNext } from '../src/process/pm.ts';
 import { addMissionToReview, processProject, reviewerPass, step } from './process-fixtures.ts';
 
@@ -42,10 +41,9 @@ test('#64: an accepted product\'s commit survives git gc --prune=now before deli
   }
 });
 
-/** As 4.3 left it: no kept ref for the candidate, and no anchor marker for the mission. */
+/** As 4.3 left the repository, or a clone the memory folder was copied to: no kept ref for the candidate. */
 function as43(p: ReturnType<typeof processProject>, commit: string): void {
   p.git('update-ref', '-d', `refs/mission-pipeline/kept/m1/${commit}`);
-  p.ctx.memory.write({}, (tx) => {setCursor(tx, { cursor: anchorMarker('m1'), rev: 0 });});
 }
 
 test('#64 (review p2-1): a product recorded under 4.3 is anchored when it is accepted under 4.4', async () => {
@@ -62,7 +60,7 @@ test('#64 (review p2-1): a product recorded under 4.3 is anchored when it is acc
   }
 });
 
-test('#64 (review p2-1): a reconciliation anchors accepted products of an upgraded mission once, then lists nothing; a failed write is retried', async () => {
+test('#64 (review p2-1): a reconciliation anchors accepted products of an upgraded mission; a failed write is retried; one listing per pass', async () => {
   const p = processProject();
   try {
     const { candidate } = await addMissionToReview(p, 'm1');
@@ -75,16 +73,30 @@ test('#64 (review p2-1): a reconciliation anchors accepted products of an upgrad
     p.ctx.memory.connection.prepare("DELETE FROM meta WHERE key = 'git_hold'").run();
     await pmNext(p.ctx);
     assert.equal(p.git('for-each-ref', '--format=%(objectname)', 'refs/mission-pipeline/kept/m1/'), candidate);
-    // anchored: later passes make no git call for it
+    // anchored: a pass lists the mission's refs once and writes none
     const git = p.ctx.git as unknown as { runSync: (args: readonly string[], o: unknown) => unknown };
     const runSync = git.runSync.bind(p.ctx.git);
-    let listings = 0;
-    git.runSync = (args, o) => {if (args[0] === 'for-each-ref') listings++; return runSync(args, o);};
+    const calls: string[] = [];
+    git.runSync = (args, o) => {if (args[0] === 'for-each-ref' || args[0] === 'update-ref') calls.push(String(args[0])); return runSync(args, o);};
     await pmNext(p.ctx);
-    await pmNext(p.ctx);
-    assert.equal(listings, 0);
+    assert.deepEqual(calls, ['for-each-ref']);
     p.git('gc', '--prune=now', '--quiet');
     assert.ok(exists(p.dir, candidate));
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('#64 (review r2, p2-1): the memory folder copied to a clone without the refs: the next pass anchors there too', async () => {
+  const p = processProject();
+  try {
+    const { candidate } = await addMissionToReview(p, 'm1');
+    await step(p.ctx, 'reviewer', (c) => reviewerPass(c));
+    await pmNext(p.ctx);
+    // what the memory remembers is unchanged; the repository lacks the refs (another clone)
+    as43(p, candidate);
+    await pmNext(p.ctx);
+    assert.equal(p.git('for-each-ref', '--format=%(objectname)', 'refs/mission-pipeline/kept/m1/'), candidate, 'a marker in the memory said the mission was anchored');
   } finally {
     p.cleanup();
   }

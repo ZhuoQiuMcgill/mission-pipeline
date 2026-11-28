@@ -342,6 +342,9 @@ export async function executionStep(ctx: FlowCtx): Promise<void> {
     }
     // releases after the close can requeue obsolete steps: cancelling them is not production
     await supersededStep(ctx, eff);
+    // 4.4 (F14): notices a 4.3 memory left open on a mission closed since are tracked, and closed once superseded
+    await adoptKeptNotices(ctx);
+    await keptSweep(ctx, eff);
     return;
   }
   // reopen decisions (an integration review's, a repair's) carried out before the tasks move (restartable)
@@ -1990,8 +1993,14 @@ async function adoptKeptNotices(ctx: FlowCtx): Promise<void> {
     if (tracked.has(n.key) || typeof d?.task !== 'string' || typeof d.product !== 'string' || typeof d.dplan !== 'string') continue;
     events.push(ev(ctx, taskLine(d.task), KEPT_NOTICE, keptEventKey(n.key), { product: d.product, dplan: d.dplan, notice: n.key, base: n.key } satisfies KeptNoticeBody));
   }
-  if (events.length > 0) await commit(ctx, `flow:kept-adopted:${ctx.mission}:${shortHash(events.map((e) => e.key))}`, { events });
+  // in bounded batches (an append takes at most 1,000 records), each under the operation id of its own
+  // notices: a retry goes on with what is still untracked and never resubmits an oversized batch
+  for (let i = 0; i < events.length; i += KEPT_ADOPT_BATCH) {
+    const batch = events.slice(i, i + KEPT_ADOPT_BATCH);
+    await commit(ctx, `flow:kept-adopted:${ctx.mission}:${shortHash(batch.map((e) => `${e.line}\n${e.key}`))}`, { events: batch });
+  }
 }
+const KEPT_ADOPT_BATCH = 200;
 
 /** 4.4 (F14): after a pass, a tracked notice closes once its plan is no longer in effect or its product is no longer the task's accepted one. */
 async function keptSweep(ctx: FlowCtx, eff: EffectiveBody): Promise<void> {
