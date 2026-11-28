@@ -126,6 +126,16 @@ describe('4.4 G3: an instruction addressed to a task reaches its cards only', ()
     assert.equal(await events(), 1, 'nothing written');
     await assert.rejects(pmConstraintScope(ports.ctx, { constraint: 'later', tasks: ['impl'], mission: 'm2' }), /scoped to mission m1/);
   });
+
+  it('a scope change of a version another writer replaced meanwhile is refused: the old text is never written back', async () => {
+    const { ports } = await setup();
+    const v1 = (await instruction(ports, 'moving', 'Prefer small functions.')).version;
+    await instruction(ports, 'moving', 'Prefer small, pure functions.');
+    await assert.rejects(recordConstraint(ports, { mission: M, constraint: 'moving', kind: 'instruction', text: 'Prefer small functions.', scope: { mission: 'm1', paths: ['**'], taskTypes: [], tasks: ['impl'] }, expect: v1 }), /has a new version since it was read/);
+    const r = ports.memory.read((db) => constraintsRead(db, ports.memory.data, 'm1', false)).constraints.find((c) => c.id === 'constraint.moving');
+    assert.equal(r?.first, 'Prefer small, pure functions.');
+    assert.equal(r?.address, null);
+  });
 });
 
 describe('4.4 G3: the author of a constraint, and layer 1', () => {

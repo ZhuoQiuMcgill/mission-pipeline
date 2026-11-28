@@ -231,12 +231,14 @@ export async function setContested(ctx: FlowCtx, line: string, contested: boolea
  */
 export async function recordConstraint(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly words?: string; readonly author?: 'secretary' },
+  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly words?: string; readonly author?: 'secretary'; readonly expect?: string },
 ): Promise<string> {
   const ctx = flowCtx(ports, req.mission);
   const line = constraintLine(req.constraint);
   const ix = await basisIndex(ctx);
   if (ix.withdrawn.has(line)) throw new Error(`Constraint ${req.constraint} was withdrawn and stays withdrawn; use a new id.`);
+  // 4.4 (G3): a scope change of the version its caller read; another version current now would be written over with the old text
+  if (req.expect !== undefined && ix.current.get(line) !== req.expect) throw Object.assign(new Error(`constraint ${req.constraint} has a new version since it was read (${ix.current.get(line) ?? 'none'}): nothing was changed; run the command again`), { code: 'STALE_REQUEST' });
   checkKind(ix, line, 'a project constraint', new Set(['constraint', 'instruction']), null);
   // 4.4 (G3): an address is for an instruction, bound to one mission (an object constraint's scope is a proof input)
   if ((req.scope.tasks !== undefined || req.scope.repairs !== undefined) && (req.kind !== 'instruction' || req.scope.mission === undefined)) throw new Error(`an address (tasks, repairs) is for an instruction of one mission: nothing was recorded`);

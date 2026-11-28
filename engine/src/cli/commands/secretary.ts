@@ -116,7 +116,7 @@ const instruct: Command = {
   flags: {text: 'string', tasks: 'list', repair: 'list', paths: 'list', 'task-types': 'list', withdraw: 'string', reason: 'string'},
   async run(c, a) {
     const p = P(c); const w = flagStr(a, 'withdraw');
-    if (w !== null) {await secWithdrawInstruction(p.ctx, {constraint: w, reason: flagStr(a, 'reason') ?? ''}); return ok(`Instruction ${w} withdrawn by the Secretary; its record is kept.`, {constraint: w, withdrawn: true});}
+    if (w !== null) {const r = await secWithdrawInstruction(p.ctx, {constraint: w, reason: flagStr(a, 'reason') ?? ''}); return ok(r.already ? `Instruction ${w} was withdrawn already; nothing was written.` : `Instruction ${w} withdrawn by the Secretary; its record is kept.`, {constraint: w, withdrawn: true, already: r.already});}
     const mission = positional(a, 0, 'mission'), id = positional(a, 1, 'instruction id');
     const text = flagStr(a, 'text'); if (text === null || text.trim() === '') throw usage('--text: the instruction');
     const address = {...given('tasks', flagList(a, 'tasks')), ...given('repairs', flagList(a, 'repair'))};

@@ -1375,7 +1375,7 @@ export async function pmConstraintScope(ctx: ProcessContext, req: { readonly con
   const { tasks: _t, repairs: _r, ...rest } = cur.scope;
   const scope: ConstraintScope = { ...rest, ...(mission !== undefined ? { mission } : {}), ...(req.tasks !== undefined ? { tasks: [...req.tasks] } : {}), ...(req.repairs !== undefined ? { repairs: [...req.repairs] } : {}) };
   addressProblem(cur.kind, scope);
-  const version = await recordConstraint(ctx.ports(), { mission: scope.mission as MissionId, constraint: req.constraint, kind: cur.kind, text: cur.text, scope });
+  const version = await recordConstraint(ctx.ports(), { mission: scope.mission as MissionId, constraint: req.constraint, kind: cur.kind, text: cur.text, scope, expect: cur.version });
   await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint scope' });
   return { version, scope, reach: await constraintReach(ctx, { kind: cur.kind, scope }), scopeChanged: canonicalJson(cur.scope) !== canonicalJson(scope) };
 }
@@ -1406,18 +1406,19 @@ export async function secInstruct(ctx: ProcessContext, req: { readonly mission: 
 }
 
 /** 4.4 (G3): `mp sec instruct withdraw <constraint> --reason …`: the Secretary withdraws an instruction of its own (no words: it is not the user's). */
-export async function secWithdrawInstruction(ctx: ProcessContext, req: { readonly constraint: string; readonly reason: string }): Promise<void> {
+export async function secWithdrawInstruction(ctx: ProcessContext, req: { readonly constraint: string; readonly reason: string }): Promise<{ readonly already: boolean }> {
   if (ctx.secretary === null) throw new ProcessError('NOT_ALLOWED', 'mp sec instruct withdraw is the live Secretary\'s (MP_SECRETARY); the PM withdraws with mp pm constraint withdraw --words');
   if (req.reason.trim() === '') throw new ProcessError('NOT_ALLOWED', '--reason: why the instruction no longer holds');
   const line = constraintLine(req.constraint);
   const c = (await currentConstraints(flowCtx(ctx.ports(), 'project' as MissionId))).find((x) => x.line === line);
   if (c === undefined) {
-    // withdrawn already (a retry) or never recorded
+    // withdrawn already (a retry, or by the PM: the output says only that it is withdrawn), or never recorded (refused there)
     await withdrawConstraint(ctx.ports(), { constraint: req.constraint, by: 'secretary', reason: req.reason });
-    return;
+    return { already: true };
   }
   if (c.author !== 'secretary') throw new ProcessError('NOT_ALLOWED', `${req.constraint} is the PM's: only the PM withdraws it (mp pm constraint withdraw --words). Nothing was withdrawn`);
   await withdrawConstraint(ctx.ports(), { constraint: req.constraint, by: 'secretary', reason: req.reason });
+  return { already: false };
 }
 
 /** `mp pm plan submit <mission> --file <plan.json> --words W-<n>...`: a PM plan batch; Calibrator ① checks it next. */

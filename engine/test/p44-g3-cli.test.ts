@@ -48,7 +48,8 @@ test('mp sec instruct records the Secretary\'s instruction for one mission; an i
     // the PM cannot withdraw through the Secretary's command, nor the Secretary the PM's
     const noPm = await command43(p, ['sec', 'instruct', '--withdraw', 'pm-rule', '--reason', 'gone'], id);
     assert.match(noPm.error.message, /pm-rule is the PM's: only the PM withdraws it/);
-    await done43(p, ['sec', 'instruct', '--withdraw', 'samples', '--reason', 'the fixtures moved'], id);
+    assert.match((await runCli(['sec', 'instruct', '--withdraw', 'samples', '--reason', 'the fixtures moved'], env)).stdout, /Instruction samples withdrawn by the Secretary; its record is kept\./);
+    assert.match((await runCli(['sec', 'instruct', '--withdraw', 'samples', '--reason', 'the fixtures moved'], env)).stdout, /Instruction samples was withdrawn already; nothing was written\./);
     assert.deepEqual((await done43(p, ['read', 'constraints', 'm1'])).constraints.map((c: { id: string }) => c.id), ['constraint.pm-rule']);
     const withdrawn = p.ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as MissionId, line: 'requirements', event: 'constraint-withdrawn' }).map((e) => JSON.parse(p.ctx.memory.data.text(e.body))));
     assert.deepEqual(withdrawn.map((b: Record<string, unknown>) => [b['by'], b['reason']]), [['secretary', 'the fixtures moved']]);
