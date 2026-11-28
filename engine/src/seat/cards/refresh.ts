@@ -8,12 +8,12 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { attemptPast, lineAcceptance, mergedReopens, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage, withMergedDuties } from '../../flow/execution.ts';
+import { attemptPast, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage } from '../../flow/execution.ts';
 import { acceptedEntry } from '../../flow/repair.ts';
 import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
 import { repairPlanMaterial } from './architect.ts';
 import type { MaterialRef } from './common.ts';
-import { DetailedPlanDoc, PmPlanDoc, REPAIRS_LINE, amendedPlan, latestEffectiveOf, repairRef, type DetailedTask, type RepairBody, type StoredDetailedPlan } from '../../flow/plandoc.ts';
+import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
 import { secretaryOptions, type EscalationBody } from '../../flow/secretary.ts';
@@ -233,15 +233,6 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const review = was?.review ?? null;
       if (was !== null && review !== null && lacks(card, PREVIOUS_REVIEW_MATERIAL)) plus(card, PREVIOUS_REVIEW_MATERIAL, review, () => previousReviewMaterial(put, sourceAt(readers!, review), { review, attempt: was.attempt }));
       if (was !== null && lacks(card, PREVIOUS_HANDBACK_MATERIAL)) plus(card, PREVIOUS_HANDBACK_MATERIAL, was.constructor, () => previousHandBackMaterial(put, sourceAt(readers!, was.constructor), { attempt: was.attempt }));
-      // 4.4 (F13): the reopens other repairs merged into this attempt since its card was queued, laid as the queue-time builder lays them
-      if (k !== undefined) {
-        const repairs = new Map(events.filter((e) => e.line === REPAIRS_LINE && e.event === 'repair').map((e) => [e.key, e.body as RepairBody]));
-        const merged = mergedReopens(events, task.id, k);
-        card.duties = withMergedDuties(card.duties, merged, repairs);
-        const shown = new Set((card.repairs ?? []).map((r) => r.id));
-        const more = [...new Set(merged.map((m) => m.repair))].filter((id) => !shown.has(id)).flatMap((id) => { const r = repairs.get(id); return r === undefined ? [] : [repairRef(r)]; });
-        if (more.length > 0) card.repairs = [...(card.repairs ?? []), ...more];
-      }
       break;
     }
     case 'reviewer': {

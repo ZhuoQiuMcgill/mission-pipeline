@@ -111,8 +111,6 @@ export interface AppendGuard {
   readonly openMissions?: readonly string[];
   readonly words?: readonly {readonly id: string; readonly fingerprint: string; readonly mission: string}[];
   readonly absent: ReadonlyArray<{ readonly mission: string; readonly line: string; readonly event: string; readonly key: string }>;
-  /** 4.4 (F13): seat tasks that must not have been claimed: unknown, or queued (a released one is queued again). */
-  readonly unclaimed?: readonly string[];
   readonly code: string;
   readonly message: string;
 }

@@ -9,7 +9,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The project constraints that apply to the task *(required)*: an instruction is labelled "Instruction (follow it; not a proof input)": follow it; the relevant decisions, verbatim; a few lines of duties.
 - Your worktree `.mission-pipeline/worktrees/<dispatch>/` and the write paths in it.
 - Files to read first; the interpreter (the runtime to build and run with); the verification commands `mp` will run (the project's local tests for this task); the exclusive resources leased to you, if any.
-- On a reopened attempt: the issue your task's work must fix, and who reopened it (an integration task's review, or a repair). Your accepted product stays recorded until this attempt is accepted. Another repair's issue for the same task may join your attempt, as the last lines of your duties.
+- On a reopened attempt: the issue your task's work must fix, and who reopened it (an integration task's review, or a repair). Your accepted product stays recorded until this attempt is accepted.
 - Work that answers a repair: the repair, with the user's reason verbatim.
 - The plan's data formats and storage, when it declares them.
 - Materials, read page by page. On a later attempt: the previous review's report and your earlier hand-back (optional).

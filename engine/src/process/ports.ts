@@ -333,8 +333,6 @@ export class MemoryFlowLedger implements FlowLedgerPort {
         return row.revision !== g.revision;
       })) throw Object.assign(new Error(guard.message), {code: guard.code});
       if (guard !== undefined && guard.absent.some((g) => flowEventExists(tx, g))) throw Object.assign(new Error(guard.message), { code: guard.code });
-      // 4.4 (F13): a step claimed since the caller read it (a merge into its card would come too late)
-      if (guard?.unclaimed?.some((task) => { const t = taskInfo(tx, task); return t !== null && t.state !== 'queued'; })) throw Object.assign(new Error(guard.message), { code: guard.code });
       appendRecords(tx, [...events.map((e) => flowRecord(tx.data, e)), ...records.filter((r) => r.kind !== 'notice.delivery')]);
       for (const r of records) {
         if (r.kind === 'notice.delivery') markNotice(tx, r);

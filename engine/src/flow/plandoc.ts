@@ -404,16 +404,18 @@ export interface RepairDecidedBody {
   readonly add: readonly string[];
   /**
    * The tasks it reopens, each at the attempt it was accepted at when the repair was decided (4.4, F13: a task
-   * moved on since its Architect's card, at the attempt it was last accepted at; execution merges it or pins it
-   * again). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every reopen before 4.4).
+   * moved on since its Architect's card, at the attempt it was last accepted at; execution waits for its open attempt
+   * and then opens the next). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every
+   * reopen before 4.4).
    */
   readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
   /**
-   * 4.4 (F13, p7-1): its reopens are tracked requests: one whose task moved on is merged, pinned again or told as not
-   * carried out, and an acceptance past it is reopened. Absent: a decision of 4.3, whose reopen of a task that moved
-   * on and was accepted again since was left out by 4.3.
+   * 4.4 (F13, p7-1): its reopens are tracked requests (requested, carried out, not carried out: execution.ts): one
+   * whose task moved on waits for the open attempt and opens the next, or is told as not carried out, and an
+   * acceptance past it is reopened; only such a reopen holds other work of its repair (p7-r2-3). Absent: a decision
+   * of 4.3, whose reopen of a task that moved on and was accepted again since was left out by 4.3.
    */
   readonly tracked?: true;
 }

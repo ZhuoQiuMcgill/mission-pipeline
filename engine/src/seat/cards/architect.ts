@@ -540,7 +540,9 @@ export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult)
     for (const d of t.dependsOn) if (!existing.has(d) && !ids.includes(d)) out.push(`${where}[${t.id}].dependsOn: "${d}" is not a task of the plan in effect or of this repair`);
     if (t.estimate.basis.trim() === '') out.push(`${where}[${t.id}].estimate.basis: give the basis of the estimate`);
   }
-  // 4.4 (F12 b): a reopen comes after other work of this repair only, and never in a circle (each would wait for the other)
+  // 4.4 (F12 b): a reopen comes after other work of this repair only. Whether that closes a circle is checked once,
+  // by the flow after the hand-back, on what the scheduler itself waits for (execution.ts waitCircles, p7-4): a circle
+  // there is a mechanical failure that returns the decision to the Architect
   const own = new Set([...ids, ...changed, ...named]);
   for (const x of r.reopen) {
     for (const a of x.after ?? []) {
@@ -548,26 +550,6 @@ export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult)
       else if (!own.has(a)) out.push(`reopen[${x.task}].after: "${a}" is not a task this repair adds, changes or reopens`);
     }
   }
-  // 4.4 (p7-4): what waits for what once the amendment applies, over the whole plan as execution reads it: every task
-  // with no accepted product (the plan's unfinished ones, and the added and changed cards) waits for its card's
-  // dependencies, and a reopened task also for its `after`; an accepted task not reopened waits for nothing
-  const cards = new Map<string, readonly string[]>(c.plan.tasks.filter((t) => !accepted.has(t.id)).map((t) => [t.id, t.dependsOn]));
-  for (const t of [...r.add, ...change]) cards.set(t.id, t.dependsOn);
-  for (const x of r.reopen) cards.set(x.task, [...(c.plan.tasks.find((t) => t.id === x.task)?.dependsOn ?? []), ...(x.after ?? [])]);
-  const waits = new Map([...cards].map(([id, deps]) => [id, deps.filter((d) => cards.has(d))]));
-  const circle = (from: string): boolean => {
-    const seen = new Set<string>();
-    const stack = [...(waits.get(from) ?? [])];
-    while (stack.length > 0) {
-      const at = stack.pop()!;
-      if (at === from) return true;
-      if (seen.has(at)) continue;
-      seen.add(at);
-      stack.push(...(waits.get(at) ?? []));
-    }
-    return false;
-  };
-  for (const x of r.reopen) if ((x.after ?? []).length > 0 && circle(x.task)) out.push(`reopen[${x.task}].after: it waits for work that waits for it (a circle through after and dependsOn)`);
   return out;
 }
 

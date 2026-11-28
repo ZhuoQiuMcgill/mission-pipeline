@@ -37,7 +37,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
   - the critical path, as task ids in order;
   - the verdict: `return` when any finding is blocking, `feasible` otherwise.
 - **Repair**:
-  - `reopen`: the tasks whose accepted work causes the problem, each with the issue its work must fix (each gets a new attempt with the issue on its card); `after`, optional: tasks this repair adds, changes or reopens whose new work it builds on (its new attempt waits for them and starts on their work; never in a circle);
+  - `reopen`: the tasks whose accepted work causes the problem, each with the issue its work must fix (each gets a new attempt with the issue on its card); `after`, optional: tasks this repair adds, changes or reopens whose new work it builds on (its new attempt waits for them and starts on their work; never in a circle: a wait that closes one with what the flow waits for, an integration's own dependencies included, comes back to you as a mechanical failure);
   - `add`: new tasks only for work no existing task owns, each with a fresh id, depending on the existing tasks whose work it builds on or whose paths it touches, and tracing to the PM plan elements it serves (or `architect`);
   - `change`: tasks of the plan in effect with no accepted product whose card the repair must change: the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs. Each starts a new attempt under its new card and carries its earlier work on;
   - `note`: why the repair is these reopenings, changes and additions, in a few sentences.

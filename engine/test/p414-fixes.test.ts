@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { acceptedProduct, builtOnOlder, productAttempt, taskLineage } from '../src/flow/execution.ts';
+import { acceptedProduct, builtOnOlder, productAttempt, REOPEN_PINNED, taskLineage } from '../src/flow/execution.ts';
 import { RENEW_LINE, REVIEW_NEEDED, type ReviewNeededBody } from '../src/flow/plandoc.ts';
 import { recordItem } from '../src/flow/requirements.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
@@ -792,5 +792,42 @@ test('a review reopen settled by accept-risk does not hold the integration attem
   }));
   const now = await acceptedProduct(flowCtx(w, M), 'integ');
   assert.ok(now !== null && now !== settled, `the repair's integration attempt ran and was accepted (now ${now}, settled ${settled})`);
+  await unchanged(w, engine);
+});
+
+test('4.4 (F13, p7-3): a repair reopen of an integration whose rebuild waits for a review reopen waits for that rebuild; accept-risk adopting the reviewed product settles none of it, and the next attempt carries it', async () => {
+  const { w, engine } = await usedUp();
+  const pass: Script = (t) => ({ handBack: reviewer(t.card as unknown as ReviewerCard, 'pass') });
+  await drive(engine, w.scheduler, script({ reviewer: pass, secretary: () => null }));
+  assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'), 'integ is accepted at its attempt 1');
+  // two repairs; both Architects take their cards while integ is accepted at attempt 1
+  await pmRepair(w.ctx, { mission: M, words: say(w, 'Fix the integration order.'), kind: 'defect', text: 'Fix the integration order.' });
+  await pmRepair(w.ctx, { mission: M, words: say(w, 'Fix the integration timing.'), kind: 'defect', text: 'Fix the integration timing.' });
+  await engine.reconcile();
+  const step = (id: string) => w.scheduler.queued('architect-repair').find((t) => (t.card as unknown as { repair: { id: string } }).repair.id === id)!.task;
+  const s1 = step('R-1');
+  const s2 = step('R-2');
+  w.scheduler.dispatchOf(s1);
+  w.scheduler.dispatchOf(s2);
+  // R-1 reopens integ; the review of its attempt 2 reopens impl, whose rework loop is used up: integ's rebuild (attempt 3) waits
+  assert.deepEqual(await w.scheduler.run(s1, { handBack: { reopen: [{ task: 'integ', issue: 'integration order' }], add: [], note: 'integ owns it' } }), []);
+  await drive(engine, w.scheduler, script({ reviewer: reopenReview, secretary: () => null }));
+  const esc = (await escalations(w)).at(-1)!;
+  assert.ok(esc.options.includes('accept-risk'), 'the review reopen offers accept-risk');
+  assert.equal((await events(w, 'task:integ', 'rework')).find((e) => e.key === '3')?.body.reason, 'rebuild');
+  // R-2, decided on the attempt 1 its Architect saw, finds the rebuild waiting: it waits for it, never joins it
+  assert.deepEqual(await w.scheduler.run(s2, { handBack: { reopen: [{ task: 'integ', issue: 'integration timing' }], add: [], note: 'integ owns it' } }), []);
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  assert.equal((await events(w, 'repairs', 'decided')).find((e) => e.key === 'R-2')?.body.reopen[0].attempt, 1);
+  assert.deepEqual((await events(w, 'repairs', REOPEN_PINNED)).map((e) => [e.body.repair, e.body.attempt]), [['R-2', 3]]);
+  // the user accepts the reviewed integration with its risks: the rebuild adopts the product reviewed at attempt 2
+  const words = say(w, 'Accept the integration as it was reviewed.');
+  await answerEscalation(w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept it as it is. (${words})` });
+  await drive(engine, w.scheduler, script({ secretary: () => null }));
+  const accepted = (await events(w, 'task:integ', 'accepted')).map((e) => e.body.k);
+  assert.ok(accepted.includes(3), `the rebuild is accepted with the reviewed product: ${JSON.stringify(accepted)}`);
+  const rw = (await events(w, 'task:integ', 'rework')).find((e) => e.key === '4')!.body;
+  assert.deepEqual([rw.reason, rw.reopen, rw.issues], ['reopen', { kind: 'repair', repair: 'R-2' }, ['integration timing']], "R-2's issue opens the next attempt");
+  assert.ok(accepted.includes(4), "the attempt that carries R-2's issue is judged and accepted");
   await unchanged(w, engine);
 });
