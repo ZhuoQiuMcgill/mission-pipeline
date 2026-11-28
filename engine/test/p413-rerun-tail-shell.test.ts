@@ -160,7 +160,10 @@ describe('4: config.json shell', () => {
       project.close();
     }
     writeFileSync(file, JSON.stringify({ format: 'mp41.config.v1', targetBranch: 'main' }));
-    assert.match((await cli(p.dir, ['config'])).out, /Shell of declared commands \(local tests, reruns, renewals, full runs, cleanup\): \/bin\/sh \(the platform's shell; shell not set\)/);
+    // 4.4.1 (Windows): the platform's shell there is the one ComSpec names (cmd.exe)
+    const platformShell = process.platform === 'win32' ? (process.env['ComSpec'] ?? 'cmd.exe') : '/bin/sh';
+    const unset = (await cli(p.dir, ['config'])).out;
+    assert.ok(unset.includes(`Shell of declared commands (local tests, reruns, renewals, full runs, cleanup): ${platformShell} (the platform's shell; shell not set)`), unset);
   });
 });
 

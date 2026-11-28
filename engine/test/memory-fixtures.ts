@@ -95,6 +95,12 @@ export function child(action: unknown): { proc: ChildProcess; line: Promise<stri
   return { proc, line, exit };
 }
 
+/**
+ * 4.4.1 (Windows): what `exit` gives for a child that killed itself with SIGKILL. POSIX reports the signal
+ * (-1 above); Windows has no signals: the process is terminated (TerminateProcess) with exit code 1.
+ */
+export const KILLED = process.platform === 'win32' ? 1 : -1;
+
 /** Event kinds in the log, in order. */
 export function kinds(m: Memory): string[] {
   return (m.stmt('SELECT kind FROM log ORDER BY rev').all() as Array<{ kind: string }>).map((r) => r.kind);

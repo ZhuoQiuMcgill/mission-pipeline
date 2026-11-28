@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { sha256 } from '../src/common/hash.ts';
 import { entryText, setMission } from '../src/memory/index.ts';
 import { id, type MissionId } from '../src/common/ids.ts';
-import { child, project, throwsCode } from './memory-fixtures.ts';
+import { child, KILLED, project, throwsCode } from './memory-fixtures.ts';
 
 const M = id<MissionId>('m1');
 const anchorOf = (op: string, k = 0): string => `e-${sha256(`${op}\n${k}`).slice(0, 16)}`;
@@ -80,7 +80,7 @@ test('a process killed before the commit leaves orphans: never served, removed b
     const doc = 'missions/m1/dispatches/D-1/report.md';
     const journal = 'missions/m1/notices.md';
     const crashed = child({ action: 'crash-in-write', project: w.dir, op: 'op-crash', document: doc, journal });
-    assert.equal(await crashed.exit, -1, 'killed');
+    assert.equal(await crashed.exit, KILLED, 'killed');
     // The files are there, the skeleton names none of them.
     assert.ok(existsSync(join(root, 'missions', 'm1', 'dispatches', 'D-1', 'report.md')));
     assert.match(readFileSync(join(root, 'missions', 'm1', 'notices.md'), 'utf8'), new RegExp(anchorOf('op-crash')));
@@ -181,8 +181,13 @@ test('review #6: a leaf whose name differs only in letter case from a recorded o
     assert.equal(w.m.readLeaf('missions/m1/dispatches/D-a/card.md')?.status, 'ok');
     // A dead writer's note naming the alias never removes the recorded file (one file on Windows and macOS).
     const notes = join(root, 'tmp', '.leaves-pending');
-    mkdirSync(join(root, 'missions', 'm1', 'dispatches', 'D-A'), { recursive: true });
-    writeFileSync(join(root, 'missions', 'm1', 'dispatches', 'D-A', 'card.md'), '# A\n');
+    // 4.4.1 (Windows): where letter case does not tell names apart, the alias already is the recorded file; writing
+    // it would edit that file. Elsewhere a file of its own stands for it.
+    const oneFile = existsSync(join(root, 'missions', 'm1', 'dispatches', 'D-A', 'card.md'));
+    if (!oneFile) {
+      mkdirSync(join(root, 'missions', 'm1', 'dispatches', 'D-A'), { recursive: true });
+      writeFileSync(join(root, 'missions', 'm1', 'dispatches', 'D-A', 'card.md'), '# A\n');
+    }
     writeFileSync(join(notes, 'dead-2.json'), JSON.stringify({ op: 'x', entries: [{ leaf: 'missions/m1/dispatches/D-A/card.md', kind: 'document', file: 'missions/m1/dispatches/D-A/card.md', anchor: null, prefix: 0 }] }));
     w.m.write({}, (tx) => setMission(tx, M, 'open'));
     assert.equal(w.m.readLeaf('missions/m1/dispatches/D-a/card.md')?.status, 'ok');

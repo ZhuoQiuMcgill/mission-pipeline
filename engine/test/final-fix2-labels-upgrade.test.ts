@@ -244,7 +244,9 @@ test('U5: a process killed after removal but before commit loses removal, seeds 
       labelBatch(m);
     `;
     const child = spawnSync(process.execPath, ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', '--input-type=module', '-e', code, p.dir], { encoding: 'utf8', timeout: 20_000 });
-    assert.equal(child.signal, 'SIGKILL', child.stderr);
+    // 4.4.1 (Windows): no signals there; the killed process ends with exit code 1 (TerminateProcess)
+    if (process.platform === 'win32') assert.deepEqual([child.status, child.signal], [1, null], child.stderr);
+    else assert.equal(child.signal, 'SIGKILL', child.stderr);
     assert.ok(child.stdout.trim(), 'the upgrade reached its pre-commit hook');
     const pending = JSON.parse(child.stdout.trim());
     assert.ok(Number(pending.cursor) > 0, 'the bounded step stored its cursor before the crash');

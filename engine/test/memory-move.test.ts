@@ -25,10 +25,13 @@ import {
   type Memory,
 } from '../src/memory/index.ts';
 import { plainGit, type GitRunner } from '../src/memory/git.ts';
-import { child, git, kinds, repo, tempDir, throwsCode } from './memory-fixtures.ts';
+import { child, git, KILLED, kinds, repo, tempDir, throwsCode } from './memory-fixtures.ts';
 import { BASE, C1, domainWorkload } from './memory-workload.ts';
 
 const M = id<MissionId>('m1');
+
+/** 4.4.1 (Windows): a path as git writes and prints it (forward slashes there). */
+const gitPath = (p: string): string => (process.platform === 'win32' ? p.replace(/\\/g, '/') : p);
 
 function dump(m: Memory): Record<string, unknown[]> {
   return Object.fromEntries(STATE_TABLES.map((t) => [t, m.stmt(`SELECT * FROM ${t} ORDER BY 1, 2`).all().map((r) => ({ ...r }))]));
@@ -155,7 +158,7 @@ test('worktrees under the folder follow the copy (git worktree repair, the commo
     try {
       assert.deepEqual(m.status().lastMove!.findings.git, { kind: 'repaired', worktrees: 1 });
       assert.equal(realpathSync(git(wt, 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(to, '.git')));
-      assert.match(git(to, 'worktree', 'list', '--porcelain'), new RegExp(realpathSync(wt).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.match(git(to, 'worktree', 'list', '--porcelain'), new RegExp(gitPath(realpathSync(wt)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       // The original's worktree still belongs to the original.
       assert.equal(realpathSync(git(join(dir, '.mission-pipeline', 'worktrees', 'D-1'), 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(dir, '.git')));
     } finally {
@@ -234,7 +237,7 @@ test('a crash after any step of the recovery: the next open finishes it, with on
     for (const step of [1, 2, 3, 4, 5, 6]) {
       const to = o.copy(`crash-${step}`);
       const c = child({ action: 'open', project: to, crashAfterStep: step });
-      assert.equal(await c.exit, -1, `killed after step ${step}`);
+      assert.equal(await c.exit, KILLED, `killed after step ${step}`);
       const m = openMemory(to);
       try {
         const st = m.status();
@@ -378,8 +381,8 @@ test('a copy skips a deleted unpruned registration, reports it and verifies the 
       const admin = git(live, 'rev-parse', '--absolute-git-dir');
       assert.equal(realpathSync(git(live, 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(copied, '.git')));
       assert.equal(readFileSync(join(live, '.git'), 'utf8').trim(), `gitdir: ${admin}`);
-      assert.equal(readFileSync(join(admin, 'gitdir'), 'utf8').trim(), join(live, '.git'));
-      assert.ok(git(copied, 'worktree', 'list', '--porcelain').includes(`worktree ${live}`));
+      assert.equal(readFileSync(join(admin, 'gitdir'), 'utf8').trim(), gitPath(join(live, '.git')));
+      assert.ok(git(copied, 'worktree', 'list', '--porcelain').includes(`worktree ${gitPath(live)}`));
       assert.equal(git(live, 'status', '--porcelain'), '');
     } finally { m.close(); }
   } finally { rmSync(base, { recursive: true, force: true }); }

@@ -5,8 +5,9 @@
 
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import type { MissionId } from '../src/common/ids.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
@@ -29,10 +30,11 @@ const PROJECT_WIDE_OR_INDIRECT: ReadonlyArray<{ readonly file: string; readonly 
 
 describe('release review r5: op ids carry the mission', () => {
   it('every op-id template in src/flow/** names the mission, or is listed as project-wide or indirect', () => {
-    const root = new URL('../', import.meta.url).pathname;
+    // a file path, not the URL's pathname (on Windows that is "/C:/…")
+    const root = fileURLToPath(new URL('../', import.meta.url));
     const found: Array<{ file: string; template: string }> = [];
     for (const f of files(join(root, 'src/flow'))) {
-      const rel = f.slice(root.length);
+      const rel = f.slice(root.length).split(sep).join('/');
       for (const m of readFileSync(f, 'utf8').matchAll(/`(?:flow|xp|aud|grant|restart):[^`]*`/g)) found.push({ file: rel, template: m[0] });
     }
     assert.ok(found.length > 40, `the scan found the builders (${found.length})`);
