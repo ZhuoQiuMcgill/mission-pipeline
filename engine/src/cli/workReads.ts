@@ -152,7 +152,7 @@ export function constraintsText(r: ReturnType<typeof constraintsRead>, reach: bo
 
 /**
  * A task a repair added, changed or reopened, and its state. Neither open nor done: `superseded` (a changed card
- * another card of the task replaced: the repair that replaced it, or "a later plan"),
+ * another card of the task replaced before any acceptance under it: the repair that replaced it, or "a later plan"),
  * `notRecorded` (a 4.3 reopen the record does not show the outcome of), `notCarried` (a reopen not carried out).
  */
 export interface RepairTaskState { readonly task: string; readonly state: string; readonly done: boolean; readonly superseded?: string; readonly notRecorded?: true; readonly notCarried?: true }
@@ -201,8 +201,9 @@ export interface RepairRead {
   readonly dispatches: ReadonlyArray<{ readonly dispatch: string; readonly seat: string; readonly state: string }>;
   readonly taskDispatches: number;
   /**
-   * Derived: every added task accepted; every changed task accepted now under the card the repair gave it (one whose
-   * card another card replaced is superseded: neither open nor done); every reopened
+   * Derived: every added task accepted; every changed task accepted at some attempt under the spec that carries the
+   * repair, whatever came later (one whose card another card replaced before any such acceptance is superseded:
+   * neither open nor done; an acceptance under an unrelated spec never counts); every reopened
    * task accepted at the attempt its reopen opened or later (4.4: by its `reopen-carried` record, once a seat took that
    * attempt; a reopen waiting or not carried out is not done; 4.3, no record: 4.3 counted the reopen on the task's
    * loop, or an attempt's card carried its issue, and the task is accepted at a later attempt than the decision's).
@@ -313,13 +314,13 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       const carrying = specs.filter((x) => x.revision > decidedRev && carries(x));
       const from = carrying.at(-1)?.revision ?? decidedRev;
       const replacedBy = specs.filter((x) => x.revision > from && !carries(x)).map((x) => cardSourceOf(s.events, x, t, r.id, body!.dplan)).find((by) => by !== null) ?? null;
-      // replaced: that card will never run again (not open), and the task is not accepted under it now (not done, p6-3);
-      // said with what replaced it, so the PM looks there, and whether an attempt was accepted under it before
-      if (replacedBy !== null) {
-        const under = line.filter((x) => x.event === 'accepted' && x.revision > decidedRev).find((a) => { const sp = specBefore(a.revision); return sp !== undefined && sp.revision > decidedRev && carries(sp); });
-        const how = under === undefined ? `superseded before it was accepted, by ${replacedBy}` : `accepted under this repair's card at attempt ${(under.body as { k: number }).k}, then superseded by ${replacedBy}`;
-        return { task: t, state: `${how}; ${st.state}`, done: false, superseded: replacedBy };
-      }
+      // accepted under this repair's own spec at an attempt: that part is done, whatever came later (another repair's or
+      // a plan's card, more work on the task); an acceptance under an unrelated spec never counts for it (p6-3)
+      const under = line.filter((x) => x.event === 'accepted' && x.revision > decidedRev).find((a) => { const sp = specBefore(a.revision); return sp !== undefined && sp.revision > decidedRev && carries(sp); });
+      if (under !== undefined) return { task: t, state: `accepted under this repair's card at attempt ${(under.body as { k: number }).k}${replacedBy !== null ? `; later changed by ${replacedBy === 'a later plan' ? 'a plan' : replacedBy}` : ''}; ${st.state}`, done: true };
+      // replaced before any acceptance under it: that card will never run (not open), and its change was never accepted
+      // as such (not done); said with what replaced it, so the PM looks there
+      if (replacedBy !== null) return { task: t, state: `superseded before it was accepted, by ${replacedBy}; ${st.state}`, done: false, superseded: replacedBy };
       return { task: t, state: carrying.length === 0 ? `${st.state}; no card of this repair's has run yet` : `${st.state}${current ? '' : '; its card changed since this repair'}`, done: false };
     });
     const secretaryEvents = s.events.filter((x) => x.line === 'secretary');

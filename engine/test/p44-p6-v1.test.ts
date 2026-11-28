@@ -10,7 +10,8 @@
 //   3  (4.3 and 4.4 alike) a changed card another card of the task replaced before any acceptance under it is
 //      "superseded before it was accepted, by R-n" or "by a later plan": neither open nor done; the repair's line
 //      is "decided; done or superseded: see …" when nothing else is left; `mp read items` gives it no acceptance
-//      and no proof, and its row says superseded.
+//      and no proof, and its row says superseded. Accepted under the repair's own spec at any attempt, it is done,
+//      whatever card the task has since ("later changed by R-n").
 // The memories of 1 and 2 are synthetic, in the 4.3 shape: a decision event with no `note` and no `tracked`.
 
 import assert from 'node:assert/strict';
@@ -199,7 +200,8 @@ describe('v1-3: a changed card replaced before it was accepted is superseded: ne
     const { ports, engine, script } = await changedThenHeld();
     const w = say(ports, 'The docs should show an example of each call.');
     await pmRepair(ports.ctx, { mission: M, words: w, kind: 'missing', text: 'show an example of each call', about: 'docs' });
-    await drive(engine, ports.scheduler, script({ 'architect-repair': docsChange((d) => ({ ...d, goal: `${d.goal}, with an example of each call` })) }));
+    // R-1's attempt 2 stays held until R-2's card replaces it: no acceptance under R-1's card
+    await drive(engine, ports.scheduler, script({ 'architect-repair': docsChange((d) => ({ ...d, goal: `${d.goal}, with an example of each call` })), 'con.m1.docs.2': () => null }));
     const [r1, r2] = [repair(ports, 'R-1'), repair(ports, 'R-2')];
     assert.match(r1.changed[0]!.state, /^superseded before it was accepted, by R-2; accepted at attempt 3 \(/);
     assert.deepEqual([r1.done, r2.done], [false, true]);
@@ -208,5 +210,23 @@ describe('v1-3: a changed card replaced before it was accepted is superseded: ne
     const row = items(ports, 'R-1');
     assert.deepEqual([row.state, row.tasks[0]?.state, row.tasks[0]?.product, row.proof], ['superseded', 'superseded', null, null]);
     assert.notEqual(items(ports, 'R-2').proof, null, 'R-2 has the acceptance and its proof');
+  });
+
+  it('accepted under the repair\'s card, then replaced by a later repair: done (the acceptance under its own spec is on the record)', async () => {
+    const { ports, engine, script } = await changedThenHeld();
+    await drive(engine, ports.scheduler, script());
+    assert.deepEqual([repair(ports, 'R-1').done, repair(ports, 'R-1').changed[0]?.state], [true, 'accepted at attempt 2 (prod.con.m1.docs.2)']);
+    // docs is given up after that acceptance; a later repair gives it a new card, which revives it and is accepted
+    await ports.ledger.append('test:docs-given-up', { events: [{ mission: M, line: 'task:docs', event: 'abandoned', key: 'abandoned', body: { escalation: 'x', reason: 'given up', attempt: 2 } }] });
+    const w = say(ports, 'The docs should show an example of each call.');
+    await pmRepair(ports.ctx, { mission: M, words: w, kind: 'missing', text: 'show an example of each call', about: 'docs' });
+    await drive(engine, ports.scheduler, script({ 'architect-repair': docsChange((d) => ({ ...d, goal: `${d.goal}, with an example of each call` })) }));
+    const specs = await ports.ledger.events<{ repair?: string }>({ mission: M, line: 'task:docs', event: 'spec' });
+    assert.equal(specs.at(-1)?.body.repair, 'R-2', "R-2's card is the task's card now");
+    const [r1, r2] = [repair(ports, 'R-1'), repair(ports, 'R-2')];
+    assert.deepEqual(r1.changed, [{ task: 'docs', state: "accepted under this repair's card at attempt 2; later changed by R-2; accepted at attempt 3 (prod.con.m1.docs.3)", done: true }]);
+    assert.deepEqual([r1.done, r2.done], [true, true]);
+    assert.ok(!repairsText(read(ports)).includes('superseded'));
+    assert.notEqual(items(ports, 'R-1').state, 'superseded');
   });
 });

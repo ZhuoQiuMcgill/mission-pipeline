@@ -138,7 +138,7 @@ describe('p6-2: a user\'s answer with words and no instructions is carried by it
 });
 
 describe('p6-3: a changed task is done only under the card this repair gave it', () => {
-  it('a re-plan that gives the task another card, accepted, leaves the repair not done (its part superseded)', async () => {
+  it('a re-plan that gives the task another card before its acceptance, accepted, leaves the repair not done (its part superseded)', async () => {
     let goal = 'Integrate and document the parser';
     const plan = () => { const p = detailedPlan(M, { extraTask: true }); return { ...p, tasks: p.tasks.map((t) => (t.id === 'docs' ? { ...t, goal, verificationCommands: [{ id: 'lint', command: 'npm run lint' }] } : t)) }; };
     const { ports, engine, script } = await setup(plan);
@@ -149,17 +149,17 @@ describe('p6-3: a changed task is done only under the card this repair gave it',
       'architect-repair': (t) => { const docs = (t.card as unknown as ArchitectRepairCard).plan.tasks.find((x) => x.id === 'docs')!; return { handBack: { reopen: [], add: [], change: [{ ...docs, writeScope: ['README.md'] }], note: 'the README' } }; },
       'con.m1.docs.2': () => null,
     }));
-    // a re-plan gives docs another card (its own goal and write path), and that card is accepted
+    // a re-plan gives docs another card (its own goal and write path) while the repair's attempt is still held, and that card is accepted
     goal = 'Document the parser in docs/ and in the README';
     await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests, documented' }] }), userWords: ['W-1'] });
-    await drive(engine, ports.scheduler, script());
+    await drive(engine, ports.scheduler, script({ 'con.m1.docs.2': () => null }));
     const pie = await planInEffect(flowCtx(ports, M));
     assert.equal(pie?.plan.tasks.find((t) => t.id === 'docs')?.goal, goal, 'the re-plan\'s card is in effect');
     const r = repairs(ports)[0]!;
     assert.equal(r.changed[0]?.task, 'docs');
     assert.equal(r.changed[0]?.done, false, 'accepted under another card than this repair\'s');
-    // v1: its card replaced, so neither open nor done (p44-p6-v1); attempt 2 was accepted under it before the re-plan
-    assert.match(r.changed[0]!.state, /^accepted under this repair's card at attempt 2, then superseded by a later plan; accepted at attempt 3 /);
+    // v1: its card replaced before any acceptance under it, so neither open nor done (p44-p6-v1: accepted under it first is done)
+    assert.match(r.changed[0]!.state, /^superseded before it was accepted, by a later plan; accepted at attempt 3 /);
     assert.equal(r.done, false);
   });
 });
