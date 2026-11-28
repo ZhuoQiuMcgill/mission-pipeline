@@ -191,7 +191,7 @@ Other repairs go to the Architect: reopen responsible work, change a card with n
 Only mechanical checks apply; nothing else loses proof; accepted tasks keep their cards and a changed card starts a new attempt carrying prior work.
 A decision that changes a card another repair changed since its Architect's card was built goes back to that Architect once, as a mechanical return.
 A repair's reopen is not counted: its work gets a fresh rework loop. A reopen that may come after other work of its repair waits for it, and that repair's tasks wait while a dependency it reopens is pending.
-A second repair's reopen of a task that moved on joins the open attempt while its Constructor is not claimed (`reopen-merged`), else waits for that attempt and reopens it once accepted (`reopen-pinned`); notice `reopen-not-carried`: neither was possible (the task given up or dropped), and the repair does not read as done.
+A second repair's reopen of a task that moved on joins the open attempt while its Constructor is not claimed and its start holds that repair's new work on the tasks it depends on (`reopen-merged`), else waits for that attempt and reopens it once accepted (`reopen-pinned`); an issue on an attempt superseded before its review goes on to the next; notice `reopen-not-carried`: none of this was possible (the task given up or dropped), and the repair does not read as done.
 A changed card also answers a waiting re-plan; `repair-decided` names a pass, and used-up returns go to WI-08.
 The reason appears on cards, in why and at close; repairs require an open mission.
 

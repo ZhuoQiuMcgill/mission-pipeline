@@ -548,9 +548,13 @@ export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult)
       else if (!own.has(a)) out.push(`reopen[${x.task}].after: "${a}" is not a task this repair adds, changes or reopens`);
     }
   }
-  // what waits for what once the amendment applies: the added and changed cards, and each reopened task's card and after
-  const waits = new Map<string, readonly string[]>([...r.add, ...change].map((t) => [t.id, t.dependsOn]));
-  for (const x of r.reopen) waits.set(x.task, [...(c.plan.tasks.find((t) => t.id === x.task)?.dependsOn ?? []), ...(x.after ?? [])]);
+  // 4.4 (p7-4): what waits for what once the amendment applies, over the whole plan as execution reads it: every task
+  // with no accepted product (the plan's unfinished ones, and the added and changed cards) waits for its card's
+  // dependencies, and a reopened task also for its `after`; an accepted task not reopened waits for nothing
+  const cards = new Map<string, readonly string[]>(c.plan.tasks.filter((t) => !accepted.has(t.id)).map((t) => [t.id, t.dependsOn]));
+  for (const t of [...r.add, ...change]) cards.set(t.id, t.dependsOn);
+  for (const x of r.reopen) cards.set(x.task, [...(c.plan.tasks.find((t) => t.id === x.task)?.dependsOn ?? []), ...(x.after ?? [])]);
+  const waits = new Map([...cards].map(([id, deps]) => [id, deps.filter((d) => cards.has(d))]));
   const circle = (from: string): boolean => {
     const seen = new Set<string>();
     const stack = [...(waits.get(from) ?? [])];

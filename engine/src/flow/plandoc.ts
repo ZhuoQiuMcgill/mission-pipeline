@@ -393,6 +393,8 @@ export interface RepairBody {
   readonly text: string;
   /** What it is about: a task, an exploration, or the plan in effect as a whole. */
   readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
+  /** 4.4 (F13, p7-8): filed with `--again`: the PM operation that filed it (its retry returns this repair). Absent otherwise. */
+  readonly op?: string;
 }
 /** The Architect repair step's outcome, once its amendment passed the mechanical checks (event "decided", key the repair id). */
 export interface RepairDecidedBody {
@@ -408,6 +410,12 @@ export interface RepairDecidedBody {
   readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
+  /**
+   * 4.4 (F13, p7-1): its reopens are tracked requests: one whose task moved on is merged, pinned again or told as not
+   * carried out, and an acceptance past it is reopened. Absent: a decision of 4.3, whose reopen of a task that moved
+   * on and was accepted again since was left out by 4.3.
+   */
+  readonly tracked?: true;
 }
 /** A repair as a card shows it (every card of the work it caused). */
 export interface RepairRef {
