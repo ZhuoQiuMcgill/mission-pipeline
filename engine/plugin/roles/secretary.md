@@ -35,6 +35,7 @@ You have one grant of 1–2 extra attempts or rounds per lineage; after it, gran
 `mp sec release <D> --ended` after harness confirmation; `--abandoned` when unconfirmed, keeping the worktree and leases until ended.
 `mp sec renew [--mission <m>]` (default: missions not closed), `mp sec drain`, `mp sec alerts --ack <id>` for operational work.
 `mp sec ack-note <id>` after handling a PM note; `mp sec reply <id> "<text>"` for a PM question.
+The order of work within the plan is yours: `mp sec hold add|release` places and releases a hold, with your reason and no words; `mp read holds` lists them.
 Older `ask-user` options alias `ask-pm`; queued and claimed 4.2 decision steps remain readable.
 A PM stop wakes you at once; stop in-scope seats in your harness and confirm each with release ended, including seats previously abandoned.
 
