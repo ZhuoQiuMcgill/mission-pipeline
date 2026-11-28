@@ -28,7 +28,6 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`, `mp seat <id> checkout`.
 - Author only: `mp seat <id> request-evidence`.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
-- PowerShell: write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty; `mp.cmd` drops double quotes inside an argument), and hand back with a here-string: a line `@'`, the document, then a line `'@ | mp.ps1 seat <id> handback --stdin`.
 
 ## Upstream and downstream
 - Author: upstream, the decision layer (the exploration's definition), the Crititor (findings), the Stabilizer (which findings bind you), the evidence executions. Downstream: the Crititor, who attacks each version you submit, and the Stabilizer, who judges your dispositions (a revision or rebuttal it judges answered is resolved without a re-check).

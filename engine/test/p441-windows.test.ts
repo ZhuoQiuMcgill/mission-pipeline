@@ -135,7 +135,7 @@ describe('A: everyone told to run mp on Windows is told how in PowerShell', () =
 
   it('the pages: one line marked "PowerShell:" where each seat lists its mp seat commands, in both handbooks, and beside the here-document and the VAR=value launch', () => {
     const plugin = join(ENGINE, 'plugin');
-    for (const role of ['architect', 'auditor', 'calibrator', 'constructor', 'crititor', 'researcher', 'reviewer', 'stabilizer']) {
+    for (const role of ['architect', 'auditor', 'calibrator', 'constructor', 'crititor', 'reviewer', 'stabilizer']) {
       const page = readFileSync(join(plugin, 'roles', `${role}.md`), 'utf8');
       const commands = page.slice(page.indexOf('## Your commands'));
       const lines = commands.split('\n').filter((l) => l.includes('PowerShell:'));
@@ -143,6 +143,11 @@ describe('A: everyone told to run mp on Windows is told how in PowerShell', () =
       assert.match(lines[0]!, /`mp\.ps1` for `mp`/, role);
       assert.match(lines[0]!, /`'@ \| mp\.ps1 seat <id> handback --stdin`/, `${role}: the stdin hand-back as a here-string`);
     }
+    // the Researcher's page is at its 8 KB budget with its card (5.5; flow-exploration-cards.test.ts): like the here-document
+    // in 4.4.0, the PowerShell form is left to its card's hand-back section (tested below) and, on Windows, to its fixed prompt
+    const researcher = readFileSync(join(plugin, 'roles', 'researcher.md'), 'utf8');
+    assert.doesNotMatch(researcher, /<<'EOF'|PowerShell:/);
+    assert.match(researcher, /as the card's hand-back section shows/);
     const pm = readFileSync(join(plugin, 'pm', 'PM.md'), 'utf8');
     const core = pm.slice(pm.indexOf('<!-- core:start -->'), pm.indexOf('<!-- core:end -->'));
     assert.equal(core.split('\n').filter((l) => l.includes('PowerShell:')).length, 1, 'the PM core, where its first command is');
