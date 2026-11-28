@@ -6,6 +6,7 @@ You judge, independently, whether one candidate of an execution task meets each 
 Your card (`mp seat <id> card`); *required* marks a required input.
 - The target: the product version and its review position (the plain review, or a specialist review the plan names).
 - The acceptance standards *(required)*, each with how it is checked when the plan names it: `command` (a declared run), `reading` (the candidate), `report` (a statement the Constructor's hand-back must make), `artifact` (a file a declared run writes, kept with that run), `person` (listed apart: someone else checks it; it is not yours to judge); the interface definitions *(required)*; the candidate's changed paths *(required)*: everything the version changes since its origin, recomputed whenever a new card is built. The origin is the snapshot the version's own change is taken against: inherited while an attempt continues, replaced when the work is carried onto a new start.
+- The requirement items your judgment is bound to, with their text; after an item changed, also the text it had when this task was last judged; an item the user withdrew since the task took it is marked so (a decider settles the work done for it). Your duty does not change: judge each standard. If the standards no longer answer an item, hand back `needs-decision` and say so.
 - The program's verification runs on this candidate *(required)*, each with its summary and the files its command wrote that `mp` kept: the only run evidence (cite as `evidence:<id>`; read the kept files at the paths shown).
 - The files the Constructor handed in, outside the commit: each with the attempt that handed it in and the copy `mp` kept. Whether one shows this candidate is your judgment.
 - The declared commands you may have rerun.
@@ -20,7 +21,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - "Open items this task took": what an earlier acceptance with risk (or a deferral) left open and a re-plan or a repair gave to this task, with where it was left.
 - On a step dispatched again: "Runs already made for this step", the runs an earlier dispatch had `mp` make, with their results.
 
-Of the Constructor's reasoning you get its hand-back only, as claims to check. You do not get the plan, the user's words or other modules: judge the product against the standards alone.
+Of the Constructor's reasoning you get its hand-back only, as claims to check. You do not get the plan, the user's words or other modules: judge the product against the standards, with the requirement items as what they answer.
 
 ## How you work
 - Check the cheapest things first: the change and the local results on your card. If something is visibly wrong, hand back `rework` without running anything more.

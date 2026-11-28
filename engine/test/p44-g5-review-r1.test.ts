@@ -245,7 +245,8 @@ describe('4.4 G5, review round 1: compatibility', () => {
 
   it('an acceptance with risk 4.3 recorded (no item, nothing carried) reads as made before 4.4 in the one text status, the tree and mp read items share', () => {
     const r = riskRecord([ev(6, 'task:t', 'accepted', '1', { k: 1, product: 'p', judgment: 'j.sec.e1', decision: { escalation: 'e1', option: 'accept-risk', by: 'secretary' }, risks: ['accepted with its risk by the Secretary on e1: [S1] not met: slow'] })]);
-    assert.equal(withRiskText(r, acceptanceOf(r, 't', 'e1')), '1 risk(s); what became of them is not recorded');
+    // v1-4: the sentence is not called open
+    assert.equal(withRiskText(r, acceptanceOf(r, 't', 'e1')), '0 open; 1 risk sentence accepted before 4.4: what became of it is not recorded');
   });
 });
 
@@ -322,7 +323,8 @@ describe('4.4 G5, review round 2', () => {
     assert.deepEqual([found, lost].map((id) => [views.find((i) => i.id === id)!.closed?.how, views.find((i) => i.id === id)!.trackerTold]), [['fixed', true], ['fixed', false]]);
     const { cli } = await import('./cli-fixtures.ts');
     const r = await cli(w.dir, ['read', 'open-items', 'm1']);
-    assert.ok(r.out.includes(`[${lost}] finding, task old (attempt 1, accepted with risk on exh.old.1): closed, fixed: task fix was accepted at attempt 1 with it answered fixed (the fix tracker was not told: the issue this item is about could not be found)`), r.out);
+    // v1-4: the repair that named them recorded them (they were sentences of an acceptance made before 4.4)
+    assert.ok(r.out.includes(`[${lost}] finding, task old (attempt 1, accepted with risk on exh.old.1 before 4.4, recorded when it was acted on): closed, fixed: task fix was accepted at attempt 1 with it answered fixed (the fix tracker was not told: the issue this item is about could not be found)`), r.out);
   });
 
   it('p10-r2-1: a risk of a 4.3 acceptance closed on the user\'s words no longer counts as of unknown fate in mp read items', async () => {

@@ -80,10 +80,10 @@ import {
 import { constraintLine, currentConstraints, recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
 import { planInEffect, submitPmBatch } from '../flow/planning.ts';
 import { constraintsForTask, forRepairArchitect, isAddressed } from '../seat/cards/dynamic.ts';
-import { recordRepair, repairsOf } from '../flow/repair.ts';
+import { recordExtension, recordRepair, repairsOf, type NewItem } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
 import { answerEscalation, answerByPm, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
-import { basisIndex, eventsOf, flowCtx, missionClosed } from '../flow/context.ts';
+import { basisIndex, eventsOf, flowCtx, missionClosed, objectRecord } from '../flow/context.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import { pendingTasks } from '../flow/exploration/machine.ts';
 import { pmAmendAttempts, pmRerunAttempt, type AttemptsAmended, type AttemptsRerun } from './explorationAttempts.ts';
@@ -1238,7 +1238,7 @@ export type RepairChanged =
  */
 export async function pmRepair(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null; readonly again?: boolean; readonly op?: string | null; readonly openItems?: readonly string[] },
+  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null; readonly again?: boolean; readonly op?: string | null; readonly openItems?: readonly string[]; readonly item?: string },
 ): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged; readonly over?: string }> {
   ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
   const mission = req.mission as MissionId;
@@ -1247,6 +1247,8 @@ export async function pmRepair(
     const isExploration = ctx.memory.read((db) => flowEvents(db, { mission, line: `exploration:${req.about}`, event: 'defined', limit: 1 }).length > 0);
     about = { kind: isExploration ? 'exploration' : 'task', id: req.about };
   }
+  // 4.4 (G9): the item a repair falls short of binds the work an Architect plans; a repair about an exploration has none
+  if (req.item !== undefined && (about?.kind === 'exploration' || req.change !== undefined)) throw new LedgerError('BAD_REQUEST', `--item binds the work a repair's Architect plans to a requirement item; a repair about an exploration (${about?.id ?? ''}) reopens the exploration: nothing was filed`);
   if (req.change !== undefined) {
     // a change form: the user's decision about an exploration's method, applied directly (no round)
     if (about?.kind !== 'exploration') throw new LedgerError('BAD_REQUEST', `a change form (--attempts, --rerun, --resnapshot) is about an exploration: --about names one${about !== null ? ` (${about.id} is not an exploration of ${req.mission})` : ''}`);
@@ -1278,13 +1280,43 @@ export async function pmRepair(
   }
   let r: { readonly id: string; readonly repeated: boolean; readonly over?: string };
   try {
-    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}), ...(req.again === true ? { again: true, ...(req.op != null ? { op: req.op } : {}) } : {}), ...((req.openItems ?? []).length > 0 ? { openItems: req.openItems } : {}) });
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}), ...(req.again === true ? { again: true, ...(req.op != null ? { op: req.op } : {}) } : {}), ...((req.openItems ?? []).length > 0 ? { openItems: req.openItems } : {}), ...(req.item !== undefined ? { item: req.item } : {}) });
   } catch (e) {
     if (e instanceof LedgerError || e instanceof ProcessError) throw e;
     throw new LedgerError('BAD_REQUEST', (e as Error).message);
   }
   await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm repair ${r.id}` });
   return { repair: r.id, repeated: r.repeated, about, ...(r.over !== undefined ? { over: r.over } : {}) };
+}
+
+/**
+ * 4.4 (G9, H-9): `mp pm extend <mission> --words W-n --item <id> --text "…" --quote "…" [--item … --text … --quote …]`: what
+ * the user now wants, recorded as requirement items (each quote verbatim in its words entry) outside the set the plan was
+ * checked against, and its work started on a repair's light path in the same write (one Architect step under the
+ * mechanical checks; no Calibrator, no feasibility review, no approval).
+ */
+export async function pmExtend(ctx: ProcessContext, req: { readonly mission: string; readonly items: readonly NewItem[]; readonly openItems?: readonly string[]; readonly op?: string }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly term: number; readonly items: readonly string[]; readonly outsideOf: string | null; readonly olderAudits: readonly string[]; readonly again?: string }> {
+  for (const i of req.items) ctx.memory.read((db) => checkQuote(db, ctx.memory.data, i.words, i.quote));
+  const mission = req.mission as MissionId;
+  let r: Awaited<ReturnType<typeof recordExtension>>;
+  try {
+    r = await recordExtension(ctx.ports(), { mission, items: req.items, ...((req.openItems ?? []).length > 0 ? { openItems: req.openItems } : {}), ...(req.op !== undefined ? { op: req.op } : {}) });
+  } catch (e) {
+    if (e instanceof LedgerError || e instanceof ProcessError) throw e;
+    const code = (e as { code?: unknown }).code;
+    throw new LedgerError(code === 'STALE_REQUEST' ? 'STALE_REQUEST' : 'BAD_REQUEST', (e as Error).message);
+  }
+  await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm extend ${r.id}` });
+  const fc = flowCtx(ctx.ports(), mission);
+  // what the record says the items are outside of: the plan in effect's check; and the audits made before 4.4 (P-4: detection)
+  const pie = await planInEffect(fc);
+  const olderAudits: string[] = [];
+  for (const e of await fc.ports.ledger.events<{ object: string }>({ mission, event: 'chain' })) {
+    if (!e.line.startsWith('audit:')) continue;
+    const o = await objectRecord(fc, e.body.object);
+    if (o !== null && !(o.reviews.find((x) => x.review === 'auditor-chain')?.basisLines ?? []).some((l) => l.startsWith('reqnew.'))) olderAudits.push(e.line.slice('audit:'.length));
+  }
+  return { repair: r.id, repeated: r.repeated, term: r.term, items: req.items.map((i) => i.item), outsideOf: pie?.eff.pmPlan ?? null, olderAudits, ...(r.again !== undefined ? { again: r.again } : {}) };
 }
 
 export interface WaiveRequest {

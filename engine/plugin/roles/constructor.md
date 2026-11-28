@@ -10,7 +10,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - Your worktree `.mission-pipeline/worktrees/<dispatch>/` and the write paths in it.
 - Files to read first; the interpreter (the runtime to build and run with); the verification commands `mp` will run (the project's local tests for this task), with the files each writes that `mp` keeps for the Reviewer; the exclusive resources leased to you, if any.
 - On a reopened attempt: the issue your task's work must fix, and who reopened it (an integration task's review, or a repair). Your accepted product stays recorded until this attempt is accepted.
-- Work that answers a repair: the repair, with the user's reason verbatim, on every attempt; the Architect's note on it.
+- Work that answers a repair: the repair, with the user's reason verbatim, on every attempt; the Architect's note on it. Work for a new requirement shows it the same way, and its requirement items are among yours.
 - "Instructions for this task": instructions addressed to this task or to a repair it answers (follow them; not a proof input); earlier decisions on this task, made under an earlier card.
 - "Open items this task took": what an earlier acceptance with risk left open and a re-plan or a repair gave to this task: fix each as part of your work; your Reviewer answers each.
 - The plan's data formats and storage, when it declares them.

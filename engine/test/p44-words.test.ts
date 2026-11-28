@@ -447,3 +447,29 @@ test('G7 (review p4-7): a constraint withdrawal a 4.3 tagging recorded in its re
     assert.equal((await done43(p, ['read','from',by.words])).nodes.find((n: any) => n.key === `constraint:${c.version}`)?.state, `withdrawn on ${by.words}`);
   } finally {p.cleanup();}
 });
+
+// ---- release verification on 4.3 memories
+
+test('G7: what rests on untyped words (a memory from before tagging) reads so, and a waiver on them is never out of force for that', async () => {
+  const p = project43();
+  try {
+    await done43(p, ['pm','mission','open','m1']);
+    // words with no tags, as memories from before 4.3 hold them: the waiver, the items and a constraint rest on them
+    const w = await done43(p, ['pm','say','Skip the plan reviews. Keep files small.']);
+    await done43(p, ['pm','waive','m1','plan-reviews','--words',w.words]);
+    const c = await done43(p, ['pm','constraint','add','small','--kind','instruction','--text','small files','--words',w.words]);
+    await startAddMission(p.ctx, 'm1');
+    await step(p.ctx, 'calibrator-1', (x) => cal1Pass(x));
+    await step(p.ctx, 'architect-decompose', () => addDetailedPlan('m1'));
+    const untyped = 'rests on untyped words (not tagged yet)';
+    const nodes = async () => (await done43(p, ['read','from',w.words])).nodes as any[];
+    assert.equal((await nodes()).find((n) => n.key === 'waiver:m1:plan-reviews#1').state, `in force; dplan.m1.1.1 took effect on it; ${untyped}`);
+    assert.equal((await nodes()).find((n) => n.key === `constraint:${c.version}`).state, `recorded; ${untyped}`);
+    const items = (await done43(p, ['read','tree','m1'])).tree;
+    assert.ok(JSON.stringify(items).includes(`in force; ${untyped}`), 'the items on the fixture\'s untyped words say so');
+    const done = await done43(p, ['pm','say','Close it.','--tag','instruction']);
+    await done43(p, ['pm','close','m1','--words',done.words]);
+    assert.equal((await nodes()).find((n) => n.key === 'waiver:m1:plan-reviews#1').state, `mission m1 is closed: it applies to no further plan; dplan.m1.1.1 took effect on it; ${untyped}`);
+    for (const read of [['read','tree','m1'], ['read','from',w.words], ['read','why','waiver:m1:plan-reviews#1']]) assert.doesNotMatch(await text44(p, read), /out of force/, read.join(' '));
+  } finally {p.cleanup();}
+});

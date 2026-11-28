@@ -12,7 +12,7 @@ import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
 import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
 import { ARCHITECT_ANSWER, carriedArchitectAnswer, effectiveAnswer, type ArchitectAnswerBody } from '../../flow/architectAnswers.ts';
-import { cardItemNames, riskItemsOf, type RiskItem } from '../../flow/riskItems.ts';
+import { beforeText, cardItemNames, riskItemsOf, type RiskItem } from '../../flow/riskItems.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -271,8 +271,10 @@ export interface ArchitectText { readonly from: string; readonly repair: string 
  * changed or reopened; (G1) an Architect's answer on an escalation that names other tasks of the plan. An
  * answer of a kind carried out as an answer counts once it was carried out (one another decider's answer
  * overrode is not printed); a moot one never does. The asking task gets it as its escalation's answer.
+ * A decision 4.3 recorded has no `note`; its Architect wrote one in the accepted hand-back of the step the
+ * decision names (`arch`): `handBackNote` reads it (repairNoteOf), and it is printed the same way.
  */
-export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
+export function architectTexts(events: readonly FlowEvent[], handBackNote?: HandBackNote): ArchitectText[] {
   const out: ArchitectText[] = [];
   let sec: FlowEvent[] | undefined;
   for (const e of events) {
@@ -288,29 +290,69 @@ export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
     }
     if (e.line !== 'repairs' || e.event !== 'decided') continue;
     const d = e.body as RepairDecidedBody;
-    if (typeof d.note !== 'string' || d.note.trim() === '') continue;
-    out.push({ from: `repair ${d.repair}, the Architect's note on its decision`, repair: d.repair, tasks: [...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)], text: d.note });
+    const note = repairNoteOf(d, handBackNote);
+    if (note === null || note.trim() === '') continue;
+    out.push({ from: `repair ${d.repair}, the Architect's note on its decision`, repair: d.repair, tasks: [...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)], text: note });
   }
   return out;
+}
+
+/**
+ * The 4.3 decisions among these repairs (a decision with no `note`) with the Architect step each names: the steps
+ * whose accepted hand-back holds the note (the flow reads them before it builds a card: its reads are async).
+ */
+export function stepsOfNotes43(events: readonly FlowEvent[], repairs: readonly string[]): string[] {
+  return events.filter((e) => e.line === 'repairs' && e.event === 'decided' && repairs.includes((e.body as RepairDecidedBody).repair) && (e.body as RepairDecidedBody).note === undefined)
+    .map((e) => (e.body as RepairDecidedBody).arch).filter((s): s is string => typeof s === 'string');
+}
+
+/** 4.4 (G3, G4): the note in the accepted hand-back of a repair's Architect step (by its step id); null: none, or not readable. */
+export type HandBackNote = (step: string) => string | null;
+
+/**
+ * 4.4 (G3, G4): the Architect's note of a repair decision: the decision's own (4.4 records one, an empty one too),
+ * else, for a decision 4.3 recorded (it has no `note`), the note of the accepted hand-back of its Architect step
+ * (`arch`). Null: none recorded or readable; a text that cannot be read is left out, it never fails a read or a claim.
+ */
+export function repairNoteOf(d: Pick<RepairDecidedBody, 'note' | 'arch'>, handBackNote?: HandBackNote): string | null {
+  if (typeof d.note === 'string') return d.note;
+  if (handBackNote === undefined || typeof d.arch !== 'string') return null;
+  try {
+    const note = handBackNote(d.arch);
+    return typeof note === 'string' && note.trim() !== '' ? note.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The note of an accepted Architect repair hand-back (its result's `note`), or null. */
+export function noteOfHandBack(hb: { readonly status: string; readonly result: unknown } | null | undefined): string | null {
+  if (hb?.status !== 'handed-back') return null;
+  const note = (hb.result as { note?: unknown } | null)?.note;
+  return typeof note === 'string' ? note : null;
 }
 
 /**
  * 4.4 (G3): the Architect's texts printed on a task's cards: those naming it; a repair's only while it is among the
  * repairs its work answers; (G1) an answer only while the task keeps the card it had when the answer was recorded.
  */
-export function architectNotesFor(events: readonly FlowEvent[], task: string, repairs: readonly string[]): Array<{ from: string; text: string }> {
+export function architectNotesFor(events: readonly FlowEvent[], task: string, repairs: readonly string[], handBackNote?: HandBackNote): Array<{ from: string; text: string }> {
   const spec = events.filter((e) => e.line === `task:${task}` && e.event === 'spec').at(-1)?.revision ?? 0;
-  return architectTexts(events).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair)) && (t.since === undefined || spec < t.since)).map((t) => ({ from: t.from, text: t.text }));
+  // a 4.3 note is read only for the repairs this work answers (one hand-back each)
+  const steps = handBackNote === undefined ? null : new Set(stepsOfNotes43(events, repairs));
+  const read: HandBackNote | undefined = steps === null ? undefined : (step) => (steps.has(step) ? handBackNote!(step) : null);
+  return architectTexts(events, read).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair)) && (t.since === undefined || spec < t.since)).map((t) => ({ from: t.from, text: t.text }));
 }
 
 /**
  * 4.4 (G3): what was written for a task's work, as its Constructor and Reviewer cards carry it (built alike at
  * queue time and at the claim): the instructions addressed to it or to a repair it answers, the Architect's
- * notes, and the answers given under its earlier cards. A field with nothing in it is left out.
+ * notes (a 4.3 decision's from its Architect's hand-back, `handBackNote`), and the answers given under its earlier
+ * cards. A field with nothing in it is left out.
  */
-export function writtenForTask(constraints: readonly ConstraintBody[], events: readonly FlowEvent[], mission: string, task: string, repairs: readonly string[]): { addressed?: AddressedRef[]; architectNotes?: Array<{ from: string; text: string }>; earlierAnswers?: string[] } {
+export function writtenForTask(constraints: readonly ConstraintBody[], events: readonly FlowEvent[], mission: string, task: string, repairs: readonly string[], handBackNote?: HandBackNote): { addressed?: AddressedRef[]; architectNotes?: Array<{ from: string; text: string }>; earlierAnswers?: string[] } {
   const addressed = addressedForTask(constraints, mission, task, repairs);
-  const notes = architectNotesFor(events, task, repairs);
+  const notes = architectNotesFor(events, task, repairs, handBackNote);
   const earlier = earlierTaskAnswers(events, task);
   return { ...(addressed.length > 0 ? { addressed } : {}), ...(notes.length > 0 ? { architectNotes: notes } : {}), ...(earlier.length > 0 ? { earlierAnswers: earlier } : {}) };
 }
@@ -404,6 +446,28 @@ export function taskRequirementItems(items: readonly CurrentItem[], task: Pick<D
   return task.requirementItems.map((line) => ({ id: line, text: items.find((i) => i.line === line)?.text ?? '(this item is not in force)' }));
 }
 
+/**
+ * 4.4 (G9, E-4, P-7): the requirement items a Reviewer's judgment is bound to (the item versions among its binding's
+ * bases), with their text; `was`, the text the task's previous judgment was bound to, when the item changed since.
+ * Every task that carries requirement items gets them, not only a new requirement's. Pure (queue time and claim).
+ */
+export function reviewerItems(events: readonly FlowEvent[], bases: readonly string[], previous: readonly string[] | null): Array<{ id: string; version: string; text: string; was?: string; withdrawn?: true }> {
+  const versions = new Map<string, { line: string; text: string }>();
+  // (p12-2) an item the binding keeps after its withdrawal (one a task carries through a filing) is shown withdrawn
+  const withdrawn = new Set<string>();
+  for (const e of events) {
+    if (e.line === 'requirements' && e.event === 'item') { const b = e.body as { line: string; version: string; text: string }; versions.set(b.version, b); }
+    if (e.line === 'requirements' && e.event === 'withdrawn') withdrawn.add((e.body as { line: string }).line);
+  }
+  return bases.flatMap((v) => {
+    const b = versions.get(v);
+    if (b === undefined) return [];
+    const before = (previous ?? []).find((p) => versions.get(p)?.line === b.line);
+    const was = before !== undefined && before !== v ? versions.get(before)?.text : undefined;
+    return [{ id: b.line, version: v, text: b.text, ...(was !== undefined ? { was } : {}), ...(withdrawn.has(b.line) ? { withdrawn: true as const } : {}) }];
+  });
+}
+
 export function reviewerDecisionQuotes(mission: string, items: readonly CurrentItem[], events: readonly FlowEvent[], task: DetailedTask, constraints: readonly ConstraintBody[], attempt: number, referencePlan: string | undefined) {
   const answers = events.filter((e) => e.line === `task:${task.id}` && e.event === 'reanswer' && e.key.startsWith(`${attempt}:`)).map((e) => (e.body as { decision: string }).decision);
   return [...taskDecisionQuotes(items, events, task, constraintsForTask(constraints, task, mission), referencePlan), ...answers];
@@ -437,7 +501,10 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
   const attempt = (e.facts as { attempt?: unknown } | undefined)?.attempt;
   const current = 1 + taskLine.filter((x) => x.event === 'rework').length;
   const taking = task === undefined ? [] : cardItemNames(events, task, typeof attempt === 'number' ? attempt : current);
-  const left = task === undefined ? [] : riskItemsOf(events).filter((i) => i.closed === null && (i.task === task.id || taking.includes(i.id)));
+  // v1-4: the items recorded by 4.4 only; the sentences of this task's acceptances made before 4.4 nobody acted on, as a count
+  const risks = task === undefined ? [] : riskItemsOf(events);
+  const left = risks.filter((i) => i.state === 'open' && (i.task === task!.id || taking.includes(i.id)));
+  const before = risks.filter((i) => i.state === 'not recorded' && i.task === task!.id).length;
   return {
     // 4.1.2 (item 7): the earlier decisions on the same line, so a ruling is not made again blind
     earlierDecisions: earlierDecisionsOf(e, events),
@@ -455,7 +522,7 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('alignment', 'Alignment record (PM batches)', batches.map((b) => `${b.key}: user messages ${(b.body as { userWords: string[] }).userWords.join(', ') || 'none'}`).join('\n') || '(none)', 'record'),
       // 4.4 (F16, P5): a digest that can be read, in place of every event of the task line in full; the
       // constraints are on the card already and are not repeated here
-      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, openItems, left), 'record'),
+      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, openItems, left, before), 'record'),
       // 4.4 (F4, review r2): the task's open items in full, with their answers, when it has any
       ...(task === undefined ? [] : [material('task-line', `Task ${task.id}: its card and every event of its line, in full (not must-read)`, canonicalJson({ task, events: taskLine.map((x) => ({ event: x.event, key: x.key, body: x.body })), ...(openItems.length > 0 ? { openItems: openItems.map((i) => ({ id: i.id, attempt: i.attempt, when: i.when, question: i.text, answer: i.answer })) } : {}) }), 'record', false)]),
     ],
@@ -478,7 +545,7 @@ function cut(text: string, n: number): string {
  * 4.4 (F16): the Secretary's current facts as a digest: the escalation, the selected items by id and one
  * line, the authorizations, the task's goal and standards, one line per event of the task line.
  */
-function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[], open: readonly OpenItem[] = [], left: readonly RiskItem[] = []): string {
+function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[], open: readonly OpenItem[] = [], left: readonly RiskItem[] = [], before = 0): string {
   const section = (title: string, lines: readonly string[]): string => `${title}:\n${lines.length === 0 ? '(none)' : lines.map((l) => `- ${l}`).join('\n')}`;
   return [
     `Escalation ${e.id} (${e.source}) on ${e.subject}: ${line(e.summary, 300)} (its reasons and facts in full: material request)`,
@@ -490,7 +557,9 @@ function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths
       // 4.4 (F4; G5): a Constructor's question left open is listed on every card of its task, and its answer on the next ones
       ...(open.length > 0 ? [section('Its open items (questions left open, and their answers)', open.map((i) => `[${i.id}] attempt ${i.attempt}, ${i.when}: ${cut(i.text, 160)}${i.answer === null ? ': open' : `: answered by ${i.answer.by === 'pm' ? 'the PM' : i.answer.by === 'user' ? 'the user' : 'the Secretary'}: ${cut(i.answer.answer, 300)}`}`))] : []),
       // 4.4 (G5): an acceptance with risk leaves these open; a question of design among them is the Architect's or a re-plan's, not an acceptance's
-      ...(left.length > 0 ? [section('What is left open on this task (items of earlier acceptances with risk, deferrals, items it took)', left.map((i) => `[${i.id}] ${i.kind}, attempt ${i.attempt}${i.task !== task.id ? ` of task ${i.task}, taken by this task` : ''}${i.carried > 0 ? `, carried ${i.carried}` : ''}${!i.recorded ? ', what became of it is not recorded' : ''}: ${line(i.text, 200)}`))] : []),
+      ...(left.length > 0 ? [section('What is left open on this task (items of earlier acceptances with risk, deferrals, items it took)', left.map((i) => `[${i.id}] ${i.kind}, attempt ${i.attempt}${i.task !== task.id ? ` of task ${i.task}, taken by this task` : ''}${i.carried > 0 ? `, carried ${i.carried}` : ''}: ${line(i.text, 200)}`))] : []),
+      // v1-4: the sentences of its acceptances made before 4.4 nobody acted on: a count, never listed as open
+      ...(before > 0 ? [`Of this task's acceptances with risk made before 4.4: ${beforeText(before)} (not listed; mp read open-items <mission> --all lists them).`] : []),
       section(`Its line, one event each (in full: material task-line)`, taskLine.map((x) => `${x.event} ${x.key}: ${line(canonicalJson(x.body), 120)}`)),
     ]),
   ].join('\n\n');

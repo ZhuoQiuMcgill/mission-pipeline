@@ -384,6 +384,10 @@ export function projectRecord(db: Db, rec: BaseRecord, rev: number): string[] {
         db.stmt('INSERT INTO lbl_lines (line, latest, withdrawn_rev, scope, constraint_line) VALUES (?, ?, NULL, NULL, 0) ON CONFLICT(line) DO UPDATE SET latest = excluded.latest').run(rec.line, rec.version);
       }
       seeds.push(`line:${rec.line}`);
+      // 4.4 (G9, p12-1): an audit whose contract predates the new-requirement set rests on it as well (semantics.ts
+      // legacyChainOutdated): a new version of `reqnew.<m>` makes every chain judgment be read again (they are few;
+      // the seed over-approximates, as every edge does), also those projected before 4.4, which have no edge to it
+      if (/^reqnew\.[^.]+$/.test(rec.line)) for (const r of db.stmt("SELECT judgment FROM lbl_judgments WHERE review = 'auditor-chain'").all() as Array<{ judgment: string }>) seeds.push(`j:${r.judgment}`);
       return seeds;
     }
     case 'constraint.scope': {
@@ -569,6 +573,7 @@ export class StoredIndex implements IndexView {
   readonly basisLatest: ReadMap<BasisLineId, BasisVersionId>;
   readonly basisLineOf: ReadMap<BasisVersionId, BasisLineId>;
   readonly basisKindOf: ReadMap<BasisVersionId, string>;
+  readonly setEverListed: ReadSet<BasisLineId>;
   readonly withdrawn: ReadSet<BasisLineId>;
   readonly constraints: ReadMap<BasisLineId, ConstraintLine>;
   readonly envCurrent: ReadMap<EnvLineId, EnvSnapshotId>;
@@ -601,6 +606,14 @@ export class StoredIndex implements IndexView {
     this.basisLatest = view((l) => (lines.get(l)?.latest ?? undefined) as BasisVersionId | undefined);
     this.basisLineOf = view((v) => basis.get(v)?.line as BasisLineId | undefined);
     this.basisKindOf = view((v) => basis.get(v)?.kind);
+    // 4.4 (G9): whether a requirement-set line ever listed an item: some version's record declares a list count above zero
+    // (no list read; versions are written once, so a read's answer holds for it)
+    const setItems = (v: string): number => {
+      const f = factRecord<Extract<BaseRecord, { kind: 'basis.version' }>>(db, 'basis.version', v);
+      return f !== null && f.rec.basisKind === 'requirement-set' ? ((f.rec.snapshot as { count?: number } | undefined)?.count ?? 0) : 0;
+    };
+    const everListed = new Lazy(m, (l: string) => (db.stmt("SELECT version FROM lbl_basis WHERE line = ? AND kind = 'requirement-set'").all(l) as Array<{ version: string }>).some((r) => setItems(r.version) > 0));
+    this.setEverListed = { has: (l) => everListed.get(l) === true };
     this.basisRev = view((v) => basis.get(v)?.rev as Revision | undefined);
     this.withdrawnRev = view((l) => (lines.get(l)?.withdrawn_rev ?? undefined) as Revision | undefined);
     this.withdrawn = { has: (l) => this.withdrawnRev.get(l) !== undefined };

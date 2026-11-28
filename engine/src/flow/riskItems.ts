@@ -16,8 +16,13 @@
 //   line "open-items", event "open-item-closed", key <id>: ItemClosedBody
 //   line "verified", event "verified", key <subject>@<W-n>: VerifiedBody
 //
-// An acceptance with risk made under 4.3 has no item: its sentences are listed with the same ids, marked
-// as not recorded ("what became of it is not recorded"); nothing is written for them at the upgrade.
+// An acceptance with risk made under 4.3 has no item: its sentences are derived with the same ids, and the
+// record does not say that they are open ("what became of them is not recorded"); nothing is written for them at
+// the upgrade. One that someone acts on (a repair names it, a plan or a repair's decision gives it to a task, the
+// user's words close it or a statement names it) is recorded from then on, in the write that acts on it
+// (`before44: true`), and is an item like the others. Every read classifies an item the same way (`state`):
+// open (recorded by 4.4, not closed), closed (answered fixed or closed on the user's words), or not recorded (a
+// sentence of an acceptance made before 4.4 nobody acted on). Only the first is called open.
 
 import { shortHash, safeId } from './context.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE } from './openItems.ts';
@@ -51,6 +56,8 @@ export interface RiskItemBody {
   readonly review?: string;
   /** 4.4 (F10): a standard that could not be verified: what would be needed to verify it (from the structured copy). */
   readonly needed?: string;
+  /** A risk sentence of an acceptance made before 4.4, recorded when someone acted on it (its acceptance wrote none). */
+  readonly before44?: true;
 }
 
 /** 4.4 (F10): a standard its Reviewer could not verify from what it can see, with what would be needed (the review event's and the escalation's structured copy). */
@@ -193,15 +200,23 @@ export type ItemClosure =
   | { readonly how: 'fixed'; readonly task: string; readonly attempt: number; readonly revision: number; readonly judgment?: string }
   | { readonly how: 'words'; readonly words: string; readonly reason: string; readonly statement?: string; readonly revision: number };
 
+/**
+ * How every read classifies an item (v1-4): open, an item recorded by 4.4 and not closed; closed, answered fixed or
+ * closed on the user's words; not recorded, a risk sentence of an acceptance made before 4.4 that nobody acted on (the
+ * record does not say that it is open). Only the first is called open.
+ */
+export type ItemState = 'open' | 'closed' | 'not recorded';
+
 export interface RiskItem extends RiskItemBody {
   readonly revision: number;
-  /** false: a sentence of an acceptance with risk with no item recorded (one made under 4.3: what became of it is not recorded). */
+  /** false: a sentence of an acceptance with risk with no item recorded (one made under 4.3, or a batch of a 4.4 one not written yet). */
   readonly recorded: boolean;
   readonly closed: ItemClosure | null;
   /** The acceptances of a task that took it at which its Reviewer did not answer it fixed. */
   readonly carried: number;
   /** The latest answer of a Reviewer to it, if any. */
   readonly answer: (ItemAnswer & { readonly task: string; readonly attempt: number }) | null;
+  readonly state: ItemState;
 }
 
 /** A review as the outcome of an item reads it: its attempt, its answers to open items, the deferred issues it answered fixed. */
@@ -257,7 +272,7 @@ export interface AcceptanceSummary {
   readonly escalation: string;
   readonly created: readonly string[];
   readonly carried: readonly string[];
-  /** Made before 4.4: no item of it is recorded and it carried none; its sentences are all it left. */
+  /** Made before 4.4: its own write recorded no item and it carried none (a sentence recorded since, when someone acted on it, is `before44`). */
   readonly legacy: boolean;
   /** How many risk sentences it stores. */
   readonly risks: number;
@@ -339,17 +354,51 @@ export function riskRecord(events: readonly Ev[]): RiskRecord {
       }
     }
   }
-  const items = [...all.entries()].sort((a, b) => a[1].revision - b[1].revision).map(([id, x]) => {
-    const o = outcome.get(id);
-    return { ...x.body, revision: x.revision, recorded: x.recorded, closed: o?.closed ?? null, carried: o?.carried ?? 0, answer: o?.answer ?? null };
-  });
+  // made before 4.4: its own write recorded no item (every one it made is a sentence not recorded, or one recorded
+  // since because someone acted on it) and it carried none
+  const plain = (id: string): boolean => all.get(id)?.recorded === true && all.get(id)?.body.before44 !== true;
   const acceptances = withRisk.map((a): AcceptanceSummary => {
     const made = created.get(a) ?? [];
     const carried = carriedAt.get(a) ?? [];
-    const legacy = carried.length === 0 && made.every((id) => all.get(id)?.recorded === false) && made.length > 0;
+    const legacy = carried.length === 0 && made.length > 0 && !made.some(plain);
     return { line: a.line, event: a.event, key: a.key, task: a.task, k: a.k, escalation: a.body.decision!.escalation!, created: made, carried, legacy, risks: (a.body.risks ?? []).length };
   });
+  const before = new Set(acceptances.filter((a) => a.legacy).flatMap((a) => a.created));
+  const items = [...all.entries()].sort((a, b) => a[1].revision - b[1].revision).map(([id, x]): RiskItem => {
+    const o = outcome.get(id);
+    const closed = o?.closed ?? null;
+    const carried = o?.carried ?? 0;
+    const answer = o?.answer ?? null;
+    // v1-4: a sentence of an acceptance made before 4.4 is marked so; while nobody acted on it, it is not recorded
+    const pre = !x.recorded && before.has(id);
+    const state: ItemState = closed !== null ? 'closed' : pre && answer === null && carried === 0 ? 'not recorded' : 'open';
+    return { ...x.body, ...(pre ? { before44: true as const } : {}), revision: x.revision, recorded: x.recorded, closed, carried, answer, state };
+  });
   return { items, acceptances };
+}
+
+/**
+ * v1-4: what an act on items records: for each of `ids` that is a sentence of an acceptance made before 4.4 not
+ * recorded yet, its body as the read derives it (`before44`), to be written in the write that acts on it (a repair
+ * naming it, a plan or a repair's decision giving it to a task, a close on the user's words, a statement naming it).
+ * From then on it is an item like the others. Every other id gives nothing.
+ */
+export function recordOnAct(events: readonly Ev[], ids: Iterable<string>): RiskItemBody[] {
+  const want = new Set(ids);
+  if (want.size === 0) return [];
+  return riskItemsOf(events).filter((i) => want.has(i.id) && !i.recorded && i.before44 === true).map(({ revision: _r, recorded: _c, closed: _x, carried: _n, answer: _a, state: _s, ...body }) => body);
+}
+
+/** v1-4: the phrase every read uses for the risk sentences of acceptances made before 4.4 nobody acted on. */
+export function beforeText(n: number): string {
+  return `${n} risk sentence${n === 1 ? '' : 's'} accepted before 4.4: what became of ${n === 1 ? 'it' : 'them'} is not recorded`;
+}
+
+/** v1-4: the sentences of acceptances made before 4.4 nobody acted on, counted per task, in the order first recorded. */
+export function notRecordedByTask(items: readonly RiskItem[]): Array<{ readonly task: string; readonly count: number }> {
+  const out = new Map<string, number>();
+  for (const i of items) if (i.state === 'not recorded') out.set(i.task, (out.get(i.task) ?? 0) + 1);
+  return [...out].map(([task, count]) => ({ task, count }));
 }
 
 /** The items left at the caps and the deferrals, with what became of each (riskRecord's items). */
@@ -358,12 +407,18 @@ export function riskItemsOf(events: readonly Ev[]): RiskItem[] {
 }
 
 /**
- * 4.4 (G5, p10-4): what one acceptance with risk left still open: the distinct items it created or carried that
- * are not closed; `legacy`, an acceptance made before 4.4 (what became of its sentences is not recorded).
+ * 4.4 (G5, p10-4; v1-4): what one acceptance with risk left: the distinct items it created or carried that are open
+ * (recorded by 4.4, not closed), and those that are sentences of an acceptance made before 4.4 nobody acted on (not
+ * recorded: never counted as open).
  */
-export function stillOpen(summary: AcceptanceSummary, items: ReadonlyMap<string, RiskItem>): { readonly open: readonly string[]; readonly legacy: boolean } {
+export function stillOpen(summary: AcceptanceSummary, items: ReadonlyMap<string, RiskItem>): { readonly open: readonly string[]; readonly notRecorded: readonly string[] } {
   const ids = [...new Set([...summary.created, ...summary.carried])];
-  return { open: ids.filter((id) => (items.get(id)?.closed ?? null) === null), legacy: summary.legacy };
+  return { open: ids.filter((id) => items.get(id)?.state === 'open'), notRecorded: ids.filter((id) => items.get(id)?.state === 'not recorded') };
+}
+
+/** v1-4: "n open" (with how many of them are to verify, when asked), and apart the sentences before 4.4 not recorded: the one wording of status, the tree and `mp read items`. */
+export function riskCountText(open: number, notRecorded: number, toVerify = 0): string {
+  return `${open} open${toVerify > 0 ? `, ${toVerify} of them to verify` : ''}${notRecorded > 0 ? `; ${beforeText(notRecorded)}` : ''}`;
 }
 
 /** The acceptance with risk a task line's event is (its line, event and key), if it is one. */
@@ -377,15 +432,14 @@ export function acceptanceOf(record: RiskRecord, task: string, escalation: strin
 }
 
 /**
- * 4.4 (G5, p10-4): how one acceptance with risk reads in status, the tree and `mp read items`: "n open" (the
- * distinct items it created or carried that are not closed), or, made before 4.4, its sentences whose fate is not
- * recorded. One function, so the reads never disagree.
+ * 4.4 (G5, p10-4; v1-4): how one acceptance with risk reads in status and the tree: "n open" (the distinct items it
+ * created or carried that are recorded and not closed) and, beside it, its sentences made before 4.4 that nobody acted
+ * on (not recorded, never called open). One classification (`state`) for every read, so they never disagree.
  */
 export function withRiskText(record: RiskRecord, a: AcceptanceSummary | undefined): string {
   if (a === undefined) return 'what it left is not recorded';
   const s = stillOpen(a, new Map(record.items.map((i) => [i.id, i])));
-  // p10-r2-1: of a 4.3 acceptance only the sentences no closure resolved are of unknown fate
-  return s.legacy && s.open.length > 0 ? `${s.open.length} risk(s); what became of them is not recorded` : `${s.open.length} open`;
+  return riskCountText(s.open.length, s.notRecorded.length);
 }
 
 /** Who took an item: the tasks of the plan in effect whose card names it, with what wrote that card (the plan, or a repair's amendment). */

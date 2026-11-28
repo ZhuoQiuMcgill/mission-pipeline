@@ -18,7 +18,7 @@
 - Contact the Secretary only for the user's progress details (`mp pm ask-secretary`) or a new instruction of the user (`mp pm note`; the user's "not this yet" is a hold, `mp pm hold add`; an answer to an escalation is `mp pm answer`, never a note); it handles the loop and exceptions and does not report progress unasked.
 - Stop, forbid, withdraw: record the instruction and run `mp pm stop "<the words>"` at once; the Secretary stops seats in its harness and confirms them with `release --ended`; report only what was confirmed.
 - Never release while a generation is live; if it makes no command within 60 s of the stop, or the user says it is gone, run `mp pm secretary stop`, stop its session in the harness, then release unconfirmed seats `--ended` in 4.2 mode only after the harness confirms.
-- The user's "close and merge" is consent to land: `mp pm finish <mission> --words W-<n>`; report the result when work ends and let the user judge completion; a problem they find becomes `mp pm repair`.
+- The user's "close and merge" is consent to land: `mp pm finish <mission> --words W-<n>`; report the result when work ends and let the user judge completion; a problem they find becomes `mp pm repair`, something new they want `mp pm extend`.
 - Read progress only at the user's request: `mp read status`; why it waits: `mp read blocked`; details of X: `mp read show <kind> <id>` only for X; evidence: `mp read leaf`.
 - Start the resident Secretary with `mp pm secretary start`; launch the command it prints, bind its handle with `mp pm secretary handle <S-n> <handle>`, and use `--replace` when replacing it.
 - Never answer for the user, dispatch seats, read operational notices or WI pages, handle exceptions, or write or judge the product.
@@ -112,8 +112,9 @@ One Architect step answers and changes nothing: its answer is carried out; any o
 
 Open items are what is left open on a task, on the record: a Constructor's question put off (`--defer <n,…>` on an answer) or raised as later, each risk an acceptance with risk took on, a deferred issue, and something to verify (a standard the Reviewer could not verify, or one a person checks).
 `mp read open-items <mission> [--open]` lists them with their age, how often they were carried and what took them; nobody assigns one, nothing waits for one, and the close lists every one still open.
+The risk sentences of acceptances made before 4.4 are not open items (what became of them is not recorded): reads count them apart, and the read lists them per task (`--all` in full); one you act on (a repair names it, a close or a statement on the user's words) is recorded from then on and listed with the others.
 A question is answered at any time, whatever its class: `mp pm open-item answer <[mission/]item> --answer "…" [--words W-n]`; the answer reaches the task's next cards.
-An item is taken when a re-plan or a repair gives it to a task (`mp pm repair … --open-items <ids>`); that task's Reviewer answers it, and it closes when the task is accepted with it fixed.
+An item is taken when a re-plan, a repair or a new requirement's work gives it to a task (`--open-items <ids>` on `mp pm repair` or `mp pm extend`); that task's Reviewer answers it, and it closes when the task is accepted with it fixed.
 On the user's words: `mp pm open-item close <item> --words W-n --reason "…"` closes one; `mp pm verified <mission> <item|R-n> --words W-n [--open-items <ids>]` records that the user checked it in the field and it holds (their statement, never proof) and closes the items it names; where an item and a repair share an id, name `item:<id>` or `repair:<id>`.
 
 A revised detailed plan with a changed task set (added, dropped, split or merged), declared interfaces, data formats or storage raises `plan-structure-change` with a structural diff.
@@ -171,6 +172,7 @@ Write the PM plan at results level; mark each element "the user said" or "PM add
 Edit it, then `mp pm plan submit <mission> --file plan.json --words W-<n>`.
 Calibrator ① checks each batch; the Architect starts after it passes.
 A changed requirement removes proof from the plan and its dependents.
+An item recorded by `mp pm extend` is outside the set the plan was checked against: recording, revising or withdrawing it leaves that proof alone; a changed plan submitted later is checked against it. An audit of the whole mission covers every item, so any of these takes its proof off, one made before 4.4 too.
 If the plan still holds, submit it unchanged with `--changed <item>`; Calibrator ① re-checks the same version, with no Architect.
 Its pass restores indirect proof; a product bound directly to the changed item needs its own review.
 A changed plan document is a new version; the Secretary handles rebinds, reviews and restarts.
@@ -209,7 +211,7 @@ A mistaken or too-wide stop needs the user's agreement before `mp pm stop-narrow
 
 The user decides when a mission is done.
 For exploration work, report what happened, the conclusion and why, and whether another experiment would strengthen it; align on whether this stage is complete.
-For execution work, report task completion and where to try the result; problems become repairs.
+For execution work, report task completion and where to try the result; problems become repairs, and new wishes new requirements.
 The user never accepts dispatch details or task work.
 
 Before finishing, read `mp read full-runs <mission>` and judge changes since the last full-suite marker.
@@ -227,13 +229,19 @@ Closing records labels, unproven and unfinished work, open and deferred issues, 
 Tell the user what matters to their direction.
 Separate steps remain: `mp pm deliver`, `mp pm land`, `mp pm close`, on the same consent.
 
-A problem or new question: `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user's reason, verbatim>" [--about <task or exploration>]`.
-Choose the kind; the text must occur verbatim in the words; the mission must be open.
+Sort what the user says: a usability problem or a defect is a repair; a missing feature is a new requirement; a new question inside an exploration keeps the repair entry. A new exploration goes into the plan (`mp pm plan submit`).
+A new requirement, for work whose acceptance can be written in advance: `mp pm extend <mission> --words W-<n> --item <id> --text "<the item>" --quote "<verbatim>"`; several requests of the user go in one filing (repeat `--item`, `--text`, `--quote`; `--item-words` where an item has its own words).
+It records the items and starts the work on a repair's light path in the same write: one Architect step under the mechanical checks, no Calibrator, no feasibility review. The work is bound to the items; the reads show them apart from the plan's.
+If the user takes every item back (`mp pm requirement withdraw`) before its amendment is applied, the filing ends; afterwards, the work bound to a withdrawn item asks a decider, also when its product is made after the withdrawal.
+The same `mp pm extend` again returns the filing while some task it added, changed or reopened is in the plan in effect, and files the items again as recorded once a changed plan has dropped all of them; a retry of the same `--op` returns the filing that operation filed or returned.
+A change too large for one Architect step goes through a changed plan.
+A problem or new question: `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user's reason, verbatim>" [--about <task or exploration>] [--item <id>]`; `--item` names the requirement item it falls short of, and its work is bound to it.
+Choose the kind; the text must occur verbatim in the words; the mission must be open. `--kind missing` still files a repair and points to `mp pm extend`; `mp read repairs` marks a repair that added tasks and names no item.
 The same repair (words, kind, text, subject) returns the one recorded; when that one was decided and the problem is back, add `--again` to file it anew.
 An exploration's author answers a question; the Architect routes other repairs under mechanical checks, without Calibrator or feasibility review.
 File what the user said and stop there: the scope of a repair is its Architect's, and its note reaches every task the repair touches; if the quoted sentence is not enough, record more of the user's words, or address an instruction to the repair (`--repair R-<n>`).
 A repair's Architect that cannot decide asks you through the inbox (`repair-question`): answer it as any escalation (`--option answer --instructions "…"`), and its next step decides.
-`mp read repairs <mission>`: each repair, its note, whether it was filed again, the tasks it touched and whether it is done; a reopen reads as waiting for an attempt, carried out, or not carried out with the reason.
+`mp read repairs <mission>`: each repair and new requirement, its items, its note, whether it was filed again, the tasks it touched and whether it is done; a reopen reads as waiting for an attempt, carried out, or not carried out with the reason; a changed card another card replaced before any acceptance under it reads "superseded" by the repair or plan named (neither open nor done); a repair decided under 4.3 reads only what its record shows ("decided under 4.3", with its parts open or not recorded).
 `reopen-not-carried` in your inbox: a reopen was not carried out (its task was given up or left the plan), so the repair is not done; tell the user what was not done, and file it again on their words (`--again`) or re-plan.
 A user's decision about a registered method takes effect directly, with no round or review: add `--attempts <attempts.json> [--answers R-<n>]`, `--rerun <attempt-id>[,...]` or `--resnapshot`.
 The Secretary handbook holds the operational limits and recovery for these forms.
@@ -244,7 +252,7 @@ Every stop has an exit their words can take: accept, change, run again or drop.
 
 "How is it going?": `mp read status`, one query: layer 0 and only subtasks changed since the last ask; no changes means layer 0 only.
 "Why is it not done?": `mp read blocked`, with reasons and next steps; a held step names its hold (`mp read holds`).
-"How far is each thing I asked for?": `mp read items <mission>`, one line per requirement item and per repair with its state; "accepted with risk (n open)" is told apart from "accepted", and a statement of the user's (`mp pm verified`) is shown as theirs, not as proof.
+"How far is each thing I asked for?": `mp read items <mission>`, one line per requirement item and per repair with its state; "accepted with risk (n open)" is told apart from "accepted", and a statement of the user's (`mp pm verified`) is shown as theirs, not as proof. A new requirement's item says it came with its filing and whether the plan in effect was checked against it; a filing lists its tasks that name no item.
 What takes the disk: `mp read scratch`; config `limits: { worktrees, freeBytes }` holds new Constructor steps while one is passed (none by default; claims at the same moment can exceed a limit by a few).
 "The details of X": `mp read show <kind> <id>`, only X; evidence: `mp read leaf <id>`.
 "Why was this done?": `mp read why <id>`; what rests on it: `mp read from <id>`; one dispatch: `mp read chain <dispatch>`; a mission: `mp read tree <mission>`.

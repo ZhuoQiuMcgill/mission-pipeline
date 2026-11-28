@@ -16,11 +16,12 @@ import { safeId } from '../flow/context.ts';
 import { flowEvents, flowMissions, recordsByKind, factById, type Db } from '../memory/index.ts';
 import type { DataStore } from '../memory/data.ts';
 import { resolveBases, resolveConstraints } from '../memory/domain/constraints.ts';
-import { constraintAuthor, type ConstraintBody } from '../flow/requirements.ts';
-import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, REOPEN_NOT_CARRIED, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
+import { constraintAuthor, planSetItems, type ConstraintBody } from '../flow/requirements.ts';
+import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, REOPEN_NOT_CARRIED, REPAIR_ENDED, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import type { FlowEvent } from '../flow/ports.ts';
 import type { EscalationBody } from '../flow/secretary.ts';
-import { addressee, constraintsForTask, forRepairArchitect, isAddressed, planInEffect, repairReopensCarried, reopenRecordState, type ReopenRecordState } from '../seat/cards/dynamic.ts';
+import { addressee, constraintsForTask, forRepairArchitect, isAddressed, noteOfHandBack, planInEffect, repairNoteOf, repairReopensCarried, reopenRecordState, type ReopenRecordState } from '../seat/cards/dynamic.ts';
+import { taskStatus } from '../process/ports.ts';
 import { lineAcceptance, taskLineage } from '../flow/execution.ts';
 import { repairLineage } from '../flow/repair.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED } from '../flow/exploration/machine.ts';
@@ -37,6 +38,8 @@ interface Snapshot {
   readonly constraints: ConstraintBody[];
   readonly plan: Plan | null;
   readonly dispatches: Array<{ dispatch: string; task: string; seat: string; state: string; lineage: string; rev: number }>;
+  /** 4.4 (G9): the PM plan in effect and the item lines its check is bound to (null: no plan in effect). */
+  readonly checked: { readonly plan: string; readonly items: ReadonlySet<string> } | null;
 }
 
 function snapshot(db: Db, data: DataStore, mission: string): Snapshot {
@@ -50,7 +53,9 @@ function snapshot(db: Db, data: DataStore, mission: string): Snapshot {
   const obj = eff === undefined ? undefined : (factById(db, 'object.version', eff.dplan)?.record as ObjectVersionRecord | undefined);
   const plan = eff === undefined || obj === undefined ? null : amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(obj.content)) as StoredDetailedPlan).plan), eff.amendments);
   const dispatches = (db.stmt('SELECT dispatch, task, seat, state, lineage, claimed_rev FROM dispatches WHERE mission = ? ORDER BY claimed_rev').all(mission) as Array<{ dispatch: string; task: string; seat: string; state: string; lineage: string; claimed_rev: number }>).map((d) => ({ ...d, rev: Number(d.claimed_rev) }));
-  return { events, constraints, plan, dispatches };
+  const pm = eff === undefined ? undefined : (factById(db, 'object.version', eff.pmPlan)?.record as ObjectVersionRecord | undefined);
+  const checked = eff === undefined || pm === undefined ? null : { plan: eff.pmPlan, items: planSetItems(pm, ix, (r) => data.getList(r)) };
+  return { events, constraints, plan, dispatches, checked };
 }
 
 const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
@@ -149,7 +154,20 @@ export function constraintsText(r: ReturnType<typeof constraintsRead>, reach: bo
 
 // ---------------------------------------------------------------- mp read repairs
 
-export interface RepairTaskState { readonly task: string; readonly state: string; readonly done: boolean }
+/**
+ * A task a repair added, changed or reopened, and its state. Neither open nor done: `superseded` (a changed card
+ * another card of the task replaced before any acceptance under it: the repair that replaced it, or "a later plan"),
+ * `notRecorded` (a 4.3 reopen the record does not show the outcome of), `notCarried` (a reopen not carried out).
+ */
+export interface RepairTaskState { readonly task: string; readonly state: string; readonly done: boolean; readonly superseded?: string; readonly notRecorded?: true; readonly notCarried?: true }
+
+/** The parts of a decided repair that are not done, by what the record establishes of each. */
+export interface RepairParts {
+  readonly open: readonly string[];
+  readonly superseded: ReadonlyArray<{ readonly part: string; readonly by: string }>;
+  readonly notRecorded: readonly string[];
+  readonly notCarried: readonly string[];
+}
 
 export interface RepairRead {
   readonly id: string;
@@ -157,14 +175,36 @@ export interface RepairRead {
   readonly words: string;
   readonly text: string;
   readonly about: string | null;
-  readonly state: 'waiting' | 'architect' | 'decided' | 'exploration' | 'answered';
+  /** 4.4 (G9): "ended": a filing whose every item was withdrawn before its amendment was applied. */
+  readonly state: 'waiting' | 'architect' | 'decided' | 'exploration' | 'answered' | 'ended';
+  /** 4.4 (G9): "extend": a new requirement's filing; null: a repair. */
+  readonly entry: 'extend' | null;
+  /** 4.4 (G9): the requirement items its work is bound to (a new requirement's, or the one a repair falls short of), with their state. */
+  readonly items: ReadonlyArray<{ readonly id: string; readonly state: 'in force' | 'withdrawn' }>;
+  /** 4.4 (G9): the PM plan in effect, and whether its check is bound to each in-force item of the filing (`inside`), from its contract's sets. */
+  readonly checkedBy: { readonly plan: string; readonly inside: readonly string[] } | null;
+  /** 4.4 (G9): a repair that added tasks and names no item (a lead for a spot-check: was it a new requirement?). */
+  readonly addedNoItem: boolean;
+  /** 4.4 (G9): with several items, the tasks it added, changed or reopened on which its Architect named none of them (bound to none). */
+  readonly unnamed: readonly string[];
   /**
    * 4.4 (F13): filed again: with `--again` (`flag`, its operation recorded with it), and the same repair (words, kind,
    * text and subject) filed before it (`of`, null: none). Null: neither.
    */
   readonly filedAgain: { readonly flag: boolean; readonly of: string | null } | null;
-  /** The Architect's note on its decision ("" when it gave none); null: not decided, or decided before 4.4 (not recorded). */
+  /**
+   * The Architect's note on its decision ("" when it gave none); a decision 4.3 recorded has none, and its note is
+   * the one in its Architect step's accepted hand-back. Null: not decided, or no note recorded or readable.
+   */
   readonly note: string | null;
+  /** 4.4: decided by 4.3 (its reopens carry no `tracked`; a decision with none carries no note). */
+  readonly under43: boolean;
+  /**
+   * The parts of a decided repair that are not done: open (work that may still be done), superseded (a changed card
+   * replaced before it was accepted, with what replaced it), not recorded (4.3), not carried out (a reopen). The line
+   * says them instead of "not done". Null: not decided, or about an exploration.
+   */
+  readonly parts: RepairParts | null;
   /** The Architect's question waiting for the PM (4.4, G4), with its escalation. */
   readonly question: { readonly escalation: string; readonly text: string } | null;
   readonly added: readonly RepairTaskState[];
@@ -176,9 +216,12 @@ export interface RepairRead {
   readonly dispatches: ReadonlyArray<{ readonly dispatch: string; readonly seat: string; readonly state: string }>;
   readonly taskDispatches: number;
   /**
-   * Derived: every added task accepted; every changed task accepted after the card the repair gave it; every reopened
+   * Derived: every added task accepted; every changed task accepted at some attempt under the spec that carries the
+   * repair, whatever came later (one whose card another card replaced before any such acceptance is superseded:
+   * neither open nor done; an acceptance under an unrelated spec never counts); every reopened
    * task accepted at the attempt its reopen opened or later (4.4: by its `reopen-carried` record, once a seat took that
-   * attempt; a reopen waiting or not carried out is not done; 4.3: the accepted attempt's card carried the issue).
+   * attempt; a reopen waiting or not carried out is not done; 4.3, no record: 4.3 counted the reopen on the task's
+   * loop, or an attempt's card carried its issue, and the task is accepted at a later attempt than the decision's).
    * Null: not a repair of the plan's tasks, or not decided.
    */
   readonly done: boolean | null;
@@ -189,8 +232,11 @@ export interface RepairRead {
   readonly openItems?: ReadonlyArray<{ readonly id: string; readonly named: boolean; readonly takenBy: readonly string[]; readonly closed: boolean }>;
 }
 
-/** The same repair (flow/repair.ts recordRepair): the same words, kind, text and subject (4.4: and the open items it names). */
-const sameRepair = (a: RepairBody, b: RepairBody): boolean => a.words === b.words && a.kind === b.kind && a.text === b.text && canonicalJson(a.about) === canonicalJson(b.about) && canonicalJson(a.openItems ?? []) === canonicalJson(b.openItems ?? []);
+/**
+ * The same repair (flow/repair.ts recordRepair): the same words, kind, text and subject (4.4: and the open items it names;
+ * G9: never a new requirement's filing, and the same item named, none: as 4.3).
+ */
+const sameRepair = (a: RepairBody, b: RepairBody): boolean => a.words === b.words && a.kind === b.kind && a.text === b.text && canonicalJson(a.about) === canonicalJson(b.about) && canonicalJson(a.openItems ?? []) === canonicalJson(b.openItems ?? []) && a.entry === undefined && b.entry === undefined && canonicalJson(a.items ?? null) === canonicalJson(b.items ?? null);
 
 /** Whether a seat took attempt k of a task (as execution.ts attemptTaken): it was reviewed, or a dispatch of its Constructor or Reviewer exists. */
 function attemptTaken(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], k: number): boolean {
@@ -202,7 +248,7 @@ function attemptTaken(s: Snapshot, mission: string, task: string, line: readonly
 
 /** 4.4 (F13): a reopen 4.4 tracks as the read of repairs says it, from its records (seat/cards/dynamic.ts reopenRecordState). */
 function reopenState(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], st: ReturnType<typeof taskState>, rec: ReopenRecordState): RepairTaskState {
-  if (rec.state === 'not-carried') return { task, state: `the reopen was not carried out: ${rec.why}; ${st.state}`, done: false };
+  if (rec.state === 'not-carried') return { task, state: `the reopen was not carried out: ${rec.why}; ${st.state}`, done: false, notCarried: true };
   if (rec.state === 'requested') {
     const at = st.accepted && st.k >= rec.attempt ? `attempt ${rec.attempt}${st.k > rec.attempt ? ` and the task since (attempt ${st.k})` : ''} accepted: the next pass opens attempt ${st.k + 1} with its issue`
       : `it waits for attempt ${rec.attempt} to be accepted, then opens the next attempt with its issue`;
@@ -210,6 +256,31 @@ function reopenState(s: Snapshot, mission: string, task: string, line: readonly 
   }
   if (!attemptTaken(s, mission, task, line, rec.attempt)) return { task, state: `the reopen opened attempt ${rec.attempt}, which no seat has taken yet; ${st.state}`, done: false };
   return { task, state: `reopened at attempt ${rec.attempt}; ${st.state}`, done: st.accepted && st.k >= rec.attempt };
+}
+
+/** The parts of a repair (added, changed, reopened tasks) that are not done, each by what the record establishes. */
+function partsOf(added: readonly RepairTaskState[], changed: readonly RepairTaskState[], reopened: readonly RepairTaskState[]): RepairParts {
+  const all = ([['added', added], ['changed', changed], ['reopened', reopened]] as const).flatMap(([label, ts]) => ts.filter((t) => !t.done).map((t) => ({ part: `${label} ${t.task}`, t })));
+  return {
+    open: all.filter((x) => x.t.superseded === undefined && x.t.notRecorded !== true && x.t.notCarried !== true).map((x) => x.part),
+    superseded: all.filter((x) => x.t.superseded !== undefined).map((x) => ({ part: x.part, by: x.t.superseded! })),
+    notRecorded: all.filter((x) => x.t.notRecorded === true).map((x) => x.part),
+    notCarried: all.filter((x) => x.t.notCarried === true).map((x) => x.part),
+  };
+}
+
+/**
+ * 4.4: who gave a spec of `task` that is not the card of repair `repair`: the repair whose change it carries (tagged,
+ * or an untagged spec with the card of another repair's amendment of its plan), "a later plan" (a spec of another
+ * plan's card), or null (the same plan's card from before the repair: a pass that read the plan before it).
+ */
+function cardSourceOf(events: readonly FlowEvent[], x: FlowEvent, task: string, repair: string, dplan: string): string | null {
+  const b = x.body as { dplan?: string; hash?: string; repair?: string };
+  if (b.repair !== undefined) return b.repair === repair ? null : b.repair;
+  const by = b.dplan === undefined ? undefined : latestEffectiveOf<{ dplan: string; amendments?: readonly AmendmentEntry[] }>(events, b.dplan)?.amendments
+    ?.find((a) => a.repair !== repair && (a.changed ?? []).some((c) => c.id === task && taskCardHash(c) === b.hash));
+  if (by !== undefined) return by.repair;
+  return b.dplan !== undefined && b.dplan !== dplan ? 'a later plan' : null;
 }
 
 /** A task's state as the repair read shows it, from its line: accepted (at which attempt), in work, or given up. */
@@ -253,10 +324,22 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       // p6-r2-3: the card the task is (or was accepted) under is its last spec before the acceptance (the last one, when
       // not accepted); it counts when it postdates the decision and carries this repair, however often the spec was written
       const specs = line.filter((x) => x.event === 'spec');
-      const last = (st.accepted ? specs.filter((x) => x.revision < st.acceptedRev) : specs).at(-1);
+      const specBefore = (rev: number): FlowEvent | undefined => specs.filter((x) => x.revision < rev).at(-1);
+      const last = st.accepted ? specBefore(st.acceptedRev) : specs.at(-1);
       const current = last !== undefined && last.revision > decidedRev && carries(last);
-      const ever = specs.some((x) => x.revision > decidedRev && carries(x));
-      return { task: t, state: !ever ? `${st.state}; no card of this repair's has run yet` : `${st.state}${current ? '' : '; its card changed since this repair'}`, done: st.accepted && current };
+      if (st.accepted && current) return { task: t, state: st.state, done: true };
+      // 4.4 (v1): what replaced this repair's card, if another card of the task did (a repair's change, or a later plan)
+      const carrying = specs.filter((x) => x.revision > decidedRev && carries(x));
+      const from = carrying.at(-1)?.revision ?? decidedRev;
+      const replacedBy = specs.filter((x) => x.revision > from && !carries(x)).map((x) => cardSourceOf(s.events, x, t, r.id, body!.dplan)).find((by) => by !== null) ?? null;
+      // accepted under this repair's own spec at an attempt: that part is done, whatever came later (another repair's or
+      // a plan's card, more work on the task); an acceptance under an unrelated spec never counts for it (p6-3)
+      const under = line.filter((x) => x.event === 'accepted' && x.revision > decidedRev).find((a) => { const sp = specBefore(a.revision); return sp !== undefined && sp.revision > decidedRev && carries(sp); });
+      if (under !== undefined) return { task: t, state: `accepted under this repair's card at attempt ${(under.body as { k: number }).k}${replacedBy !== null ? `; later changed by ${replacedBy === 'a later plan' ? 'a plan' : replacedBy}` : ''}; ${st.state}`, done: true };
+      // replaced before any acceptance under it: that card will never run (not open), and its change was never accepted
+      // as such (not done); said with what replaced it, so the PM looks there
+      if (replacedBy !== null) return { task: t, state: `superseded before it was accepted, by ${replacedBy}; ${st.state}`, done: false, superseded: replacedBy };
+      return { task: t, state: carrying.length === 0 ? `${st.state}; no card of this repair's has run yet` : `${st.state}${current ? '' : '; its card changed since this repair'}`, done: false };
     });
     const secretaryEvents = s.events.filter((x) => x.line === 'secretary');
     const repairsEvents = s.events.filter((x) => x.line === 'repairs');
@@ -271,23 +354,26 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       // issue on to a further attempt, does not undo it); requested or pinned: what it waits for; not carried: why
       const rec = reopenRecordState(repairsEvents, r.id, x.task);
       if (rec !== null) return reopenState(s, mission, x.task, line, st, rec);
-      // a 4.3 decision (no record): the attempts whose card carried this repair's own issue (its reopen, or a grant that
-      // covered it, p6-r2-1: when one of that attempt's claimed cards shows the issue), under the current card (p6-4)
+      // a reopen of a 4.3 decision with no record: only what the record establishes (4.4 schedules nothing for it, so
+      // nothing here promises a later step). 4.3 counted it on the task's loop (its marker or its verdict), or an
+      // attempt's card carried its issue (repairReopensCarried: its reopen, or a grant that covered it, p6-r2-1)
+      const decidedAt = 'attempt' in x ? x.attempt : null;
+      const counted = line.some((y) => (y.event === 'loop-return' || y.event === 'loop-verdict') && y.key === `reopen:repair:${r.id}`);
       const carried = repairReopensCarried(mission, x.task, line, secretaryEvents, repairsEvents, { issue: (repair) => (repair === r.id ? x.issue : null), cards: (k) => attemptDuties(s, data, mission, x.task, k) }).filter((c) => c.repair === r.id);
-      if (carried.length === 0) {
-        const before = line.some((y) => y.event === 'rework' && (y.body as { reopen?: { kind?: string; repair?: string } }).reopen?.repair === r.id);
-        return { task: x.task, state: `${st.state}; ${before ? 'its card changed since the reopen' : 'the reopen is not carried out yet'}`, done: false };
+      if ((counted || carried.length > 0) && decidedAt !== null && st.k > decidedAt) {
+        const head = `reopened under 4.3${carried.length > 0 ? ` at attempt ${carried.map((c) => c.attempt).join(', ')}` : ''}`;
+        return st.accepted ? { task: x.task, state: `${head} and ${st.state}`, done: true } : { task: x.task, state: `${head}; ${st.state}`, done: false };
       }
-      const at = carried.find((c) => c.attempt === st.k);
-      const done = st.accepted && at !== undefined && st.acceptedRev > at.revision;
-      return { task: x.task, state: `reopened at attempt ${carried.map((c) => c.attempt).join(', ')}; ${st.state}${st.accepted && !done ? "; the accepted attempt's card did not carry this repair's issue" : ''}`, done };
+      return { task: x.task, state: `decided under 4.3: what became of this reopen is not recorded; ${st.state}`, done: false, notRecorded: true };
     });
     const open = escalations.find((q) => q.subject === `repair:${r.id}` && q.source === 'repair-question' && !applied.has(q.id));
     const lineage = repairLineage(mission, r.id);
     const tasks = new Set([...(body?.add ?? []), ...(body?.changed ?? []), ...(body?.reopen ?? []).map((x) => x.task)].map((t) => taskLineage(mission, t)));
     const all = [...added, ...changed, ...reopened];
     // 4.4 (F13): filed again, with --again or (its earlier one's work over) as the same repair
-    const same = on('repair').find((x) => x.revision < e.revision && sameRepair(x.body as RepairBody, r))?.key ?? null;
+    // 4.4 (G9, p12-8): a new requirement filed again (its earlier filing's work re-planned away) names the same items
+    const sameFiling = (x: RepairBody): boolean => x.entry === 'extend' && r.entry === 'extend' && canonicalJson(x.items ?? []) === canonicalJson(r.items ?? []);
+    const same = on('repair').find((x) => x.revision < e.revision && (sameRepair(x.body as RepairBody, r) || sameFiling(x.body as RepairBody)))?.key ?? null;
     const filedAgain = r.op !== undefined || same !== null ? { flag: r.op !== undefined, of: same } : null;
     // 4.4 (G4, G5): the open items it names and what its decision gave to which task (the cards it added or changed, its reopens)
     const took = new Map<string, string[]>();
@@ -297,9 +383,29 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
     const itemIds = [...new Set([...(r.openItems ?? []), ...took.keys()])];
     const closedNow = itemIds.length === 0 ? new Set<string>() : new Set(riskItemsOf(s.events).filter((i) => i.closed !== null).map((i) => i.id));
     const openItems = itemIds.map((id) => ({ id, named: (r.openItems ?? []).includes(id), takenBy: took.get(id) ?? [], closed: closedNow.has(id) }));
+    // 4.4 (G9): its items and how its tasks are bound to them, from the decision and the cards it gave (one read)
+    if (body === undefined && on(REPAIR_ENDED).some((x) => x.key === r.id)) state = 'ended';
+    const lines = (r.items ?? []).map((i) => `item.${mission}.${i}`);
+    const withdrawn = new Set(s.events.filter((x) => x.line === 'requirements' && x.event === 'withdrawn').map((x) => (x.body as { line: string }).line));
+    const cards = [...(amendment?.tasks ?? []), ...(amendment?.changed ?? [])];
+    const unnamed = lines.length < 2 || body === undefined ? [] : [
+      ...[...(body.add ?? []), ...(body.changed ?? [])].filter((t) => !(cards.find((c) => c.id === t)?.requirementItems ?? []).some((l) => lines.includes(l))),
+      ...(body.reopen ?? []).filter((x) => (x.items ?? []).length === 0).map((x) => x.task),
+    ];
+    // 4.4: a decision 4.3 recorded (its reopens carry no `tracked`; one with none carries no note); the parts not done,
+    // each as the record establishes it (open, superseded, not recorded, not carried out), said instead of "not done"
+    const under43 = body !== undefined && body.tracked !== true && (body.reopen.length > 0 || body.note === undefined);
+    const parts = body === undefined || r.about?.kind === 'exploration' ? null : partsOf(added, changed, reopened);
     out.push({
       id: r.id, kind: r.kind, words: r.words, text: r.text, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state, filedAgain,
-      note: body?.note ?? null,
+      entry: r.entry ?? null,
+      items: lines.map((id) => ({ id, state: withdrawn.has(id) ? 'withdrawn' as const : 'in force' as const })),
+      checkedBy: s.checked === null || lines.length === 0 ? null : { plan: s.checked.plan, inside: lines.filter((l) => s.checked!.items.has(l)) },
+      addedNoItem: lines.length === 0 && (body?.add ?? []).length > 0,
+      unnamed: [...new Set(unnamed)],
+      // 4.4 (G3, G4): a 4.3 decision has no note; its Architect's accepted hand-back has one
+      note: body === undefined ? null : repairNoteOf(body, (step) => noteOfHandBack(taskStatus(db, data, step)?.handBack)),
+      under43, parts,
       question: open === undefined ? null : { escalation: open.id, text: open.reasons[0] ?? open.summary },
       added, changed, reopened,
       instructions: s.constraints.filter((c) => isAddressed(c) && (c.scope.repairs ?? []).includes(r.id)).map((c) => c.line),
@@ -312,16 +418,42 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
   return { mission, repairs: out };
 }
 
+/**
+ * 4.4 (v1): the line of a decided repair not done, only what the record establishes: done or superseded (naming
+ * what superseded it, so the PM looks there); else "decided" (under 4.3 where it applies) with its parts open,
+ * superseded, not carried out and not recorded. Never a bare "not done".
+ */
+function partsLine(p: RepairParts, under43: boolean): string {
+  const by = [...new Set(p.superseded.map((x) => x.by))];
+  if (p.open.length + p.notRecorded.length + p.notCarried.length === 0 && by.length > 0) return `decided; done or superseded: see ${by.join(', ')}`;
+  const segs = [
+    ...(p.open.length > 0 ? [`open: ${p.open.join(', ')}`] : []),
+    ...(p.superseded.length > 0 ? [`superseded: ${p.superseded.map((x) => `${x.part} (by ${x.by})`).join(', ')}`] : []),
+    ...(p.notCarried.length > 0 ? [`not carried out: ${p.notCarried.join(', ')}`] : []),
+    ...(p.notRecorded.length > 0 ? [`not recorded: ${p.notRecorded.join(', ')}`] : []),
+  ];
+  return `decided${under43 ? ' under 4.3' : ''}; ${segs.length > 0 ? segs.join('; ') : 'it added, changed and reopened no task'}`;
+}
+
 export function repairsText(r: ReturnType<typeof repairsRead>): string {
   if (r.repairs.length === 0) return `Mission ${r.mission} has no repair.`;
   const lines = [`Repairs of mission ${r.mission}: ${r.repairs.length}`];
   for (const x of r.repairs) {
     const done = x.done === null ? '' : x.done ? '; done' : '; not done';
-    lines.push(`[${x.id}] ${x.kind} (${x.words})${x.about !== null ? `, about ${x.about}` : ''}: "${clip(x.text, 200)}"`);
-    lines.push(`    ${x.state}${done}`);
-    if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)` : ''}`);
+    // 4.4 (G9): how the work came in, and what it is bound to
+    lines.push(`[${x.id}] ${x.entry === 'extend' ? 'new requirement' : x.kind} (${x.words})${x.about !== null ? `, about ${x.about}` : ''}: "${clip(x.text, 200)}"`);
+    lines.push(`    ${x.state === 'ended' ? 'ended: every item of it was withdrawn before its amendment was applied (a hand-back that came afterwards is kept and was not applied)' : x.parts !== null && x.done === false ? partsLine(x.parts, x.under43) : `${x.state}${done}`}`);
+    // what the plan in effect's check is bound to, read from its contract's sets (a changed plan takes them in)
+    const live = x.items.filter((i) => i.state === 'in force').map((i) => i.id);
+    const outside = x.checkedBy === null ? [] : live.filter((i) => !x.checkedBy!.inside.includes(i));
+    const where = x.checkedBy === null || live.length === 0 ? '' : outside.length === 0 ? `; PM plan ${x.checkedBy.plan} was checked against them` : `; outside the set PM plan ${x.checkedBy.plan} was checked against: ${outside.join(', ')}`;
+    if (x.items.length > 0) lines.push(`    ${x.entry === 'extend' ? 'its items' : 'the item it falls short of'}: ${x.items.map((i) => `${i.id}${i.state === 'withdrawn' ? ' (withdrawn)' : ''}`).join(', ')}${where}`);
+    if (x.state === 'decided') lines.push("    its work passed its Architect and the mechanical checks, no plan review (D-10)");
+    if (x.addedNoItem) lines.push('    it added tasks and names no requirement item (a lead for a spot-check: was it a new requirement? mp pm extend records one)');
+    if (x.unnamed.length > 0) lines.push(`    tasks on which its Architect named none of its items (bound to none): ${x.unnamed.join(', ')}`);
+    if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? (x.entry === 'extend' ? `: the same items as new requirement ${x.filedAgain.of} (a task ${x.filedAgain.of} added had left the plan in effect)` : `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)`) : ''}`);
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
-    if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
+    if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? "(not recorded: decided under 4.3, and its Architect's hand-back has none that can be read)" : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
     for (const [label, ts] of [['added', x.added], ['changed', x.changed], ['reopened', x.reopened]] as const) for (const t of ts) lines.push(`    ${label} ${t.task}: ${t.state}`);
     // 4.4 (G4, G5): what its decision gave of the open items it is for (mp read open-items says what takes one now)
     for (const i of x.openItems ?? []) lines.push(`    open item ${i.id}${i.named ? '' : ' (not named on the repair)'}: ${i.takenBy.length > 0 ? `its decision gave it to ${i.takenBy.map((t) => `task ${t}`).join(', ')}` : x.state === 'decided' ? 'given to no task by its decision' : 'not given to a task yet (not decided)'}${i.closed ? '; closed' : '; still open'}`);

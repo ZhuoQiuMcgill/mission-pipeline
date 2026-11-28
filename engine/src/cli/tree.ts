@@ -43,12 +43,15 @@ import { judgmentStates, labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof, 
 import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
-import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
+import { attemptReopenRepairs, builtOnOlder, lineAcceptance } from '../flow/execution.ts';
 import { acceptanceSummary, riskRecord, withRiskText, type RiskRecord } from '../flow/riskItems.ts';
 import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverBy, waiverEnds, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { pmNotes } from '../process/secretary.ts';
-import { keptMark, keptOnChangedWords, wordsAuthority } from '../memory/words.ts';
+import { keptMark, keptOnChangedWords, taggedWords, wordsAuthority } from '../memory/words.ts';
+
+/** 4.4 (G7): the mark on what rests on a words entry that has no tags yet; it is not out of force for that (4.3, F-9). */
+const UNTYPED = 'rests on untyped words (not tagged yet)';
 import { age, clip, filler as fillerText, short } from './render.ts';
 
 export type NodeKind = 'mission' | 'words' | 'requirement' | 'constraint' | 'plan' | 'object' | 'task' | 'dispatch' | 'judgment' | 'run' | 'commit' | 'delivery' | 'landing' | 'escalation' | 'decision' | 'exploration' | 'stop' | 'repair' | 'waiver' | 'note';
@@ -235,15 +238,39 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
     const flowKey = (m: string, line: string, event: string, key: string): string => JSON.stringify([m, line, event, key]);
     const escalationsOfTask = new Map<string, FlowRow[]>();
     const effectivePlans: FlowRow[] = [];
+    // 4.4 (G9): the filings (repairs, new requirements), the tasks their amendments added, and what each was
+    const filings = new Map<string, { readonly entry: string | null }>();
+    const addedBy = new Map<string, { readonly repair: string; readonly dplan: string }>();
+    const taskEvents = new Map<string, Array<{ revision: number; event: string; key: string; body: unknown }>>();
     for (const f of flows) {
       byKey.set(flowKey(f.mission, f.line, f.event, f.key), f);
+      if (f.line.startsWith('task:')) taskEvents.set(`${f.mission}/${f.line}`, [...(taskEvents.get(`${f.mission}/${f.line}`) ?? []), { revision: f.rev, event: f.event, key: f.key, body: f.body }]);
       if (f.line === SECRETARY_LINE && f.event === 'escalation' && typeof f.body['task'] === 'string') escalationsOfTask.set(f.body['task'], [...(escalationsOfTask.get(f.body['task']) ?? []), f]);
       if (f.line === PLAN_LINE && f.event === 'pm-plan-effective') effectivePlans.push(f);
+      if (f.line === REPAIRS_LINE && f.event === 'repair') filings.set(`${f.mission}/${f.key}`, { entry: typeof f.body['entry'] === 'string' ? f.body['entry'] : null });
+      if (f.line === PLAN_LINE && f.event === 'effective') for (const a of (f.body['amendments'] ?? []) as Json[]) for (const t of (a['tasks'] ?? []) as Json[]) if (!addedBy.has(`${f.mission}/${String(t['id'])}`)) addedBy.set(`${f.mission}/${String(t['id'])}`, { repair: String(a['repair']), dplan: String(f.body['dplan']) });
     }
+    // a product made under a later plan that carried the task over was reviewed with that plan: only one made under
+    // the plan the filing amended came with the filing alone
+    const cameWith = (mission: string, task: string, k: number, product: string): string | null => {
+      // the latest reopen of a filing attempt k came under (execution.ts attemptReopenRepairs: its later attempts too,
+      // the accepted ones and the reworks after them, until a new card of the task)
+      const reopened = attemptReopenRepairs(taskEvents.get(`${mission}/task:${task}`) ?? [], k).at(-1) ?? null;
+      const added = addedBy.get(`${mission}/${task}`);
+      const relies = ((objects.get(product)?.['reviews'] ?? []) as Json[]).flatMap((r) => (r['review'] === 'reviewer' ? ((r['reliesOn'] ?? []) as string[]) : []));
+      const by = reopened ?? (added !== undefined && relies.includes(added.dplan) ? added.repair : undefined);
+      if (by === undefined) return null;
+      const what = filings.get(`${mission}/${by}`)?.entry === 'extend' ? 'new requirement' : 'repair';
+      return `${reopened !== null ? `this work came with the reopen of ${what} ${by}` : `its task came with ${what} ${by}`}: it passed that filing's Architect and the mechanical checks, no plan review`;
+    };
 
     // requirement item versions, and the version of a line in force at a revision
     const itemVersions = new Map<string, Array<{ version: string; rev: number }>>();
     const latestConstraint = new Map<string, GNode>();
+    // 4.4 (G7): the words entry each requirement or constraint version rests on; the entries with no tags (recorded before tagging, 4.3 F-9) and the closed missions
+    const restsOn = new Map<string, string>();
+    const untypedWords = new Set(taggedWords(db, data).filter((w) => w.tags.length === 0).map((w) => w.words));
+    const closedMissions = new Set((db.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
     const withdrawn = new Map<string, number>();
     const versionAt = (line: string, rev: number): string | null => {
       const xs = itemVersions.get(line) ?? [];
@@ -266,6 +293,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         if (src['kind'] === 'words' && typeof src['words'] === 'string') {
           node('words', src['words'], null, 0);
           edge(n.key, `words:${src['words']}`, `quotes "${clip(String(src['quote'] ?? ''), 60)}"`);
+          restsOn.set(n.key, src['words']);
         } else if (src['kind'] === 'authorization' && typeof src['line'] === 'string') {
           const v = versionAt(src['line'], f.rev);
           if (v !== null) edge(n.key, `requirement:${v}`, 'rests on authorization');
@@ -283,6 +311,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         if (typeof b['words'] === 'string') {
           node('words', b['words'], null, 0);
           edge(n.key, `words:${b['words']}`, 'cites');
+          restsOn.set(n.key, b['words']);
         }
       } else if (f.event === 'constraint-withdrawn' && typeof b['line'] === 'string') {
         // 4.4 (G7): a withdrawn constraint reads so, and the words it was withdrawn on reach it
@@ -313,6 +342,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         if (k !== undefined && k.version === x.version) n.state = `${n.state}; ${keptMark(k)}`;
       });
     }
+    // 4.4 (G7): an item or a constraint on an untyped entry says so: such words are not out of force (4.3, F-9)
+    for (const [key, words] of restsOn) {const n = nodes.get(key); if (n !== undefined && untypedWords.has(words)) n.state = `${n.state ?? ''}; ${UNTYPED}`.replace(/^; /, '');}
 
     // ---- object versions (plans, products, exploration versions)
     const objects = new Map<string, Json & { rev: number }>();
@@ -477,6 +508,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
             n.by = seatBy(b['dispatch']);
             edge(n.key, `dispatch:${b['dispatch']}`, 'handed back by');
           }
+          // 4.4 (G9, P-7): how the work came in: a task a filing added (or an attempt a filing's reopen opened) passed
+          // that filing's Architect and the mechanical checks, and no plan review; any other came with the plan
+          const came = cameWith(f.mission, f.line.slice('task:'.length), Number(b['k'] ?? 0), b['object']);
+          if (came !== null) addCheck(n, came);
         } else if (f.event === 'verified') {
           const prod = byKey.get(flowKey(f.mission, f.line, 'product', f.key))?.body['object'];
           const runs = (b['runs'] ?? []) as Json[];
@@ -904,21 +939,30 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       const dplan = typeof b['dplan'] === 'string' ? b['dplan'] : null;
       const effective = dplan === null ? undefined : events.find((e) => e.event === 'effective' && e.key === dplan);
       const end = waiverEnds(events).get(Number(b['n']));
+      // the plans of the mission in effect that took effect on this waiver: the outcome recorded with each plan (flow/waivers.ts)
+      const tookEffectOn = events.filter((e) => e.event === 'effective' && !e.key.includes('#') && (dplan === null || e.key === dplan)).filter((eff) => {
+        const recorded = planReviewsWaiverIn(events, f.mission, eff.key, ctx.planReviewsWaived, ((objects.get(eff.key)?.['reviews'] ?? null) as Json[] | null)?.map((r) => String(r['review'])) ?? null);
+        const same = (x: Json) => x['action'] !== 'withdraw' && ((x['dplan'] ?? null) === eff.key || (x['dplan'] ?? null) === null) && x['by'] === recorded?.by && x['ref'] === recorded?.ref && (x['reason'] ?? null) === (recorded?.reason ?? null);
+        return recorded !== null && events.filter((e) => e.event === REVIEWS_WAIVER && e.rev < eff.rev && same(e.body)).at(-1)?.body['n'] === b['n'];
+      }).map((eff) => eff.key);
       if (effective !== undefined && dplan !== null) {
-        // its plan is in effect: the outcome recorded with that plan (flow/waivers.ts), and whether this is the waiver it took effect on
+        // its plan is in effect: whether it took effect on this waiver
         const recorded = planReviewsWaiverIn(events, f.mission, dplan, ctx.planReviewsWaived, ((objects.get(dplan)?.['reviews'] ?? null) as Json[] | null)?.map((r) => String(r['review'])) ?? null);
-        const same = (x: Json) => x['action'] !== 'withdraw' && (x['dplan'] === dplan || x['dplan'] === null) && x['by'] === recorded?.by && x['ref'] === recorded?.ref && (x['reason'] ?? null) === (recorded?.reason ?? null);
-        const used = recorded !== null && events.filter((e) => e.event === REVIEWS_WAIVER && e.rev < effective.rev && same(e.body)).at(-1)?.body['n'] === b['n'];
-        n.state = used ? `${dplan} took effect on it` : `${dplan} took effect without it (${recorded === null ? 'with its reviews' : waiverBy(recorded)})`;
+        n.state = tookEffectOn.length > 0 ? `${dplan} took effect on it` : `${dplan} took effect without it (${recorded === null ? 'with its reviews' : waiverBy(recorded)})`;
       } else {
         // "in force" is the planner's own choice (flow/waivers.ts) for its plan, or for a plan of the mission no plan-specific waiver names
         const applied = selectedWaiver(eventsWithWaiversInForce(events, f.mission, (w, m) => wordsAuthority(db, data, w, m)), dplan ?? '').waiver?.n === b['n'];
+        // a closed mission takes no further plan: its words are not out of force because of that
+        const closed = closedMissions.has(f.mission);
         const outOfForce = b['by'] === 'words' && wordsAuthority(db, data, String(b['ref']), f.mission) === null;
-        n.state = applied ? 'in force'
-          : end !== undefined ? (end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`)
-            : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
-              : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan';
+        n.state = end !== undefined ? (end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`)
+          : closed ? `mission ${f.mission} is closed: it applies to no further plan`
+            : applied ? 'in force'
+              : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
+                : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan';
+        if (tookEffectOn.length > 0) n.state = `${n.state}; ${tookEffectOn.join(', ')} took effect on it`;
       }
+      if (b['by'] === 'words' && untypedWords.has(String(b['ref']))) n.state = `${n.state}; ${UNTYPED}`;
       // 4.4 (G7): the words a waiver was withdrawn on reach it
       if (end?.action === 'withdraw' && end.by === 'words') {
         node('words', end.ref, null, 0);
