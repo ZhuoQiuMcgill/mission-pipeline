@@ -110,6 +110,7 @@ It prints the principles in force and the number of other tags in force (`mp rea
 For the no-words default, use `--by pm --no-words --reason "..."` instead.
 For the user's own answer: `mp pm answer <mission> <escalation> --option <option> --by user --words W-<n>`.
 Choose only an offered option; add instructions or extra rounds as the card requires.
+An answer to a Constructor's questions may put some off (`--defer <n,…>`): each stays an open item, listed by `mp read open-items <mission>` and on the task's cards; `mp pm open-item answer <[mission/]item> --answer "…" [--words W-n]` answers one at any time, and the answer reaches the task's next cards.
 `mp pm inbox --asked-user <item>` marks your question pending, with no words; record the user's answer on the spot and answer with its words.
 
 A revised detailed plan with a changed task set (added, dropped, split or merged), declared interfaces, data formats or storage raises `plan-structure-change` with a structural diff.
