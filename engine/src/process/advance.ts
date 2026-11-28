@@ -8,6 +8,7 @@ import type { MissionId } from '../common/ids.ts';
 import { createFlowEngine } from '../flow/compose.ts';
 import type { ReconcileReport } from '../flow/engine.ts';
 import type { ProcessContext } from './context.ts';
+import { anchorProducts } from './actions.ts';
 
 /**
  * Reconcile one mission, or every mission with flow events. `by`: what is handing work over in
@@ -21,7 +22,10 @@ export async function advance(ctx: ProcessContext, mission?: MissionId, by?: { r
   const prev = ctx.handover;
   ctx.handover = by ?? prev ?? { dispatch: null, task: null, step: 'the process advanced (mp pm next)' };
   try {
-    return await createFlowEngine(ctx.ports(), o.seatSide === true ? { seatSide: true } : {}).reconcile(mission);
+    const out = await createFlowEngine(ctx.ports(), o.seatSide === true ? { seatSide: true } : {}).reconcile(mission);
+    // 4.4 (F19, #64): what the pass accepted, and products recorded before 4.4, are held by their kept refs
+    anchorProducts(ctx, mission);
+    return out;
   } finally {
     ctx.handover = prev;
   }

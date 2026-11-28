@@ -252,13 +252,36 @@ function planLeaves(tx: WriteTx, records: readonly BaseRecord[]): void {
   }
 }
 
+/**
+ * 4.4 (F19): a notice about what is already over when it is raised (a replay after an upgrade raises
+ * many): its mission is closed, the detailed plan it names was in effect and a later one took effect, or
+ * the escalations it asks a decision on are decided. It is born resolved: on the record, never pending.
+ */
+function bornResolved(tx: WriteTx, n: FlowNotice): string | null {
+  if ((tx.stmt('SELECT state FROM missions WHERE mission = ?').get(n.mission) as { state: string } | undefined)?.state === 'closed') return 'its mission is closed';
+  const d = (n.detail ?? null) as { dplan?: unknown; escalation?: unknown; escalations?: unknown } | null;
+  if (typeof d?.dplan === 'string') {
+    const effective = flowEvents(tx, { mission: n.mission, line: PLAN_LINE, event: 'effective', limit: 10_000 }).filter((e) => !e.key.includes('#'));
+    if (effective.some((e) => e.key === d.dplan) && effective.at(-1)!.key !== d.dplan) return `its plan ${d.dplan} is superseded`;
+  }
+  if (n.askUser === true) {
+    const one = typeof d?.escalation === 'string' ? d.escalation : typeof (d?.escalation as { id?: unknown } | undefined)?.id === 'string' ? (d!.escalation as { id: string }).id : null;
+    const ids = [...(one !== null ? [one] : []), ...(Array.isArray(d?.escalations) ? (d!.escalations as unknown[]).filter((x): x is string => typeof x === 'string') : [])];
+    const decided = (id: string): boolean => flowEventExists(tx, { mission: n.mission, line: SECRETARY_LINE, event: 'applied', key: id }) || flowEventExists(tx, { mission: n.mission, line: SECRETARY_LINE, event: 'user-answer', key: id });
+    if (ids.length > 0 && ids.every(decided)) return 'its escalation is decided';
+  }
+  return null;
+}
+
 /** Raise a notice inside a write (once per id): the alert record and its journal entry in the mission's notices.md. */
 export function raiseNotice(tx: WriteTx, n: FlowNotice): boolean {
   const alert = noticeAlertId(n);
   if (tx.stmt("SELECT 1 FROM log WHERE kind = 'alert' AND json_extract(record, '$.alert') = ? LIMIT 1").get(alert)) return false;
-  const body = tx.data.put(canonicalJson({ mission: n.mission, category: n.category, wi: n.wi, key: n.key, trigger: n.trigger, defaultAction: n.defaultAction, detail: n.detail ?? null, askUser: n.askUser ?? false }));
+  const over = bornResolved(tx, n);
+  const body = tx.data.put(canonicalJson({ mission: n.mission, category: n.category, wi: n.wi, key: n.key, trigger: n.trigger, defaultAction: n.defaultAction, detail: n.detail ?? null, askUser: n.askUser ?? false, ...(over !== null ? { bornResolved: over } : {}) }));
   raiseAlert(tx, { alert: alert as AlertId, category: n.category, ...(n.wi !== null ? { wi: n.wi } : { informational: true as const }), body });
-  tx.leaves.appendEntry(`missions/${n.mission}/notices.md`, `### ${n.category}${n.wi !== null ? ` (${n.wi})` : ''}\n\n${n.trigger}\n\nDefault action: ${n.defaultAction}${n.askUser === true ? '\n\nAsk the user.' : ''}`);
+  if (over !== null) markNotice(tx, { notice: alert, state: 'acknowledged' });
+  tx.leaves.appendEntry(`missions/${n.mission}/notices.md`, `### ${n.category}${n.wi !== null ? ` (${n.wi})` : ''}\n\n${n.trigger}\n\nDefault action: ${n.defaultAction}${n.askUser === true ? '\n\nAsk the user.' : ''}${over !== null ? `\n\nResolved when raised: ${over}.` : ''}`);
   return true;
 }
 
@@ -382,6 +405,19 @@ export class MemoryFlowLedger implements FlowLedgerPort {
     this.memory.write({ op: `notice:${alert}`, payload: { alert } }, (tx) => {
       raiseNotice(tx, n);
     });
+  }
+
+  /** 4.4 (F14): the notices of a category raised for a mission and not acknowledged (one read). */
+  async openNotices(q: { readonly mission: MissionId; readonly category: string }): Promise<ReadonlyArray<{ readonly key: string; readonly detail: unknown }>> {
+    const data = this.memory.data;
+    return this.memory.read((db) => (db.stmt("SELECT l.record FROM log l WHERE l.kind = 'alert' AND json_extract(l.record, '$.category') = ? AND NOT EXISTS (SELECT 1 FROM notice_deliveries d WHERE d.state = 'acknowledged' AND d.notice = json_extract(l.record, '$.alert')) ORDER BY l.rev").all(q.category) as Array<{ record: string }>).flatMap((r) => {
+      try {
+        const b = JSON.parse(data.text((JSON.parse(r.record) as { body: string }).body)) as { mission?: unknown; key?: unknown; detail?: unknown };
+        return b.mission === q.mission && typeof b.key === 'string' ? [{ key: b.key, detail: b.detail ?? null }] : [];
+      } catch {
+        return [];
+      }
+    }));
   }
 
   async missions(): Promise<readonly MissionId[]> {

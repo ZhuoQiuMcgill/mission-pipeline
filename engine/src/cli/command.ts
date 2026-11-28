@@ -44,6 +44,12 @@ export interface Command {
   readonly unrecorded?: boolean;
   /** What identifies the operation for a retry (default: positionals and command flags). */
   readonly identity?: (args: ParsedArgs) => unknown;
+  /** 4.4 (F17): what the PM action records of a result (default: the result as it is). */
+  readonly recorded?: (c: RunContext, r: CommandResult) => CommandResult;
+  /** 4.4 (F17): the result a retry with the same --op prints, from the recorded one (default: the recorded one). */
+  readonly replay?: (c: RunContext, prior: CommandResult) => CommandResult;
+  /** 4.4 (F8): what a successful command commits once its output is written out (best effort: a failure leaves it undone). */
+  readonly afterOutput?: (c: RunContext, r: CommandResult) => void;
   run(c: RunContext, args: ParsedArgs): Promise<CommandResult>;
 }
 

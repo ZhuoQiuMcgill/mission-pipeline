@@ -69,6 +69,7 @@ import {
   latestUserWords,
   recordWords,
   flowEvents,
+  flowMissions,
   flowEventExists,
   type Db,
   type DispatchInfo,
@@ -210,6 +211,8 @@ export interface HeldStep {
   readonly purpose: string;
   readonly why: string;
   readonly wi: string | null;
+  /** 4.4 (F8): a production step of a closed mission (`mp sec next` counts these). */
+  readonly closedMission?: true;
 }
 
 export interface InFlight {
@@ -254,6 +257,29 @@ function conflicts(a: TaskSpecDoc, b: TaskSpecDoc): boolean {
   return a.writeScope !== undefined && b.writeScope !== undefined && scopesOverlap(a.writeScope, b.writeScope).length > 0;
 }
 
+/**
+ * 4.4 (F14, #54): stable production that waits because the plan's deciding passes do not cover a current
+ * object constraint (flow/plan-constraints.ts, its open gap) is a held line with WI-34; no step is queued
+ * for it, so nothing else shows it. Fast mode goes on and holds nothing.
+ */
+function constraintGapHolds(db: Db, data: { text(h: string): string }): HeldStep[] {
+  const out: HeldStep[] = [];
+  // the missions the flows run, read by the (mission, line, event) index; a closed mission's production is held by its close
+  const closed = new Set((db.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
+  for (const m of flowMissions(db)) {
+    if (closed.has(m)) continue;
+    if (flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap', limit: 1 }).length === 0) continue;
+    const eff = flowEvents(db, { mission: m, line: PLAN_LINE, event: 'effective', limit: 10_000 }).filter((e) => !e.key.includes('#')).at(-1);
+    if (eff === undefined || (JSON.parse(data.text(eff.body)) as { mode?: string }).mode !== 'stable') continue;
+    const closedGaps = new Set(flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap-closed', limit: 10_000 }).map((e) => e.key));
+    for (const g of flowEvents(db, { mission: m, line: PLAN_LINE, event: 'plan-constraint-gap', limit: 10_000 }).filter((e) => !closedGaps.has(e.key))) {
+      const gap = JSON.parse(data.text(g.body)) as { plan: string; uncovered: Array<{ line: string; version: string }> };
+      out.push({ step: gap.plan, seat: 'production', kind: 'plan-constraint-gap', mission: m, purpose: `stable production of ${m}`, why: `stable production waits: plan ${gap.plan} has current deciding passes that do not cover the object constraint(s) ${gap.uncovered.map((c) => `${c.line} (${c.version})`).join(', ')}; the PM takes an exit of WI-34 with the user's words`, wi: 'WI-34' });
+    }
+  }
+  return out;
+}
+
 /** The ready and held steps, the dispatches in flight and what waits on the user, in one read. */
 export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held' | 'inFlight' | 'waitingOnUser'> {
   const now = ctx.now();
@@ -275,7 +301,7 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
       const entry = seatCardEntry(kind);
       const base = { step: q.task, seat: entry.seat, kind, mission: q.mission, purpose: purposeOf(spec.card) };
       if (heldByClose(db, spec)) {
-        held.push({ ...base, why: `mission ${q.mission} is closed (§6.7): its production steps wait until it is opened again (mp pm mission ${q.mission})`, wi: null });
+        held.push({ ...base, why: `mission ${q.mission} is closed (§6.7): its production steps wait until it is opened again (mp pm mission ${q.mission})`, wi: null, closedMission: true });
         continue;
       }
       if (stoppedFor(db, { mission: q.mission, capabilities: spec.capabilities })) {
@@ -300,6 +326,7 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
       const dispatches = dispatchCount(db, q.task);
       candidates.push({ spec, step: { ...base, parallel: true, priority: spec.priority, dispatches } });
     }
+    held.push(...constraintGapHolds(db, ctx.memory.data));
     candidates.sort((a, b) => b.step.priority - a.step.priority);
     const ready = candidates.map((c, i) => {
       const others = [...flightSpecs, ...candidates.filter((_, j) => j !== i).map((x) => x.spec)];
@@ -345,8 +372,37 @@ function tidyWorktrees(ctx: ProcessContext): void {
   }
 }
 
+/** What a pass's reconciliation found, before its report is read. */
+export interface Reconciled {
+  readonly olderEnvironmentRuns: number;
+  readonly landings: RecoveryReport | null;
+  readonly errors: readonly string[];
+  readonly detachedRuns: readonly DetachedRunNote[];
+}
+
 /** `mp pm next` (§5.1 step 1). */
 async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: boolean } = {}): Promise<NextReport> {
+  const { report } = readNextReport(ctx, await reconcileNext(ctx));
+  if (o.markDelivered !== false) markNotices(ctx.memory, report.notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
+  return report;
+}
+
+/**
+ * 4.4 (F8): the report of a pass in one read, after its reconciliation: the steps, the notices and the
+ * labels as of one revision, which it returns too (a change that lands later is after it).
+ */
+export function readNextReport(ctx: ProcessContext, recon: Reconciled): { readonly report: NextReport; readonly revision: number } {
+  return ctx.memory.read((db) => {
+    const revision = Number(ctx.memory.head());
+    const steps = readSteps(ctx);
+    const notices = listNotices(db, ctx.memory.data, ctx.secretary !== null ? {audience: 'secretary'} : {}).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
+    const st = labelStatus(db);
+    return { revision, report: { notices, ...steps, olderEnvironmentRuns: recon.olderEnvironmentRuns, labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since }, landings: recon.landings, errors: recon.errors, detachedRuns: recon.detachedRuns } };
+  });
+}
+
+/** A pass's reconciliation: labels, landings, housekeeping, the flows, the environment notice and the detached runs. */
+async function reconcileNext(ctx: ProcessContext): Promise<Reconciled> {
   ctx.environment();
   settleLabels(ctx);
   let landings: RecoveryReport | null = null;
@@ -366,7 +422,6 @@ async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
   for (const r of await advance(ctx)) for (const e of r.errors) errors.push(`${r.mission} ${e.step}: ${e.message}`);
   // 4.1.2: an environment change is told once (runs from older environments still count), never a ready step
   const olderEnvironmentRuns = noticeOlderEnvironment(ctx);
-  const steps = readSteps(ctx);
   // 4.1.3 (#30): a detached run that ended while its dispatch is in flight (its seat may be gone); a lost one is recorded so
   let detachedRuns: DetachedRunNote[] = [];
   try {
@@ -374,19 +429,7 @@ async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
   } catch (e) {
     errors.push(`detached runs: ${(e as Error).message}`);
   }
-  const data = ctx.memory.data;
-  const notices = ctx.memory.read((db) => listNotices(db, data, ctx.secretary !== null ? {audience: 'secretary'} : {})).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
-  if (o.markDelivered !== false) markNotices(ctx.memory, notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
-  const st = ctx.memory.read((db) => labelStatus(db));
-  return {
-    notices,
-    ...steps,
-    olderEnvironmentRuns,
-    labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since },
-    landings,
-    errors,
-    detachedRuns,
-  };
+  return { olderEnvironmentRuns, landings, errors, detachedRuns };
 }
 
 /** `mp pm alerts --ack <id...>`: notices acknowledged (never back). */
@@ -406,6 +449,8 @@ export interface Dispatched {
   /** The card as the seat receives it (`mp seat <id> card` prints the same). */
   readonly card: string;
   readonly cardLeaf: string;
+  /** 4.4 (F17): the sha256 of the card's text; what is stored of a claim is its leaf and this hash. */
+  readonly cardSha256: string;
   /** A Constructor's worktree, relative to the project folder. */
   readonly worktree: string | null;
   /** Where the seat writes its hand-back (decision 7). */
@@ -438,6 +483,24 @@ function claimOnceMore<T>(claim: () => T): T {
   }
 }
 
+/** What a claim's write returns and the memory stores (a concurrent claim with the same op reads it back); 4.3 stored the card's text. */
+export interface ClaimResponse {
+  readonly dispatch: string;
+  readonly cardLeaf: string;
+  readonly cardSha256?: string;
+  readonly card?: string;
+  readonly worktree: string | null;
+}
+
+/** 4.4 (F17): the card a claim's response names, read from its leaf and checked against its hash; a 4.3 response carries the text. */
+export function storedCard(ctx: ProcessContext, out: ClaimResponse): string {
+  if (typeof out.card === 'string') return out.card;
+  const r = ctx.memory.readLeaf(out.cardLeaf);
+  if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `the card of dispatch ${out.dispatch} (${out.cardLeaf}) is missing; the PM follows WI-30`, { wi: 'WI-30' });
+  if (r.status === 'edited' || (out.cardSha256 !== undefined && r.sha256 !== out.cardSha256)) throw new ProcessError('LEAF_EDITED', `the card of dispatch ${out.dispatch} (${out.cardLeaf}) was edited after it was recorded; the PM follows WI-30`, { wi: 'WI-30' });
+  return r.text;
+}
+
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
 function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null; readonly starts?: ReadonlyMap<string, boolean> } = {}): Dispatched {
   settleLabels(ctx);
@@ -451,7 +514,7 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
   const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
   const queued = spec;
-  const claim = (): { dispatch: string; card: string; cardLeaf: string; worktree: string | null } => pmWrite(
+  const claim = (): ClaimResponse => pmWrite(
     ctx,
     'dispatch',
     `dispatch:${step}:${prior + 1}`,
@@ -489,11 +552,13 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       // which step and which spec this dispatch took over (§3.2 item 1: the run chain)
       // 4.4 (F5): `servedReceipts`: this claim's card records a served receipt, so its release may be judged unstarted (absent: a 4.3 claim, released as 4.3 counted it)
       appendRecords(tx, [{ kind: 'flow.event', mission: task.mission as MissionId, line: DISPATCH_LINE(dispatch), event: 'claimed', key: 'spec', body: tx.data.put(canonicalJson({ spec: refreshed, task: step, lineage: spec.lineage, dispatches: prior, generation: ctx.secretary, servedReceipts: true })) as ContentHash }]);
-      return { dispatch, card, cardLeaf: claimed.card?.leaf ?? dispatchLeaf(task.mission, dispatch, 'card'), worktree: claimed.worktree };
+      // 4.4 (F17): the stored response names the card's leaf and hash; its text is in the leaf only
+      return { dispatch, cardLeaf: claimed.card?.leaf ?? dispatchLeaf(task.mission, dispatch, 'card'), cardSha256: claimed.card?.sha256 ?? sha256(card), worktree: claimed.worktree };
     },
     filler,
   );
   const out = claimOnceMore(claim);
+  const card = storedCard(ctx, out);
   mkdirSync(join(ctx.memory.paths.tmp, out.dispatch), { recursive: true });
   let worktree: string | null = null;
   if (entry.exportsProduct === true) {
@@ -509,8 +574,9 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     seat: entry.seat,
     kind: spec.card.seat,
     mission: task.mission as MissionId,
-    card: out.card,
+    card,
     cardLeaf: out.cardLeaf,
+    cardSha256: out.cardSha256 ?? sha256(card),
     worktree,
     files: handBackFiles(out.dispatch),
     prompt: `You are the ${title} of Mission Pipeline. Your card: \`mp seat ${out.dispatch} card\`. Use only the \`mp seat ${out.dispatch}\` commands listed there. Finish with \`mp seat ${out.dispatch} handback\`.`,
@@ -713,12 +779,41 @@ export interface Renewed {
   readonly skipped: ReadonlyArray<{ readonly evidence: string; readonly why: string }>;
   /** Judgments handed to their flow for a new judgment of the same position (a Reviewer step in `mp pm next`). */
   readonly reviewSteps: number;
+  /** 4.4 (F14): the missions covered: the one named, or the open ones. */
+  readonly missions: readonly string[];
+  /** 4.4 (F14): judgments resting on runs from older environments left as they are, because their missions are not covered. */
+  readonly leftOut: number;
 }
 
-/** `mp pm renew` (§6.5): rerun the declared commands of the affected runs on clean checkouts; equal outputs renew the evidence. */
-async function driver_pmRenew(ctx: ProcessContext): Promise<Renewed> {
+/**
+ * 4.4 (F14): what a renewal covers: the named mission, or every mission that is not closed. A run counts for
+ * the missions of the versions its judgments decide and of its candidate; one whose mission cannot be told
+ * is covered unless a mission is named.
+ */
+function renewCovers(ctx: ProcessContext, mission: string | null): { readonly missions: readonly string[]; readonly covers: (missions: readonly (string | null)[]) => boolean } {
+  // one read of the missions' states
+  const states = ctx.memory.stmt('SELECT mission, state FROM missions ORDER BY mission').all() as Array<{ mission: string; state: string }>;
+  const closed = new Set(states.filter((r) => r.state === 'closed').map((r) => r.mission));
+  const missions = mission !== null ? [mission] : states.filter((r) => r.state === 'open').map((r) => r.mission);
+  const inScope = (m: string): boolean => (mission !== null ? m === mission : !closed.has(m));
+  return { missions, covers: (ms) => { const known = ms.filter((m): m is string => m !== null && m !== 'project'); return known.length === 0 ? mission === null : known.some(inScope); } };
+}
+
+/** `mp pm renew [--mission <m>]` (§6.5): rerun the declared commands of the affected runs on clean checkouts; equal outputs renew the evidence. */
+async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: string | null } = {}): Promise<Renewed> {
   const env = ctx.environment();
-  const c = ctx.memory.read((db) => renewalCandidates(db));
+  const all = ctx.memory.read((db) => renewalCandidates(db));
+  const scope = renewCovers(ctx, o.mission ?? null);
+  // 4.4 (F14): each judgment by its own mission (the version it decides, else its run's): a run that judgments of
+  // several missions cite is rerun once, and only the covered judgments are renewed, scoped or sent to a Reviewer
+  const inScope = (j: { readonly target: string }, evidence?: string): boolean => scope.covers([missionOfObject(ctx, j.target) ?? (evidence === undefined ? null : missionOfEvidence(ctx, evidence))]);
+  const covered = all.candidates.flatMap((cand) => {
+    const judgments = cand.judgments.filter((j) => inScope(j, cand.evidence));
+    return judgments.some((j) => j.renewable) ? [{ ...cand, judgments }] : [];
+  });
+  const c = { ...all, candidates: covered, reviews: all.reviews.filter((j) => inScope(j)) };
+  const judgmentsOf = (xs: ReadonlyArray<{ readonly judgments: ReadonlyArray<{ readonly judgment: string }> }>, ys: ReadonlyArray<{ readonly judgment: string }>): number => new Set([...xs.flatMap((x) => x.judgments.map((j) => j.judgment)), ...ys.map((j) => j.judgment)]).size;
+  const leftOut = judgmentsOf(all.candidates, all.reviews) - judgmentsOf(c.candidates, c.reviews);
   const reruns: Array<Renewed['reruns'][number]> = [];
   const skipped: Array<{ evidence: string; why: string }> = [];
   // The log, rather than evidence-id order, preserves legacy command groups and
@@ -768,7 +863,7 @@ async function driver_pmRenew(ctx: ProcessContext): Promise<Renewed> {
       const renewGroup = (tx: WriteTx, runs: readonly RecordedRun[], records: readonly EvidenceRecord[] = []): Array<Renewed['reruns'][number]> => originals.map((cand) => {
         const x = replacementFor(runs, cand);
         const rec: EvidenceRecord = records.find((r) => r.evidence === x.evidence) ?? { kind: 'evidence', evidence: x.evidence as never, envLine: 'env' as never, envSnapshot: env.identity, runClass: 'declared', fields: x.fields };
-        const out = recordRenewedRun(tx, { original: cand.evidence, run: rec });
+        const out = recordRenewedRun(tx, { original: cand.evidence, run: rec, judgments: new Set(cand.judgments.map((j) => j.judgment as string)) });
         const ix = new StoredIndex(tx);
         const renewed: string[] = [];
         const refused = out.refused.map((f) => ({ judgment: f.judgment as string, reason: f.reason }));
@@ -843,7 +938,7 @@ async function driver_pmRenew(ctx: ProcessContext): Promise<Renewed> {
     });
   }
   await advance(ctx, undefined, { dispatch: null, task: null, step: `mp pm renew (environment ${env.identity.slice(0, 16)})` });
-  return { environment: c.environment, reruns, reviews: c.reviews, skipped, reviewSteps: needed.length };
+  return { environment: c.environment, reruns, reviews: c.reviews, skipped, reviewSteps: needed.length, missions: scope.missions, leftOut };
 }
 
 /**
@@ -1322,6 +1417,14 @@ export async function pmNext(...args: Parameters<typeof driver_pmNext>): Promise
   const was = ctx.operational;
   ctx.operational = true;
   try { return await driver_pmNext(...args); } finally { ctx.operational = was; }
+}
+
+/** 4.4 (F8): a pass's reconciliation alone; `readNextReport` reads its report afterwards in one snapshot (`mp sec next`, `mp sec wait`). */
+export async function pmReconcile(ctx: ProcessContext): Promise<Reconciled> {
+  requireDriver(ctx.memory, ctx.secretary);
+  const was = ctx.operational;
+  ctx.operational = true;
+  try { return await reconcileNext(ctx); } finally { ctx.operational = was; }
 }
 
 export function pmDispatch(...args: Parameters<typeof driver_pmDispatch>): ReturnType<typeof driver_pmDispatch> {

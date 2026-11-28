@@ -10,7 +10,12 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import { idPart, type MissionId } from '../src/common/ids.ts';
 import type { JudgmentRecord, ObjectVersionRecord } from '../src/common/records.ts';
-import { commit, ev, flowCtx } from '../src/flow/context.ts';
+import { commit, ev, flowCtx, noticeAlertId, shortHash } from '../src/flow/context.ts';
+import { listNotices } from '../src/process/notices.ts';
+import { raiseNotice } from '../src/process/ports.ts';
+import { raiseAlert, setMission } from '../src/memory/index.ts';
+import { canonicalJson } from '../src/common/hash.ts';
+import type { AlertId, ContentHash } from '../src/common/ids.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { acceptedProduct, taskLineage } from '../src/flow/execution.ts';
 import { RENEW_LINE, REVIEW_NEEDED, type DetailedPlanDoc, type ReviewNeededBody } from '../src/flow/plandoc.ts';
@@ -1447,4 +1452,167 @@ it('a failing re-bind review after the attempt\'s own used-up loop was decided r
   // a further pass raises nothing new
   await engine.reconcile(M);
   assert.equal(ports.scheduler.queued('secretary').length, 1);
+});
+
+describe('4.4 (F14): re-binding with less noise', () => {
+  /** A further fast plan that keeps every card (a decision of its own, so the plan is new). */
+  async function fastPlan(ports: World, round: number, item: string): Promise<void> {
+    const w = say(ports, `Keep decision ${item} in mind.`);
+    await recordItem(ports, { mission: M, item, type: 'decision', text: `Decision ${item}`, source: { kind: 'words', words: w, quote: `decision ${item}` } });
+    await submitPmBatch(ports, { mission: M, plan: { ...plan2(), round }, userWords: [w], changedItems: [item], mode: 'fast' });
+  }
+
+  it('a prerequisite re-bound to a successor of the same content is not stale (#66)', async () => {
+    const { ports, engine, base } = await waitingRebind();
+    // iface is re-bound and passes; impl's re-bind review never runs
+    await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'reviewer' && t.task.startsWith('rev.m1.impl.') ? null : base(t, s));
+    assert.equal(await current(ports, 'iface'), 'prod.con.m1.iface.1.b1');
+    // a fast plan: impl's queued re-bind review is dropped, and docs is built on impl.1, whose closure records iface.1
+    await fastPlan(ports, 3, 'd2');
+    await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'reviewer' && t.task.includes('.b') ? null : base(t, s));
+    const docs = (await current(ports, 'docs'))!;
+    const pre = ports.ledger.content.getList((await ports.ledger.objectVersion(docs))!.prerequisites);
+    assert.ok(pre.includes('prod.con.m1.iface.1'), `${docs}: ${JSON.stringify(pre)}; impl ${await current(ports, 'impl')}; iface ${await current(ports, 'iface')}`);
+    // a further fast plan keeps docs: iface.1 and its successor iface.1.b1 are the same content
+    await fastPlan(ports, 4, 'd3');
+    await drive(engine, ports.scheduler, base);
+    const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'docs');
+    assert.ok(told.length > 0);
+    assert.deepEqual(told.filter((n) => ((n.detail as { stale?: string[] }).stale ?? []).length > 0 || ((n.detail as { missing?: string[] }).missing ?? []).length > 0).map((n) => n.detail), [], '4.3 called iface.1.b1 stale');
+    assert.ok(told.every((n) => /:fast$/.test(n.key)));
+  });
+
+  it('one notice per product and plan: a new stale set replaces it, a plan that supersedes it closes it', async () => {
+    const { ports, engine } = await setup();
+    const state = (key: string) => listNotices(ports.ctx.memory, ports.ctx.memory.data, { includeAcknowledged: true }).find((n) => n.id === noticeAlertId({ mission: M, category: 'kept-product-not-rebound', key }))?.state;
+    const implNotices = () => ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'impl' && !n.key.endsWith(':fast'));
+    const noSeats = (t: Parameters<Script>[0], s: Parameters<Script>[1]) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(M, keeps)(t, s);
+    const reworkIface = async () => {
+      await requestEnvironmentReview(ports, 'iface');
+      await drive(engine, ports.scheduler, (t) => t.card.seat === 'reviewer' && t.task.startsWith('rev.m1.iface.') ? { handBack: reviewer(t.card as ReviewerCard, 'rework') } : null);
+      await drive(engine, ports.scheduler, happyScript(M, keeps));
+    };
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await reworkIface();
+    await fastPlan(ports, 2, 'd1');
+    await drive(engine, ports.scheduler, noSeats);
+    const first = implNotices();
+    assert.equal(first.length, 1, JSON.stringify(first.map((n) => n.key)));
+    await engine.reconcile(M);
+    assert.equal(implNotices().length, 1, 'a further pass raises nothing new');
+    // iface moves again: impl's stale set changes, its notice is replaced
+    await reworkIface();
+    await engine.reconcile(M);
+    const second = implNotices();
+    assert.ok(second.length >= 2, JSON.stringify(second.map((n) => [n.key, n.detail])));
+    assert.deepEqual(second.filter((n) => state(n.key) !== 'acknowledged').map((n) => n.key), [second.at(-1)!.key], 'one open notice per product and plan');
+    assert.match(second.at(-1)!.trigger, /updated: it replaces the notice of the earlier set/);
+    assert.deepEqual((second.at(-1)!.detail as { missing: string[] }).missing, ['prod.con.m1.iface.3']);
+    // a later plan supersedes the plan it named: it closes, and the new plan has its own notice
+    await fastPlan(ports, 3, 'd2');
+    await drive(engine, ports.scheduler, noSeats);
+    const third = implNotices();
+    assert.equal(state(second.at(-1)!.key), 'acknowledged');
+    assert.equal(third.filter((n) => state(n.key) !== 'acknowledged').length, 1);
+    assert.ok(third.at(-1)!.key.includes((third.at(-1)!.detail as { dplan: string }).dplan));
+  });
+
+  it('compatibility: a notice 4.3 raised for the same set is the one 4.4 keeps; nothing is raised twice', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await requestEnvironmentReview(ports, 'iface');
+    await drive(engine, ports.scheduler, (t) => t.card.seat === 'reviewer' && t.task.startsWith('rev.m1.iface.') ? { handBack: reviewer(t.card as ReviewerCard, 'rework') } : null);
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await fastPlan(ports, 2, 'd1');
+    // the 4.3 shape: the notice alone, with no lifecycle event on the task's line
+    const key = `impl:prod.con.m1.impl.1:dplan.m1.2.1:prerequisites:${shortHash({ stale: ['prod.con.m1.iface.1'], missing: ['prod.con.m1.iface.2'] })}`;
+    await ports.ledger.notify({ mission: M, category: 'kept-product-not-rebound', wi: null, key, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.2.1', stale: ['prod.con.m1.iface.1'], missing: ['prod.con.m1.iface.2'] } });
+    await drive(engine, ports.scheduler, (t, s) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(M, keeps)(t, s));
+    const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === 'impl');
+    assert.deepEqual(told.map((n) => [n.key, n.trigger]), [[key, 'raised by 4.3']]);
+    assert.deepEqual((await lineEvents<{ notice: string }>(ports, 'impl', 'kept-notice')).map((e) => e.body.notice), [key]);
+  });
+
+  it('compatibility (review p2-7): of several open 4.3 notices for one product and plan, the current set is kept and the others close', async () => {
+    const { ports, engine } = await setup();
+    const state = (key: string) => listNotices(ports.ctx.memory, ports.ctx.memory.data, { includeAcknowledged: true }).find((n) => n.id === noticeAlertId({ mission: M, category: 'kept-product-not-rebound', key }))?.state;
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await requestEnvironmentReview(ports, 'iface');
+    await drive(engine, ports.scheduler, (t) => t.card.seat === 'reviewer' && t.task.startsWith('rev.m1.iface.') ? { handBack: reviewer(t.card as ReviewerCard, 'rework') } : null);
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await fastPlan(ports, 2, 'd1');
+    // 4.3 raised one notice per stale set as the set moved: an earlier set and the current one
+    const legacy = (stale: string[], missing: string[]) => ({ key: `impl:prod.con.m1.impl.1:dplan.m1.2.1:prerequisites:${shortHash({ stale, missing })}`, detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.2.1', stale, missing } });
+    const earlier = legacy(['prod.con.m1.iface.1'], []);
+    const current = legacy(['prod.con.m1.iface.1'], ['prod.con.m1.iface.2']);
+    for (const n of [earlier, current]) await ports.ledger.notify({ mission: M, category: 'kept-product-not-rebound', wi: null, key: n.key, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: n.detail });
+    const noSeats = (t: Parameters<Script>[0], s: Parameters<Script>[1]) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(M, keeps)(t, s);
+    await drive(engine, ports.scheduler, noSeats);
+    assert.equal(state(earlier.key), 'acknowledged', 'the earlier set stayed open');
+    assert.notEqual(state(current.key), 'acknowledged');
+    // a later plan supersedes the one they named: the kept one closes too
+    await fastPlan(ports, 3, 'd2');
+    await drive(engine, ports.scheduler, noSeats);
+    assert.equal(state(current.key), 'acknowledged');
+  });
+
+  it('compatibility (review r2, p2-7): on a mission closed since, an open 4.3 notice of a superseded plan closes', async () => {
+    const { ports, engine } = await setup();
+    const state = (key: string) => listNotices(ports.ctx.memory, ports.ctx.memory.data, { includeAcknowledged: true }).find((n) => n.id === noticeAlertId({ mission: M, category: 'kept-product-not-rebound', key }))?.state;
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    await fastPlan(ports, 2, 'd1');
+    await drive(engine, ports.scheduler, (t, s) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(M, keeps)(t, s));
+    // 4.3 raised a notice about the first plan while it was in effect (its own form: 4.3 raised nothing born resolved), left it open, and the mission was closed
+    const key = 'impl:prod.con.m1.impl.1:dplan.m1.1.1:fast';
+    ports.ctx.memory.write({}, (tx) => {
+      raiseAlert(tx, { alert: noticeAlertId({ mission: M, category: 'kept-product-not-rebound', key }) as AlertId, category: 'kept-product-not-rebound', informational: true, body: tx.data.put(canonicalJson({ mission: M, category: 'kept-product-not-rebound', wi: null, key, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.1.1' }, askUser: false })) as ContentHash });
+      setMission(tx, M, 'closed');
+    });
+    assert.equal(state(key), 'undelivered');
+    await engine.reconcile(M);
+    assert.equal(state(key), 'acknowledged', 'the closed mission’s pass returned before adoption and the sweep');
+  });
+
+  it('compatibility (review r2-1): 1,001 open 4.3 notices are adopted in bounded batches; the pass reaches its tasks', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, happyScript(M, keeps));
+    // 4.3 left 1,001 notices open for one product (one per stale set it saw)
+    for (let from = 0; from < 1001; from += 250) {
+      ports.ctx.memory.write({ op: `test:legacy-notices:${from}`, payload: from }, (tx) => {
+        for (let i = from; i < Math.min(1001, from + 250); i++) raiseNotice(tx, { mission: M, category: 'kept-product-not-rebound', wi: null, key: `impl:prod.con.m1.impl.1:dplan.m1.1.1:prerequisites:${i}`, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.1.1', stale: [`prod.old.${i}`], missing: [] } });
+      });
+    }
+    await engine.reconcile(M);
+    assert.deepEqual(ports.ledger.notices.filter((n) => n.category.startsWith('flow-')).map((n) => n.trigger), [], 'the pass failed before its first task');
+    assert.equal((await lineEvents(ports, 'impl', 'kept-notice')).length, 1001);
+    const head = ports.ledger.head;
+    await engine.reconcile(M);
+    assert.equal(ports.ledger.head, head, 'once tracked, nothing is written again');
+  });
+
+  it('long mission and task ids keep the lifecycle event\'s key within the ledger\'s limit (review p2-4)', async () => {
+    const LM = `m${'x'.repeat(31)}` as MissionId;
+    const LT = `t${'y'.repeat(59)}`;
+    const ports = memoryPorts();
+    world = null;
+    say(ports, SEED_TEXT);
+    await seedMission(ports, LM);
+    await submitPmBatch(ports, { mission: LM, plan: pmPlan(LM), userWords: ['W-1'], changedItems: ['g1', 's1', 'a1'] });
+    const engine = new FlowEngine(ports);
+    const plan = (): DetailedPlanDoc => {
+      const p = detailedPlan(LM);
+      return { ...p, tasks: p.tasks.map((t) => ({ ...t, id: t.id === 'impl' ? LT : t.id, dependsOn: t.dependsOn.map((d) => (d === 'impl' ? LT : d)) })) };
+    };
+    await drive(engine, ports.scheduler, happyScript(LM, plan));
+    const w = say(ports, LATER);
+    await recordItem(ports, { mission: LM, item: 'd1', type: 'decision', text: 'The parser is read-only once it has parsed a file', source: { kind: 'words', words: w, quote: 'keep the parser read-only' } });
+    await submitPmBatch(ports, { mission: LM, plan: pmPlan(LM, { elements: [{ ...pmPlan(LM).elements[0]!, text: 'A CSV parser library, read-only once it has parsed a file', items: ['g1', 'd1'] }, pmPlan(LM).elements[1]!] }), userWords: [w], changedItems: ['d1'], mode: 'fast' });
+    await drive(engine, ports.scheduler, (t, s) => ['constructor', 'reviewer', 'secretary'].includes(t.card.seat) ? null : happyScript(LM, plan)(t, s));
+    assert.deepEqual(ports.ledger.notices.filter((n) => n.category.startsWith('flow-')).map((n) => n.trigger), [], 'the pass failed at the task');
+    const told = ports.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task: string }).task === LT);
+    assert.ok(told.length === 1 && told[0]!.key.length > 200, JSON.stringify(told.map((n) => n.key.length)));
+    const events = await ports.ledger.events<{ notice: string }>({ mission: LM, line: `task:${LT}`, event: 'kept-notice' });
+    assert.deepEqual(events.map((e) => e.body.notice), [told[0]!.key]);
+    assert.ok(events.every((e) => e.key.length <= 200));
+  });
 });

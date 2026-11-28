@@ -102,7 +102,12 @@ test('resident PM commands defer reconciliation; reads are pure apart from their
     for (const args of [['read','status','--no-mark'], ['read','blocked'], ['read','secretary']]) await done43(p, args);
     assert.deepEqual(operational(), count);
     const sec = secretary43(p, id);
-    try {const r = await secWait(sec, {since: before, timeout: 0}); assert.equal(r.timedOut, false);} finally {sec.memory.close();}
+    try {
+      // 4.4 (F8): recorded words alone call for no Secretary pass (4.3 woke on any write); a PM note does
+      assert.equal((await secWait(sec, {since: before, timeout: 0})).timedOut, true);
+      await done43(p, ['pm','note','start on the user words']);
+      assert.equal((await secWait(sec, {since: before, timeout: 0})).timedOut, false);
+    } finally {sec.memory.close();}
   } finally {p.cleanup();}
 });
 

@@ -151,6 +151,8 @@ export interface FlowLedgerPort {
   loopAttempt(req: { readonly op: string; readonly lineage: string; readonly loop: LoopKind; readonly signature: string; readonly failureClass?: string | null }): Promise<LoopStatus>;
   /** A notice to the PM (3.9, 3.11). */
   notify(n: FlowNotice): Promise<void>;
+  /** 4.4 (F14): the notices of a category raised for a mission and not acknowledged, with their keys and details. Absent: none are read. */
+  openNotices?(q: { readonly mission: MissionId; readonly category: string }): Promise<ReadonlyArray<{ readonly key: string; readonly detail: unknown }>>;
   /** Missions that have flow events (the engine reconciles each). */
   missions(): Promise<readonly MissionId[]>;
   /** Whether the mission is closed (4.1 §6.7: its production steps are held; post-close work goes on). Absent: never closed. */
