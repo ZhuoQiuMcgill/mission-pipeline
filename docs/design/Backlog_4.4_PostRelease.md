@@ -76,6 +76,16 @@ engine README's known limitations.
   waiver for one plan, that plan runs its ordinary reviews: the safe side. The reads say "kept, but the
   planner does not apply it". Whether a withdrawal of scope alone should leave a waiver for one plan
   applied is a later decision.
+- A plan-review waiver granted after the planner chose the waiver for a plan, and before that plan took
+  effect, is shown by the reads as the waiver the plan took effect under. The plan's own record of what
+  it took effect on is right; only the reads name the later grant. Rare: two waivers of one scope
+  within one pass.
+- `mp pm say` with a supersession, interrupted after its write and retried after other words were
+  recorded, records its tag again as a new message. What to do: read `mp read words` before retrying
+  a recording, and re-tag on the user's words if a duplicate came of it.
+- A requirement item that is revised into an authorization keeps, by its id, the "kept" mark an earlier
+  supersession gave the item, and the next supersession does not ask about it by name. What to do:
+  withdraw the authorization by `--withdraw-items` when its words change.
 
 ## The loop and housekeeping (`src/process/secretary.ts`, `src/process/actions.ts`, `src/evaluator/renew.ts`)
 
@@ -97,6 +107,16 @@ engine README's known limitations.
 - Sizes of the reads on a long mission (a copy of a three-week mission written by 4.3): `mp read tree`
   printed 1.6 MB in 6,117 lines, `mp read notes` (with or without `--all`) 132 KB. Both are read on
   the user's request only; what to do: read one subject (`mp read show`, `mp read why`) instead.
+- A pass lists the kept refs of the repository once for each open mission that holds products, not
+  once in all: with several such missions a pass makes several listings. Correct, only slower.
+- The flow's memo of accepted starts (4.3 code) lives as long as its process and is not dropped when
+  `mp pm continue-from` recovers the event chain; the closures 4.4 keeps are keyed by the chain too. A
+  process alive across a recovery (a `mp sec wait` already waiting) could check a start against the
+  history cut away. What to do: end a waiting `mp sec wait` after a recovery and run `mp sec next`.
+- A `mp sec next --op <id>` that 4.3 recorded and did not print, whose stored text was cut at the
+  receipt's limit, replayed in text mode under 4.4 in the same Secretary generation moves the cursor
+  past a PM reply that only the stored JSON holds: the reply then shows as a count. `mp sec next --all`
+  prints it.
 
 ## Repairs, new requirements and the cap (`src/flow/execution.ts`, `src/flow/repair.ts`, `src/cli/workReads.ts`)
 
@@ -114,6 +134,26 @@ engine README's known limitations.
   items ends when the user withdraws every item before its amendment is applied.
 - `mp read repairs` prints the bare state `architect` for a repair whose Architect step is queued or
   in work, and `waiting` for one not yet queued.
+- A task dropped by a plan and added again later with an identical card can be attributed by the next
+  plan to the earliest repair that added it. The gate of a newer repair's reopen of its dependency is
+  then passed over, and the task can start on the product that reopen replaces. The proof labels show
+  it afterwards: the task's prerequisite reads as no longer the accepted one.
+- A task added by one new requirement, reopened by a second and changed by a third, then carried into a
+  new detailed plan: when the first filing's item is withdrawn while the task is under construction, its
+  product can pass with no "basis withdrawn" escalation, because the item it took on the reopen is not
+  carried through the changed card and the new plan. What a user sees: `mp read items` shows the item
+  withdrawn and the task under it accepted. What to do: stop the task when the user withdraws a
+  requirement, as for any work.
+- When a later change restores the card a task had before a new requirement's filing changed it, the
+  task's id is still in the plan, so repeating the same `mp pm extend` returns the old filing although
+  none of its work is left. What to do: file with new words of the user.
+- Right after `mp pm extend` on a large memory, every label reads "(recomputing)" until the next pass
+  (about 11 s on a mission of three weeks), then returns unchanged. Ready and held steps do not change.
+- At an acceptance with risk, a reason whose text names an open item the task already carries can be
+  taken for that item carried, and no new item is written, although its text differs. The decision's
+  receipt keeps every reason; `mp read show decision` shows them.
+- `mp read items` shows a delivered output's current label: when the label changes after a successful
+  delivery, the row no longer shows the label at delivery. The close shows both.
 
 ## Questions, Architect answers and their bounds (`src/flow/execution.ts`, `src/flow/architectAsk.ts`, `src/process/pm.ts`)
 
@@ -131,6 +171,22 @@ engine README's known limitations.
 ## Holds (`src/process/holds.ts`)
 
 - A hold window that repeats daily is not in 4.4: such a hold is placed by hand each day (G6).
+- With a live Secretary, the PM's `mp pm hold add --after <task>` does not validate a start recorded
+  without prerequisite pins, so placing the same hold again can return the id and end time of a hold
+  that is already over. What to do: read `mp read holds`; place the hold with new arguments if it is
+  over.
+
+## Going back to 4.3
+
+- Going back is restoring the copy of `.mission-pipeline/` taken before the first 4.4 command (the
+  CHANGELOG and both handbooks say so); a 4.3 engine run on a memory 4.4 has written to misreads it.
+  Beyond the limits the design names (a held step dispatched, an addressed instruction printed by its
+  paths), it would apply a late Architect hand-back of a new requirement's filing the user withdrew
+  (the filing has ended for 4.4 and is undecided for 4.3), record a Constructor's parked edits as a
+  product and queue their review (they are stored where 4.3 looks for a candidate), and mark a PM's
+  question to the Architect applied (4.3 does not know the option). A 4.3 engine refuses only a
+  `config.json` that carries 4.4's keys. Candidate: a mark in the memory by which a 4.3 engine refuses
+  a memory 4.4 has written to.
 
 ## Not in 4.4
 
@@ -147,6 +203,9 @@ engine README's known limitations.
   `mp pm stop`) ends in `OP_CONFLICT`, under 4.3 as under 4.4; `mp pm stop-release` runs again under
   both. The other 4.3 operations the verification retried under 4.4 replayed their receipts. What to
   do: the first run is on the record; read what it wrote before running the command again.
+- An acceptance's write is not guarded against a concurrent change of attempt, as in 4.3: a pass that
+  read a passing review of attempt k can record its acceptance after another process started attempt
+  k+1. The reads credit a repair only with the attempt that carried it, so they do not misreport.
 
 ## Defects of 4.3 found and not fixed
 

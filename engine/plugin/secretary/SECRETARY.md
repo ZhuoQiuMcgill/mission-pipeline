@@ -294,6 +294,7 @@ Never delete under `.mission-pipeline/` by hand.
 
 ## Upgrading to 4.4
 
+Before the first 4.4 command on a mission in progress, copy `.mission-pipeline/` (quiesced, as under "Copying the folder"); to go back to 4.3, restore that copy: never run a 4.3 engine on a memory 4.4 has written to.
 Run `mp docs update` to refresh roles, both handbooks and WI pages; the PM reads its new core. A 4.3 memory opens with no migration.
 The first `mp sec next` of a generation prints everything; later passes show what changed.
 Holds and orders of work kept in notes or in your own log: place them as holds (`mp sec hold add`); the PM places those that rest on the user's words.

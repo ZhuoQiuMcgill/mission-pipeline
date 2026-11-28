@@ -52,7 +52,8 @@ mp init --pointer both  # adds one line to CLAUDE.md and AGENTS.md pointing the 
 Then open the project with an agent harness and tell it what you want.
 It reads `.mission-pipeline/pm/PM.md`, starts its PM session, and launches the resident Secretary with `mp pm secretary start`.
 After an engine upgrade, run `mp docs update`, read the new PM core, and start the Secretary.
-A 4.3 memory opens with no migration (read the CHANGELOG before going back to an older engine); without a live Secretary, the older loop names still work in 4.2 mode.
+A 4.3 memory opens with no migration; without a live Secretary, the older loop names still work in 4.2 mode.
+Copy `.mission-pipeline/` before the first 4.4 command on a mission in progress: to go back to 4.3, restore that copy, and never run a 4.3 engine on a memory 4.4 has written to.
 
 ## How a harness acts as the PM
 
