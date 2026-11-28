@@ -255,6 +255,28 @@ export function recordedGroup(fields: Readonly<Record<string, string>>, text: (h
   });
 }
 
+/**
+ * 4.4 (F10; review F2-3): the renewal group of a recorded run: its candidate and its command group together with
+ * the files its commands name (two runs of one command on one commit that named different files are two groups,
+ * and neither lends the other its list), else its own run.
+ */
+export function renewalGroupKey(candidate: string, rec: { readonly evidence: string; readonly fields: Readonly<Record<string, string>> }): string {
+  const f = rec.fields;
+  return canonicalJson([candidate, f['group'] === undefined ? ['run', f['run'] ?? rec.evidence] : ['group', f['group'], f[GROUP_FILES_FIELD] ?? null]]);
+}
+
+/**
+ * 4.4 (F10; review F2-3): the files a recorded run's own command named, from its own record's group (none: the
+ * record names no group, as 4.3's do, or its command named no file). A renewal compares each original run with
+ * what it named itself, never with another run's declarations.
+ */
+export function ownDeclaredFiles(rec: { readonly fields: Readonly<Record<string, string>> }, command: string, cwd: string, text: (hash: string) => string): readonly string[] {
+  const group = recordedGroup(rec.fields, text);
+  if (!Array.isArray(group)) return [];
+  const own = group.find((cmd) => cmd?.command === command && (cmd.cwd ?? '.') === cwd && Array.isArray(cmd.artifacts) && cmd.artifacts.length > 0);
+  return own === undefined ? [] : [...own.artifacts!];
+}
+
 /** The working directory a recorded run ran in ("." when it recorded none). */
 export function runCwd(fields: Readonly<Record<string, string>>): string {
   return Object.hasOwn(fields, CWD_FIELD) ? fields[CWD_FIELD]! : '.';

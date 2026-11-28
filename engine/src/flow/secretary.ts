@@ -23,7 +23,7 @@ import type { BaseRecord, JudgmentRecord, LoopKind } from '../common/records.ts'
 import { validateRecord } from '../common/validate.ts';
 import type { CardBinding } from '../seat/cards/common.ts';
 import type { DecisionOption, EscalationSource, SecretaryCard, SecretaryResult } from '../seat/cards/secretary.ts';
-import { cardBase, commit, currentVersions, basisIndex, ev, eventOf, eventsOf, flowCtx, judgmentRecordOf, missionClosed, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
+import { cardBase, commit, currentVersions, basisIndex, ev, eventOf, eventsOf, failureInForce, flowCtx, judgmentRecordOf, missionClosed, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { DetailedPlanDoc, PLAN_LINE, SECRETARY_LINE, amendedPlan, latestEffectiveOf, type AmendmentEntry, type StoredDetailedPlan } from './plandoc.ts';
 import type { AppendGuard, FlowEvent, FlowEventInput, FlowPorts, FlowSchedulerPort } from './ports.ts';
 import { currentItems, currentConstraints } from './requirements.ts';
@@ -311,7 +311,7 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
   let position: SecretaryCard['position'] = null;
   if (e.position) {
     const neg = await judgmentRecordOf(ctx, e.position.revokes);
-    if (neg !== null) position = { target: e.position.target, review: e.position.review, revokes: e.position.revokes, binding: rulingBinding(neg, rulingJudgmentId(e.id, 'secretary')) };
+    if (neg !== null) position = { target: e.position.target, review: e.position.review, revokes: e.position.revokes, binding: rulingBinding(neg, rulingJudgmentId(e.id, 'secretary'), (await failureInForce(ctx, e.position.target, e.position.review)) ?? neg.judgment) };
   }
   return {
     ...cardBase(ctx, e.task, {
@@ -327,14 +327,14 @@ async function secretaryCard(ctx: FlowCtx, e: EscalationBody): Promise<Secretary
 }
 
 /** A ruling's binding: the same contract inputs as the negation it overrules. */
-function rulingBinding(neg: JudgmentRecord, judgment: string): CardBinding {
+function rulingBinding(neg: JudgmentRecord, judgment: string, revokes: string): CardBinding {
   return {
     judgment,
     bases: neg.bases,
     constraints: neg.constraints,
     reliesOn: neg.reliesOn,
     evidence: neg.evidence,
-    revokes: neg.judgment,
+    revokes,
     extends: null,
     evidenceUse: { fields: [...neg.evidenceUse.fields], statisticalOrExternal: neg.evidenceUse.statisticalOrExternal },
     superseded: [],
@@ -698,7 +698,10 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
       // 4.4 (G5): a task's acceptance with risk keeps the Reviewer's answers on the accepted product, so the fix
       // tracker reads them (4.3 carried an empty list: every issue read "not fixed")
       const keep = what['option'] === 'accept-risk' && esc.subject.startsWith('task:');
-      records.push(deciderJudgment({ escalation: esc.id, by, target: esc.position.target, review: esc.position.review, inputs: neg, revokes: neg.judgment, ...(keep ? { issues: neg.issues } : {}) }));
+      // 4.4 (F10; review F4-2): the ruling adopts this review's evidence and item answers and revokes the failure in
+      // force on the position, which an undecided review between them leaves standing (evaluator positionState)
+      const revokes = (await failureInForce(ctx, esc.position.target, esc.position.review)) ?? neg.judgment;
+      records.push(deciderJudgment({ escalation: esc.id, by, target: esc.position.target, review: esc.position.review, inputs: neg, revokes, ...(keep ? { issues: neg.issues } : {}) }));
       ruling = jid;
     }
   }

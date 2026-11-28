@@ -103,7 +103,7 @@ import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, raiseNotice, taskStatus, type TaskSpecDoc } from './ports.ts';
-import { recordedGroup, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { ownDeclaredFiles, recordedGroup, renewalGroupKey, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { keptArtifactsOf } from './keptFiles.ts';
 import { fullRunLine, heldByClose } from './close.ts';
 import { authorizationInForce, fullRunStatus } from './fullRuns.ts';
@@ -961,7 +961,8 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
       skipped.push({ evidence: cand.evidence, why: 'the run recorded no candidate or command: a Reviewer judges again' });
       continue;
     }
-    const key = canonicalJson([cand.candidate, rec.fields['group'] === undefined ? ['run', rec.fields['run'] ?? rec.evidence] : ['group', rec.fields['group']]]);
+    // review F2-3: the files the group's commands name are part of it (a run never lends another its declarations)
+    const key = renewalGroupKey(cand.candidate, rec);
     const group = groups.get(key) ?? [];
     group.push(cand);
     groups.set(key, group);
@@ -997,11 +998,12 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
       // each file the original run's command named: the same sha256, written by the rerun's command (an origin not
       // established or unknown does not show it), or absent both times. An original file with no recorded hash
       // (too large to keep), or an original run whose kept files are not on the record, cannot be shown: a new review
+      // (review F2-3: the files that original run's own record names, not the first original's)
       const lostFiles = (tx: WriteTx, cand: (typeof originals)[number], x: RecordedRun): string[] => {
-        const declared = source.find((cmd) => cmd.command === cand.command && (cmd.cwd ?? '.') === cand.cwd && (cmd.artifacts ?? []).length > 0);
-        if (declared === undefined) return [];
+        const declared = ownDeclaredFiles(byEvidence.get(cand.evidence)!, cand.command!, cand.cwd, (h) => ctx.memory.data.text(h));
+        if (declared.length === 0) return [];
         const was = keptArtifactsOf(tx, tx.data, cand.evidence);
-        if (was === null) return [...declared.artifacts!];
+        if (was === null) return [...declared];
         const now = x.artifacts ?? keptArtifactsOf(tx, tx.data, x.evidence) ?? [];
         const absent = (a: { readonly why?: string | undefined } | undefined): boolean => a?.why === 'the run did not write it';
         return was.filter((a) => {

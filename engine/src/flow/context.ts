@@ -98,6 +98,19 @@ export async function judgmentRecordOf(ctx: FlowCtx, judgment: string): Promise<
   return ctx.ports.ledger.judgment(judgment);
 }
 
+/**
+ * 4.4 (F10; review F2-2, F4-2): the failing judgment in force on a review position, by the evaluator's own fold
+ * (a negation stands until a pass names it in `revokes`, whatever undecided judgments came after it). Whatever
+ * closes the position in favour of its target (a Reviewer's pass, a decider's ruling that accepts) names it. An
+ * Auditor's negation is never closed this way. Null: no failure is in force there.
+ */
+export async function failureInForce(ctx: FlowCtx, target: string, review: string): Promise<string | null> {
+  const pos = (await ctx.ports.evaluator.deciding([target])).views[target]?.positions.find((p) => p.review === review);
+  if (pos === undefined || pos.state !== 'fail' || pos.by === null) return null;
+  const j = await judgmentRecordOf(ctx, pos.by);
+  return j !== null && j.executor !== 'auditor' ? pos.by : null;
+}
+
 /** Basis lines: their latest version and whether they are withdrawn (5.2: valid = latest and not withdrawn). */
 export interface BasisIndex {
   readonly current: ReadonlyMap<string, string>;
