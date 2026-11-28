@@ -4,7 +4,8 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, seatRerunDetached, seatRerunWorker, seatWait, WAIT_DEFAULT_SECONDS, type FullRunMarker, type HandBackAnswer, type RerunResult, type WorkerMessage } from '../../process/index.ts';
+import { dispatchOver, parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, seatRerunDetached, seatRerunWorker, seatWait, WAIT_DEFAULT_SECONDS, type FullRunMarker, type HandBackAnswer, type RerunResult, type WorkerMessage } from '../../process/index.ts';
+import { artifactLines } from '../../seat/card.ts';
 import { LedgerError } from '../../memory/index.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
@@ -99,7 +100,7 @@ const checkout: Command = {
 /** A rerun's result as the seat reads it, foreground or from `wait` (4.1.3: with the last lines of its output, passing or failing). */
 function rerunLines(r: RerunResult): string[] {
   return [
-    `Run ${r.run}: ${r.passed ? 'passed' : 'failed'} — ${r.summary}${r.leaf !== null ? `\nSummary: .mission-pipeline/${r.leaf}` : ''}`,
+    `Run ${r.run}: ${r.passed ? 'passed' : 'failed'} — ${r.summary}${r.leaf !== null ? `\nSummary: .mission-pipeline/${r.leaf}` : ''}${artifactLines(r.artifacts ?? [])}`,
     ...(r.tail !== '' ? ['Last lines of its output:', r.tail, '(end of the output)'] : []),
     `Cite it as your card says: evidence:${r.run} (a judgment) or run:${r.run} (a blind experiment).`,
   ];
@@ -279,7 +280,7 @@ function stdinFiles(c: RunContext, dispatch: string, args: ParsedArgs, names: { 
 const handback: Command = {
   group: 'seat',
   name: ['handback'],
-  summary: 'hand back once: your report (Markdown) with your structured fields (JSON) on stdin, or as two files in .mission-pipeline/tmp/<dispatch>/ (a Constructor that must stop to ask: "blocked": true with its questions)',
+  summary: 'hand back once: your report (Markdown) with your structured fields (JSON) on stdin, or as two files in .mission-pipeline/tmp/<dispatch>/ (a Constructor that must stop to ask: "blocked": true with its questions; files outside the commit it hands in: "files", kept by mp); the folder is removed after the result is printed',
   usage: "mp seat <dispatch> handback --stdin [--result-json '<json>']   (the report on stdin; the fields as its LAST ```json block, or --result-json)\n       mp seat <dispatch> handback --report <report.md> --result <result.json>   [--filled-by \"<harness>/<model>\"]",
   flags: { report: 'string', result: 'string', stdin: 'boolean', 'result-json': 'string', 'filled-by': 'string' },
   decides: true,
@@ -295,8 +296,14 @@ const handback: Command = {
       result = files.json;
     } else if (flagStr(args, 'result-json') !== null) throw usage('--result-json goes with --stdin');
     if (report === null || result === null) throw usage("--stdin (your report on stdin, the fields as its last ```json block), or --report <file.md> --result <file.json>");
-    const a = await seatHandback(P(c).ctx, d, { report: fileArg(c, report), result: fileArg(c, result), ...(f !== null ? { filler: parseFiller(f) } : {}) });
+    // 4.4 (F10, issue 65): the hand-back folder stays until the result is printed (afterOutput removes it)
+    const a = await seatHandback(P(c).ctx, d, { report: fileArg(c, report), result: fileArg(c, result), keepScratch: true, ...(f !== null ? { filler: parseFiller(f) } : {}) });
     return answerResult(a, P(c));
+  },
+  afterOutput(c, r) {
+    const a = r.json as HandBackAnswer;
+    // review p9-5: a cited file of the folder that could not be copied keeps it (the sweep may remove it later)
+    if (a.kind === 'recorded' && c.project !== null) dispatchOver(c.project.ctx, a.dispatch, undefined, { keepTmp: a.keepScratch === true });
   },
 };
 

@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { ConstructorCardSchema, ReviewerCardSchema, renderCard, type ConstructorCard, type ReviewerCard } from '../card.ts';
-import { ConstructorResultShape, ReviewerResultShape, resultProblems, type ConstructorResult, type ReviewerResult, type SnapshotFiles } from '../results.ts';
+import { ConstructorResultShape, ReviewerResultShape, constructorDataTexts, resultProblems, reviewerDataTexts, type ConstructorResult, type ReviewerResult, type SnapshotFiles } from '../results.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
 export * from './registry.ts';
@@ -26,8 +26,10 @@ const constructorEntry: SeatCardEntry<ConstructorCard, ConstructorResult> = {
   toolProfile: 'write',
   exportsProduct: true,
   render: (c) => renderCard(c),
-  problems: (c, r, ctx) => resultProblems(c, r, { snapshot: ctx.snapshot ?? NO_SNAPSHOT, runs: ctx.runs ?? [] }),
+  problems: (c, r, ctx) => resultProblems(c, r, { snapshot: ctx.snapshot ?? NO_SNAPSHOT, runs: ctx.runs ?? [], ...(ctx.data !== undefined ? { data: ctx.data } : {}) }),
   records: () => [],
+  // 4.4 (F10, E-4): the files outside the commit the hand-back names
+  dataTexts: (r) => constructorDataTexts(r),
 };
 
 const reviewerEntry: SeatCardEntry<ReviewerCard, ReviewerResult> = {
@@ -38,9 +40,11 @@ const reviewerEntry: SeatCardEntry<ReviewerCard, ReviewerResult> = {
   resultSchema: z.object(ReviewerResultShape) as unknown as z.ZodType<ReviewerResult>,
   toolProfile: 'read-rerun',
   render: (c) => renderCard(c),
-  problems: (c, r, ctx) => resultProblems(c, r, { snapshot: ctx.snapshot ?? NO_SNAPSHOT, runs: ctx.runs ?? [] }),
+  problems: (c, r, ctx) => resultProblems(c, r, { snapshot: ctx.snapshot ?? NO_SNAPSHOT, runs: ctx.runs ?? [], ...(ctx.data !== undefined ? { data: ctx.data } : {}) }),
   // `mp` builds the Reviewer's judgment and findings itself (results.ts judgmentRecord, findingRecords)
   records: () => [],
+  // 4.4 (F10, E-4): the data outside the commit its judgments cite as evidence
+  dataTexts: (r) => reviewerDataTexts(r),
 };
 
 registerSeatCard(constructorEntry);

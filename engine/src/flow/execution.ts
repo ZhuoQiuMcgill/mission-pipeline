@@ -43,6 +43,7 @@ import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVers
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
+import { ITEM_BATCH, acceptanceReasons, cardItemNames, carriedBy, deferredItemBody, issueResolver, itemIssue, itemIssueLine, personItemBodies, riskItemBodies, riskItemsOf, takenItems, unverifiableLine, unverifiableOf, type IssueNote, type ItemAnswer, type RiskItem, type RiskItemBody } from './riskItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -66,7 +67,7 @@ import {
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
 import { attach, constructorClaims, pausedHandBack, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
-import { DetailedTask, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
@@ -190,7 +191,26 @@ interface ReviewBody {
   readonly reopen?: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly evidence?: string }>;
   /** 4.4 (G3): the Reviewer's answer to each instruction addressed to this work (it never changes the verdict). Absent: none on the card. */
   readonly instructions?: ReadonlyArray<{ readonly instruction: string; readonly version?: string; readonly response: 'followed' | 'not-followed' | 'unclear'; readonly reason: string }>;
+  /** 4.4 (G5): the Reviewer's answers to the open items its card listed (absent: none listed, every review before 4.4). */
+  readonly items?: readonly ItemAnswer[];
+  /** 4.4 (G5): the task's deferred issues this review answered fixed (absent: none). */
+  readonly fixed?: readonly string[];
+  /** 4.4 (F10): the standards the Reviewer could not verify from what it can see, with what would be needed (absent: none, every 4.3 review). */
+  readonly unverifiable?: ReadonlyArray<{ readonly standard: string; readonly reason: string; readonly needed: string }>;
 }
+
+/**
+ * 4.4 (F10): a review whose only open standards are ones the Reviewer could not verify, with nothing else
+ * open (no standard not met or unclear, no finding, no issue not fixed, no reopen): it goes to a decider,
+ * not back to the Constructor.
+ */
+export function onlyUnverifiable(r: Pick<ReviewBody, 'verdict' | 'issues' | 'unverifiable' | 'reopen'>): boolean {
+  const n = r.unverifiable?.length ?? 0;
+  return r.verdict !== 'pass' && n > 0 && r.issues.length === n && (r.reopen ?? []).length === 0;
+}
+
+/** 4.4 (F10): the issue line of a standard the Reviewer could not verify, in the form a standard not met takes ("[S1] not met: why"); one function with the open items' reading of it (flow/riskItems.ts). */
+export { unverifiableLine };
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
 export const taskLineage = (mission: string, task: string): string => safeId(`task.${mission}.${idPart(task)}`);
@@ -317,6 +337,22 @@ export function riskAcceptance(events: Line['events']): RiskAcceptance | null {
   if (acc === null || acc.decision === undefined) return null;
   if (currentAcceptance(line, line.k)?.judgment !== acc.judgment) return null;
   return { k: line.k, product: acc.product, escalation: acc.decision.escalation, by: acc.decision.by, words: acc.decision.words ?? null, risks: acc.risks ?? [] };
+}
+
+/**
+ * 4.4 (G5): the escalation whose acceptance with risk the task's current acceptance is (the attempt's accepting
+ * record a ruling with risk: accepted, or a re-bound version accepted with its risk), or null (a Reviewer's pass
+ * accepted it, or judged it again since, or it is not accepted). Pure, from the task line's events.
+ */
+export function currentRiskEscalation(events: Line['events']): string | null {
+  const line = new Line(events);
+  if (line.abandoned) return null;
+  const cur = currentAcceptance(line, line.k);
+  if (cur === null) return null;
+  const acc = line.one<{ judgment: string; decision?: { escalation: string; option?: string } }>('accepted', String(line.k));
+  const rb = line.all<ReboundBody>('rebound').filter((r) => r.body.k === line.k && bySeat(r.body)).at(-1)?.body;
+  for (const x of [rb, acc]) if (x?.decision?.option === 'accept-risk' && x.judgment === cur.judgment) return x.decision.escalation;
+  return null;
 }
 
 /** The production start resolver, shared by execution and the closing snapshot. */
@@ -613,7 +649,9 @@ async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTa
     }
     review = await takeReview(ctx, t, r.k, r.rev, view);
     if (review === null) return 'pending';
-    switch (review.verdict) {
+    // 4.4 (F10): what the Reviewer could not verify, with nothing else open, goes to a decider, not back to the Constructor
+    const unverified = onlyUnverifiable(review);
+    switch (unverified ? 'needs-decision' : review.verdict) {
       case 'pass':
         await commit(ctx, `flow:reaccepted:${ctx.mission}:${r.rev}`, { events: [ev(ctx, lineName, 'reaccepted', `${r.k}:${r.n}`, { k: r.k, product: product.object, judgment: review.judgment })] });
         break;
@@ -629,9 +667,10 @@ async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTa
           source: 'reviewer-needs-decision',
           lineage,
           subject: `task:${t.id}`,
-          summary: `The Reviewer of task ${t.id} (attempt ${r.k}, re-review ${r.n} after an environment change) needs a decision: the standards are unclear or in conflict.`,
+          summary: `The Reviewer of task ${t.id} (attempt ${r.k}, re-review ${r.n} after an environment change) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
           reasons: [...review.issues],
-          options: ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
+          // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
+          options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
           items: t.requirementItems,
           facts: { task: t.id, attempt: r.k, product: product.object, issues: review.issues, rereview: r.n },
           handover: { from: r.rev, objects: [product.object] },
@@ -639,7 +678,9 @@ async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTa
         break;
     }
   }
-  return review.verdict;
+  // 4.4 (F10, review p9-3): the disposition taken, when recorded and when resumed: such a review waits for its
+  // decider's answer as a "needs decision" does (the hand-back keeps the verdict the Reviewer gave)
+  return onlyUnverifiable(review) ? 'needs-decision' : review.verdict;
 }
 
 /** 6.2: an accepted product whose basis was withdrawn → the Secretary judges whether to re-plan. */
@@ -675,6 +716,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const lineName = taskLine(t.id);
   const lineage = taskLineage(ctx.mission, t.id);
   let line = await readLine(ctx, t.id);
+  // 4.4 (G5): the open items of a large acceptance with risk that an interruption left out (written in batches)
+  await riskItemsLeft(ctx, t, line);
 
   // the task's card under this plan; a changed card (re-plan) restarts it at the next attempt
   const hash = taskCardHash(t);
@@ -905,6 +948,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     review = await takeReview(ctx, t, k, rev, view);
     if (review === null) return;
   }
+  // 4.4 (F10): what the Reviewer could not verify, with nothing else open, goes once to a decider, not back to the Constructor
+  if (onlyUnverifiable(review)) return reviewerUnverifiable(ctx, t, k, rev, review, product);
   switch (review.verdict) {
     case 'pass': {
       // 4.1.3: an integration is accepted only on the tree that is delivered (#41: its start holds its dependencies'
@@ -916,7 +961,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
         if (e === 'wait') return;
         if (e !== null) return rebuildOnAccepted(ctx, t, k, e);
       }
-      await commit(ctx, `flow:accepted:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'accepted', String(k), { k, product: product.object, judgment: review.judgment })] });
+      // 4.4 (F10): a standard a person checks starts as something to verify, in the write that accepts the task
+      await commit(ctx, `flow:accepted:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'accepted', String(k), { k, product: product.object, judgment: review.judgment }), ...await personItems(ctx, t, k)] });
       return;
     }
     case 'rework':
@@ -1076,6 +1122,39 @@ async function reviewerNeedsDecision(ctx: FlowCtx, t: DetailedTask, k: number, r
     ...(risk !== null ? { position: { target: risk.product, review: 'reviewer', revokes: risk.judgment } } : {}),
     items: t.requirementItems,
     facts: { task: t.id, attempt: k, product: product.object, issues: review.issues },
+    handover: { from: rev, objects: [product.object] },
+  });
+}
+
+/**
+ * 4.4 (F10): a review whose only open standards are ones the Reviewer could not verify from what it can
+ * see goes once to a decider (its escalation is keyed by the review): accept the verified product with
+ * those standards recorded as left open (accept-risk: each one is among the acceptance's risks, with what
+ * would be needed), send it back with instructions, or answer (what is missing, or where it is: the same
+ * candidate is reviewed again). It is not sent back to the Constructor by itself, and it spends no rework.
+ * The option list has the shape of a Reviewer's "needs decision".
+ */
+async function reviewerUnverifiable(ctx: FlowCtx, t: DetailedTask, k: number, rev: string, review: ReviewBody, product: ProductBody): Promise<void> {
+  const risk = await riskAcceptable(ctx, t, k);
+  // a hand-back whose program runs did not all pass is accepted with its risks by the PM or the user only
+  const runRisk = risk === null ? await failedRunsRisk(ctx, t, k) : null;
+  const offered = risk ?? runRisk;
+  const standards = (review.unverifiable ?? []).map((u) => u.standard);
+  const accept = offered !== null ? (['accept-risk'] as const) : [];
+  await raiseEscalation(ctx, {
+    id: `unv.${rev}`,
+    source: 'reviewer-needs-decision',
+    lineage: taskLineage(ctx.mission, t.id),
+    subject: `task:${t.id}`,
+    summary: `The Reviewer of task ${t.id} (attempt ${k}) could not verify ${standards.join(', ')} from what it can see, and nothing else is open: a decider settles it; it is not sent back to the Constructor by itself.`,
+    reasons: [...review.issues, ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
+    // review p9-8: `answer` (what is missing, or where it is: the same candidate is reviewed again) stays, as on every Reviewer's "needs decision";
+    // 4.4 (G1): not ask-architect: what could not be verified is a question of evidence, not of design
+    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'replan', ...accept, 'ask-user'] : ['answer', 'rework', 'replan', ...accept, 'ask-user'],
+    ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
+    ...(offered !== null ? { position: { target: offered.product, review: 'reviewer', revokes: offered.judgment } } : {}),
+    items: t.requirementItems,
+    facts: { task: t.id, attempt: k, product: product.object, issues: review.issues, unverifiable: review.unverifiable },
     handover: { from: rev, objects: [product.object] },
   });
 }
@@ -1571,12 +1650,15 @@ async function acceptRebindWithRisk(ctx: FlowCtx, t: DetailedTask, k: number, e:
   const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
   const body: ReboundBody = { k, n: rb.n, product: rb.product, judgment: ruling, how: 'review', decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks };
+  // 4.4 (G5): one open item per risk accepted, in the same write
+  const items = await acceptanceItems(ctx, t.id, k, e.id, e.reasons, risk.review);
   await commitCarrying(
     ctx,
     `flow:rebound-risk:${ctx.mission}:task:${idPart(t.id)}:${rebind}`,
-    [ev(ctx, taskLine(t.id), 'rebound', rebind, body)],
+    [ev(ctx, taskLine(t.id), 'rebound', rebind, body), ...items.first, ...await personItems(ctx, t, k)],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
+  await writeItemBatches(ctx, items.rest);
 }
 
 /**
@@ -1625,12 +1707,109 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // the decider's ruling, written by carryOut in this write (flow/secretary.ts deciderJudgment): the same id here
   const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  // 4.4 (G5): one open item per risk accepted, in the same write
+  const items = await acceptanceItems(ctx, t.id, k, e.id, e.reasons, acceptedReview(line, k, Infinity));
   await commitCarrying(
     ctx,
     `flow:accepted-risk:${ctx.mission}:task:${idPart(t.id)}:${k}`,
-    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks })],
+    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }), ...items.first, ...await personItems(ctx, t, k)],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
+  await writeItemBatches(ctx, items.rest);
+}
+
+/**
+ * 4.4 (G5): the open items an acceptance with risk leaves, one per distinct reason (flow/riskItems.ts): the first
+ * ITEM_BATCH go in the acceptance's own write (the same deterministic records on every run of it), the rest in
+ * writes of their own right after it (writeItemBatches; riskItemsLeft writes on a later pass what an interruption
+ * left out). Nothing else in the acceptance changes.
+ */
+async function acceptanceItems(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<{ readonly first: FlowEventInput[]; readonly rest: RiskItemBody[] }> {
+  const bodies = await itemBodiesOf(ctx, task, k, escalation, reasons, review);
+  return { first: bodies.slice(0, ITEM_BATCH).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)), rest: bodies.slice(ITEM_BATCH) };
+}
+
+/**
+ * The items of an acceptance with risk resting on `review` (a review of the task's line): one per reason, the issue
+ * each finding became, and (p10-1) no new item only for an item that review answered not fixed (it is carried).
+ * The writer and the later pass that completes its batches derive them alike; riskRecord reads them the same way.
+ */
+async function itemBodiesOf(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<RiskItemBody[]> {
+  const body = review === undefined ? undefined : (await eventOf<ReviewBody>(ctx, taskLine(task), 'review', review))?.body;
+  // 4.4 (F10): a standard that could not be verified, from the structured copy (the escalation's facts, the review's)
+  const facts = (await eventOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation', escalation))?.body.facts;
+  return riskItemBodies(task, k, escalation, reasons, await findingIssues(ctx, review), carriedBy(body), unverifiableOf(facts, body));
+}
+
+/**
+ * 4.4 (F10): the open items of the standards a person checks, for the write that accepts attempt k of the task (by
+ * a pass or by a ruling): one per accepted attempt and standard, those not recorded yet (a re-bind of the attempt writes
+ * none again). Nothing waits for them; they block nothing.
+ */
+async function personItems(ctx: FlowCtx, t: DetailedTask, k: number): Promise<FlowEventInput[]> {
+  const bodies = personItemBodies(t, k);
+  if (bodies.length === 0) return [];
+  const recorded = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  return bodies.filter((b) => !recorded.has(b.id)).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
+}
+
+/**
+ * 4.4 (G5, p10-5): the issue records the findings of a review's hand-back became ("finding: <text>" → its issue id),
+ * so an item of a finding names its issue and a taking task's answer reaches the fix tracker. Empty when the
+ * hand-back cannot be read (the item then names none).
+ */
+async function findingIssues(ctx: FlowCtx, review: string | undefined): Promise<ReadonlyMap<string, string>> {
+  if (review === undefined) return new Map();
+  const hb = (await ctx.ports.scheduler.status(review))?.handBack;
+  const findings = ((hb?.result ?? null) as ReviewerResult | null)?.findings ?? [];
+  const issues = (hb?.records ?? []).flatMap((r) => (r.kind === 'issue' ? [r.issue as string] : []));
+  if (findings.length !== issues.length) return new Map();
+  return new Map(findings.map((f, i) => [`finding: ${f}`, issues[i]!]));
+}
+
+/**
+ * 4.4 (G5, p10-5): how a card finds the issue each item it lists is about: the item's own record, else (a finding of
+ * an acceptance made before 4.4) the issue record of those words on the product accepted. The issue records are read
+ * only when a listed item needs them.
+ */
+async function cardIssues(ctx: FlowCtx, events: Parameters<typeof riskItemsOf>[0], names: readonly string[]): Promise<(i: RiskItem) => string | undefined> {
+  if (!riskItemsOf(events).some((i) => names.includes(i.id) && i.kind === 'finding' && itemIssue(i) === undefined)) return itemIssue;
+  const c = ctx.ports.ledger.content;
+  const notes: IssueNote[] = (await ctx.ports.ledger.records(['issue'])).map(({ record }) => {
+    const r = record as IssueRecord;
+    let text: string | null = null;
+    try { if (r.text !== undefined) text = (JSON.parse(c.get(r.text)) as { text?: string }).text ?? null; } catch { /* the words are not readable: not this finding's */ }
+    return { issue: r.issue as string, observedOn: c.getList(r.observedOn), text };
+  });
+  return issueResolver(events, notes);
+}
+
+/** The review an acceptance of attempt k rests on: the one it names as adopted, else the attempt's last review before it. */
+function acceptedReview(line: Line, k: number, before: number, adopted?: string): string | undefined {
+  return adopted ?? line.all<ReviewBody>('review').filter((r) => r.body.k === k && r.revision < before).at(-1)?.key;
+}
+
+/** 4.4 (G5): open items not recorded yet, in bounded writes (an append takes at most 1,000 records), each under the operation id of its own items. */
+async function writeItemBatches(ctx: FlowCtx, bodies: readonly RiskItemBody[], requires?: string): Promise<void> {
+  if (bodies.length === 0) return;
+  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  // an acceptance made under 4.3 wrote no first batch: nothing is written for it (its sentences are listed as not recorded)
+  if (requires !== undefined && !existing.has(requires)) return;
+  const missing = bodies.filter((b) => !existing.has(b.id));
+  for (let i = 0; i < missing.length; i += ITEM_BATCH) {
+    const batch = missing.slice(i, i + ITEM_BATCH);
+    await commit(ctx, `flow:risk-items:${ctx.mission}:${shortHash(batch.map((b) => b.id))}`, { events: batch.map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)) });
+  }
+}
+
+/** 4.4 (G5): the items past the first batch of each acceptance with risk on the task's line, written when an interruption left them out (only such an acceptance is read again). */
+async function riskItemsLeft(ctx: FlowCtx, t: DetailedTask, line: Line): Promise<void> {
+  for (const e of [...line.all<{ k: number; decision?: { escalation: string; option?: string }; risks?: string[]; review?: string }>('accepted'), ...line.all<ReboundBody & { review?: string }>('rebound')]) {
+    const d = e.body.decision;
+    if (d?.option !== 'accept-risk' || (e.body.risks ?? []).length <= ITEM_BATCH) continue;
+    const bodies = await itemBodiesOf(ctx, t.id, e.body.k, d.escalation, acceptanceReasons(e.body, d.escalation), acceptedReview(line, e.body.k, e.revision, e.body.review));
+    if (bodies.length > ITEM_BATCH) await writeItemBatches(ctx, bodies.slice(ITEM_BATCH), bodies[0]!.id);
+  }
 }
 
 /** The latest review reopen whose integration still waits at its undispatched rebuild. */
@@ -1690,15 +1869,23 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
     return;
   }
   const words = by === 'pm' ? (d.words ?? []).map((w) => w.id).join(',') : by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
-  const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  // 4.4 (G5, p10-1): the ruling accepts every reason of the escalation it decides (the dependency's reopen among them),
+  // as the other acceptances with risk quote theirs; one open item per risk, on the integration task that is accepted,
+  // in the same write. The acceptance names the review it adopts, whose attempt and answers its outcome reads.
+  const risks = e.reasons.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  const items = await acceptanceItems(ctx, integration, line.k, e.id, e.reasons, review.task);
   await commitCarrying(ctx, `flow:accepted-risk:${ctx.mission}:task:${idPart(integration)}:${line.k}`,
     [
       // Adopt the reviewed product at this attempt, preserving its actual source dispatch.
       // Renewal and kept-product rebinds then read the same body as any accepted attempt.
       ev(ctx, taskLine(integration), 'product', String(line.k), { ...product, k: line.k } satisfies ProductBody),
-      ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }),
+      ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks, review: review.task }),
+      ...items.first,
+      ...(task === undefined ? [] : await personItems(ctx, task, line.k)),
     ],
-    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);
+    // p10-1 (round 2): the decision's receipt names every reason it accepted, as the acceptance does
+    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })]);
+  await writeItemBatches(ctx, items.rest);
 }
 
 /**
@@ -2096,27 +2283,40 @@ async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string,
     await internalError(ctx, rev, `the accepted Reviewer hand-back of ${rev} has no judgment j.${rev}`);
     return null;
   }
+  // 4.4 (G5): an open item the task took and its Reviewer did not answer fixed goes back with the issues
+  const items: ItemAnswer[] = (r.item_responses ?? []).map((i) => ({ item: i.item, response: i.response, reason: i.reason }));
+  // 4.4 (F10): a standard the Reviewer could not verify, with what would be needed, in the form of a standard not met
+  const unverifiable = r.judgments.filter((j) => j.met === 'cannot-verify').map((j) => ({ standard: j.standard, reason: j.reason, needed: j.needed ?? '' }));
   const issues = [
-    ...r.judgments.filter((j) => j.met !== 'yes').map((j) => `[${j.standard}] ${j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}`),
+    ...r.judgments.filter((j) => j.met !== 'yes').map((j) => (j.met === 'cannot-verify' ? unverifiableLine({ standard: j.standard, reason: j.reason, needed: j.needed ?? '' }) : `[${j.standard}] ${j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}`)),
     ...r.findings.map((f) => `finding: ${f}`),
     ...r.issue_responses.filter((i) => i.response === 'not-fixed').map((i) => `issue ${i.issue} not fixed: ${i.reason}`),
+    ...items.filter((i) => i.response !== 'fixed').map(itemIssueLine),
   ];
   const deferred = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`);
   const reopen = (r.reopen ?? []).map((x) => ({ task: x.task, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) }));
   // 4.4 (G3, p6-5): each answer is of the version its claimed card showed, so a later text is never credited with it
   const answers = await instructionAnswers(ctx, view.status.handBack?.dispatch, r.instruction_responses ?? []);
-  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}), ...(answers.length > 0 ? { instructions: answers } : {}) };
-  for (const answer of r.issue_responses.filter((i) => i.response === 'deferred')) {
+  // 4.4 (G5; the plan's F11 "Deferred findings"): a deferral is an open item of the task, one per issue, recorded with
+  // this review; its notice is raised once, when the item is new, not again at each re-review that defers it again
+  const recorded = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  const deferrals = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => ({ answer: i, body: deferredItemBody(t.id, k, rev, i.issue, `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`) }));
+  // the task's deferred issues this review answered fixed: they close those items once the attempt is accepted
+  const fixed = r.issue_responses.filter((i) => i.response === 'fixed' && recorded.has(deferredItemBody(t.id, k, rev, i.issue, '').id)).map((i) => i.issue);
+  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}), ...(answers.length > 0 ? { instructions: answers } : {}), ...(items.length > 0 ? { items } : {}), ...(fixed.length > 0 ? { fixed } : {}), ...(unverifiable.length > 0 ? { unverifiable } : {}) };
+  for (const { answer, body } of deferrals) {
+    if (recorded.has(body.id)) continue;
     await notify(ctx, {
       category: 'reviewer-issue-deferred',
       wi: null,
       key: `${rev}:${answer.issue}`,
       trigger: `task ${t.id}, version ${judgment.target}: issue ${answer.issue} deferred to ${answer.owner}: ${answer.reason}`,
-      defaultAction: 'the issue stays unfixed and is listed at close; a re-plan or the user routes the work',
+      defaultAction: `the issue stays unfixed and is listed at close, as open item ${body.id} (mp read open-items ${ctx.mission}); a re-plan or the user routes the work: a re-plan or a repair takes the item, or the user's words close it`,
       detail: { task: t.id, version: judgment.target, judgment: review.judgment, issue: answer.issue, owner: answer.owner, reason: answer.reason },
     });
   }
-  await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, taskLine(t.id), 'review', rev, review)] });
+  const fresh = deferrals.filter((x) => !recorded.has(x.body.id)).map((x) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.body.id, x.body));
+  await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, taskLine(t.id), 'review', rev, review), ...fresh] });
   return review;
 }
 
@@ -2469,9 +2669,11 @@ async function rebindReview(
     review = await takeReview(ctx, t, k, rev, view);
     if (review === null) return 'held';
   }
-  switch (review.verdict) {
+  // 4.4 (F10): what the Reviewer could not verify, with nothing else open, goes to a decider, not back to the Constructor
+  const unverified = onlyUnverifiable(review);
+  switch (unverified ? 'needs-decision' : review.verdict) {
     case 'pass':
-      await commit(ctx, `flow:rebound:${ctx.mission}:task:${idPart(t.id)}:${rb.key}`, { events: [ev(ctx, taskLine(t.id), 'rebound', rb.key, { k, n: b.n, product: b.product, judgment: review.judgment, how: 'review' } satisfies ReboundBody)] });
+      await commit(ctx, `flow:rebound:${ctx.mission}:task:${idPart(t.id)}:${rb.key}`, { events: [ev(ctx, taskLine(t.id), 'rebound', rb.key, { k, n: b.n, product: b.product, judgment: review.judgment, how: 'review' } satisfies ReboundBody), ...await personItems(ctx, t, k)] });
       kept.successors = null;
       break;
     case 'rework':
@@ -2484,9 +2686,10 @@ async function rebindReview(
         source: 'reviewer-needs-decision',
         lineage,
         subject: `task:${t.id}`,
-        summary: `The Reviewer of task ${t.id} (attempt ${k}, its product re-bound to ${b.dplan}) needs a decision: the standards are unclear or in conflict.`,
+        summary: `The Reviewer of task ${t.id} (attempt ${k}, its product re-bound to ${b.dplan}) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
         reasons: [...review.issues],
-        options: ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
+        // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
+        options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
         items: t.requirementItems,
         facts: { task: t.id, attempt: k, product: b.product, issues: review.issues, rebind: b.n },
         handover: { from: rev, objects: [b.product] },
@@ -2998,6 +3201,11 @@ async function droppedStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanD
 
 // ---------------------------------------------------------------- cards
 
+/** A task's standards on its cards; 4.4 (F10): with how each is checked, when the plan names it (a 4.3 plan's card is as 4.3 built it). */
+export function cardStandards(t: Pick<DetailedTask, 'standards'>): Array<{ id: string; text: string; check?: NonNullable<DetailedTask['standards'][number]['check']> }> {
+  return t.standards.map((s) => ({ id: s.id, text: s.text, ...(s.check !== undefined ? { check: s.check } : {}) }));
+}
+
 function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{ name: string; definition: string }> {
   return names.map((n) => {
     const nw = plan.newInterfaces.find((i) => i.name === n);
@@ -3170,16 +3378,21 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // 4.4 (F4): a continuation reads the hand-back that stopped to ask (optional)
   if (paused !== null) past.push(await pausedHandBack(ctx, { constructor: paused.step, attempt: k, pause: paused.n, parked: paused.parked }));
   // 4.4 (F4; G5): the attempt's questions with their answers, and every question of the task left open
-  const questions = taskQuestions(await ctx.ports.ledger.events({ mission: ctx.mission }), t.id, k);
+  const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
+  const questions = taskQuestions(missionEvents, t.id, k);
+  // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open
+  const names = cardItemNames(missionEvents, t, k);
+  const openItems = takenItems(missionEvents, names, await cardIssues(ctx, missionEvents, names));
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: withoutAnswers(await decisionQuotes(ctx, t), questions), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
+    ...(openItems.length > 0 ? { openItems } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
     ...written,
     seat: 'constructor',
     workspace,
     goal: t.goal,
-    standards: t.standards.map((s) => ({ id: s.id, text: s.text })),
+    standards: cardStandards(t),
     requirementItems: taskRequirementItems(items, t),
     readableFiles: [...t.readableFiles],
     interpreter: t.interpreter,
@@ -3316,7 +3529,14 @@ async function submitReviewer(
   const contractPlan = taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'));
   const formats = contractPlan === undefined ? null : (await detailedPlanOf(ctx, contractPlan))?.plan;
   // 4.4 (F4): the questions of the attempt under review with their answers, and those left open on the task
-  const questions = taskQuestions(await ctx.ports.ledger.events({ mission: ctx.mission }), t.id, product.k);
+  const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
+  const questions = taskQuestions(missionEvents, t.id, product.k);
+  // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open: the Reviewer answers each
+  const names = cardItemNames(missionEvents, t, product.k);
+  const openItems = takenItems(missionEvents, names, await cardIssues(ctx, missionEvents, names));
+  // 4.4 (F10, E-4): the files the runs kept, and the files outside the commit the Constructor handed in, with its attempt
+  const kept = new Map((await ctx.ports.ledger.events<KeptArtifactsBody>({ mission: ctx.mission, line: ARTIFACTS_LINE, event: KEPT_ARTIFACTS })).map((e) => [e.key, e.body.artifacts] as const));
+  const handedIn = startOnlyAttempt ? [] : (conView?.handBack?.data ?? []).map((d) => ({ pointer: d.pointer, attempt: product.k, dispatch: conView!.handBack!.dispatch, label: d.label, ...(d.kept !== undefined ? { kept: `.mission-pipeline/${d.kept}` } : { notKept: d.notKept ?? 'no copy was made' }) }));
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
@@ -3325,14 +3545,21 @@ async function submitReviewer(
       constraints: [...cardConstraintsList, ...await cardConstraints(ctx, t, new Set(['instruction']))],
     }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
+    ...(openItems.length > 0 ? { openItems } : {}),
     seat: 'reviewer',
     workspace: { snapshot: product.snapshot, writablePaths: [] },
     target: product.object,
     review: 'reviewer',
-    standards: t.standards.map((s) => ({ id: s.id, text: s.text })),
+    standards: cardStandards(t),
     interfaces: [...interfaceDefs(plan, t.implements), ...interfaceDefs(plan, t.calls)],
     candidate: { changedPaths: [...changedPaths] },
-    verificationRuns: runs.map((r) => ({ evidence: r.evidence, command: r.command, summary: r.summary })),
+    // 4.4 (F10): with the files each run kept, read from its record (a run reused from one recorded before its command named them kept none: said so)
+    verificationRuns: runs.map((r) => {
+      const named = t.verificationCommands.find((c) => c.command === r.command)?.artifacts ?? [];
+      const artifacts = kept.get(r.evidence) ?? named.map((path) => ({ path, why: 'this run kept no files: it was recorded before its command named them' }));
+      return { evidence: r.evidence, command: r.command, summary: r.summary, ...(artifacts.length > 0 ? { artifacts: [...artifacts] } : {}) };
+    }),
+    ...(handedIn.length > 0 ? { handedIn } : {}),
     declaredCommands: t.verificationCommands.map((x) => ({ ...x })),
     selfReportedGaps: gaps,
     openIssues,
@@ -3349,7 +3576,8 @@ async function submitReviewer(
       // the objects the version's contract relies on (v51 §5.2: a judgment conforms to the contract fixed with
       // its target), which for a version recorded under an earlier plan is that plan, not the one in effect
       reliesOn: c.putList(reliedPlans(obj, eff)),
-      revokes: null,
+      // 4.4 (F10, review p9-r2-1): the failing judgment of this very version that a decider's answer sent to this review
+      revokes: await failureToSupersede(ctx, t.id, product.object, task),
       extends: null,
       evidenceUse: { fields: ['exit'], statisticalOrExternal: false },
       superseded: [],
@@ -3379,15 +3607,33 @@ async function submitReviewer(
   ctx.progressed = true;
 }
 
+/**
+ * 4.4 (F10, review p9-r2-1): the judgment a new review of `target` supersedes: the task's latest review of that very
+ * version, when it failed. A failing review is followed by another review of the same version only through a
+ * decider's answer (a fourth answer's review sent back as "rework", an integration rework with nothing to reopen),
+ * and a negation stands until a pass names it (evaluator/store.ts positionAfter). Null: the latest review of the
+ * version did not fail, or there is none.
+ */
+async function failureToSupersede(ctx: FlowCtx, taskId: string, target: string, current: string): Promise<string | null> {
+  const reviews = (await readLine(ctx, taskId)).all<ReviewBody>('review').filter((r) => r.body.task !== current);
+  for (const r of reviews.toReversed()) {
+    const j = await judgmentRecordOf(ctx, r.body.judgment);
+    if (j === null || j.target !== target) continue;
+    return j.verdict === 'fail' ? j.judgment : null;
+  }
+  return null;
+}
+
 /** The previous Reviewer of the task (any attempt, before this review task): its verdict, each standard it did not find met, with the reason, and its findings. */
 async function previousReviewOf(ctx: FlowCtx, line: Line, current: string): Promise<NonNullable<ReviewerCard['previousReview']> | null> {
   const prev = line.all<ReviewBody>('review').filter((r) => r.body.task !== current).at(-1);
   if (prev === undefined) return null;
   const result = ((await ctx.ports.scheduler.status(prev.body.task))?.handBack?.result ?? null) as ReviewerResult | null;
   const unmet = result !== null
-    ? result.judgments.filter((j) => j.met !== 'yes').map((j) => ({ standard: j.standard, met: j.met as 'no' | 'unclear', reason: j.reason }))
+    // 4.4 (F10): a standard it could not verify, with what would be needed
+    ? result.judgments.filter((j) => j.met !== 'yes').map((j) => ({ standard: j.standard, met: j.met as 'no' | 'unclear' | 'cannot-verify', reason: j.met === 'cannot-verify' ? `${j.reason}; needed: ${j.needed ?? ''}` : j.reason }))
     // a result not readable any more: the recorded issue lines stand in ("[S1] not met: why")
-    : prev.body.issues.flatMap((i) => { const m = /^\[([^\]]+)\] (not met|unclear): (.*)$/s.exec(i); return m === null ? [] : [{ standard: m[1]!, met: (m[2] === 'not met' ? 'no' : 'unclear') as 'no' | 'unclear', reason: m[3]! }]; });
+    : prev.body.issues.flatMap((i) => { const m = /^\[([^\]]+)\] (not met|unclear|cannot be verified): (.*)$/s.exec(i); return m === null ? [] : [{ standard: m[1]!, met: (m[2] === 'not met' ? 'no' : m[2] === 'unclear' ? 'unclear' : 'cannot-verify') as 'no' | 'unclear' | 'cannot-verify', reason: m[3]! }]; });
   const findings = result !== null ? [...result.findings] : prev.body.issues.filter((i) => i.startsWith('finding: ')).map((i) => i.slice('finding: '.length));
   return { review: prev.body.task, attempt: prev.body.k, verdict: prev.body.verdict, unmet, findings };
 }

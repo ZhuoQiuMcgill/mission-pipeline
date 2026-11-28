@@ -1,6 +1,6 @@
 // Claim-time selection is owned by the queue-time builders; refresh adds no seat context.
 import { liveSecretary } from '../../memory/resident.ts';
-import type { BaseRecord, ObjectVersionRecord, ProofUnitRecord, ListRef } from '../../common/records.ts';
+import type { BaseRecord, IssueRecord, ObjectVersionRecord, ProofUnitRecord, ListRef } from '../../common/records.ts';
 import type { BasisIndex } from '../../flow/context.ts';
 import { predecessorMaterials, predecessorsFrom, withPredecessorMaterials } from '../../flow/exploration/predecessors.ts';
 import { decidingViews, labelStatus } from '../../evaluator/index.ts';
@@ -13,6 +13,7 @@ import { acceptedEntry } from '../../flow/repair.ts';
 import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
 import { repairPlanMaterial } from './architect.ts';
 import { cardQuestions, taskQuestions, withoutAnswers } from '../../flow/openItems.ts';
+import { cardItemNames, issueResolver, itemIssue, riskItemsOf, takenItems, type IssueNote } from '../../flow/riskItems.ts';
 import type { MaterialRef } from './common.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
@@ -124,6 +125,17 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     else l.push(e);
   }
   const lineOf = (id: string): FlowEvent[] => lines.get(`task:${id}`) ?? [];
+  // 4.4 (G5, p10-5): the items a card lists, each with the issue it is about (a finding of a 4.3 acceptance: its issue record)
+  const cardItems = (names: readonly string[]) => {
+    const need = riskItemsOf(events).some((i) => names.includes(i.id) && i.kind === 'finding' && itemIssue(i) === undefined);
+    const notes: IssueNote[] = !need ? [] : pages((after) => recordsByKind(db, { kinds: ['issue'], after })).map((r) => {
+      const rec = r.record as IssueRecord;
+      let text: string | null = null;
+      try { if (rec.text !== undefined) text = (JSON.parse(data.text(rec.text)) as { text?: string }).text ?? null; } catch { /* not readable */ }
+      return { issue: rec.issue as string, observedOn: data.getList(rec.observedOn), text };
+    });
+    return takenItems(events, names, need ? issueResolver(events, notes) : itemIssue);
+  };
   // 4.4 (F3): a material the card lacks (it was queued by 4.3, or its hand-back was not readable then), from the recorded hand-backs
   const put = (d: string): string => data.put(d);
   const readers = o.handBack !== undefined && o.leaf !== undefined ? { handBack: o.handBack, leaf: o.leaf } : null;
@@ -202,6 +214,11 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const tasks = new Set(events.filter((e) => e.line === 'plan' && e.event === 'effective').flatMap((e) => (e.body as EffectiveBody).tasks));
       card.owners = ownersOfPaths(new Map([...tasks].map((id) => [id, lineOf(id)])), about).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
       card.materials = [repairPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')];
+      // 4.4 (G4, G5): the open items the repair is for, as they stand at the claim (one closed meanwhile is not listed)
+      const named = (events.find((e) => e.line === 'repairs' && e.event === 'repair' && e.key === card.repair.id)?.body as { openItems?: readonly string[] } | undefined)?.openItems;
+      const listed = takenItems(events, named);
+      if (listed.length > 0) card.openItems = listed;
+      else delete card.openItems;
       break;
     }
     case 'architect-answer': {
@@ -290,6 +307,10 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       card.decisionQuotes = withoutAnswers(card.decisionQuotes, qs);
       if (qs.length > 0) card.questions = cardQuestions(qs);
       else delete card.questions;
+      // 4.4 (G5): the open items the card takes, as they stand at the claim (one closed meanwhile is not listed)
+      const taken = k === undefined ? [] : cardItems(cardItemNames(events, task, k));
+      if (taken.length > 0) card.openItems = taken;
+      else delete card.openItems;
       const was = k === undefined ? null : attemptPast(lineOf(task.id), k);
       const review = was?.review ?? null;
       if (was !== null && review !== null && lacks(card, PREVIOUS_REVIEW_MATERIAL)) plus(card, PREVIOUS_REVIEW_MATERIAL, review, () => previousReviewMaterial(put, sourceAt(readers!, review), { review, attempt: was.attempt }));
@@ -316,6 +337,10 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
         card.decisionQuotes = withoutAnswers(card.decisionQuotes, qs);
         if (qs.length > 0) card.questions = cardQuestions(qs);
         else delete card.questions;
+        // 4.4 (G5): the open items the card takes, as they stand at the claim: each listed one is answered
+        const taken = attempt === null ? [] : cardItems(cardItemNames(events, task, attempt));
+        if (taken.length > 0) card.openItems = taken;
+        else delete card.openItems;
       }
       // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
       const relied = taskReferencePlan(events, fixed);

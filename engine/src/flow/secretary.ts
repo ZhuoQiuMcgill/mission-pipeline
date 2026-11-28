@@ -169,6 +169,10 @@ export function sourceOutcome(e: EscalationBody, o: DecisionOption): string | nu
   if (o === 'grant' && failedSeat(e, facts)) return 'the step may be dispatched again: its re-dispatches get the attempts granted';
   if (e.source === 'feasibility-unresolved') return o === 'send-back' ? 'the Architect revises the plan with the instructions; this takes one more feasibility return on the lineage, granted by the PM\'s or the user\'s answer, or once by the Secretary' : o === 'accept-risk' ? 'the blocking findings are accepted as the plan\'s risks, and the plan goes on to its remaining checks' : null;
   if (e.source === 'order-change' && o === 'accept') return 'the changed order stands, and the plan goes on to its remaining checks';
+  // 4.4 (F10): the fourth answer: acceptWithRisk stores each reason, so each standard not verified is among the risks;
+  // review p9-8: its answer is carried out as a Reviewer's "needs decision" answer is (applyTaskDecision: a reanswer, a new review)
+  if (e.source === 'reviewer-needs-decision' && facts['unverifiable'] !== undefined && o === 'answer') return "the answer is recorded as the decision (say what is missing, or where it is), and the same candidate is reviewed again with the answer on the Reviewer's card; no new attempt starts";
+  if (e.source === 'reviewer-needs-decision' && facts['unverifiable'] !== undefined && o === 'accept-risk') return 'the work under review is accepted as it is; each standard the Reviewer could not verify is recorded among its risks, with what would be needed, as left open';
   if (e.source === 'calibrator-2' && o === 'accept') return 'the detailed plan is accepted as it is (the ruling overrules Calibrator ②) and takes effect';
   if (e.source === 'loop-exhausted' && o === 'grant' && facts['loop'] === 'mechanical-return') return e.subject.startsWith('repair:') ? 'the repair\'s Architect gets the returns granted and amends the plan again' : 'the Architect gets the returns granted and decomposes again';
   if (e.source === 'loop-exhausted' && o === 'grant' && facts['loop'] === 'rework') return `the rework loop gets the attempts granted, and the Constructor starts the next attempt; ${REOPEN_GRANTS}`;
@@ -691,7 +695,10 @@ export async function carryOut(ctx: FlowCtx, id: string, what: Record<string, un
     const neg = await judgmentRecordOf(ctx, esc.position.revokes);
     const jid = rulingJudgmentId(esc.id, by);
     if (neg !== null && (await judgmentRecordOf(ctx, jid)) === null) {
-      records.push(deciderJudgment({ escalation: esc.id, by, target: esc.position.target, review: esc.position.review, inputs: neg, revokes: neg.judgment }));
+      // 4.4 (G5): a task's acceptance with risk keeps the Reviewer's answers on the accepted product, so the fix
+      // tracker reads them (4.3 carried an empty list: every issue read "not fixed")
+      const keep = what['option'] === 'accept-risk' && esc.subject.startsWith('task:');
+      records.push(deciderJudgment({ escalation: esc.id, by, target: esc.position.target, review: esc.position.review, inputs: neg, revokes: neg.judgment, ...(keep ? { issues: neg.issues } : {}) }));
       ruling = jid;
     }
   }
@@ -823,7 +830,7 @@ export function rulingJudgmentId(escalation: string, by: Decider, suffix?: strin
  * negation it overrules (carryOut), or the position's latest judgment it stands beside (an exploration's
  * plain "accept", exploration/step.ts). `revokes`: the negation it revokes, or null.
  */
-export function deciderJudgment(o: { readonly escalation: string; readonly by: Decider; readonly suffix?: string; readonly target: string; readonly review: string; readonly inputs: JudgmentRecord; readonly revokes: string | null }): JudgmentRecord {
+export function deciderJudgment(o: { readonly escalation: string; readonly by: Decider; readonly suffix?: string; readonly target: string; readonly review: string; readonly inputs: JudgmentRecord; readonly revokes: string | null; readonly issues?: JudgmentRecord['issues'] }): JudgmentRecord {
   const b = o.inputs;
   const rec: JudgmentRecord = {
     kind: 'judgment',
@@ -836,7 +843,7 @@ export function deciderJudgment(o: { readonly escalation: string; readonly by: D
     bases: b.bases,
     constraints: b.constraints,
     reliesOn: b.reliesOn,
-    issues: [],
+    issues: o.issues === undefined ? [] : o.issues.map((i) => ({ ...i })),
     revokes: o.revokes as JudgmentId | null,
     evidenceUse: { fields: [...b.evidenceUse.fields], statisticalOrExternal: b.evidenceUse.statisticalOrExternal },
     superseded: [],

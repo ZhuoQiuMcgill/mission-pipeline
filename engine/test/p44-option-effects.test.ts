@@ -61,9 +61,12 @@ function says(e: EscalationBody, o: DecisionOption, re: RegExp): void {
   assert.match(pm, re, `${e.source}/${o}: ${pm}`);
   const card = secretaryOptions(e, true).find((x) => x.id === o)?.outcome;
   if (card !== undefined) assert.match(card, re, `the Secretary card: ${e.source}/${o}: ${card}`);
-  // 4.4 (G1): ask-architect is offered on a Constructor's questions, a Reviewer's needs-decision and a used-up rework loop, and on no other kind
-  const asks = e.source === 'constructor-decision' || e.source === 'reviewer-needs-decision' || (e.source === 'loop-exhausted' && (e.facts as { loop?: unknown } | undefined)?.loop === 'rework');
-  assert.equal(pmOptions(e).some((x) => x.id === 'ask-architect'), asks, `${e.source} (${e.subject}) offers ask-architect only when it is one of the three kinds`);
+  // 4.4 (G1): ask-architect is offered on a Constructor's questions, a Reviewer's needs-decision and a used-up rework loop, and on no other
+  // kind; not on a review whose only open standards the Reviewer could not verify (F10's fourth answer, unv.<review>): a question of
+  // evidence (what would be needed to verify it), not of design
+  const unverifiable = e.id.startsWith('unv.') || (e.facts as { unverifiable?: unknown } | undefined)?.unverifiable !== undefined;
+  const asks = e.source === 'constructor-decision' || (e.source === 'reviewer-needs-decision' && !unverifiable) || (e.source === 'loop-exhausted' && (e.facts as { loop?: unknown } | undefined)?.loop === 'rework');
+  assert.equal(pmOptions(e).some((x) => x.id === 'ask-architect'), asks, `${e.source} (${e.subject}) offers ask-architect only when it is one of the three kinds, and not on the fourth answer`);
 }
 
 // ---------------------------------------------------------------- the decision layer and execution (scripted seats)
@@ -214,6 +217,50 @@ describe('option effects: task escalations', () => {
     const acc = (await events<{ decision: { option: string }; risks: string[] }>(w, { line: 'task:impl', event: 'accepted' })).at(-1);
     assert.equal(acc?.body.decision.option, 'accept-risk');
     assert.ok((acc?.body.risks.length ?? 0) > 0);
+  });
+
+  // 4.4 (F10; review p9-8): a review whose only open standard the Reviewer could not verify (escalation unv.<review>)
+  const unverifiedAsks = async (option: DecisionOption) => {
+    const { w, engine } = await scripted();
+    let first = true;
+    await drive(engine, w.scheduler, withKinds({
+      reviewer: (t) => {
+        const c = t.card as unknown as ReviewerCard;
+        const r = reviewer(c, 'pass');
+        if (!(c.target.includes('impl') && first)) return { handBack: r };
+        first = false;
+        return { handBack: { ...r, verdict: 'needs-decision', judgments: r.judgments.map((j) => (j.standard === 'S2' ? { ...j, met: 'cannot-verify' as const, needed: 'the device log', evidence: [] } : j)) } };
+      },
+      secretary: decides('reviewer-needs-decision', option),
+    }));
+    const esc = (await escalations(w)).find((e) => e.id.startsWith('unv.'));
+    assert.ok(esc !== undefined, 'the escalation of the fourth answer');
+    return { w, esc };
+  };
+  test('reviewer-needs-decision, cannot be verified / answer', async () => {
+    const { w, esc } = await unverifiedAsks('answer');
+    says(esc, 'answer', /the answer is recorded as the decision \(say what is missing, or where it is\), and the same candidate is reviewed again with the answer on the Reviewer's card; no new attempt starts/);
+    assert.ok((await events(w, { line: 'task:impl', event: 'reanswer' })).length === 1);
+    assert.ok(w.scheduler.card<ReviewerCard>('rev.m1.impl.1.r1').decisionQuotes.includes(INSTR), 'the next review of the same candidate quotes it');
+    assert.ok(!w.scheduler.tasks.has('con.m1.impl.2'), 'no new attempt');
+  });
+  test('reviewer-needs-decision, cannot be verified / rework', async () => {
+    const { w, esc } = await unverifiedAsks('rework');
+    says(esc, 'rework', /the Constructor reworks the task in a new attempt with the instructions/);
+    const rw = (await events<{ k: number; instructions: string[] }>(w, { line: 'task:impl', event: 'rework' })).find((e) => e.key === '2');
+    assert.ok(rw?.body.instructions.includes(INSTR));
+  });
+  test('reviewer-needs-decision, cannot be verified / accept-risk', async () => {
+    const { w, esc } = await unverifiedAsks('accept-risk');
+    says(esc, 'accept-risk', /each standard the Reviewer could not verify is recorded among its risks, with what would be needed/);
+    const acc = (await events<{ decision: { option: string }; risks: string[] }>(w, { line: 'task:impl', event: 'accepted' })).at(-1);
+    assert.equal(acc?.body.decision.option, 'accept-risk');
+    assert.ok(acc?.body.risks.some((x) => x.endsWith('[S2] cannot be verified: checked; needed: the device log')), JSON.stringify(acc?.body.risks));
+  });
+  test('reviewer-needs-decision, cannot be verified / replan', async () => {
+    const { w, esc } = await unverifiedAsks('replan');
+    says(esc, 'replan', /the task waits while the Architect re-plans it/);
+    await replanned(w, esc, 'impl');
   });
 
   const reworkExhausted = async (option: DecisionOption) => {

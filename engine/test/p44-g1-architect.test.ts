@@ -689,6 +689,8 @@ describe('4.4 G1, review round 2', () => {
     const id = (await events(ports, { line: 'secretary', event: 'escalation' })).map((e) => e.body as { id: string; source: string }).find((e) => e.source === 'loop-exhausted')!.id;
     const retry = `sec.${id}.retry1`;
     assert.equal(ports.scheduler.tasks.get(retry)?.state, 'queued', 'returned to a fresh Secretary round');
+    // the used-up loop's card (with G5): a question of design is the Architect's or a re-plan's, and why not an acceptance
+    assert.ok(renderSeatCard(ports.scheduler.card<SecretaryCard>(retry) as never, { dispatch: 'D-x' }).includes('ask the Architect or choose replan, not an acceptance: an acceptance with risk leaves each of its reasons open, as an open item of the task.'));
     // claimed while its grant is available; another escalation of the lineage uses the Secretary's one grant meanwhile
     ports.scheduler.dispatchOf(retry);
     await ports.scheduler.grant({ op: 'other-escalation', lineage: 'task.m1.impl', loop: 'rework', extra: 1, by: 'secretary', reason: 'another escalation of the lineage' });

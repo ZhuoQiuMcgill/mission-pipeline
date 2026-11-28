@@ -5,7 +5,7 @@
 // answers it at any time, and the answer goes onto the task's next cards; until then the open question
 // is listed on every card of the task (taskQuestions), through rework and acceptance.
 //
-// The record is small, and package p10 extends it (the items of an acceptance with risk):
+// The record is small, and flow/riskItems.ts extends it (the items of an acceptance with risk, kinds other than `question`):
 //   line "open-items", event "open-item", key <id>: {id, kind, text, task, attempt, escalation, question, when, why}
 //   line "open-items", event "open-item-answer", key <id>: {id, by, answer, words?}
 // A 4.3 memory has neither: every question of its escalations reads as before-review, answered by the
@@ -78,7 +78,8 @@ export function questionReasons(qs: ReadonlyArray<{ readonly text: string; reado
 export function openItemsOf(events: readonly Ev[]): OpenItem[] {
   const answers = new Map(events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM_ANSWER).map((e) => [e.key, e.body as OpenItemAnswerBody]));
   const sec = events.filter((e) => e.line === 'secretary');
-  return events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM).map((e) => {
+  // 4.4 (G5): the items an acceptance with risk or a deferral left share the line; they are read by flow/riskItems.ts
+  return events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM && (e.body as { kind?: unknown }).kind === 'question').map((e) => {
     const b = e.body as OpenItemBody;
     const own = answers.get(e.key) ?? null;
     const carried = b.why !== 'deferred' ? null : appliedAnswer(sec, b.escalation);

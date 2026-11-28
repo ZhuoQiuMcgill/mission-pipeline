@@ -103,7 +103,8 @@ import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, raiseNotice, taskStatus, type TaskSpecDoc } from './ports.ts';
-import { runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { recordedGroup, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { keptArtifactsOf } from './keptFiles.ts';
 import { fullRunLine, heldByClose } from './close.ts';
 import { authorizationInForce, fullRunStatus } from './fullRuns.ts';
 import { CONFIG_KEY, REVIEWS_WAIVER, WAIVABLE_CHECKS, waiversInForce, type ReviewsWaiverBody } from '../flow/waivers.ts';
@@ -968,11 +969,13 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
     try {
       const first = originals[0]!;
       const fields = byEvidence.get(first.evidence)!.fields;
-      const source: Array<Omit<DeclaredCommand, 'id'>> = fields['group'] === undefined
+      // review p9-r2-2: the group with its named files (stored by hash, or inline in an earlier record)
+      const grouped = recordedGroup(fields, (h) => ctx.memory.data.text(h));
+      const source: Array<Omit<DeclaredCommand, 'id'>> = grouped === null
         ? recorded.filter((rec) => rec.fields['candidate'] === first.candidate && (fields['run'] === undefined ? rec.evidence === first.evidence : rec.fields['run'] === fields['run']))
           .map((rec) => ({ command: rec.fields['command']!, cwd: runCwd(rec.fields), sampled: rec.runClass === 'sampling', network: rec.runClass === 'other' }))
-        : JSON.parse(fields['group']) as Array<Omit<DeclaredCommand, 'id'>>;
-      if (!Array.isArray(source) || source.length === 0 || source.some((cmd) => typeof cmd?.command !== 'string' || (cmd.cwd !== undefined && typeof cmd.cwd !== 'string') || (cmd.sampled !== undefined && typeof cmd.sampled !== 'boolean') || (cmd.network !== undefined && typeof cmd.network !== 'boolean'))) {
+        : grouped;
+      if (!Array.isArray(source) || source.length === 0 || source.some((cmd) => typeof cmd?.command !== 'string' || (cmd.cwd !== undefined && typeof cmd.cwd !== 'string') || (cmd.sampled !== undefined && typeof cmd.sampled !== 'boolean') || (cmd.network !== undefined && typeof cmd.network !== 'boolean') || (cmd.artifacts !== undefined && (!Array.isArray(cmd.artifacts) || cmd.artifacts.some((a) => typeof a !== 'string'))))) {
         throw new Error('the recorded verification group is invalid: a Reviewer judges again');
       }
       const commands = source.map((cmd, i) => ({ ...cmd, id: `renew-${i + 1}` }));
@@ -980,9 +983,32 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
         throw new Error('the recorded verification group omits a declared run to renew: a Reviewer judges again');
       }
       const replacementFor = (runs: readonly RecordedRun[], cand: (typeof originals)[number]): RecordedRun => runs.find((r) => r.command.command === cand.command && runCwd(r.fields) === cand.cwd && !r.command.sampled && !r.command.network)!;
+      // 4.4 (F10, review p9-2, round 2): a renewal is mechanical only when the record shows that the rerun repeated
+      // each file the original run's command named: the same sha256, written by the rerun's command (an origin not
+      // established or unknown does not show it), or absent both times. An original file with no recorded hash
+      // (too large to keep), or an original run whose kept files are not on the record, cannot be shown: a new review
+      const lostFiles = (tx: WriteTx, cand: (typeof originals)[number], x: RecordedRun): string[] => {
+        const declared = source.find((cmd) => cmd.command === cand.command && (cmd.cwd ?? '.') === cand.cwd && (cmd.artifacts ?? []).length > 0);
+        if (declared === undefined) return [];
+        const was = keptArtifactsOf(tx, tx.data, cand.evidence);
+        if (was === null) return [...declared.artifacts!];
+        const now = x.artifacts ?? keptArtifactsOf(tx, tx.data, x.evidence) ?? [];
+        const absent = (a: { readonly why?: string | undefined } | undefined): boolean => a?.why === 'the run did not write it';
+        return was.filter((a) => {
+          const b = now.find((y) => y.path === a.path);
+          if (absent(a)) return b === undefined || !absent(b);
+          return a.sha256 === undefined || b === undefined || b.sha256 !== a.sha256 || b.origin !== undefined;
+        }).map((a) => a.path);
+      };
       const renewGroup = (tx: WriteTx, runs: readonly RecordedRun[], records: readonly EvidenceRecord[] = []): Array<Renewed['reruns'][number]> => originals.map((cand) => {
         const x = replacementFor(runs, cand);
         const rec: EvidenceRecord = records.find((r) => r.evidence === x.evidence) ?? { kind: 'evidence', evidence: x.evidence as never, envLine: 'env' as never, envSnapshot: env.identity, runClass: 'declared', fields: x.fields };
+        const lost = lostFiles(tx, cand, x);
+        if (lost.length > 0) {
+          // the rerun is recorded; no judgment on the original is renewed by it
+          recordRenewedRun(tx, { original: cand.evidence, run: rec, judgments: new Set() });
+          return { original: cand.evidence, run: x.evidence, passed: x.passed, renewed: [], refused: cand.judgments.map((j) => ({ judgment: j.judgment as string, reason: `the record does not show that it repeated ${lost.join(', ')} as the original run kept ${lost.length === 1 ? 'it' : 'them'} (missing, another sha256, no recorded hash, or not shown to be written by it): a new review` })) };
+        }
         const out = recordRenewedRun(tx, { original: cand.evidence, run: rec, judgments: new Set(cand.judgments.map((j) => j.judgment as string)) });
         const ix = new StoredIndex(tx);
         const renewed: string[] = [];
@@ -1212,7 +1238,7 @@ export type RepairChanged =
  */
 export async function pmRepair(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null; readonly again?: boolean; readonly op?: string | null },
+  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null; readonly again?: boolean; readonly op?: string | null; readonly openItems?: readonly string[] },
 ): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged; readonly over?: string }> {
   ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
   const mission = req.mission as MissionId;
@@ -1252,7 +1278,7 @@ export async function pmRepair(
   }
   let r: { readonly id: string; readonly repeated: boolean; readonly over?: string };
   try {
-    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}), ...(req.again === true ? { again: true, ...(req.op != null ? { op: req.op } : {}) } : {}) });
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}), ...(req.again === true ? { again: true, ...(req.op != null ? { op: req.op } : {}) } : {}), ...((req.openItems ?? []).length > 0 ? { openItems: req.openItems } : {}) });
   } catch (e) {
     if (e instanceof LedgerError || e instanceof ProcessError) throw e;
     throw new LedgerError('BAD_REQUEST', (e as Error).message);
