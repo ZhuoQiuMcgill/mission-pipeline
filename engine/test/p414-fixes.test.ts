@@ -115,11 +115,24 @@ test('S1 a 4.1.3 old-id reopen escalation is reused and its grant starts the reo
   await unchanged(w, engine);
 });
 
+/**
+ * The record 4.3 left of a repair's reopen counted on impl's used-up rework loop (4.4, F12 a: a repair's reopen
+ * is not counted any more, so only a memory written by 4.3 has it): its marker and its negative verdict.
+ */
+async function countedBy43(w: World, repair: string) {
+  const lineage = taskLineage(M, 'impl');
+  await w.ledger.append(`test:43-counted-reopen:${repair}`, { events: [
+    { mission: M, line: 'task:impl', event: 'loop-return', key: `reopen:repair:${repair}`, body: { decision: 'exhausted', lineage, loop: 'rework', signature: 'legacy-repair-reopen' } },
+    { mission: M, line: 'task:impl', event: 'loop-verdict', key: `reopen:repair:${repair}`, body: { proceed: false, attempts: 2, allowed: 2, reason: 'cap' } },
+  ] });
+}
+
 /** 4.1.3: a repair loses its escalation write; a later review records the shared old id. */
 async function sharedLegacyReopen() {
   const { w, engine } = await lastAllowedPass();
   const words = say(w, 'Keep the header requested by the repair.');
   await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'Keep the header requested by the repair.' });
+  await countedBy43(w, 'R-1');
   w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
   await assert.rejects(drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'repair finding: keep the header' }], add: [], note: 'impl owns the header' } }),
@@ -173,6 +186,7 @@ test('A a negative verdict after the old escalation gets its own suffixed escala
   const { w, engine, id } = await sharedLegacyReopen();
   const words = say(w, 'Also keep the footer.');
   await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'Also keep the footer.' });
+  await countedBy43(w, 'R-2');
   w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
   await assert.rejects(drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'later repair finding: keep the footer' }], add: [], note: 'impl owns the footer' } }),
@@ -193,6 +207,7 @@ async function reopenPair(legacy: boolean) {
   const { w, engine } = await lastAllowedPass();
   const repairWords = say(w, 'Keep the header requested by this repair.');
   await pmRepair(w.ctx, { mission: M, words: repairWords, kind: 'defect', text: 'Keep the header requested by this repair.' });
+  await countedBy43(w, 'R-1');
   const repairScript = script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'repair finding: keep the header' }], add: [], note: 'impl owns the header' } }),
   });
@@ -554,10 +569,11 @@ test('#47 review reopen gets a distinct escalation and its own Secretary step', 
   await unchanged(w, engine);
 });
 
-test('#47 repair reopen gets a distinct escalation; #50 repair offers no accept-risk', async () => {
+test('#47 a repair reopen that 4.3 counted on a used-up loop gets a distinct escalation; #50 it offers no accept-risk', async () => {
   const { w, engine } = await usedUp();
   const words = say(w, 'Fix the dependency speed.');
   await pmRepair(w.ctx, { mission: M, words, kind: 'usability', text: 'dependency speed' });
+  await countedBy43(w, 'R-1');
   await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'dependency speed' }], add: [], note: 'impl owns it' } }),
   }));
@@ -566,6 +582,23 @@ test('#47 repair reopen gets a distinct escalation; #50 repair offers no accept-
   assert.notEqual(es[0]!.id, es[1]!.id);
   assert.ok(!es[1]!.options.includes('accept-risk'));
   assert.ok(w.scheduler.queued('secretary').some((t) => t.task === es[1]!.task));
+  await unchanged(w, engine);
+});
+
+test('4.4 (F12 a): a repair reopen on a used-up rework loop is not counted: the reopened attempt starts at once, on a fresh loop', async () => {
+  const { w, engine } = await usedUp();
+  const before = await w.ledger.loop(taskLineage(M, 'impl'), 'rework');
+  const words = say(w, 'Fix the dependency speed.');
+  await pmRepair(w.ctx, { mission: M, words, kind: 'usability', text: 'dependency speed' });
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null, constructor: () => null,
+    'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'dependency speed' }], add: [], note: 'impl owns it' } }),
+  }));
+  assert.equal((await escalations(w)).length, 1, 'no escalation for the reopen');
+  assert.ok(w.scheduler.tasks.has('con.m1.impl.4'), 'the reopened attempt is queued');
+  const rw = (await events(w, 'task:impl', 'rework')).find((e) => e.key === '4')!.body;
+  assert.deepEqual([rw.reason, rw.reopen, rw.loop], ['reopen', { kind: 'repair', repair: 'R-1' }, `${taskLineage(M, 'impl')}.reopen4`]);
+  assert.deepEqual((await events(w, 'task:impl', 'loop-verdict')).filter((e) => e.key.startsWith('reopen:repair:')), [], 'nothing was counted');
+  assert.equal((await w.ledger.loop(taskLineage(M, 'impl'), 'rework')).attempts, before.attempts, "the task's own count is left as it was");
   await unchanged(w, engine);
 });
 

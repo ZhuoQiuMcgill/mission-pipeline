@@ -400,8 +400,12 @@ export interface RepairDecidedBody {
   readonly dplan: string;
   readonly arch: string;
   readonly add: readonly string[];
-  /** The tasks it reopens, each at the attempt it was accepted at when the repair was decided. */
-  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string }>;
+  /**
+   * The tasks it reopens, each at the attempt it was accepted at when the repair was decided (4.4, F13: a task
+   * moved on since its Architect's card, at the attempt it was last accepted at; execution merges it or pins it
+   * again). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every reopen before 4.4).
+   */
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
 }
