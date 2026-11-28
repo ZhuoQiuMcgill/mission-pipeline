@@ -26,7 +26,7 @@ import { FlowEngine } from '../src/flow/engine.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import { recordItem, withdrawItem } from '../src/flow/requirements.ts';
 import { recordExtension } from '../src/flow/repair.ts';
-import { drive, happyScript, pmPlan, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
+import { cal1Pass, drive, happyScript, pmPlan, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { pmExtend, pmRequirement, pmSay } from '../src/process/pm.ts';
 import type { Calibrator1Card } from '../src/seat/cards/calibrator.ts';
 import type { AuditChainCard, AuditChainResult } from '../src/seat/cards/auditor.ts';
@@ -114,6 +114,13 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     const card = ports.scheduler.card<Calibrator1Card>('cal1.m1.1.c1');
     const items = ports.ledger.content.get(card.materials.find((m) => m.id === 'items')!.ref);
     assert.ok(items.includes('item.m1.g1') && !items.includes('item.m1.g2'), `the re-check leaves the new item aside: ${items}`);
+    // asked for a full review, the re-check lists every item the plan is checked against, and still not the new one
+    const full: Script = (t, s) => (t.task === 'cal1.m1.1.c1' ? { handBack: { ...cal1Pass(t.card as never), verdict: 'needs-full-review' } } : t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s));
+    await drive(engine, ports.scheduler, full);
+    const fullCard = ports.scheduler.card<Calibrator1Card>('cal1.m1.1.c1.full');
+    assert.equal(fullCard.mode.kind, 'full');
+    const all = ports.ledger.content.get(fullCard.materials.find((m) => m.id === 'items')!.ref);
+    assert.ok(all.includes('item.m1.g1') && all.includes('item.m1.s1') && !all.includes('item.m1.g2'), `the full re-check leaves the new item aside: ${all}`);
     await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
     for (const [id, l] of Object.entries(await labels(ports, chain))) assert.equal(l, 'proven', `${id} after the re-check`);
   });
