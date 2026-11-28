@@ -2459,13 +2459,15 @@ async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet
 }
 
 /** One next attempt, with the context of every grant that ensured it (the rework event stays immutable). */
-async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): Promise<ReworkBody | null> {
+async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): Promise<(ReworkBody & { readonly covered: ReadonlyArray<{ readonly issue: string; readonly source: ReopenSource }> }) | null> {
   const body = line.one<ReworkBody>('rework', String(k));
   if (body === null) return null;
   const applied = new Set((await eventsOf<{ what?: { option?: string } }>(ctx, SECRETARY_LINE, 'applied')).filter((e) => e.body.what?.option === 'grant').map((e) => e.key));
   const requests = await reopenRequests(ctx);
   const issues = [...body.issues];
   const instructions = [...body.instructions];
+  // 4.4 (p6-r2-1): the reopen requests a grant covered, so the Reviewer of the attempt sees them too
+  const reopens: Array<{ issue: string; source: ReopenSource }> = [];
   for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
     const facts = e.body.facts as { attempt?: number; loop?: string; issues?: string[] } | undefined;
     if (!applied.has(e.key) || e.body.source !== 'loop-exhausted' || e.body.subject !== `task:${t.id}` || facts?.loop !== 'rework' || facts.attempt !== k - 1) continue;
@@ -2474,8 +2476,14 @@ async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): P
     const covered = requests.filter((r) => r.task === t.id && r.attempt === k - 1 && keys.includes(r.key));
     issues.push(...(facts.issues ?? []), ...covered.map((r) => r.issue));
     instructions.push(...(d?.instructions ? [d.instructions] : []), ...covered.map((r) => r.instruction));
+    for (const r of covered) if (!reopens.some((x) => x.issue === r.issue)) reopens.push({ issue: r.issue, source: r.source });
   }
-  return { ...body, issues: [...new Set(issues)], instructions: [...new Set(instructions)] };
+  return { ...body, issues: [...new Set(issues)], instructions: [...new Set(instructions)], covered: reopens };
+}
+
+/** Who reopened an attempt, in words (a Reviewer's card). */
+function reopenedBy(s: ReopenSource | undefined): string {
+  return s?.kind === 'repair' ? `repair ${s.repair}` : s?.kind === 'review' ? `the review ${s.review} of integration task ${s.integration}` : 'reopened';
 }
 
 async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number, task: string, deps: readonly string[]): Promise<void> {
@@ -2673,7 +2681,9 @@ async function submitReviewer(
   const startOnlyAttempt = startOnly(line, product);
   const integration = t.kind === 'integration' ? { hasConstructor: !startOnlyAttempt, dependencies: await dependencyProducts(ctx, plan, t) } : undefined;
   const rw = await reworkAt(ctx, t, line, k);
-  const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
+  // 4.4 (p6-r2-1): an attempt a grant gave a covered reopen tells its Reviewer the reopen's issue too (with no Constructor, no other card shows it)
+  const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${reopenedBy(rw.reopen)}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.`
+    : rw !== null && rw.covered.length > 0 ? ` This attempt was granted for a reopen (${[...new Set(rw.covered.map((c) => reopenedBy(c.source)))].join('; ')}): ${rw.covered.map((c) => c.issue).join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
   const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
   const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });

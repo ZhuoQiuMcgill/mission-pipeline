@@ -10,7 +10,8 @@
 // Each read takes one snapshot of the memory (every row it derives from is read in one transaction).
 
 import type { BaseRecord, ObjectVersionRecord } from '../common/records.ts';
-import type { MissionId } from '../common/ids.ts';
+import { idPart, type MissionId } from '../common/ids.ts';
+import { safeId } from '../flow/context.ts';
 import { flowEvents, flowMissions, recordsByKind, factById, type Db } from '../memory/index.ts';
 import type { DataStore } from '../memory/data.ts';
 import { resolveBases, resolveConstraints } from '../memory/domain/constraints.ts';
@@ -52,6 +53,24 @@ function snapshot(db: Db, data: DataStore, mission: string): Snapshot {
 
 const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
 const lineOf = (s: Snapshot, task: string): FlowEvent[] => s.events.filter((e) => e.line === `task:${task}`);
+
+/** 4.4 (p6-r2-1): the duties of the claimed cards of one attempt of a task: its Constructor's and its Reviewers'. */
+function attemptDuties(s: Snapshot, data: DataStore, mission: string, task: string, k: number): string[] {
+  const con = safeId(`con.${mission}.${idPart(task)}.${k}`);
+  const rev = safeId(`rev.${mission}.${idPart(task)}.${k}`);
+  const out: string[] = [];
+  for (const d of s.dispatches.filter((x) => x.task === con || x.task === rev || x.task.startsWith(`${rev}.r`))) {
+    const claimed = s.events.find((e) => e.line === `dispatch:${d.dispatch}` && e.event === 'claimed' && e.key === 'spec');
+    if (claimed === undefined) continue;
+    try {
+      const duties = (JSON.parse(data.text((claimed.body as { spec: string }).spec)) as { card?: { duties?: string } }).card?.duties;
+      if (typeof duties === 'string') out.push(duties);
+    } catch {
+      /* an unreadable card shows nothing */
+    }
+  }
+  return out;
+}
 
 /** 4.4 (G3): the version of an instruction the claimed card of a step's handed-back dispatch showed, or null (no such card). */
 function cardVersion(s: Snapshot, data: DataStore, step: string, line: string): string | null {
@@ -191,18 +210,21 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       const hash = card === undefined ? null : taskCardHash(card);
       // the spec that carries this repair: tagged with it, or (a task that had no spec yet) of its plan with its card's hash
       const carries = (x: FlowEvent): boolean => { const b = x.body as { dplan?: string; hash?: string; repair?: string }; return b.repair === r.id || (b.repair === undefined && b.dplan === body!.dplan && hash !== null && b.hash === hash); };
-      const spec = line.find((x) => x.event === 'spec' && x.revision > decidedRev && carries(x));
-      // accepted under that spec: no other spec between it and the acceptance
-      const under = spec !== undefined && st.accepted && st.acceptedRev > spec.revision && !line.some((x) => x.event === 'spec' && x.revision > spec.revision && x.revision < st.acceptedRev);
-      const since = spec !== undefined && line.some((x) => x.event === 'spec' && x.revision > spec.revision);
-      return { task: t, state: spec === undefined ? `${st.state}; no card of this repair's has run yet` : `${st.state}${since ? '; its card changed since this repair' : ''}`, done: under };
+      // p6-r2-3: the card the task is (or was accepted) under is its last spec before the acceptance (the last one, when
+      // not accepted); it counts when it postdates the decision and carries this repair, however often the spec was written
+      const specs = line.filter((x) => x.event === 'spec');
+      const last = (st.accepted ? specs.filter((x) => x.revision < st.acceptedRev) : specs).at(-1);
+      const current = last !== undefined && last.revision > decidedRev && carries(last);
+      const ever = specs.some((x) => x.revision > decidedRev && carries(x));
+      return { task: t, state: !ever ? `${st.state}; no card of this repair's has run yet` : `${st.state}${current ? '' : '; its card changed since this repair'}`, done: st.accepted && current };
     });
     const secretaryEvents = s.events.filter((x) => x.line === 'secretary');
     const reopened = (body?.reopen ?? []).map((x): RepairTaskState => {
       const line = lineOf(s, x.task);
       const st = taskState(line);
-      // 4.4 (F13, p6-4): the attempts whose card carried this repair's own issue (its reopen, or a grant that covered it), under the current card
-      const carried = repairReopensCarried(mission, x.task, line, secretaryEvents).filter((c) => c.repair === r.id);
+      // 4.4 (F13, p6-4): the attempts whose card carried this repair's own issue (its reopen, or a grant that covered it,
+      // p6-r2-1: when one of that attempt's claimed cards shows the issue), under the current card
+      const carried = repairReopensCarried(mission, x.task, line, secretaryEvents, { issue: (repair) => (repair === r.id ? x.issue : null), cards: (k) => attemptDuties(s, data, mission, x.task, k) }).filter((c) => c.repair === r.id);
       if (carried.length === 0) {
         const before = line.some((y) => y.event === 'rework' && (y.body as { reopen?: { kind?: string; repair?: string } }).reopen?.repair === r.id);
         return { task: x.task, state: `${st.state}; ${before ? 'its card changed since the reopen' : 'the reopen is not carried out yet'}`, done: false };

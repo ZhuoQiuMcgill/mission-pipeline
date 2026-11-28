@@ -103,8 +103,9 @@ export async function withdrawConstraint(ports: import('../../flow/ports.ts').Fl
   if (ix.withdrawn.has(line)) return;
   const owner = flowCtx(ports, rec.mission ?? ctx.mission);
   const body = 'words' in req ? { line, version: current, words: req.words } : { line, version: current, by: req.by, reason: req.reason };
-  // 4.4 (G3): the Secretary withdraws the version of its own it checked, also inside the write: a PM version recorded meanwhile is never withdrawn
+  // 4.4 (G3, p6-1): a withdrawal acts on the version read (the Secretary's: the one of its own it checked), also inside
+  // the write: a version another writer recorded meanwhile is never withdrawn with it
   const stale = `constraint ${req.constraint} changed since it was read (another version was recorded): nothing was withdrawn; run the command again`;
   if ('expect' in req && current !== req.expect) throw Object.assign(new Error(stale), { code: 'STALE_REQUEST' });
-  await commit(owner, `flow:constraint-withdraw:${line}`, { events: [ev(owner, 'requirements', 'constraint-withdrawn', line, body)], records: [{ kind: 'basis.withdrawn', line: rec.line }], ...('expect' in req ? { guard: { absent: [], constraints: [{ line, version: req.expect }], code: 'STALE_REQUEST', message: stale } } : {}) });
+  await commit(owner, `flow:constraint-withdraw:${line}`, { events: [ev(owner, 'requirements', 'constraint-withdrawn', line, body)], records: [{ kind: 'basis.withdrawn', line: rec.line }], guard: { absent: [], constraints: [{ line, version: current! }], code: 'STALE_REQUEST', message: stale } });
 }

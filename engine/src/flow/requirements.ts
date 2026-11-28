@@ -237,11 +237,12 @@ export async function recordConstraint(
   const line = constraintLine(req.constraint);
   const ix = await basisIndex(ctx);
   if (ix.withdrawn.has(line)) throw new Error(`Constraint ${req.constraint} was withdrawn and stays withdrawn; use a new id.`);
-  // 4.4 (G3): a write on the version its caller read (null: none yet), checked now and again inside the write, so
-  // another writer's version (a PM replacement, an object constraint) is never scoped, overwritten or taken over
+  // 4.4 (G3, p6-1): every write of a line (a new version, a scope) acts on the version read: its caller's (`expect`,
+  // null: none yet) or, without one, the one this call read below; checked again inside the write, so another
+  // writer's version (a PM replacement, an object constraint, which is a proof input) is never scoped, overwritten or taken over
   const stale = `constraint ${req.constraint} changed since it was read (another version was recorded, or it was withdrawn): nothing was changed; run the command again`;
   if (req.expect !== undefined && (ix.current.get(line) ?? null) !== req.expect) throw Object.assign(new Error(stale), { code: 'STALE_REQUEST' });
-  const guard = req.expect === undefined ? {} : { guard: { absent: [], constraints: [{ line, version: req.expect }], code: 'STALE_REQUEST', message: stale } };
+  const guard = { guard: { absent: [], constraints: [{ line, version: req.expect !== undefined ? req.expect : ix.current.get(line) ?? null }], code: 'STALE_REQUEST', message: stale } };
   checkKind(ix, line, 'a project constraint', new Set(['constraint', 'instruction']), null);
   // 4.4 (G3): an address is for an instruction, bound to one mission (an object constraint's scope is a proof input)
   if ((req.scope.tasks !== undefined || req.scope.repairs !== undefined) && (req.kind !== 'instruction' || req.scope.mission === undefined)) throw new Error(`an address (tasks, repairs) is for an instruction of one mission: nothing was recorded`);

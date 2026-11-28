@@ -173,7 +173,15 @@ export function coveredReopenKeys(mission: string, task: string, line: readonly 
  * one place the reopens of a repair are read (cards and `mp read repairs`); a later change of how reopens are
  * carried (merged into an open attempt, pinned to a later one) is read here too.
  */
-export function repairReopensCarried(mission: string, task: string, line: readonly LineEvent[], secretary: readonly LineEvent[]): Array<{ readonly attempt: number; readonly repair: string; readonly revision: number }> {
+export function repairReopensCarried(
+  mission: string,
+  task: string,
+  line: readonly LineEvent[],
+  secretary: readonly LineEvent[],
+  // 4.4 (p6-r2-1): a read that must know a card showed the issue: a granted attempt counts only when one of its
+  // claimed cards (its Constructor's or its Reviewer's) carries the reopen's issue (absent: the cards are being built)
+  check?: { readonly issue: (repair: string) => string | null; readonly cards: (attempt: number) => readonly string[] },
+): Array<{ readonly attempt: number; readonly repair: string; readonly revision: number }> {
   const spec = line.filter((e) => e.event === 'spec').at(-1)?.revision ?? 0;
   const reworks = line.filter((e) => e.event === 'rework' && e.revision > spec);
   const out: Array<{ attempt: number; repair: string; revision: number }> = [];
@@ -188,7 +196,13 @@ export function repairReopensCarried(mission: string, task: string, line: readon
     const next = attempt === undefined ? undefined : reworks.find((r) => Number(r.key) === attempt + 1);
     if (next === undefined) continue;
     for (const key of coveredReopenKeys(mission, task, line, { body: e.body as EscalationBody, revision: e.revision })) {
-      if (key.startsWith('reopen:repair:') && !out.some((x) => x.attempt === attempt! + 1 && x.repair === key.slice('reopen:repair:'.length))) out.push({ attempt: attempt! + 1, repair: key.slice('reopen:repair:'.length), revision: next.revision });
+      const repair = key.slice('reopen:repair:'.length);
+      if (!key.startsWith('reopen:repair:') || out.some((x) => x.attempt === attempt! + 1 && x.repair === repair)) continue;
+      if (check !== undefined) {
+        const issue = check.issue(repair);
+        if (issue === null || !check.cards(attempt! + 1).some((c) => c.includes(issue))) continue;
+      }
+      out.push({ attempt: attempt! + 1, repair, revision: next.revision });
     }
   }
   return out.sort((a, b) => a.attempt - b.attempt);
