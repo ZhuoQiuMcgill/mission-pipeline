@@ -413,7 +413,9 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       edge(n.key, `task:${String(row['task'])}`, 'claimed');
       const cand = doc?.['candidate']?.['commit'];
       if (typeof cand === 'string') {
-        const c = node('commit', cand, String(row['mission']), Number(row['claimed_rev']), `the candidate collected from dispatch ${d}`);
+        // 4.4 (F4): a Constructor that stopped to ask handed in a parked commit, not a candidate
+        const parked = doc?.['fields']?.['blocked'] === true;
+        const c = node('commit', cand, String(row['mission']), Number(row['claimed_rev']), parked ? `the parked commit of dispatch ${d} (its edits when it stopped to ask; not a product)` : `the candidate collected from dispatch ${d}`);
         edge(c.key, n.key, 'collected from');
       }
     }

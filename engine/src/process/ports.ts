@@ -407,7 +407,8 @@ export class MemoryFlowLedger implements FlowLedgerPort {
   }
 
   async loop(lineage: string, loop: LoopKind): Promise<LoopStatus> {
-    return loopStatus(lineage, loop, this.memory.read((db) => loopState(db, lineage, loop)));
+    // 4.4 (F12 c): the rework cap is the project's setting (config.json `loops.rework`), read here where the flows read every loop
+    return loopStatus(lineage, loop, this.memory.read((db) => loopState(db, lineage, loop, null, loop === 'rework' ? this.ctx.reworkCap : undefined)));
   }
 
   async loopAttempt(req: { readonly op: string; readonly lineage: string; readonly loop: LoopKind; readonly signature: string; readonly failureClass?: string | null }): Promise<LoopStatus> {

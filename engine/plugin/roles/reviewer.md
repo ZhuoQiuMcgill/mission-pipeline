@@ -11,6 +11,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The Constructor's self-reported gaps and every issue observed in this task's lineage, including earlier rounds on this version and superseded re-bound versions, with the latest response as context. Answer each on this version, including previously deferred issues; repeating a deferral does not require rework.
 - The Constructor's hand-back of the attempt under review (its report, what it says it did, its questions): an optional material, "the Constructor's claims: to check, not proof". Check its claims against the candidate; never cite it as evidence.
 - The plan's data formats and storage, when it declares them.
+- The Constructor's questions on this attempt with their answers, and any question of the task still open. The review of an attempt waits until the answer to its before-review questions is carried out; a question put off or marked later may still be open.
 - The previous review of this task, when there is one: its verdict, the standards it found not met or unclear with its reasons, and its findings.
 - On an integration task: its dependencies with the paths their accepted products changed, and whether a Constructor ran (with nothing to write, none runs: the candidate is the dependencies' work laid together).
 - The project constraints (an instruction is labelled "Instruction (follow it; not a proof input)": follow it) and relevant decisions; materials, read page by page.

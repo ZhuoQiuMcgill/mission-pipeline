@@ -20,6 +20,7 @@ import type { DecisionBody, EscalationBody } from '../flow/secretary.ts';
 import { secretaryRoundInputs } from '../seat/cards/dynamic.ts';
 import { handBackFiles } from '../seat/card.ts';
 import type { SecretaryResult } from '../seat/cards/secretary.ts';
+import { holdTimeReached } from './holds.ts';
 
 export function unconfirmedSeats(db: Db): {dispatch: string; mission: string; seat: string; stops: string[]}[] {
   const stops = activeStops(db);
@@ -184,13 +185,19 @@ type FlowRow = ReturnType<typeof allFlow>[number];
 
 type Decided = {notice: string; reason: string; authorization?: string | null; inputs?: readonly {line: string; version: string}[]};
 
+/** 4.4 (F4): the accepted hand-back of a Secretary decision step, as the inbox reads it (in any snapshot, a write's too). */
+export function handedBackResult(db: Db, data: {text(h: string): string}, task: string): SecretaryResult | undefined {
+  const s = taskStatus(db, data, task);
+  return s?.state !== 'done' || s.handBack === null ? undefined : (s.handBack.result as SecretaryResult);
+}
+
 /**
  * 4.4 (F9, issue 62): a Secretary decision handed back before any pass recorded it, read from its accepted
  * hand-back, with the versions its card was claimed with (what a pass records as the decision's inputs).
  */
 function handedBackDecision(ctx: ProcessContext, task: string): (SecretaryResult & {inputs?: readonly {line: string; version: string}[]}) | undefined {
   const s = taskStatus(ctx.memory, ctx.memory.data, task);
-  if (s?.state !== 'done' || s.handBack === null) return undefined;
+  if (handedBackResult(ctx.memory, ctx.memory.data, task) === undefined || s === null || s.handBack === null) return undefined;
   const claimed = flowEvents(ctx.memory, {mission: dispatchInfo(ctx.memory, s.handBack.dispatch)!.mission, line: `dispatch:${s.handBack.dispatch}`, event: 'claimed'})[0];
   const spec = claimed === undefined ? null : JSON.parse(ctx.memory.data.text((JSON.parse(ctx.memory.data.text(claimed.body)) as {spec: string}).spec)) as {card?: {contextItems?: {line: string; version: string}[]}};
   return {...(s.handBack.result as SecretaryResult), ...(spec?.card?.contextItems !== undefined ? {inputs: spec.card.contextItems} : {})};
@@ -434,17 +441,18 @@ async function secReconcile(ctx: ProcessContext): Promise<void> {
  * a note, a question or a reply of the PM, a change of constraint or stop, a notice that calls for an
  * action, a detached run that ended (lost, stopped, or finished with its result: its seat may be gone),
  * and an unconfirmed seat (checked apart). Not on it: a seat's own claim, read, checkout, foreground rerun
- * or refused hand-back, and the other writes of a pass. The holds of 4.4 (G6) add their record kinds (a
- * change of hold) and a check by time (a hold's time) here.
+ * or refused hand-back, and the other writes of a pass. 4.4 (G6): a change of hold (its record kinds) and a
+ * hold's time (a check: holds.ts holdTimeReached).
  */
 export const SECRETARY_WAKE: {
   readonly kinds: readonly string[];
   readonly flow: ReadonlyArray<{readonly line: string; readonly prefix?: true; readonly events: readonly string[]}>;
   /** Flow events that wake only when their body says so (the body is data, read for these rows only). */
   readonly bodies: ReadonlyArray<{readonly line: string; readonly prefix?: true; readonly event: string; readonly when: (body: Record<string, unknown>) => boolean}>;
-  readonly checks: ReadonlyArray<(db: Db, now: number) => boolean>;
+  /** Checks of the state at `now` for what happened after revision `since` (a time is no record). */
+  readonly checks: ReadonlyArray<(db: Db, now: number, since: number) => boolean>;
 } = {
-  kinds: ['dispatch.handback', 'dispatch.released', 'task.queued', 'mission.state', 'memory.git-confirmed', 'pm.note', 'pm.question', 'pm.reply', 'stop.committed', 'stop.released'],
+  kinds: ['dispatch.handback', 'dispatch.released', 'task.queued', 'mission.state', 'memory.git-confirmed', 'pm.note', 'pm.question', 'pm.reply', 'stop.committed', 'stop.released', 'hold.placed', 'hold.released'],
   flow: [
     {line: 'secretary', events: ['decision', 'pm-answer', 'user-answer', 'applied']},
     {line: 'requirements', events: ['constraint', 'constraint-scope', 'constraint-withdrawn']},
@@ -452,7 +460,7 @@ export const SECRETARY_WAKE: {
   ],
   // a detached run's worker records its result as the run event of its dispatch, with the detached run's id
   bodies: [{line: 'dispatch:', prefix: true, event: 'run', when: (b) => typeof b['detached'] === 'string'}],
-  checks: [],
+  checks: [holdTimeReached],
 };
 
 /** Whether something on SECRETARY_WAKE was recorded after `since` (a notice calls for an action unless it says it only informs); one read. */
@@ -465,7 +473,7 @@ export function secretaryWakes(memory: Db & {readonly data: {text(h: string): st
       const rows = db.stmt(`SELECT json_extract(record, '$.body') AS body FROM log WHERE rev > ? AND kind = 'flow.event' AND json_extract(record, '$.event') = ? AND json_extract(record, '$.line') ${b.prefix === true ? 'LIKE ?' : '= ?'}`).all(since, b.event, b.prefix === true ? `${b.line}%` : b.line) as Array<{body: string}>;
       if (rows.some((r) => {try {return b.when(JSON.parse(memory.data.text(r.body)) as Record<string, unknown>);} catch {return false;}})) return true;
     }
-    return SECRETARY_WAKE.checks.some((c) => c(db, now));
+    return SECRETARY_WAKE.checks.some((c) => c(db, now, since));
   });
 }
 
@@ -479,7 +487,7 @@ export async function secWait(ctx: ProcessContext, o: {since: number; timeout?: 
     requireSecretary(ctx.memory, ctx.secretary);
     if (Date.now() >= nextCheck) {await secReconcile(ctx); nextCheck = Date.now() + (o.periodicMs ?? 30_000);}
     const unconfirmed = unconfirmedSeats(ctx.memory);
-    if (unconfirmed.length > 0 || secretaryWakes(ctx.memory, o.since)) return {revision: Number(ctx.memory.head()), timedOut: false, unconfirmed, replies: replies()};
+    if (unconfirmed.length > 0 || secretaryWakes(ctx.memory, o.since, ctx.now())) return {revision: Number(ctx.memory.head()), timedOut: false, unconfirmed, replies: replies()};
     if (Date.now() >= deadline) return {revision: Number(ctx.memory.head()), timedOut: true, unconfirmed, replies: replies()};
     await new Promise((resolve) => setTimeout(resolve, Math.min(o.pollMs ?? 100, Math.max(1, deadline - Date.now()))));
   }

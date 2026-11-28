@@ -95,7 +95,23 @@ describe('p6-1: every write of a constraint line is checked inside the write aga
   });
 });
 
-describe('p6-r2-1: a reopen granted on a task with no Constructor', () => {
+/**
+ * 4.3 decides `repair` (as in p44-repairs-flow): its decision has no `tracked`, and its reopen of `task` is counted on
+ * the task's used-up rework loop in the same write (what a 4.3 memory holds: 4.4 runs a reopen on a fresh loop).
+ */
+function decidedBy43(ports: World, repair: string, task: string): () => void {
+  type Entries = { events?: Array<{ event: string; body: unknown }> };
+  const l = ports.ledger as unknown as { append: (op: string, entries: Entries) => Promise<void> };
+  const orig = l.append.bind(l);
+  l.append = async (op, entries) => {
+    if (op !== `flow:repair-decided:${M}:${repair}`) return orig(op, entries);
+    const events = (entries.events ?? []).map((e) => { if (e.event !== 'decided') return e; const { tracked: _t, ...body } = e.body as Record<string, unknown>; return { ...e, body }; });
+    return orig(op, { ...entries, events: [...events, { mission: M, line: `task:${task}`, event: 'loop-verdict', key: `reopen:repair:${repair}`, body: { proceed: false, attempts: 2, allowed: 2, reason: 'cap' } }] } as Entries);
+  };
+  return () => { l.append = orig; };
+}
+
+describe('p6-r2-1: a reopen granted on a task with no Constructor (a 4.3 decision: 4.4 never counts a repair\'s reopen)', () => {
   // iface, impl, and integ: an integration task with nothing to write (no Constructor; its Reviewer judges the combination)
   const plan = (): DetailedPlanDoc => { const p = detailedPlan(M); return { ...p, tasks: [...p.tasks, { ...p.tasks[1]!, id: 'integ', kind: 'integration' as const, module: null, writeScope: [], implements: [], calls: [], dependsOn: ['impl'], provenance: { planElements: ['e1', 'e2'] } }] }; };
   const issue = 'compare the header rows of both parsers';
@@ -108,7 +124,9 @@ describe('p6-r2-1: a reopen granted on a task with no Constructor', () => {
     for (const n of [1, 2]) await ports.ledger.loopAttempt({ op: `test:integ-rework:${n}`, lineage: taskLineage(M, 'integ'), loop: 'rework', signature: `used-${n}` });
     const w2 = say(ports, 'The combined output loses a header row.');
     await pmRepair(ports.ctx, { mission: M, words: w2, kind: 'defect', text: 'The combined output loses a header row', about: 'integ' });
+    const restore = decidedBy43(ports, 'R-1', 'integ');
     await drive(engine, ports.scheduler, script({ 'architect-repair': () => ({ handBack: { reopen: [{ task: 'integ', issue }], add: [], note: 'integ judges the combination.' } }), secretary: () => null }));
+    restore();
     const exh = (await ports.ledger.events<EscalationBody>({ mission: M, line: 'secretary', event: 'escalation' })).map((e) => e.body).find((e) => e.source === 'loop-exhausted' && e.subject === 'task:integ');
     assert.ok(exh !== undefined, 'the reopen met the used-up loop');
     const w3 = say(ports, 'Grant one more attempt.');

@@ -12,6 +12,7 @@ import { attemptPast, lineAcceptance, ownersOfPaths, planData, productAttempt, t
 import { acceptedEntry } from '../../flow/repair.ts';
 import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
 import { repairPlanMaterial } from './architect.ts';
+import { cardQuestions, taskQuestions, withoutAnswers } from '../../flow/openItems.ts';
 import type { MaterialRef } from './common.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
@@ -252,6 +253,11 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       // 4.4 (F3): a later attempt's past, when the card lacks it
       const k = (lineOf(task.id).find((e) => e.event === 'dispatched' && e.key === spec.task)?.body as { k?: number } | undefined)?.k;
       writtenFor(card, task, k ?? null);
+      // 4.4 (F4; G5): the questions as they stand at the claim: an answer given since the step was queued reaches this card
+      const qs = k === undefined ? [] : taskQuestions(events, task.id, k);
+      card.decisionQuotes = withoutAnswers(card.decisionQuotes, qs);
+      if (qs.length > 0) card.questions = cardQuestions(qs);
+      else delete card.questions;
       const was = k === undefined ? null : attemptPast(lineOf(task.id), k);
       const review = was?.review ?? null;
       if (was !== null && review !== null && lacks(card, PREVIOUS_REVIEW_MATERIAL)) plus(card, PREVIOUS_REVIEW_MATERIAL, review, () => previousReviewMaterial(put, sourceAt(readers!, review), { review, attempt: was.attempt }));
@@ -273,6 +279,11 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
         const attempt = productAttempt(events.filter((e) => e.line === `task:${task!.id}`), card.target);
         if (attempt !== null) card.decisionQuotes = reviewerDecisionQuotes(mission, items, events, task, constraints, attempt, taskReferencePlan(events, fixed));
         writtenFor(card, task, attempt);
+        // 4.4 (F4): the questions of the attempt under review and their answers, as they stand at the claim
+        const qs = attempt === null ? [] : taskQuestions(events, task.id, attempt);
+        card.decisionQuotes = withoutAnswers(card.decisionQuotes, qs);
+        if (qs.length > 0) card.questions = cardQuestions(qs);
+        else delete card.questions;
       }
       // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
       const relied = taskReferencePlan(events, fixed);

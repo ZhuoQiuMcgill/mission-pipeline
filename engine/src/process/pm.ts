@@ -11,7 +11,7 @@ import { taskLine } from '../flow/plandoc.ts';
 //               dispatches removed, the process advanced; then, notices first (marked delivered):
 //               the ready steps (seat, task, mission, purpose, parallel), the steps held (a stop,
 //               a lease, the git-writes hold, an exploration planned after others not settled
-//               yet), what waits on the user, the dispatches in flight with their age. 4.1.2:
+//               yet; 4.4: a hold or a disk limit, holds.ts), what waits on the user, the dispatches in flight with their age. 4.1.2:
 //               after an environment change, no renew step; one notice per change names how
 //               many runs current proof rests on are from older environments
 //   pmDispatch  claims a ready step once (A1 claimDispatch): the dispatch id, the card leaf
@@ -113,8 +113,10 @@ import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/
 import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
 import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts';
 import { heldByPredecessors } from './explorationAfter.ts';
+import { heldForQuestions, openQuestionHolds } from './questions.ts';
 import { materialLeaf } from './seat.ts';
 import { carriedRunLines, detachedRunNotes, stopDetachedRuns, type DetachedRunNote } from './detached.ts';
+import { checkAfters, diskLimitPassed, heldByHolds, heldWhy, holdRef, holdsInForce, holdsOn, isConstructorStep, type AfterChecks, type HoldRef } from './holds.ts';
 
 // ---------------------------------------------------------------- shared
 
@@ -213,6 +215,10 @@ export interface HeldStep {
   readonly wi: string | null;
   /** 4.4 (F8): a production step of a closed mission (`mp sec next` counts these). */
   readonly closedMission?: true;
+  /** 4.4 (G6): the holds in force that hold it, each with its id and reason (holds.ts). */
+  readonly holds?: readonly HoldRef[];
+  /** 4.4 (F6, H-3): a new Constructor step held because a disk limit of config.json is passed. */
+  readonly diskLimit?: true;
 }
 
 export interface InFlight {
@@ -280,11 +286,17 @@ function constraintGapHolds(db: Db, data: { text(h: string): string }): HeldStep
   return out;
 }
 
-/** The ready and held steps, the dispatches in flight and what waits on the user, in one read. */
-export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held' | 'inFlight' | 'waitingOnUser'> {
+/**
+ * The ready and held steps, the dispatches in flight and what waits on the user, in one read. `afters`:
+ * production's verdict on the unpinned acceptances a hold's `after` names (holds.ts checkAfters).
+ */
+export function readSteps(ctx: ProcessContext, o: { readonly afters?: AfterChecks } = {}): Pick<NextReport, 'ready' | 'held' | 'inFlight' | 'waitingOnUser'> {
   const now = ctx.now();
   const gitHeld = ctx.memory.gitHold();
+  const disk = diskLimitPassed(ctx);
+  const group = ctx.secretary !== null ? 'sec' : 'pm';
   return ctx.memory.read((db) => {
+    const holds = holdsInForce(db, ctx.memory.data, now, o.afters);
     const inFlightRows = listDispatches(db, { state: 'in-flight', limit: 10_000 });
     const flightSpecs: TaskSpecDoc[] = [];
     const inFlight: InFlight[] = inFlightRows.map((d) => {
@@ -295,32 +307,53 @@ export function readSteps(ctx: ProcessContext): Pick<NextReport, 'ready' | 'held
     const held: HeldStep[] = [];
     const candidates: Array<{ spec: TaskSpecDoc; step: ReadyStep }> = [];
     const leased = new Map(leases(db).map((l) => [l.resource, l.dispatch]));
+    // 4.4 (F4): the reviews that wait for their Constructor's questions, read once per mission of this report
+    const asked = new Map<string, ReturnType<typeof openQuestionHolds>>();
+    const askedIn = (m: string): ReturnType<typeof openQuestionHolds> => asked.get(m) ?? asked.set(m, openQuestionHolds(db, ctx.memory.data, m)).get(m)!;
     for (const q of taskQueue(db)) {
       const spec = specOf(ctx, q.card);
       const kind = spec.card.seat;
       const entry = seatCardEntry(kind);
       const base = { step: q.task, seat: entry.seat, kind, mission: q.mission, purpose: purposeOf(spec.card) };
+      // 4.4 (G6, review p5-8): the holds on the step are named beside any earlier reason, so a stop's release shows none for the first time
+      const onIt = holdsOn(holds, q, spec);
+      const hold = (x: Omit<HeldStep, keyof typeof base>): void => { held.push(onIt.length === 0 ? { ...base, ...x } : { ...base, ...x, why: `${x.why}; also ${heldWhy(onIt, group)}`, holds: onIt.map((h) => holdRef(h.placed)) }); };
       if (heldByClose(db, spec)) {
-        held.push({ ...base, why: `mission ${q.mission} is closed (§6.7): its production steps wait until it is opened again (mp pm mission ${q.mission})`, wi: null, closedMission: true });
+        hold({ why: `mission ${q.mission} is closed (§6.7): its production steps wait until it is opened again (mp pm mission ${q.mission})`, wi: null, closedMission: true });
         continue;
       }
       if (stoppedFor(db, { mission: q.mission, capabilities: spec.capabilities })) {
-        held.push({ ...base, why: 'a stop covers it (the stop report covers it; it waits until the stop is narrowed or released)', wi: null });
+        hold({ why: 'a stop covers it (the stop report covers it; it waits until the stop is narrowed or released)', wi: null });
         continue;
       }
       if (entry.exportsProduct === true && gitHeld !== null) {
-        held.push({ ...base, why: `git writes are held since this folder was moved or copied: ${gitHeld.reason}`, wi: 'WI-31' });
+        hold({ why: `git writes are held since this folder was moved or copied: ${gitHeld.reason}`, wi: 'WI-31' });
         continue;
       }
       // an exploration planned after others starts once they settled (explorationAfter.ts)
       const after = heldByPredecessors(db, ctx.memory.data, spec);
       if (after !== null) {
-        held.push({ ...base, why: after, wi: null });
+        hold({ why: after, wi: null });
         continue;
       }
+      // 4.4 (F4): a review waits for the answer to its Constructor's questions; a hold on it is named beside,
+      // as beside the reasons above, so the release of either never hides that the other still applies
+      const waits = kind === 'reviewer' ? heldForQuestions(db, ctx.memory.data, spec, askedIn(q.mission)) : null;
+      if (waits !== null) {
+        hold({ why: waits, wi: null });
+        continue;
+      }
+      // 4.4 (G6, F6): a hold in force, or a disk limit passed for a new Constructor step (holds.ts)
       const busy = (spec.exclusive ?? []).filter((r) => leased.has(r));
+      const lease = `waits for ${busy.map((r) => `${r} (leased to ${leased.get(r)})`).join(', ')}`;
+      const byHold = heldByHolds(holds, disk, q, spec, group);
+      if (byHold !== null) {
+        // review p5-8: a lease the step also waits for is named beside the hold
+        held.push({ ...base, ...byHold, ...(busy.length > 0 ? { why: `${byHold.why}; also ${lease}`, wi: 'WI-28' } : {}) });
+        continue;
+      }
       if (busy.length > 0) {
-        held.push({ ...base, why: `waits for ${busy.map((r) => `${r} (leased to ${leased.get(r)})`).join(', ')}`, wi: 'WI-28' });
+        hold({ why: lease, wi: 'WI-28' });
         continue;
       }
       const dispatches = dispatchCount(db, q.task);
@@ -378,6 +411,8 @@ export interface Reconciled {
   readonly landings: RecoveryReport | null;
   readonly errors: readonly string[];
   readonly detachedRuns: readonly DetachedRunNote[];
+  /** 4.4 (G6, review p5-3): production's verdict on the unpinned acceptances a hold's `after` names (holds.ts checkAfters). */
+  readonly afters?: AfterChecks;
 }
 
 /** `mp pm next` (§5.1 step 1). */
@@ -394,7 +429,7 @@ async function driver_pmNext(ctx: ProcessContext, o: { readonly markDelivered?: 
 export function readNextReport(ctx: ProcessContext, recon: Reconciled): { readonly report: NextReport; readonly revision: number } {
   return ctx.memory.read((db) => {
     const revision = Number(ctx.memory.head());
-    const steps = readSteps(ctx);
+    const steps = readSteps(ctx, recon.afters !== undefined ? { afters: recon.afters } : {});
     const notices = listNotices(db, ctx.memory.data, ctx.secretary !== null ? {audience: 'secretary'} : {}).sort((a, b) => (a.state === b.state ? a.revision - b.revision : a.state === 'undelivered' ? -1 : 1));
     const st = labelStatus(db);
     return { revision, report: { notices, ...steps, olderEnvironmentRuns: recon.olderEnvironmentRuns, labels: { recomputing: st.recomputing, toVisit: st.toVisit, toRecompute: st.toRecompute, since: st.since }, landings: recon.landings, errors: recon.errors, detachedRuns: recon.detachedRuns } };
@@ -429,7 +464,14 @@ async function reconcileNext(ctx: ProcessContext): Promise<Reconciled> {
   } catch (e) {
     errors.push(`detached runs: ${(e as Error).message}`);
   }
-  return { olderEnvironmentRuns, landings, errors, detachedRuns };
+  // 4.4 (G6, review p5-3): a hold's `after` counts an acceptance as production does; checked here, where writes are allowed
+  let afters: AfterChecks = new Map();
+  try {
+    afters = await checkAfters(ctx);
+  } catch {
+    /* unchecked: the holds stay, the safe side */
+  }
+  return { olderEnvironmentRuns, landings, errors, detachedRuns, afters };
 }
 
 /** `mp pm alerts --ack <id...>`: notices acknowledged (never back). */
@@ -555,7 +597,7 @@ export function storedCard(ctx: ProcessContext, out: ClaimResponse): string {
 }
 
 /** `mp pm dispatch <step> --filled-by "<harness>/<model>"` (§5.1 step 2): the step is claimed once. */
-function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null; readonly starts?: ReadonlyMap<string, boolean> } = {}): Dispatched {
+function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null; readonly starts?: ReadonlyMap<string, boolean>; readonly afters?: AfterChecks } = {}): Dispatched {
   settleLabels(ctx);
   const filler = parseFiller(o.filledBy);
   const task = ctx.memory.read((db) => db.stmt('SELECT task, card, state, mission FROM tasks WHERE task = ?').get(step) as { task: string; card: string; state: string; mission: string } | undefined);
@@ -566,6 +608,8 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   const prior = ctx.memory.read((db) => dispatchCount(db, step));
   // an exploration's first step reads the target branch as it is now (explorationSnapshot.ts): its head, read before the write
   const head = prior === 0 && explorationSeat(spec.card.seat) ? (ctx.actions().targetHead?.() ?? null) : null;
+  // 4.4 (F6, H-3): the disk is read before the write (a new Constructor step only: the role, review p5-5)
+  const disk = isConstructorStep(spec) ? diskLimitPassed(ctx) : null;
   const queued = spec;
   const claim = (): ClaimResponse => pmWrite(
     ctx,
@@ -580,6 +624,13 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
       const after = heldByPredecessors(tx, tx.data, spec);
       if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
+      // 4.4 (G6, F6): a hold in force, or a disk limit passed, holds a new dispatch: checked in the same write
+      // review p5-3: an unpinned acceptance counts only while the product production validated is still the current one
+      const hold = heldByHolds(holdsInForce(tx, tx.data, ctx.now(), o.afters), disk, { task: step, mission: task.mission, lineage: spec.lineage }, spec, ctx.secretary !== null ? 'sec' : 'pm');
+      // 4.4 (F4): a review waits for the answer to its Constructor's before-review questions, checked in the same write; a hold on it is named beside
+      const asked = heldForQuestions(tx, tx.data, spec);
+      if (asked !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${asked}${hold !== null ? `; also ${hold.why}` : ''}`, hold !== null ? { detail: { holds: hold.holds ?? [], diskLimit: hold.diskLimit === true } } : {});
+      if (hold !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${hold.why}`, { detail: { holds: hold.holds ?? [], diskLimit: hold.diskLimit === true } });
       // 4.4 (F3, F5): the recorded hand-backs fill in what a card queued by 4.3 lacks; a repair card's unpinned starts as checked before this write
       spec = refreshDispatchCard(tx, tx.data, spec, {
         handBack: (t) => taskStatus(tx, tx.data, t)?.handBack ?? null,
@@ -616,9 +667,10 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
   mkdirSync(join(ctx.memory.paths.tmp, out.dispatch), { recursive: true });
   let worktree: string | null = null;
   if (entry.exportsProduct === true) {
-    const ws = spec.card['workspace'] as { snapshot: string };
-    // A4: after the claim; idempotent (a crash in between leaves nothing half done: the next dispatch call or a release cleans up)
-    ctx.workspaces().ensure(out.dispatch, ws.snapshot);
+    const ws = spec.card['workspace'] as { snapshot: string; start?: string };
+    // A4: after the claim; idempotent (a crash in between leaves nothing half done: the next dispatch call or a release cleans up).
+    // 4.4 (F4): a Constructor that continues a paused attempt starts on its parked commit
+    ctx.workspaces().ensure(out.dispatch, ws.start ?? ws.snapshot);
     worktree = `.mission-pipeline/worktrees/${out.dispatch}`;
   }
   const title = entry.seat.charAt(0).toUpperCase() + entry.seat.slice(1);
@@ -668,13 +720,16 @@ export const STARTS_CHECKS = 3;
  * Every command-line claim of a step (4.4, F5): `mp pm dispatch`, `mp sec dispatch` and `mp sec card`.
  * For a repair step, the unpinned starts are checked by the flow's resolver before the claim, and checked
  * again when the claim finds the accepted work changed meanwhile, a bounded number of times; past it,
- * nothing was claimed and the dispatch is run again. Only in-process callers (tests) use pmDispatch.
+ * nothing was claimed and the dispatch is run again. Only in-process callers (tests) use pmDispatch
+ * (without the checks of a hold's `after`, an unpinned acceptance does not release it: the safe side).
  */
 export async function pmDispatchChecked(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Promise<Dispatched> {
   for (let tries = 1; ; tries++) {
     const starts = await repairStarts(ctx, step);
+    // 4.4 (G6, review p5-3): production's verdict on the unpinned acceptances a hold's `after` names, re-checked in the claim's write
+    const afters = await checkAfters(ctx);
     try {
-      return pmDispatch(ctx, step, { ...o, ...(starts !== undefined ? { starts } : {}) });
+      return pmDispatch(ctx, step, { ...o, ...(starts !== undefined ? { starts } : {}), afters });
     } catch (e) {
       if (!(e instanceof ProcessError) || (e.detail as Record<string, unknown> | null)?.[STARTS_CHANGED] !== true) throw e;
       if (tries >= STARTS_CHECKS) throw new ProcessError('NOT_READY', `nothing was claimed: the accepted work of repair step ${step} changed during each of ${STARTS_CHECKS} checks of its starts; run the dispatch again`, { detail: { [STARTS_CHANGED]: true } });
@@ -1147,8 +1202,8 @@ export type RepairChanged =
  */
 export async function pmRepair(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null },
-): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged }> {
+  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null; readonly again?: boolean; readonly op?: string | null },
+): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged; readonly over?: string }> {
   ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
   const mission = req.mission as MissionId;
   let about: { kind: 'task' | 'exploration'; id: string } | null = null;
@@ -1185,15 +1240,15 @@ export async function pmRepair(
       }
     }
   }
-  let r: { readonly id: string; readonly repeated: boolean };
+  let r: { readonly id: string; readonly repeated: boolean; readonly over?: string };
   try {
-    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}) });
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}), ...(req.again === true ? { again: true, ...(req.op != null ? { op: req.op } : {}) } : {}) });
   } catch (e) {
     if (e instanceof LedgerError || e instanceof ProcessError) throw e;
     throw new LedgerError('BAD_REQUEST', (e as Error).message);
   }
   await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm repair ${r.id}` });
-  return { repair: r.id, repeated: r.repeated, about };
+  return { repair: r.id, repeated: r.repeated, about, ...(r.over !== undefined ? { over: r.over } : {}) };
 }
 
 export interface WaiveRequest {
@@ -1447,7 +1502,7 @@ export async function pmPlan(
  * `mp pm answer <mission> <escalation> --option ... --words W-<n> [--instructions ...] [--extra n] [--findings F,...]`:
  * the user's decision. 4.1.3 (#39): a grant on an exploration may name the findings it is for.
  */
-export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly by?: 'pm' | 'user'; readonly noWords?: boolean; readonly reason?: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[] }): Promise<{ readonly round: number | null }> {
+export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: string; readonly escalation: string; readonly option: DecisionOption; readonly words: string; readonly by?: 'pm' | 'user'; readonly noWords?: boolean; readonly reason?: string; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[]; readonly defer?: readonly number[] }): Promise<{ readonly round: number | null }> {
   const text = req.by === 'pm' ? '' : wordsText(ctx, req.words);
   const findings = [...new Set((req.findings ?? []).map((f) => f.trim()).filter((f) => f !== ''))];
   if (findings.length > 0) {
@@ -1469,6 +1524,7 @@ export async function pmAnswer(ctx: ProcessContext, req: { readonly mission: str
     ...(req.instructions !== undefined ? { instructions: req.instructions } : {}),
     ...(req.grantExtra !== undefined ? { grantExtra: req.grantExtra } : {}),
     ...(findings.length > 0 ? { findings } : {}),
+    ...((req.defer ?? []).length > 0 ? { defer: req.defer } : {}),
   });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm answer' });
   return { round };

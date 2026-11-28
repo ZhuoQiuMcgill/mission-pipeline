@@ -27,6 +27,7 @@ import { cardBase, commit, currentVersions, basisIndex, ev, eventOf, eventsOf, f
 import { DetailedPlanDoc, PLAN_LINE, SECRETARY_LINE, amendedPlan, latestEffectiveOf, type AmendmentEntry, type StoredDetailedPlan } from './plandoc.ts';
 import type { AppendGuard, FlowEventInput, FlowPorts, FlowSchedulerPort } from './ports.ts';
 import { currentItems, currentConstraints } from './requirements.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE, deferredItemBodies, escalationQuestions } from './openItems.ts';
 import { WI } from './wi.ts';
 
 export interface EscalationSpec {
@@ -77,6 +78,8 @@ export interface DecisionBody {
   readonly grantExtra: number;
   /** 4.1.3 (#39): a grant on an exploration: the findings the granted round is for (absent: none named). */
   readonly findings?: readonly string[];
+  /** 4.4 (F4): an answer to a Constructor's questions: the numbers of those it puts off (open items); absent: it answers them all. */
+  readonly defer?: readonly number[];
   readonly notice: string;
   readonly mayMatter: boolean;
   readonly inputs?: readonly { line: string; version: string; type: string }[];
@@ -160,6 +163,10 @@ export function sourceOutcome(e: EscalationBody, o: DecisionOption): string | nu
   if (e.source === 'loop-exhausted' && o === 'grant' && facts['loop'] === 'rework') return `the rework loop gets the attempts granted, and the Constructor starts the next attempt; ${REOPEN_GRANTS}`;
   // 4.4 (G4): repair.ts askPm carries it out as the repair's next Architect attempt
   if (e.source === 'repair-question' && o === 'answer') return 'the question and the answer go on the card of the repair\'s next Architect step, which decides the repair; until it hands back, the repair is undecided';
+  // 4.4 (F4): a Constructor's questions: a pause resumes on its parked edits; a review that waited is ready once the answer is carried out
+  if (e.source === 'constructor-decision' && o === 'answer' && escalationQuestions(e).length > 0) {
+    return `${OPTION_TEXT.answer.outcome}: ${facts['blocked'] === true ? 'the paused attempt resumes on its parked edits' : 'a review that waits for it is ready once it is carried out'}; a question it puts off (defer, by number) stays an open item, answered later`;
+  }
   return null;
 }
 
@@ -205,14 +212,37 @@ export async function escalationsOf(ctx: FlowCtx, subject: string): Promise<Esca
 }
 
 /**
- * Raise an escalation (idempotent by id): the event, then the Secretary task. 4.4 (G4): `guard`, the
- * precondition its caller read, checked inside the write that records it (nothing is raised when it fails).
+ * 4.4 (F4): what is wrong with an answer that puts questions off (null: nothing): only an answer to a
+ * Constructor's questions does, and it names questions of its escalation by their numbers.
  */
-export async function raiseEscalation(ctx: FlowCtx, spec: EscalationSpec, guard?: AppendGuard): Promise<void> {
+export function deferProblems(e: Pick<EscalationBody, 'source' | 'facts' | 'id'>, option: string, defer: readonly number[]): string | null {
+  if (defer.length === 0) return null;
+  if (option !== 'answer' || e.source !== 'constructor-decision') return 'defer goes with option "answer" on a Constructor\'s questions';
+  // review r2 (p8-7): every question of a pause is needed before the work resumes
+  if ((e.facts as { blocked?: unknown } | undefined)?.blocked === true) return `${e.id} is a Constructor that stopped to ask: each of its questions is needed before the work resumes, so none is put off`;
+  const n = escalationQuestions(e).length;
+  const bad = defer.filter((q) => !Number.isSafeInteger(q) || q < 1 || q > n);
+  return bad.length === 0 ? null : `defer names questions by their numbers on ${e.id}: 1 to ${n} (not ${bad.join(', ')})`;
+}
+
+/**
+ * 4.4 (F4; G5): the open items a decision puts off, for the write that records it: the same deterministic
+ * records on every run (review r2-2: a retry with the same operation id writes the payload the first run
+ * wrote; the fact writer keeps one of identical records).
+ */
+function deferredEvents(ctx: FlowCtx, esc: EscalationBody, defer: readonly number[]): FlowEventInput[] {
+  return deferredItemBodies(esc, defer).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
+}
+
+/**
+ * Raise an escalation (idempotent by id): the event, then the Secretary task. 4.4 (F4): `withEvents` are written
+ * in the same write; (F4, G4) under `guard` when given, the precondition its caller read, checked inside the write.
+ */
+export async function raiseEscalation(ctx: FlowCtx, spec: EscalationSpec, withEvents: readonly FlowEventInput[] = [], guard?: AppendGuard): Promise<void> {
   const id = safeId(spec.id);
   if ((await escalation(ctx, id)) !== null) return;
   const body: EscalationBody = { ...spec, id, task: escalationTask(id) };
-  await commit(ctx, `flow:escalation:${ctx.mission}:${id}`, { events: [ev(ctx, SECRETARY_LINE, 'escalation', id, body)], ...(guard !== undefined ? { guard } : {}) });
+  await commit(ctx, `flow:escalation:${ctx.mission}:${id}`, { events: [ev(ctx, SECRETARY_LINE, 'escalation', id, body), ...withEvents], ...(guard !== undefined ? { guard } : {}) });
   if (spec.source === 'plan-structure-change' || spec.source === 'plan-restarts-work') await escalateToUser(ctx, id, spec.summary, null);
   // 4.4 (G4): a repair Architect's question goes to the PM, whose filing on the user's words the repair is
   else if (spec.source === 'repair-question') await escalateToUser(ctx, id, REPAIR_QUESTION_TO_PM, null);
@@ -356,6 +386,7 @@ export async function secretaryStep(ctx: FlowCtx): Promise<void> {
       instructions: r.instructions,
       grantExtra: r.grantExtra,
       ...(r.findings !== undefined && r.findings.length > 0 ? { findings: [...r.findings] } : {}),
+      ...(r.defer !== undefined && r.defer.length > 0 ? { defer: [...r.defer] } : {}),
       notice: r.notice,
       mayMatter: r.mayMatter,
       ...(dispatched?.card.contextItems !== undefined ? { inputs: dispatched.card.contextItems } : {}),
@@ -495,7 +526,7 @@ export async function decisionFor(ctx: FlowCtx, id: string): Promise<DecisionBod
 }
 
 /** Records a PM answer; returns its answer round (4.4, F9: the command reports on this very answer). */
-export async function answerByPm(ports: FlowPorts, req: {mission: MissionId; escalation: string; option: DecisionOption; words: readonly string[]; noWords?: boolean; reason: string; instructions?: string; grantExtra?: number; findings?: readonly string[]}): Promise<{round: number}> {
+export async function answerByPm(ports: FlowPorts, req: {mission: MissionId; escalation: string; option: DecisionOption; words: readonly string[]; noWords?: boolean; reason: string; instructions?: string; grantExtra?: number; findings?: readonly string[]; defer?: readonly number[]}): Promise<{round: number}> {
   const ctx = flowCtx(ports, req.mission);
   if (await missionClosed(ctx)) throw Object.assign(new Error(`mission ${req.mission} is closed; reopen it before a PM answer can take effect`), {name: 'ProcessError', code: 'NOT_READY'});
   const esc = await escalation(ctx, req.escalation);
@@ -506,10 +537,14 @@ export async function answerByPm(ports: FlowPorts, req: {mission: MissionId; esc
   const words = req.words.map((id) => {const fingerprint = ports.wordsAuthority?.(id, req.mission); if (fingerprint == null) throw Object.assign(new Error(`${id} is not in force for ${req.mission}`), {name: 'ProcessError', code: 'NOT_ALLOWED'}); return {id, fingerprint};});
   if (req.option === 'grant' && (!Number.isSafeInteger(req.grantExtra) || req.grantExtra! < 1)) throw Object.assign(new Error('grant requires a positive --extra'), {name: 'ProcessError', code: 'NOT_ALLOWED'});
   if (['send-back', 'replan', 'rework', 'answer'].includes(req.option) && !req.instructions?.trim()) throw Object.assign(new Error(`${req.option} requires --instructions`), {name: 'ProcessError', code: 'NOT_ALLOWED'});
+  const deferProblem = deferProblems(esc, req.option, req.defer ?? []);
+  if (deferProblem !== null) throw Object.assign(new Error(deferProblem), {name: 'ProcessError', code: 'NOT_ALLOWED'});
   const round = await pmAnswerRound(ctx, esc.id);
   const key = `${esc.id}#${round}`;
-  const d: DecisionBody = {escalation: esc.id, by: 'pm', option: req.option, classification: 'detail', authorization: null, reason: req.noWords ? `by the PM, no words on record: ${req.reason}` : req.reason, instructions: req.instructions ?? '', grantExtra: req.grantExtra ?? 0, findings: req.findings ?? [], notice: '', mayMatter: false, words, noWords: req.noWords === true, answerRound: round};
-  await commit(ctx, `flow:pm-answer:${req.mission}:${key}`, {events: [ev(ctx, SECRETARY_LINE, 'pm-answer', key, d)], guard: {absent: [{mission: req.mission, line: SECRETARY_LINE, event: 'applied', key: esc.id}, {mission: req.mission, line: SECRETARY_LINE, event: 'pm-answer-rejected', key}], words: words.map((w) => ({...w, mission: req.mission})), openMissions: [req.mission], code: 'NOT_READY', message: 'this answer round was carried out or closed; read the inbox again'}});
+  // 4.4 (F4): `defer` only when given, so a 4.3 answer's payload is what 4.3 wrote
+  const d: DecisionBody = {escalation: esc.id, by: 'pm', option: req.option, classification: 'detail', authorization: null, reason: req.noWords ? `by the PM, no words on record: ${req.reason}` : req.reason, instructions: req.instructions ?? '', grantExtra: req.grantExtra ?? 0, findings: req.findings ?? [], ...((req.defer ?? []).length > 0 ? {defer: [...new Set(req.defer)].sort((a, b) => a - b)} : {}), notice: '', mayMatter: false, words, noWords: req.noWords === true, answerRound: round};
+  // 4.4 (F4, G5): the questions it puts off are open items from this write
+  await commit(ctx, `flow:pm-answer:${req.mission}:${key}`, {events: [ev(ctx, SECRETARY_LINE, 'pm-answer', key, d), ...deferredEvents(ctx, esc, d.defer ?? [])], guard: {absent: [{mission: req.mission, line: SECRETARY_LINE, event: 'applied', key: esc.id}, {mission: req.mission, line: SECRETARY_LINE, event: 'pm-answer-rejected', key}], words: words.map((w) => ({...w, mission: req.mission})), openMissions: [req.mission], code: 'NOT_READY', message: 'this answer round was carried out or closed; read the inbox again'}});
   return {round};
 }
 
@@ -762,12 +797,14 @@ export async function openEscalations(ctx: FlowCtx, subject: string): Promise<Es
  */
 export async function answerEscalation(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly escalation: string; readonly option: DecisionOption; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[]; readonly words: string },
+  req: { readonly mission: MissionId; readonly escalation: string; readonly option: DecisionOption; readonly instructions?: string; readonly grantExtra?: number; readonly findings?: readonly string[]; readonly defer?: readonly number[]; readonly words: string },
 ): Promise<void> {
   const ctx = flowCtx(ports, req.mission);
   const esc = await escalation(ctx, req.escalation);
   if (esc === null) throw new Error(`no escalation ${req.escalation} in mission ${req.mission}`);
   if (isAskOption(req.option) || !esc.options.some((o) => sameDecisionOption(o, req.option))) throw new Error(`option ${req.option} is not a decision for ${req.escalation} (choose one of ${esc.options.filter((o) => o !== 'ask-user').join(', ')})`);
+  const deferProblem = deferProblems(esc, req.option, req.defer ?? []);
+  if (deferProblem !== null) throw new Error(deferProblem);
   // an escalation already carried out (applied once) takes no later answer: it would never be carried out,
   // and an accepting answer would write a ruling judgment that revokes a negation with no flow effect.
   // Refused before anything is written.
@@ -783,6 +820,7 @@ export async function answerEscalation(
     instructions: req.instructions ?? '',
     grantExtra: req.grantExtra ?? 0,
     ...(req.findings !== undefined && req.findings.length > 0 ? { findings: [...req.findings] } : {}),
+    ...((req.defer ?? []).length > 0 ? { defer: [...new Set(req.defer)].sort((a, b) => a - b) } : {}),
     notice: '',
     mayMatter: false,
   };
@@ -791,7 +829,8 @@ export async function answerEscalation(
   // the same check inside the write that records the answer (a flow that carries the escalation out
   // meanwhile wins; nothing is written)
   await commit(ctx, `flow:user-answer:${req.mission}:${esc.id}`, {
-    events: [ev(ctx, SECRETARY_LINE, 'user-answer', esc.id, d)],
+    // 4.4 (F4, G5): the questions it puts off are open items from this write
+    events: [ev(ctx, SECRETARY_LINE, 'user-answer', esc.id, d), ...deferredEvents(ctx, esc, d.defer ?? [])],
     guard: { absent: [{ mission: req.mission, line: SECRETARY_LINE, event: 'applied', key: esc.id }], code: 'already-applied', message: `escalation ${esc.id} (${esc.source} on ${esc.subject}) was carried out or closed while this answer was being recorded; an answer now would not be carried out, so nothing was recorded (WI-24)` },
   });
 }

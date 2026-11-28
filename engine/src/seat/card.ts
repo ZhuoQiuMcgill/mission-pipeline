@@ -16,11 +16,32 @@ import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
 
 export { Continuation };
 
+/**
+ * 4.4 (F4; G5): a Constructor's question on the task and its state: answered (with the answer and who
+ * gave it), open (an open item not answered yet) or waiting (its escalation is not decided and carried
+ * out yet). Absent on a card: the task has none (or the card was queued before 4.4 and not claimed).
+ */
+const Question = z.object({
+  id: z.string().min(1),
+  attempt: z.number().int().positive(),
+  text: z.string(),
+  when: z.enum(['before-review', 'later']),
+  state: z.enum(['answered', 'open', 'waiting']),
+  answer: z.string().optional(),
+  by: z.string().optional(),
+});
+
 export const ConstructorCardSchema = z.object({
   ...commonCardFields,
   seat: z.literal('constructor'),
-  /** snapshot: the base commit its worktree is created at; writablePaths: the write paths (§5.3). */
-  workspace: Workspace,
+  /**
+   * snapshot: the base commit its worktree is created at, and its candidate is taken against;
+   * writablePaths: the write paths (§5.3). 4.4 (F4): `start`, a continuation after a pause: the parked
+   * commit its worktree opens on (it descends from the snapshot).
+   */
+  workspace: Workspace.extend({ start: z.string().optional() }),
+  /** 4.4 (F4): the Constructor's questions on this task, with their answers. */
+  questions: z.array(Question).optional(),
   goal: z.string().min(1),
   standards: z.array(Item).min(1),
   requirementItems: z.array(Item),
@@ -85,6 +106,8 @@ export const ReviewerCardSchema = z.object({
   storage: z.array(z.string()).optional(),
   /** 4.4 (F3, ruling E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional reading, never evidence). */
   materials: z.array(Material).optional(),
+  /** 4.4 (F4): the Constructor's questions of the attempt under review and those left open on the task, with their answers. */
+  questions: z.array(Question).optional(),
   /** The judgment's binding inputs, fixed by the card's contract (5.2). */
   binding: z.object({
     judgment: z.string().min(1),
@@ -136,6 +159,7 @@ export function renderCard(c: SeatCard): string {
       list('Interfaces to call', c.interfaces.calls.map((i) => `${i.name}: ${i.definition}`)) +
       renderPlanData(c) +
       list('Exclusive resources leased to you', c.exclusive ?? []) +
+      renderQuestions(c.questions ?? []) +
       renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
     );
   }
@@ -151,10 +175,18 @@ export function renderCard(c: SeatCard): string {
     list('Scratch paths (a rerun may write here; nothing written is kept)', c.workspace.scratchPaths ?? []) +
     list("The Constructor's self-reported gaps (answer every one)", c.selfReportedGaps.map((g) => `[${g.id}] ${g.text}`)) +
     list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`)) +
+    renderQuestions(c.questions ?? []) +
     renderPreviousReview(c) +
     renderIntegration(c) +
     renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
   );
+}
+
+const WHO: Readonly<Record<string, string>> = { secretary: 'the Secretary', pm: 'the PM', user: 'the user' };
+
+/** 4.4 (F4): the Constructor's questions on the task, each with its state and answer. */
+function renderQuestions(qs: ReadonlyArray<z.infer<typeof Question>>): string {
+  return list('Questions on this task and their answers', qs.map((q) => `[${q.id}] attempt ${q.attempt}, ${q.when}: ${q.text}\n  ${q.state === 'answered' ? `Answered${q.by !== undefined ? ` by ${WHO[q.by] ?? q.by}` : ''}: ${q.answer ?? ''}` : q.state === 'open' ? 'Open: not answered yet (an open item)' : 'Not answered yet: its decision is pending'}`));
 }
 
 /** 4.4 (F3): the plan's data formats and storage (plan-level lists, short), as the Architect's cards show them. */
@@ -359,13 +391,13 @@ function carriedRunsSection(o: { readonly dispatch: string; readonly carriedRuns
  */
 export function renderSeatCard(card: { readonly seat: string } & Readonly<Record<string, unknown>>, o: { readonly dispatch: string; readonly projectDir?: string | null; readonly carriedRuns?: readonly string[] } & CardProject): string {
   const e = seatCardEntry(card.seat);
-  const parsed = e.schema.parse(card) as { readonly seat: string; readonly task: string; readonly mission: string; readonly workspace?: { snapshot: string; writablePaths: readonly string[] } };
+  const parsed = e.schema.parse(card) as { readonly seat: string; readonly task: string; readonly mission: string; readonly workspace?: { snapshot: string; start?: string; writablePaths: readonly string[] } };
   const f = handBackFiles(o.dispatch);
   const role = roleText(e.seat, o.projectDir ?? null).trim();
   const ws = parsed.workspace;
   const where =
     e.exportsProduct === true && ws !== undefined
-      ? `## Your worktree\n\`.mission-pipeline/worktrees/${o.dispatch}/\`, created at commit ${ws.snapshot}. Work there with your harness's own tools and leave your changes as files: at hand-back \`mp\` collects every change git does not ignore (modified, deleted and new files, without \`git add\`); inside the write paths they become your candidate commit, a change outside them refuses the hand-back with the paths listed. Ignored files are never collected. Do not commit, stage, reset, stash or switch branches there.\n\n`
+      ? `## Your worktree\n\`.mission-pipeline/worktrees/${o.dispatch}/\`, created at commit ${ws.start !== undefined ? `${ws.start} (this attempt's edits so far, on its start ${ws.snapshot})` : ws.snapshot}. Work there with your harness's own tools and leave your changes as files: at hand-back \`mp\` collects every change git does not ignore (modified, deleted and new files, without \`git add\`); inside the write paths they become your candidate commit, a change outside them refuses the hand-back with the paths listed. Ignored files are never collected. Do not commit, stage, reset, stash or switch branches there.\n\n`
       : ws !== undefined && ws.snapshot !== ''
         ? `## What you read\nThe project at commit ${ws.snapshot}: run \`mp seat ${o.dispatch} checkout\`, which prints the directory that holds it.\n\n`
         : '';

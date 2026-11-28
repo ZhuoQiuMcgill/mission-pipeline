@@ -4,8 +4,8 @@
 //   p6-2 a user's answer given with words and no instructions reaches the repair's next Architect card and the
 //        earlier-decisions list by those words
 //   p6-3 a changed task is done only when accepted under the card this repair gave it
-//   p6-4 a reopen carried by a grant on a used-up loop is a reopen of the repair (card and read); "done" needs the
-//        accepted attempt's card to carry the repair's issue (the other direction is in p44-g4-repairs)
+//   p6-4 a reopen carried by a grant on a used-up loop (one 4.3 counted) is a reopen of the repair (card and read);
+//        "done" needs the accepted attempt's card to carry the repair's issue (the other direction is in p44-g4-repairs)
 //   p6-5 a Reviewer's answer counts for the instruction version its card showed
 //   p6-6 (kept) a decision with --tasks is not printed as a decision on other tasks; a task that links it lists it
 //   p6-7 a repair Architect's question is not posted once another pass moved the repair on
@@ -111,7 +111,8 @@ describe('p6-2: a user\'s answer with words and no instructions is carried by it
     const w3 = say(ports, 'Keep the header, also for an empty file.');
     await pmAnswer(ports.ctx, { mission: M, escalation: id, option: 'answer', words: w3, by: 'user' });
     await drive(engine, ports.scheduler, script({ 'architect-repair': architect }));
-    assert.deepEqual(cards[1]?.answers, [{ question: 'Keep the header of an empty file?', answer: `Keep the header, also for an empty file. (${w3})`, by: 'user' }]);
+    // one text of an answer everywhere (flow/openItems.ts answerText): the user's cited words, quoted with the entry's id
+    assert.deepEqual(cards[1]?.answers, [{ question: 'Keep the header of an empty file?', answer: `"Keep the header, also for an empty file." (the user's words ${w3})`, by: 'user' }]);
   });
 
   it('in the earlier-decisions list after a new card', async () => {
@@ -132,7 +133,7 @@ describe('p6-2: a user\'s answer with words and no instructions is carried by it
       'architect-repair': (t) => { const docs = (t.card as unknown as ArchitectRepairCard).plan.tasks.find((x) => x.id === 'docs')!; return { handBack: { reopen: [], add: [], change: [{ ...docs, writeScope: ['README.md'] }], note: 'the README' } }; },
       'con.m1.docs.2': () => null,
     }));
-    assert.deepEqual(ports.scheduler.card<ConstructorCard>('con.m1.docs.2').earlierAnswers, [`[${esc.id}] user: Use a level-2 heading. (${w3})`]);
+    assert.deepEqual(ports.scheduler.card<ConstructorCard>('con.m1.docs.2').earlierAnswers, [`[${esc.id}] user: "Use a level-2 heading." (the user's words ${w3})`]);
   });
 });
 
@@ -162,15 +163,33 @@ describe('p6-3: a changed task is done only under the card this repair gave it',
   });
 });
 
-describe('p6-4: a reopen carried by a grant on a used-up rework loop', () => {
+/**
+ * 4.3 decides `repair` (as in p44-repairs-flow): its decision has no `tracked`, and its reopen of `task` is counted on
+ * the task's used-up rework loop in the same write (what a 4.3 memory holds: 4.4 runs a reopen on a fresh loop).
+ */
+function decidedBy43(ports: World, repair: string, task: string): () => void {
+  type Entries = { events?: Array<{ event: string; body: unknown }> };
+  const l = ports.ledger as unknown as { append: (op: string, entries: Entries) => Promise<void> };
+  const orig = l.append.bind(l);
+  l.append = async (op, entries) => {
+    if (op !== `flow:repair-decided:${M}:${repair}`) return orig(op, entries);
+    const events = (entries.events ?? []).map((e) => { if (e.event !== 'decided') return e; const { tracked: _t, ...body } = e.body as Record<string, unknown>; return { ...e, body }; });
+    return orig(op, { ...entries, events: [...events, { mission: M, line: `task:${task}`, event: 'loop-verdict', key: `reopen:repair:${repair}`, body: { proceed: false, attempts: 2, allowed: 2, reason: 'cap' } }] } as Entries);
+  };
+  return () => { l.append = orig; };
+}
+
+describe('p6-4: a reopen carried by a grant on a used-up rework loop (a 4.3 decision: 4.4 never counts a repair\'s reopen)', () => {
   it('is the repair\'s reopen on the card (repair, note, addressed instruction) and in the read, which says done once that attempt is accepted', async () => {
     const { ports, engine, script } = await setup();
-    // impl passes at its last allowed attempt (two reworks): a reopen then needs a grant
+    // impl passes at its last allowed attempt (two reworks): a reopen 4.3 counted then needs a grant
     await drive(engine, ports.scheduler, script({ reviewer: (t) => ({ handBack: reviewer(t.card as never, t.task.startsWith('rev.m1.impl.') && !t.task.startsWith('rev.m1.impl.3') ? 'rework' : 'pass', { findings: [`finding at ${t.task}`] }) }), secretary: () => null }));
     const w2 = say(ports, 'The output loses the header row.');
     await pmRepair(ports.ctx, { mission: M, words: w2, kind: 'usability', text: 'loses the header row', about: 'impl' });
     await pmConstraint(ports.ctx, { mission: 'project', constraint: 'for-r1', kind: 'instruction', text: 'Touch the header code only.', scope: { ...SCOPE, repairs: ['R-1'] }, missionScope: 'm1' });
+    const restore = decidedBy43(ports, 'R-1', 'impl');
     await drive(engine, ports.scheduler, script({ 'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'keep the header row' }], add: [], note: 'impl writes the rows.' } }), secretary: () => null }));
+    restore();
     const exh = (await ports.ledger.events<EscalationBody>({ mission: M, line: 'secretary', event: 'escalation' })).map((e) => e.body).find((e) => e.source === 'loop-exhausted' && e.subject === 'task:impl');
     assert.ok(exh !== undefined, 'the reopen met the used-up loop');
     const w3 = say(ports, 'Grant one more attempt for the header.');

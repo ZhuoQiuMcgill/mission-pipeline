@@ -43,10 +43,12 @@ test('the inbox item carries the brief: the notice in full, its reason, the opti
     const out = await text43(p, ['pm', 'inbox']);
     assert.ok(out.includes(`The Secretary's notice:\n    ${NOTICE.split('\n').join('\n    ')}`), out);
     assert.match(out, /Its reason: this changes what the user gets/);
-    assert.match(out, /Options:\n {4}answer: the answer is recorded as the decision and goes to the next cards of the work; the work goes on\n {4}replan: the task waits while the Architect re-plans it with the instructions/);
+    // 4.4 (F4): an answer to a Constructor's questions also says what it releases and that a deferral stays open
+    assert.match(out, /Options:\n {4}answer: the answer is recorded as the decision and goes to the next cards of the work; the work goes on: a review that waits for it is ready once it is carried out; a question it puts off \(defer, by number\) stays an open item, answered later\n {4}replan: the task waits while the Architect re-plans it with the instructions/);
     assert.match(out, /Rests on: items item\.m1\.g1; words W-1/);
     assert.ok(out.includes(`The escalation's reasons, shortened (in full: mp read show escalation m1/${s.escalation}):`), out);
-    assert.match(out, /- Q1\?\n {4}- Q2\?/);
+    // 4.4 (F4): a Constructor's questions are numbered with when each must be settled
+    assert.match(out, /- Q1 \(before-review\): Q1\?\n {4}- Q2 \(before-review\): Q2\?/);
     assert.match(out, /- \(2 more\)/);
     assert.doesNotMatch(out, /END-OF-LONG/, 'a long reason is shortened');
     assert.match(out, /Action: mp pm answer m1 /);
@@ -60,7 +62,7 @@ test('the inbox item carries the brief: the notice in full, its reason, the opti
     assert.ok(item.facts, 'every read the PM has today stays');
     const shown = await text43(p, ['read', 'show', 'escalation', `m1/${s.escalation}`]);
     assert.ok(shown.includes(LONG), 'the read the item names gives every reason in full');
-    assert.match(shown, /- Q7\?/);
+    assert.match(shown, /- Q7 \(before-review\): Q7\?/);
   } finally { p.cleanup(); }
 });
 

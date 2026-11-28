@@ -14,7 +14,7 @@
 - Before any PM-class decision, read layer 2 for its subject and all principles in force (`mp read words --tag principle --in-force`), including those layer 1 could not list.
 - When the words support a choice, decide; when they do not and the impact on the project is major, ask the user; minor impact with no words: decide with a reason, recorded as "by the PM, no words on record" (the F-3 default pending a maintainer ruling).
 - Read `mp pm inbox` for your decisions, PM notices and replies; while no PM session is open, its questions wait and other work continues.
-- Contact the Secretary only for the user's progress details (`mp pm ask-secretary`) or a new instruction of the user (`mp pm note`; an answer to an escalation is `mp pm answer`, never a note); it handles the loop and exceptions and does not report progress unasked.
+- Contact the Secretary only for the user's progress details (`mp pm ask-secretary`) or a new instruction of the user (`mp pm note`; the user's "not this yet" is a hold, `mp pm hold add`; an answer to an escalation is `mp pm answer`, never a note); it handles the loop and exceptions and does not report progress unasked.
 - Stop, forbid, withdraw: record the instruction and run `mp pm stop "<the words>"` at once; the Secretary stops seats in its harness and confirms them with `release --ended`; report only what was confirmed.
 - Never release while a generation is live; if it makes no command within 60 s of the stop, or the user says it is gone, run `mp pm secretary stop`, stop its session in the harness, then release unconfirmed seats `--ended` in 4.2 mode only after the harness confirms.
 - The user's "close and merge" is consent to land: `mp pm finish <mission> --words W-<n>`; report the result when work ends and let the user judge completion; a problem they find becomes `mp pm repair`.
@@ -110,6 +110,7 @@ It prints the principles in force and the number of other tags in force (`mp rea
 For the no-words default, use `--by pm --no-words --reason "..."` instead.
 For the user's own answer: `mp pm answer <mission> <escalation> --option <option> --by user --words W-<n>`.
 Choose only an offered option; add instructions or extra rounds as the card requires.
+An answer to a Constructor's questions may put some off (`--defer <n,…>`): each stays an open item, listed by `mp read open-items <mission>` and on the task's cards; `mp pm open-item answer <[mission/]item> --answer "…" [--words W-n]` answers one at any time, and the answer reaches the task's next cards.
 `mp pm inbox --asked-user <item>` marks your question pending, with no words; record the user's answer on the spot and answer with its words.
 
 A revised detailed plan with a changed task set (added, dropped, split or merged), declared interfaces, data formats or storage raises `plan-structure-change` with a structural diff.
@@ -132,6 +133,12 @@ A note is no answer: answer an escalation with `mp pm answer`; a note naming an 
 It stays on the Secretary's next read until `mp sec ack-note <id>`.
 To change one, `mp pm note "<text>" --replaces N-<x>`: the old note shows as replaced and leaves the Secretary's list.
 `mp read notes [--all]` lists your notes with their state: current, acknowledged or replaced.
+The user's "not this yet" is a hold, not a note: `mp pm hold add --task <id> | --step <id> | --resource <name> | --all [--mission <m>] [--after [<mission>/]<task>] [--from <time>] [--until <time>] --reason "<why>" --words W-<n>`.
+A task's hold holds its Constructor steps in its own mission (its reviews and decisions go on; `--mission` names the mission when the id is in several); `--all` holds every step but a Secretary decision.
+A hold blocks new dispatches only: work in flight, hand-backs, runs, delivery and landing go on; a stop still stops.
+It ends when released by hand (`mp pm hold release <H-n>` when the user lifts it), at its `--until` time, or when its `--after` task is accepted; `mp read holds` lists them.
+A usage threshold of your harness is a hold `--all --until <the reset time>`, or one you release by hand.
+The order of work within the plan is the Secretary's: it places and releases its own holds; a note still works for any other new instruction.
 For progress details the user requested: `mp pm ask-secretary "<question>"`.
 The reply appears in your inbox; it is an answer to that question, not an unsolicited progress report.
 Memory is the channel of record; a harness message may wake the other session but never replaces a record.
@@ -223,6 +230,8 @@ Separate steps remain: `mp pm deliver`, `mp pm land`, `mp pm close`, on the same
 
 A problem or new question: `mp pm repair <mission> --words W-<n> --kind defect|usability|missing|new-question --text "<the user's reason, verbatim>" [--about <task or exploration>]`.
 Choose the kind; the text must occur verbatim in the words; the mission must be open.
+The same repair (words, kind, text, subject) returns the one recorded; when that one was decided and the problem is back, add `--again` to file it anew.
+A repair's reopen of a task gets a fresh rework loop (`loops.rework` in config.json, default 2); at its end accept-risk is offered as for any attempt. A task with an open attempt is reopened once that attempt is accepted. Notice `reopen-not-carried`: the task was given up or left the plan, so tell the user what was not done, and file it again on their words (`--again`) or re-plan.
 An exploration's author answers a question; the Architect routes other repairs under mechanical checks, without Calibrator or feasibility review.
 File what the user said and stop there: the scope of a repair is its Architect's, and its note reaches every task the repair touches.
 If the quoted sentence is not enough, record more of the user's words, or address an instruction to the repair (`--repair R-<n>`).
@@ -236,7 +245,8 @@ Every stop has an exit their words can take: accept, change, run again or drop.
 ## Reading at the user's request
 
 "How is it going?": `mp read status`, one query: layer 0 and only subtasks changed since the last ask; no changes means layer 0 only.
-"Why is it not done?": `mp read blocked`, with reasons and next steps.
+"Why is it not done?": `mp read blocked`, with reasons and next steps; a held step names its hold (`mp read holds`).
+What takes the disk: `mp read scratch`; config `limits: { worktrees, freeBytes }` holds new Constructor steps while one is passed (none by default; claims at the same moment can exceed a limit by a few).
 "The details of X": `mp read show <kind> <id>`, only X; evidence: `mp read leaf <id>`.
 "Why was this done?": `mp read why <id>`; what rests on it: `mp read from <id>`; one dispatch: `mp read chain <dispatch>`; a mission: `mp read tree <mission>`.
 `mp read from W-<n>` also lists the constraints, waivers and notes that cite the entry.

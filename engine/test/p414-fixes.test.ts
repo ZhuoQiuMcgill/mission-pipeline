@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { acceptedProduct, builtOnOlder, productAttempt, taskLineage } from '../src/flow/execution.ts';
+import { acceptedProduct, builtOnOlder, productAttempt, REOPEN_PINNED, taskLineage } from '../src/flow/execution.ts';
 import { RENEW_LINE, REVIEW_NEEDED, type ReviewNeededBody } from '../src/flow/plandoc.ts';
 import { recordItem } from '../src/flow/requirements.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
@@ -115,11 +115,24 @@ test('S1 a 4.1.3 old-id reopen escalation is reused and its grant starts the reo
   await unchanged(w, engine);
 });
 
+/**
+ * The record 4.3 left of a repair's reopen counted on impl's used-up rework loop (4.4, F12 a: a repair's reopen
+ * is not counted any more, so only a memory written by 4.3 has it): its marker and its negative verdict.
+ */
+async function countedBy43(w: World, repair: string) {
+  const lineage = taskLineage(M, 'impl');
+  await w.ledger.append(`test:43-counted-reopen:${repair}`, { events: [
+    { mission: M, line: 'task:impl', event: 'loop-return', key: `reopen:repair:${repair}`, body: { decision: 'exhausted', lineage, loop: 'rework', signature: 'legacy-repair-reopen' } },
+    { mission: M, line: 'task:impl', event: 'loop-verdict', key: `reopen:repair:${repair}`, body: { proceed: false, attempts: 2, allowed: 2, reason: 'cap' } },
+  ] });
+}
+
 /** 4.1.3: a repair loses its escalation write; a later review records the shared old id. */
 async function sharedLegacyReopen() {
   const { w, engine } = await lastAllowedPass();
   const words = say(w, 'Keep the header requested by the repair.');
   await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'Keep the header requested by the repair.' });
+  await countedBy43(w, 'R-1');
   w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
   await assert.rejects(drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'repair finding: keep the header' }], add: [], note: 'impl owns the header' } }),
@@ -173,6 +186,7 @@ test('A a negative verdict after the old escalation gets its own suffixed escala
   const { w, engine, id } = await sharedLegacyReopen();
   const words = say(w, 'Also keep the footer.');
   await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'Also keep the footer.' });
+  await countedBy43(w, 'R-2');
   w.ledger.failNext = (op) => op.startsWith('flow:escalation:');
   await assert.rejects(drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'later repair finding: keep the footer' }], add: [], note: 'impl owns the footer' } }),
@@ -193,6 +207,7 @@ async function reopenPair(legacy: boolean) {
   const { w, engine } = await lastAllowedPass();
   const repairWords = say(w, 'Keep the header requested by this repair.');
   await pmRepair(w.ctx, { mission: M, words: repairWords, kind: 'defect', text: 'Keep the header requested by this repair.' });
+  await countedBy43(w, 'R-1');
   const repairScript = script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'repair finding: keep the header' }], add: [], note: 'impl owns the header' } }),
   });
@@ -554,10 +569,11 @@ test('#47 review reopen gets a distinct escalation and its own Secretary step', 
   await unchanged(w, engine);
 });
 
-test('#47 repair reopen gets a distinct escalation; #50 repair offers no accept-risk', async () => {
+test('#47 a repair reopen that 4.3 counted on a used-up loop gets a distinct escalation; #50 it offers no accept-risk', async () => {
   const { w, engine } = await usedUp();
   const words = say(w, 'Fix the dependency speed.');
   await pmRepair(w.ctx, { mission: M, words, kind: 'usability', text: 'dependency speed' });
+  await countedBy43(w, 'R-1');
   await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null,
     'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'dependency speed' }], add: [], note: 'impl owns it' } }),
   }));
@@ -566,6 +582,23 @@ test('#47 repair reopen gets a distinct escalation; #50 repair offers no accept-
   assert.notEqual(es[0]!.id, es[1]!.id);
   assert.ok(!es[1]!.options.includes('accept-risk'));
   assert.ok(w.scheduler.queued('secretary').some((t) => t.task === es[1]!.task));
+  await unchanged(w, engine);
+});
+
+test('4.4 (F12 a): a repair reopen on a used-up rework loop is not counted: the reopened attempt starts at once, on a fresh loop', async () => {
+  const { w, engine } = await usedUp();
+  const before = await w.ledger.loop(taskLineage(M, 'impl'), 'rework');
+  const words = say(w, 'Fix the dependency speed.');
+  await pmRepair(w.ctx, { mission: M, words, kind: 'usability', text: 'dependency speed' });
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null, constructor: () => null,
+    'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'dependency speed' }], add: [], note: 'impl owns it' } }),
+  }));
+  assert.equal((await escalations(w)).length, 1, 'no escalation for the reopen');
+  assert.ok(w.scheduler.tasks.has('con.m1.impl.4'), 'the reopened attempt is queued');
+  const rw = (await events(w, 'task:impl', 'rework')).find((e) => e.key === '4')!.body;
+  assert.deepEqual([rw.reason, rw.reopen, rw.loop], ['reopen', { kind: 'repair', repair: 'R-1' }, `${taskLineage(M, 'impl')}.reopen4`]);
+  assert.deepEqual((await events(w, 'task:impl', 'loop-verdict')).filter((e) => e.key.startsWith('reopen:repair:')), [], 'nothing was counted');
+  assert.equal((await w.ledger.loop(taskLineage(M, 'impl'), 'rework')).attempts, before.attempts, "the task's own count is left as it was");
   await unchanged(w, engine);
 });
 
@@ -759,5 +792,42 @@ test('a review reopen settled by accept-risk does not hold the integration attem
   }));
   const now = await acceptedProduct(flowCtx(w, M), 'integ');
   assert.ok(now !== null && now !== settled, `the repair's integration attempt ran and was accepted (now ${now}, settled ${settled})`);
+  await unchanged(w, engine);
+});
+
+test('4.4 (F13, p7-3): a repair reopen of an integration whose rebuild waits for a review reopen waits for that rebuild; accept-risk adopting the reviewed product settles none of it, and the next attempt carries it', async () => {
+  const { w, engine } = await usedUp();
+  const pass: Script = (t) => ({ handBack: reviewer(t.card as unknown as ReviewerCard, 'pass') });
+  await drive(engine, w.scheduler, script({ reviewer: pass, secretary: () => null }));
+  assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'), 'integ is accepted at its attempt 1');
+  // two repairs; both Architects take their cards while integ is accepted at attempt 1
+  await pmRepair(w.ctx, { mission: M, words: say(w, 'Fix the integration order.'), kind: 'defect', text: 'Fix the integration order.' });
+  await pmRepair(w.ctx, { mission: M, words: say(w, 'Fix the integration timing.'), kind: 'defect', text: 'Fix the integration timing.' });
+  await engine.reconcile();
+  const step = (id: string) => w.scheduler.queued('architect-repair').find((t) => (t.card as unknown as { repair: { id: string } }).repair.id === id)!.task;
+  const s1 = step('R-1');
+  const s2 = step('R-2');
+  w.scheduler.dispatchOf(s1);
+  w.scheduler.dispatchOf(s2);
+  // R-1 reopens integ; the review of its attempt 2 reopens impl, whose rework loop is used up: integ's rebuild (attempt 3) waits
+  assert.deepEqual(await w.scheduler.run(s1, { handBack: { reopen: [{ task: 'integ', issue: 'integration order' }], add: [], note: 'integ owns it' } }), []);
+  await drive(engine, w.scheduler, script({ reviewer: reopenReview, secretary: () => null }));
+  const esc = (await escalations(w)).at(-1)!;
+  assert.ok(esc.options.includes('accept-risk'), 'the review reopen offers accept-risk');
+  assert.equal((await events(w, 'task:integ', 'rework')).find((e) => e.key === '3')?.body.reason, 'rebuild');
+  // R-2, decided on the attempt 1 its Architect saw, finds the rebuild waiting: it waits for it, never joins it
+  assert.deepEqual(await w.scheduler.run(s2, { handBack: { reopen: [{ task: 'integ', issue: 'integration timing' }], add: [], note: 'integ owns it' } }), []);
+  await drive(engine, w.scheduler, script({ reviewer: () => null, secretary: () => null }));
+  assert.equal((await events(w, 'repairs', 'decided')).find((e) => e.key === 'R-2')?.body.reopen[0].attempt, 1);
+  assert.deepEqual((await events(w, 'repairs', REOPEN_PINNED)).map((e) => [e.body.repair, e.body.attempt]), [['R-2', 3]]);
+  // the user accepts the reviewed integration with its risks: the rebuild adopts the product reviewed at attempt 2
+  const words = say(w, 'Accept the integration as it was reviewed.');
+  await answerEscalation(w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept it as it is. (${words})` });
+  await drive(engine, w.scheduler, script({ secretary: () => null }));
+  const accepted = (await events(w, 'task:integ', 'accepted')).map((e) => e.body.k);
+  assert.ok(accepted.includes(3), `the rebuild is accepted with the reviewed product: ${JSON.stringify(accepted)}`);
+  const rw = (await events(w, 'task:integ', 'rework')).find((e) => e.key === '4')!.body;
+  assert.deepEqual([rw.reason, rw.reopen, rw.issues], ['reopen', { kind: 'repair', repair: 'R-2' }, ['integration timing']], "R-2's issue opens the next attempt");
+  assert.ok(accepted.includes(4), "the attempt that carries R-2's issue is judged and accepted");
   await unchanged(w, engine);
 });

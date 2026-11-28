@@ -31,13 +31,14 @@ import { canonicalJson } from '../common/hash.ts';
 import type { BasisLineId, BasisVersionId, MissionId } from '../common/ids.ts';
 import type { BaseRecord } from '../common/records.ts';
 import { repairPlanMaterial, type ArchitectRepairCard, type ArchitectRepairResult } from '../seat/cards/architect.ts';
-import { addressedForPlanning, addressedIndexOf, answerText, planningConstraints } from '../seat/cards/dynamic.ts';
+import { addressedForPlanning, addressedIndexOf, planningConstraints } from '../seat/cards/dynamic.ts';
+import { answerText } from './openItems.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, missionClosed, nextBasisVersion, notify, objectRecord, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
-import { PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedTaskIds, explorationLine, repairRef, taskLine, type AmendmentEntry, type DetailedPlanDoc, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
-import { explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
-import { acceptedProduct, lineAcceptance, pathOwners } from './execution.ts';
+import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REPAIR_KINDS, amendedPlan, amendedTaskIds, cardChangedBy, explorationLine, repairOfTask, repairRef, taskCardHash, taskLine, type AmendmentEntry, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairKind, type RepairRef } from './plandoc.ts';
+import { detailedPlanOf, explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
+import { acceptedProduct, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints } from './requirements.ts';
 import { carryOut, closing, commitCarrying, grantForDecision, grantedAttempt, decisionFor, escalateToUser, isApplied, markApplied, openEscalations, raiseEscalation, REPAIR_QUESTION_TO_PM } from './secretary.ts';
@@ -59,6 +60,15 @@ interface RepairAttemptBody {
 
 /** 4.4 (G4): the escalation of a repair Architect's question (one per Architect attempt). */
 export const repairQuestionId = (task: string): string => safeId(`ask.${task}`);
+/**
+ * 4.4 (F13, p7-8): `mp pm repair … --again --op K` returned the same repair still in work: K is recorded against it
+ * (line "repairs", key the hash of K), so a retry of K returns that repair, also once it was decided.
+ */
+const AGAIN_RETURNED = 'again-returned';
+interface AgainReturnedBody {
+  readonly op: string;
+  readonly repair: string;
+}
 
 export const repairLineage = (mission: string, repair: string): string => safeId(`repair.${mission}.${idPart(repair)}`);
 const archRepairTask = (mission: string, repair: string, k: number): string => safeId(`arch-repair.${mission}.${idPart(repair)}.${k}`);
@@ -145,7 +155,9 @@ export async function repairRefs(ctx: FlowCtx, ids: Iterable<string>): Promise<R
 /**
  * Record a repair item. The caller checked that `text` occurs verbatim in the words entry (the
  * requirement items' check). The same repair again (same words, kind, text and subject) returns the
- * one recorded, while it is undecided or its amendment is part of the plan in effect.
+ * one recorded, while it is undecided or its amendment is part of the plan in effect. 4.4 (F13, #60):
+ * `again` files a new one although the same repair was decided (about an exploration: its round is over);
+ * one still in work is the same filing in flight, and is returned. `over` names the same repair whose work is over.
  */
 export async function recordRepair(
   ports: FlowPorts,
@@ -157,23 +169,55 @@ export async function recordRepair(
     readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
     /** About an exploration in its attempts phase (4.1.3, #31): its interpreter step, only queued, withdrawn in the same write. */
     readonly withdraw?: ReadonlyArray<{ readonly task: string; readonly role: Role }>;
+    /** 4.4 (F13, #60): `mp pm repair … --again`. */
+    readonly again?: boolean;
+    /** 4.4 (F13, p7-8): with `again`, the PM operation filing it: recorded with the repair, so its retry returns that repair. */
+    readonly op?: string;
   },
-): Promise<{ readonly id: string; readonly repeated: boolean }> {
+): Promise<{ readonly id: string; readonly repeated: boolean; readonly over?: string }> {
   const ctx = flowCtx(ports, req.mission);
   if (!(REPAIR_KINDS as readonly string[]).includes(req.kind)) throw new Error(`a repair's kind is one of ${REPAIR_KINDS.join(', ')}`);
   if (req.text.trim() === '') throw new Error('a repair records the user\'s reason');
   if (await missionClosed(ctx)) throw new Error(`mission ${req.mission} is closed: a repair is recorded before the mission is closed`);
   const existing = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
   const pie = await planInEffect(ctx);
+  // 4.4 (F13, p7-8): the operation filed it already (a retry after its receipt was lost): that repair, whatever became of it since
+  const op = req.again === true ? req.op : undefined;
+  const mine = op === undefined ? undefined : existing.find((e) => e.body.op === op);
+  // or it returned the same repair still in work: that one again, even once it was decided since
+  const returned = op === undefined || mine !== undefined ? undefined : (await eventsOf<AgainReturnedBody>(ctx, REPAIRS_LINE, AGAIN_RETURNED)).find((e) => e.body.op === op)?.body;
+  if (returned !== undefined) return { id: returned.repair, repeated: true };
+  /** The same repair still in work, returned: with `--again --op`, the operation is recorded against it first. */
+  const inWork = async (id: string): Promise<{ readonly id: string; readonly repeated: true }> => {
+    if (op !== undefined) await commit(ctx, `flow:repair-again:${req.mission}:${shortHash(op)}`, { events: [ev(ctx, REPAIRS_LINE, AGAIN_RETURNED, shortHash(op), { op, repair: id } satisfies AgainReturnedBody)] });
+    return { id, repeated: true };
+  };
+  let same: string | undefined;
   for (const e of existing) {
     const r = e.body;
     if (r.words !== req.words || r.kind !== req.kind || r.text !== req.text || canonicalJson(r.about) !== canonicalJson(req.about)) continue;
+    if (mine !== undefined) {
+      if (e.key !== mine.key && e.revision < mine.revision) same = r.id;
+      continue;
+    }
     const d = (await eventOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided', r.id))?.body;
-    // the same repair stands while undecided, or while what it added is in the plan in effect
-    if (d === undefined || pie === null || d.add.every((t) => pie.plan.tasks.some((x) => x.id === t))) return { id: r.id, repeated: true };
+    if (r.about?.kind === 'exploration') {
+      // about an exploration (never "decided"): its round is over once the exploration stopped since, or a change answered it
+      const over = (await answeringChange(ctx, r)) !== null || (await eventsOf(ctx, explorationLine(r.about.id), 'stopped')).some((s) => s.revision > e.revision);
+      if (!over && req.again === true) return inWork(r.id);
+      if (!over || req.again !== true) return { id: r.id, repeated: true, ...(over ? { over: r.id } : {}) };
+      same = r.id;
+      continue;
+    }
+    if (d === undefined) return inWork(r.id);
+    same = r.id;
+    // the same repair stands while what it added is in the plan in effect, unless the PM files it again (4.4, F13)
+    if (req.again !== true && (pie === null || d.add.every((t) => pie.plan.tasks.some((x) => x.id === t)))) return { id: r.id, repeated: true, over: r.id };
   }
+  const again = same !== undefined && req.again === true ? { over: same } : {};
+  if (mine !== undefined) return { id: mine.key, repeated: false, ...again };
   const id = `R-${existing.length + 1}`;
-  const body: RepairBody = { id, words: req.words, kind: req.kind, text: req.text, about: req.about };
+  const body: RepairBody = { id, words: req.words, kind: req.kind, text: req.text, about: req.about, ...(op !== undefined ? { op } : {}) };
   const event = ev(ctx, REPAIRS_LINE, 'repair', id, body);
   if (req.about?.kind === 'exploration') {
     const x = req.about.id;
@@ -186,12 +230,12 @@ export async function recordRepair(
     });
     await recordExplorationRerun(ports, req.mission, x, { evidence: [], environment: `repair:${id}`, repair: repairRef(body), authorTurn: true }, { events: [event, ...withdrawn] });
     for (const w of req.withdraw ?? []) await ports.scheduler.cancel(w.task);
-    return { id, repeated: false };
+    return { id, repeated: false, ...again };
   }
   if (pie === null) throw new Error(`mission ${req.mission} has no detailed plan in effect: a repair amends the plan in effect (plan the work with mp pm plan submit first)`);
   if (req.about?.kind === 'task' && !pie.plan.tasks.some((t) => t.id === req.about!.id)) throw new Error(`task ${req.about.id} is not a task of the plan in effect (${pie.eff.dplan})`);
   await commit(ctx, `flow:repair:${req.mission}:${id}`, { events: [event] });
-  return { id, repeated: false };
+  return { id, repeated: false, ...again };
 }
 
 // ---------------------------------------------------------------- the repair step
@@ -218,9 +262,15 @@ async function newAttempt(ctx: FlowCtx, repair: string, a: RepairAttemptBody): P
 }
 
 async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
-  const pie = await planInEffect(ctx);
-  if (pie === null) return;
-  const { eff, plan } = pie;
+  // 4.4 (F13): one read of the plan in effect, with the revision its decision's write is checked against
+  const effective = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).at(-1);
+  if (effective === undefined) return;
+  // 4.4 (p7-4): and the latest repair decided, which changes with every decision applied (a reopen-only one too)
+  const decided = (await eventsOf(ctx, REPAIRS_LINE, 'decided')).at(-1)?.revision ?? null;
+  const stored = await detailedPlanOf(ctx, effective.body.dplan);
+  if (stored === null) return;
+  const eff = effective.body;
+  const plan = amendedPlan(stored.plan, eff.amendments);
   const list = await attemptsOf(ctx, r.id);
   if (list.length === 0) return newAttempt(ctx, r.id, { k: 1, dplan: eff.dplan, reason: 'initial', mechanicalFailures: [] });
   const a = list.at(-1)!;
@@ -247,8 +297,12 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   const change = result.change ?? [];
   // 4.4 (G4): a hand-back with no edit is the Architect's question; the repair waits undecided for the PM's answer
   if (result.reopen.length === 0 && added.length === 0 && change.length === 0) return askPm(ctx, r, a, task, result.note);
-  // the mechanical checks only (D-10): the plan in effect with the changed cards (4.1.3), plus the added tasks
-  let mc = (await eventOf<MechanicalResult>(ctx, REPAIRS_LINE, 'mechanical-check', task))?.body ?? null;
+  // the mechanical checks only (D-10): the plan in effect with the changed cards (4.1.3), plus the added tasks.
+  // 4.4 (F13, p7-5, p7-4): kept per plan in effect (its revision) and per repairs decided (the latest one's revision),
+  // so a decision retried on a plan another repair amended since, or after another repair was decided, is checked
+  // again; a result 4.3 kept (keyed by the step alone) is checked again too
+  const mcKey = `${task}@r${effective.revision}.d${decided ?? 0}`;
+  let mc = (await eventOf<MechanicalResult>(ctx, REPAIRS_LINE, 'mechanical-check', mcKey))?.body ?? null;
   if (mc === null) {
     const doc = await pmPlanDoc(ctx, eff.pmPlan);
     if (doc === null) return;
@@ -266,7 +320,7 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
       // the tasks earlier repairs added stay outside the integration rule (S3)
       amended: amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)),
     });
-    await commit(ctx, `flow:repair-mechanical:${ctx.mission}:${task}`, { events: [ev(ctx, REPAIRS_LINE, 'mechanical-check', task, mc)] });
+    await commit(ctx, `flow:repair-mechanical:${ctx.mission}:${mcKey}`, { events: [ev(ctx, REPAIRS_LINE, 'mechanical-check', mcKey, mc)] });
   }
   if (!mc.ok) return repairReturn(ctx, r, a, task, mc.failures);
   // 4.4 (F5, p3-3): a changed card of a task that has an accepted product by now (the Architect's card was
@@ -275,8 +329,51 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   // next attempt's card is built on the work accepted now
   const accepted: string[] = [];
   for (const c of change) if (plan.tasks.some((t) => t.id === c.id) && (await acceptedProduct(ctx, c.id)) !== null) accepted.push(c.id);
-  if (accepted.length > 0) return repairReturn(ctx, r, a, task, accepted.map((id) => `change[${id}]: task ${id} now has an accepted product: reopen it instead (the card it was changed on predates its acceptance)`));
-  await decide(ctx, r, task, eff, plan, result, mc);
+  // 4.4 (F13, #61): a repair does not overwrite a card it has not seen. Each card it changes is compared with that
+  // task's card on the plan its Architect was given; one changed since (another repair's amendment), and an added
+  // id the plan in effect holds since, return the decision once to the Architect on the plan in effect now, by
+  // the same mechanical-return loop
+  const unseen = await unseenCards(ctx, view, plan, eff, result);
+  const failures = [
+    ...accepted.map((id) => `change[${id}]: task ${id} now has an accepted product: reopen it instead (the card it was changed on predates its acceptance)`),
+    ...unseen,
+    // 4.4 (F12 b, p7-4): no task may end up waiting in a circle with the waits the flow holds now (other repairs' reopens included)
+    ...(await waitCircles(ctx, plan, result)),
+  ];
+  if (failures.length > 0) return repairReturn(ctx, r, a, task, failures);
+  await decide(ctx, r, task, eff, plan, result, mc, { effective: effective.revision, decided });
+}
+
+/**
+ * 4.4 (F13): the cards a repair's hand-back changes (or the ids it adds) that changed in the plan in effect since its
+ * Architect was given its card (the card of its claim, rebuilt at the claim, F5), as mechanical failures. None when
+ * the claimed card cannot be read (the decision is applied as 4.3 applied it).
+ */
+async function unseenCards(ctx: FlowCtx, view: Extract<Awaited<ReturnType<typeof taskView>>, { kind: 'done' }>, plan: DetailedPlanDoc, eff: EffectiveBody, result: ArchitectRepairResult): Promise<string[]> {
+  const dispatch = view.status.handBack?.dispatch;
+  if (dispatch === undefined) return [];
+  const claimed = await eventOf<{ spec?: string }>(ctx, `dispatch:${dispatch}`, 'claimed', 'spec');
+  let given: DetailedPlanDoc;
+  try {
+    if (typeof claimed?.body.spec !== 'string') return [];
+    given = DetailedPlanDoc.parse((JSON.parse(ctx.ports.ledger.content.get(claimed.body.spec)) as { card: { plan: unknown } }).card.plan);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const c of result.change ?? []) {
+    const was = given.tasks.find((t) => t.id === c.id);
+    const now = plan.tasks.find((t) => t.id === c.id);
+    if (now === undefined || (was !== undefined && taskCardHash(was) === taskCardHash(now))) continue;
+    const by = cardChangedBy(eff.amendments, c.id);
+    out.push(`change[${c.id}]: the card of task ${c.id} changed after your card was built${by !== null ? ` (repair ${by} changed it)` : ''}: make your change again on its card in the plan in effect now`);
+  }
+  for (const t of result.add) {
+    if (given.tasks.some((x) => x.id === t.id) || !plan.tasks.some((x) => x.id === t.id)) continue;
+    const by = repairOfTask(eff.amendments, t.id);
+    out.push(`add[${t.id}]: task id "${t.id}" was added to the plan in effect after your card was built${by !== null ? ` (by repair ${by})` : ''}: use a fresh id, or change that task's card`);
+  }
+  return out;
 }
 
 /**
@@ -309,7 +406,7 @@ async function askPm(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, task: st
     options: ['answer'],
     facts: { repair: r.id, task, attempt: a.k },
     handover: { from: task, objects: [] },
-  }, guard);
+  }, [], guard);
   // raised by an earlier pass that stopped before handing it over: hand it over now (idempotent)
   if (!(await isApplied(ctx, id))) await escalateToUser(ctx, id, REPAIR_QUESTION_TO_PM, null);
   const d = await decisionFor(ctx, id);
@@ -367,14 +464,37 @@ async function repairReturn(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, t
  * as basis lines. Reopened tasks get their new attempts from execution (carryReopens). Each reopened
  * task is taken at the attempt it is accepted at now; one no longer accepted is left out, said.
  */
-async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveBody, plan: DetailedPlanDoc, result: ArchitectRepairResult, mc: MechanicalResult): Promise<void> {
+async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveBody, plan: DetailedPlanDoc, result: ArchitectRepairResult, mc: MechanicalResult, read: { readonly effective: number; readonly decided: number | null }): Promise<void> {
   const reopen: Array<RepairDecidedBody['reopen'][number]> = [];
   const skipped: string[] = [];
+  const notCarried: Array<{ readonly task: string; readonly attempt: number; readonly why: string }> = [];
+  // 4.4 (p7-r3-1): the card of each task a record "not carried out" relies on, as read (its latest spec): checked in the write
+  const specsRead: Array<{ readonly mission: string; readonly line: string; readonly event: string; readonly revision: number | null }> = [];
   for (const x of result.reopen) {
     const events = (await eventsOf(ctx, taskLine(x.task))).map((e) => ({ revision: e.revision, event: e.event, key: e.key, body: e.body }));
     const sel = lineAcceptance(events);
-    if (sel.product === null || (await acceptedProduct(ctx, x.task)) === null) skipped.push(x.task);
-    else reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product });
+    // 4.4 (F12 b): the tasks of this repair the reopen comes after (absent when none: the 4.3 shape)
+    const after = [...new Set(x.after ?? [])];
+    const extra = after.length > 0 ? { after } : {};
+    if (sel.product !== null && (await acceptedProduct(ctx, x.task)) !== null) {
+      reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product, ...extra });
+      continue;
+    }
+    // 4.4 (F13): a task that moved on since its Architect's card (another repair reopened it, say) is never dropped:
+    // requested at the attempt it was last accepted at, its reopen waits for the open attempt's acceptance and then
+    // opens the next attempt (execution, repairReopen)
+    const last = events.filter((e) => e.event === 'accepted').at(-1)?.body as { k: number; product: string } | undefined;
+    if (!sel.abandoned && plan.tasks.some((t) => t.id === x.task) && last !== undefined) {
+      reopen.push({ task: x.task, issue: x.issue, attempt: last.k, product: last.product, ...extra });
+      continue;
+    }
+    // a giving-up holds only under the card it was recorded under: a card of the plan in effect the task has not taken
+    // yet (another repair changed it) revives the task once execution lays it, so nothing is decided now (read again)
+    const spec = events.filter((e) => e.event === 'spec').at(-1);
+    const card = plan.tasks.find((t) => t.id === x.task);
+    if (sel.abandoned && card !== undefined && spec !== undefined && (spec.body as { hash?: string }).hash !== taskCardHash(card)) return;
+    specsRead.push({ mission: ctx.mission, line: taskLine(x.task), event: 'spec', revision: spec?.revision ?? null });
+    notCarried.push({ task: x.task, attempt: sel.k, why: sel.abandoned ? 'the task was given up' : 'the task has no accepted work to reopen' });
   }
   const added: readonly DetailedTask[] = result.add;
   // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now; 4.4: one accepted
@@ -386,7 +506,8 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   }
   // 4.4 (G3, F2): the Architect's note is recorded with its decision (also an empty one, so a read tells it from a
   // 4.3 decision, which has none); the cards of the tasks it added, changed or reopened print it
-  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), note: result.note.trim() };
+  // 4.4 (F13, p7-1): `tracked` tells this decision's reopens from those of 4.3 by the record, not by where the task is
+  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), ...(reopen.length > 0 ? { tracked: true as const } : {}), note: result.note.trim() };
   const events = [ev(ctx, REPAIRS_LINE, 'decided', r.id, body)];
   const records: BaseRecord[] = [];
   if (added.length > 0 || changed.length > 0) {
@@ -410,14 +531,21 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
       }
     }
   }
-  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records });
+  // 4.4 (F13): a reopen that cannot be carried out is recorded with the decision (the first record of its request), so
+  // the repair does not read as done; the PM's notice follows from the record (execution, reopenNotices)
+  for (const x of notCarried) events.push(ev(ctx, REPAIRS_LINE, REOPEN_NOT_CARRIED, `${r.id}:${x.task}#1`, { repair: r.id, task: x.task, attempt: x.attempt, why: x.why } satisfies ReopenNotCarriedBody));
+  // 4.4 (F13, p7-4): checked in the write: the plan in effect is still the one whose cards the decision was compared
+  // with, and no other repair was decided since its waits were checked (a reopen-only decision leaves the plan as it
+  // is, and its waits could close a circle with these), and (p7-r3-1) each task recorded as not carried out still has
+  // the card it was read under (a new card revives a task given up). Any one changed: read again on the next pass
+  await commit(ctx, `flow:repair-decided:${ctx.mission}:${r.id}`, { events, records, guard: { latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.effective }, { mission: ctx.mission, line: REPAIRS_LINE, event: 'decided', revision: read.decided }, ...specsRead], absent: [], code: 'STALE_REQUEST', message: `the plan in effect, the repairs decided, or the card of a task it reopens changed while repair ${r.id}'s decision was being recorded; nothing was written (the next pass reads it again)` } });
   await tellOnce(ctx, REPAIRS_LINE, {
     category: 'repair-decided',
     wi: null,
     key: r.id,
-    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.map((t) => t.id).join(', ')}` : ''}${skipped.length > 0 ? `; ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} left out (no longer accepted to reopen, or accepted meanwhile so its card stays)` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
-    defaultAction: `the work goes on: the added tasks run like any task of the plan, each reopened task gets a new attempt with the repair on its card${changed.length > 0 ? ', each changed task starts a new attempt under its new card and carries its earlier work on' : ''}; nothing else is re-reviewed (D-10)`,
-    detail: { repair: r.id, dplan: eff.dplan, added: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), skipped, orderChanges: mc.orderChanges },
+    trigger: `repair ${r.id} (${r.kind}) passed the mechanical checks: ${added.length > 0 ? `adds ${added.map((t) => t.id).join(', ')} to the plan in effect (${eff.dplan})` : 'adds no task'}; ${reopen.length > 0 ? `reopens ${reopen.map((x) => x.task).join(', ')}` : 'reopens no task'}${changed.length > 0 ? `; changes the card of ${changed.map((t) => t.id).join(', ')}` : ''}${skipped.length > 0 ? `; the card change of ${skipped.join(', ')} ${skipped.length === 1 ? 'was' : 'were'} left out (accepted meanwhile, so its card stays, or no longer in the plan)` : ''}${notCarried.length > 0 ? `; not carried out: the reopen of ${notCarried.map((x) => `${x.task} (${x.why})`).join(', ')}` : ''}${mc.orderChanges.length > 0 ? `; order changes against the user's order: ${mc.orderChanges.join('; ')}` : ''}`,
+    defaultAction: `the work goes on: the added tasks run like any task of the plan, each reopened task gets a new attempt with the repair on its card (one with an open attempt, once that attempt is accepted)${changed.length > 0 ? ', each changed task starts a new attempt under its new card and carries its earlier work on' : ''}; nothing else is re-reviewed (D-10)${notCarried.length > 0 ? `. Repair ${r.id} does not read as done while a reopen was not carried out: a new repair on the user's words (mp pm repair … --again) or a re-plan routes that work` : ''}`,
+    detail: { repair: r.id, dplan: eff.dplan, added: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), skipped, ...(notCarried.length > 0 ? { notCarried } : {}), orderChanges: mc.orderChanges },
   });
 }
 
