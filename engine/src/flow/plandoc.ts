@@ -228,6 +228,8 @@ export const DetailedTask = z.object({
   exclusive: z.array(z.string()),
   estimate: z.object({ durationMs: z.number().int().nonnegative(), costMicros: z.number().int().nonnegative(), basis: z.string().min(1) }),
   provenance: TaskProvenance,
+  /** 4.4 (G5): the open items this task takes (absent: none, every card before 4.4); its cards list them and its Reviewer answers each. */
+  openItems: z.array(z.string().min(1)).optional().describe('4.4: the ids of open items left earlier (on your card\'s list of open items, or named on the repair) that this task takes: its cards list them, its Constructor fixes them, its Reviewer answers each. Omit when it takes none.'),
 });
 export type DetailedTask = z.infer<typeof DetailedTask>;
 
@@ -433,6 +435,8 @@ export interface RepairBody {
   readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
   /** 4.4 (F13, p7-8): filed with `--again`: the PM operation that filed it (its retry returns this repair). Absent otherwise. */
   readonly op?: string;
+  /** 4.4 (G4, G5): the open items this repair is for (`--open-items`); its decision says which task takes each. Absent: none named. */
+  readonly openItems?: readonly string[];
 }
 /** The Architect repair step's outcome, once its amendment passed the mechanical checks (event "decided", key the repair id). */
 export interface RepairDecidedBody {
@@ -446,7 +450,7 @@ export interface RepairDecidedBody {
    * and then opens the next). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every
    * reopen before 4.4).
    */
-  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[]; readonly openItems?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
   /** 4.4 (G3, F2): the Architect's note on its decision, printed on the cards of the tasks it added, changed or reopened (absent: a 4.3 decision). */

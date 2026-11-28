@@ -42,7 +42,7 @@ import { productionDisputed, planningConstraints, addressedForPlanning, addresse
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId, ObjectVersionId } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
 import type { BaseRecord, JudgmentRecord, ObjectVersionRecord, UserWordsRecord } from '../common/records.ts';
-import { PREVIOUS_PLAN_MATERIAL, manyStandards, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
+import { OPEN_ITEMS_LISTED, PREVIOUS_PLAN_MATERIAL, manyStandards, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
 import { normalizeCommand } from '../common/fullSuite.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
@@ -99,6 +99,7 @@ import type { FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, currentConstraints, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
+import { itemIds, riskItemsOf } from './riskItems.ts';
 import { currentSettle, settledArtifactProven } from './exploration/step.ts';
 import { planReviewsWaiver, waiverLabel, type PlanReviewsWaiver } from './waivers.ts';
 
@@ -1031,7 +1032,9 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
     // tasks repairs added stay outside the integration rule when a revision carries them (4.1.2, D-10)
     const amended = amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body));
-    mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }), fullSuite: ctx.ports.project?.fullSuite ?? [], ...(amended.size > 0 ? { amended } : {}) });
+    // 4.4 (G5): the open items a task may take (read only when a task names one)
+    const named = plan.tasks.some((t) => (t.openItems ?? []).length > 0);
+    mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }), fullSuite: ctx.ports.project?.fullSuite ?? [], ...(amended.size > 0 ? { amended } : {}), ...(named ? { openItems: itemIds(await ctx.ports.ledger.events({ mission: ctx.mission })) } : {}) });
     await commit(ctx, `flow:mechanical:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'mechanical-check', dplan, mc)] });
     // before its reviews, the PM learns which work the plan would restart once in effect (told once, with the check)
 
@@ -1476,6 +1479,10 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const previousWaiver = revision && a.previous !== null ? await planReviewsWaiver(ctx, a.previous) : null;
   const nextWaiver = await planReviewsWaiver(ctx, dplan);
   const feasReport = revision ? await returnedFeasibility(ctx, a) : null;
+  // 4.4 (G5): the open items no task of the plan it revises takes, so a re-plan can give them to a task
+  const taken = new Set((previous?.plan.tasks ?? []).flatMap((t) => t.openItems ?? []));
+  const left = riskItemsOf(await ctx.ports.ledger.events({ mission: ctx.mission })).filter((i) => i.closed === null && !taken.has(i.id));
+  const listed = left.slice(0, OPEN_ITEMS_LISTED).map((i) => ({ id: i.id, kind: i.kind, text: i.text.length > 200 ? `${i.text.slice(0, 199)}…` : i.text, from: `task ${i.task}, attempt ${i.attempt}` }));
   const card: ArchitectDecomposeCard = {
     ...cardBase(ctx, task, {
       duties: revision
@@ -1513,6 +1520,8 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
     },
     projectCommands: projectCommandsOf(ctx),
     ...(previousWaiver !== null || nextWaiver !== null ? { planReviews: { previous: previousWaiver === null ? null : waiverLabel(previousWaiver), next: nextWaiver === null ? null : waiverLabel(nextWaiver) } } : {}),
+    ...(listed.length > 0 ? { openItems: listed } : {}),
+    ...(left.length > listed.length ? { openItemsMore: left.length - listed.length } : {}),
   };
   // the elements tab must not be empty (a plan with only explorations has nothing to decompose yet)
   if (card.pmPlan.elements.length === 0) return;
