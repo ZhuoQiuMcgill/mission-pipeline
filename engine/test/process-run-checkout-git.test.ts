@@ -79,7 +79,8 @@ fs.mkdirSync(path.join(root, 'build'), { recursive: true });
 fs.writeFileSync(path.join(root, 'build', 'out.txt'), 'ignored\\n');
 fs.writeFileSync(path.join(root, 'fresh.txt'), 'not ignored\\n');
 out.others = z(git('ls-files', '-z', '--full-name', '--others', '--exclude-standard', '--', ':/'));
-out.ignored = git('check-ignore', '--', ...['probe.local', 'build/out.txt', 'fresh.txt'].map((f) => path.relative(process.cwd(), path.join(root, f)))).trim().split('\\n').filter((x) => x !== '');
+// git paths with "/" (on Windows git quotes a name with a backslash in its answer)
+out.ignored = git('check-ignore', '--', ...['probe.local', 'build/out.txt', 'fresh.txt'].map((f) => path.relative(process.cwd(), path.join(root, f)).split(path.sep).join('/'))).trim().split('\\n').filter((x) => x !== '');
 for (const f of ['probe.local', 'fresh.txt']) fs.rmSync(path.join(root, f));
 fs.rmSync(path.join(root, 'build'), { recursive: true });
 fs.mkdirSync(outDir, { recursive: true });

@@ -20,7 +20,7 @@ import { readTransformDescription, transformDescriptionHash } from '../src/git/r
 import { ensureWorkspace } from '../src/git/workspace.ts';
 import { appendRecords, commitStop, currentDelivery, deliveryInfo, initMemory, loopState, openIntents, openMemory, recordDelivery, withdrawDelivery } from '../src/memory/index.ts';
 import { commitOn, fixture, IDENT, M, recordedDelivery, rejectsCode, sh, words, write, type Fixture } from './git41-fixtures.ts';
-import { tempDir } from './memory-fixtures.ts';
+import { FIXTURE_EOL, initFixtureRepo, tempDir } from './memory-fixtures.ts';
 import { builders } from './labels-fixtures.ts';
 import { pmClose, pmMission, processContext } from '../src/process/index.ts';
 
@@ -325,11 +325,11 @@ test('a bare common repository with linked worktrees: the project’s own worktr
   const bare = join(base, 'repo.git');
   const wt = join(base, 'wt');
   mkdirSync(seed);
-  sh(seed, 'init', '-q', '-b', 'main');
+  initFixtureRepo(seed, '-b', 'main');
   write(seed, 'file.txt', 'hello\n');
   sh(seed, 'add', 'file.txt');
   sh(seed, 'commit', '-q', '-m', 'first');
-  sh(base, 'clone', '-q', '--bare', seed, bare);
+  sh(base, 'clone', '-q', '-c', FIXTURE_EOL.join('='), '--bare', seed, bare);
   sh(bare, 'worktree', 'add', '-q', wt, 'main');
   initMemory(wt);
   const m = openMemory(wt);
@@ -357,7 +357,7 @@ test('a bare common repository with linked worktrees: the project’s own worktr
   }
 });
 
-test('"consistent" after a fast-forward that changes end of line, ident, symlinks, modes and types', { skip: !POSIX }, async () => {
+test('"consistent" after a fast-forward that changes end of line, ident, symlinks, modes and types', { skip: POSIX ? false : 'it checks out symbolic links and the executable bit, which Windows checkouts do not hold (core.symlinks, core.filemode false)' }, async () => {
   const f = fixture({ files: { '.gitattributes': '*.crlf text eol=crlf\n*.id ident\n', 'a.crlf': 'one\n', 'b.id': '$Id$\n', 'tool.sh': 'echo\n', 'typ': 'plain\n' } });
   try {
     // Let git materialize the attribute-bearing files, as a checkout would.

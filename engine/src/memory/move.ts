@@ -5,7 +5,9 @@
 // unfinished move. When either changed, or a move is unfinished, it takes the
 // folder's maintenance lock and then, before any other command:
 //   1. records "move pending" (old and new path and machine) unless recorded;
-//   2. runs `git worktree repair` for its worktrees, only when the git common
+//   2. repairs the links of its worktrees (4.4.1: the two link files of each,
+//      inside the folder, never `git worktree repair`, which some git versions
+//      ran against the original), only when the git common
 //      directory lies inside the folder; otherwise it skips this, rewrites
 //      nothing, and holds every command that writes to git until the PM
 //      confirms (under the WI) that this copy is the one in use;

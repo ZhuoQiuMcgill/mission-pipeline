@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -14,10 +14,12 @@ import { PlainGit } from '../src/git/plainGit.ts';
 import { id, type StopId } from '../src/common/ids.ts';
 import { commitStop, initMemory, intentInfo, openIntents, openMemory, recordDelivery } from '../src/memory/index.ts';
 import { commitOn, fixture, gitWrapper, holdGitWrites, M, recordedDelivery, rejectsCode, sh, words, write, type Fixture } from './git41-fixtures.ts';
-import { kinds, tempDir } from './memory-fixtures.ts';
+import { initFixtureRepo, kinds, tempDir } from './memory-fixtures.ts';
 
 const CHILD = fileURLToPath(new URL('./git41-land-child.ts', import.meta.url));
 const POSIX = process.platform !== 'win32';
+/** Why a test that runs the POSIX shell git wrapper (git41-fixtures gitWrapper) is skipped on Windows. */
+const SH_AS_GIT = 'it runs a POSIX shell script as the git program, which Windows cannot start';
 
 /** A delivery D on B for `branch` (created at B when it does not exist). */
 function delivery(f: Fixture, op: string, branch: string, files: Record<string, string> = { 'src/new.txt': `from ${op}\n` }): { B: string; D: string; ref: string } {
@@ -122,7 +124,7 @@ test('class A: dirty worktree (WI-02), several worktrees (WI-01), base moved (WI
   }
 });
 
-test('HEAD switched between the check and the merge: WI-06 class C; git is not run again automatically; the PM closes it after a fresh check', { skip: !POSIX }, async () => {
+test('HEAD switched between the check and the merge: WI-06 class C; git is not run again automatically; the PM closes it after a fresh check', { skip: POSIX ? false : SH_AS_GIT }, async () => {
   const f = fixture();
   try {
     const { B, D } = delivery(f, 'd1', 'main');
@@ -185,7 +187,7 @@ test('a crash between the intent and git leaves it open at B; a stop committed m
   }
 });
 
-test('the parent mp killed while its git child survives: "landing in progress" for an ordinary call; at B the intent stays open; the retry lands D once; done when seen at D', { skip: !POSIX }, async () => {
+test('the parent mp killed while its git child survives: "landing in progress" for an ordinary call; at B the intent stays open; the retry lands D once; done when seen at D', { skip: POSIX ? false : SH_AS_GIT }, async () => {
   const f = fixture();
   try {
     const { B, D } = delivery(f, 'd1', 'release');
@@ -268,7 +270,8 @@ test('a project folder in a linked worktree (§11.15): its own branch is not ext
   const base = tempDir('mp-linked-');
   const main = join(base, 'main');
   const wt = join(base, 'wt');
-  sh(base, 'init', '-q', '-b', 'main', main);
+  mkdirSync(main);
+  initFixtureRepo(main, '-b', 'main');
   repo_commit(main);
   sh(main, 'worktree', 'add', '-q', '-b', 'feature', wt);
   initMemory(wt);

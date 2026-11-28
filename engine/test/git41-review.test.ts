@@ -17,13 +17,15 @@ import { land, recoverLandings } from '../src/git/land.ts';
 import { discoverRepo, lsTree } from '../src/git/objects.ts';
 import { detachDuplicateCheckout } from '../src/git/pmActions.ts';
 import { GitTimeoutError, PlainGit } from '../src/git/plainGit.ts';
-import { AttributeEvaluator, materializeSnapshot, nameCollisions, readTransformDescription, RepresentationError, resolveConversion, transformDescriptionHash } from '../src/git/representation.ts';
+import { AttributeEvaluator, materializeSnapshot, nameCollisions, probeNameFolding, readTransformDescription, RepresentationError, resolveConversion, transformDescriptionHash } from '../src/git/representation.ts';
 import { checkoutCommit, collectCandidate, compareToCommit, ensureWorkspace, removeWorkspace, runCheckoutDir } from '../src/git/workspace.ts';
 import { appendRecords, claimDispatch, commitStop, deliveryInfo, finishIntent, intentInfo, landingState, openIntents, queueTask } from '../src/memory/index.ts';
 import { commitOn, fixture, gitWrapper, holdGitWrites, IDENT, M, recordedDelivery, rejectsCode, sh, words, write, type Fixture } from './git41-fixtures.ts';
 import { tempDir } from './memory-fixtures.ts';
 
 const POSIX = process.platform !== 'win32';
+/** Why a test that runs a POSIX shell script as git (gitWrapper, a slow stand-in) is skipped on Windows. */
+const SH_AS_GIT = 'it runs a POSIX shell script as the git program, which Windows cannot start';
 const DELIVER_CHILD = fileURLToPath(new URL('./git41-deliver-child.ts', import.meta.url));
 
 // ---------------------------------------------------------------- helpers
@@ -71,7 +73,7 @@ function pending(): { promise: Promise<void>; resolve: () => void } {
 
 // ---------------------------------------------------------------- #1
 
-test('#1 two deliveries running at once each build and record their own candidate, in their own directory', { skip: !POSIX }, async () => {
+test('#1 two deliveries running at once each build and record their own candidate, in their own directory', async () => {
   const f = fixture({ files: { 'src/a.txt': 'base\n' } });
   try {
     await product(f, 'o1', M, { 'src/a.txt': 'BAD\n' });
@@ -101,7 +103,7 @@ test('#1 two deliveries running at once each build and record their own candidat
 
 // ---------------------------------------------------------------- #2
 
-test('#2 a delivery-ref intent is never closed because the ref is absent: a late git, a retry and a lock all end with one record at D', { skip: !POSIX }, async () => {
+test('#2 a delivery-ref intent is never closed because the ref is absent: a late git, a retry and a lock all end with one record at D', { skip: POSIX ? false : SH_AS_GIT }, async () => {
   const f = fixture({ files: { 'src/a.txt': 'base\n' } });
   try {
     await product(f, 'o1');
@@ -307,7 +309,7 @@ test('#7 a capability stop reaches deliveries and landings: derived from the mis
 
 // ---------------------------------------------------------------- #8
 
-test('#8 the final authorization re-checks the labels: recomputing waits; a label input committed meanwhile reopens them and checks again', { skip: !POSIX }, async () => {
+test('#8 the final authorization re-checks the labels: recomputing waits; a label input committed meanwhile reopens them and checks again', async () => {
   const f = fixture({ files: { 'src/a.txt': 'base\n' } });
   try {
     await product(f, 'o1');
@@ -364,7 +366,7 @@ test('#9 detaching a duplicate checkout is refused while git writes are held, an
 
 // ---------------------------------------------------------------- #10
 
-test('#10 the Windows branch of the async runner ends on time although a descendant keeps the pipes open', { skip: !POSIX }, async () => {
+test('#10 the Windows branch of the async runner ends on time although a descendant keeps the pipes open', { skip: POSIX ? false : SH_AS_GIT }, async () => {
   const dir = tempDir('mp-timeout-');
   try {
     const script = join(dir, 'slow.sh');
@@ -380,7 +382,7 @@ test('#10 the Windows branch of the async runner ends on time although a descend
   }
 });
 
-test('#10b the synchronous runner (the landing\u2019s git step) returns when git exits: a descendant holding its output neither delays it nor makes it a timeout', { skip: !POSIX }, () => {
+test('#10b the synchronous runner (the landing\u2019s git step) returns when git exits: a descendant holding its output neither delays it nor makes it a timeout', { skip: POSIX ? false : SH_AS_GIT }, () => {
   const dir = tempDir('mp-timeout-');
   try {
     const slow = join(dir, 'slow.sh');
@@ -447,9 +449,18 @@ test('#12 names that fold together on a case- or normalization-insensitive files
         materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out'), folding: { case: true, normalization: true } }),
         (e: unknown) => e instanceof RepresentationError && e.code === 'path-collision' && e.paths.includes('A.txt') && e.paths.includes('a.txt'),
       );
-      // On this (case-sensitive) filesystem the probe finds no folding: both files are written.
-      const ok = await materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out2') });
-      assert.equal(ok.entries.length, 3);
+      // Without a stated folding the destination is probed. 4.4.1: a case-sensitive filesystem
+      // (Linux) folds nothing, and both files are written; a case-insensitive one (Windows, macOS)
+      // folds the two names, and the commit is refused there the same way.
+      if (probeNameFolding(scratch).case) {
+        await assert.rejects(
+          materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out2') }),
+          (e: unknown) => e instanceof RepresentationError && e.code === 'path-collision' && e.paths.includes('A.txt') && e.paths.includes('a.txt'),
+        );
+      } else {
+        const ok = await materializeSnapshot({ git: f.ctx.git, repo, commit: C, attributes, dest: join(scratch, 'out2') });
+        assert.equal(ok.entries.length, 3);
+      }
     } finally {
       attributes.dispose();
       rmSync(scratch, { recursive: true, force: true });
@@ -546,7 +557,7 @@ test('r2 #4 a submodule checked out at another commit than its gitlink is not "m
     // Not checked out: as a clean checkout has it.
     assert.deepEqual(await compareToCommit(f.ctx, f.dir, B), { state: 'match' });
     const next = commitOn(f.dir, f.base, { 'file.txt': 'another child commit\n' });
-    f.git('update-ref', 'refs/heads/aux', next);
+    f.git('update-ref', 'refs/heads/side', next); // not "aux": a reserved device name on Windows (aux.lock cannot be made)
     const sub = join(f.dir, 'sub');
     f.git('clone', '-q', '--no-hardlinks', '--no-checkout', f.dir, sub);
     sh(sub, 'checkout', '-q', '--detach', next);
@@ -628,7 +639,7 @@ test('r3 #1 a submodule’s changes hidden by assume-unchanged or skip-worktree 
   }
 });
 
-test('r3 #2 a path or submodule that cannot be read is "undetermined", never "match"', { skip: !POSIX || process.getuid?.() === 0 }, async () => {
+test('r3 #2 a path or submodule that cannot be read is "undetermined", never "match"', { skip: !POSIX ? 'a file mode cannot make a file unreadable on Windows' : process.getuid?.() === 0 ? 'root reads every file' : false }, async () => {
   const f = fixture({ files: { 'src/a.txt': 'a\n' } });
   const locked: string[] = [];
   try {

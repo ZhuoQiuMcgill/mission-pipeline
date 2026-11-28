@@ -21,7 +21,7 @@ import { appendRecords, commitStop, deliveryInfo, loopState, openIntents } from 
 import { commitOn, fixture, holdGitWrites, IDENT, M, words, write, type Fixture } from './git41-fixtures.ts';
 import { tempDir } from './memory-fixtures.ts';
 
-const POSIX = process.platform !== 'win32';
+// 4.4.1: these tests run on Windows too (they were skipped there; Git for Windows runs the sh hook).
 const FILES = { 'src/a.txt': 'a\n', 'file2.txt': 'x\n', '.gitignore': '*.log\n' };
 
 /** A product version o1 on main: its own commit on the base, changing src/ (write scope src/**). */
@@ -70,7 +70,7 @@ function advance(f: Fixture, name: string): string {
   return c;
 }
 
-test('delivery setup runs no global hooks: none has run when the candidate is built and proof-checked', { skip: !POSIX }, async () => {
+test('delivery setup runs no global hooks: none has run when the candidate is built and proof-checked', async () => {
   const f = fixture({ files: FILES });
   const saved = process.env['GIT_CONFIG_GLOBAL'];
   const scratch = tempDir('mp-deliver-hooks-');
@@ -101,7 +101,7 @@ test('delivery setup runs no global hooks: none has run when the candidate is bu
   }
 });
 
-test('a delivery: the candidate on main’s current commit, proven, no command run, its full-run status recorded, the delivery ref created and recorded once', { skip: !POSIX }, async () => {
+test('a delivery: the candidate on main’s current commit, proven, no command run, its full-run status recorded, the delivery ref created and recorded once', async () => {
   const f = fixture({ files: FILES });
   try {
     const B = f.git('rev-parse', 'main');
@@ -150,7 +150,7 @@ test('a delivery: the candidate on main’s current commit, proven, no command r
   }
 });
 
-test('labels recomputing: nothing built; not proven delivered with its label; a stop and held git writes refuse', { skip: !POSIX }, async () => {
+test('labels recomputing: nothing built; not proven delivered with its label; a stop and held git writes refuse', async () => {
   const f = fixture({ files: FILES });
   try {
     await product(f);
@@ -169,7 +169,7 @@ test('labels recomputing: nothing built; not proven delivered with its label; a 
   }
 });
 
-test('4.1.2: --message sets the delivery commit\'s subject; a candidate-only build records nothing and creates no ref', { skip: !POSIX }, async () => {
+test('4.1.2: --message sets the delivery commit\'s subject; a candidate-only build records nothing and creates no ref', async () => {
   const f = fixture({ files: FILES });
   try {
     await product(f);
@@ -191,7 +191,7 @@ test('4.1.2: --message sets the delivery commit\'s subject; a candidate-only bui
   }
 });
 
-test('the target moved while the candidate was built: rebuilt on the new base, counted (decision 16)', { skip: !POSIX }, async () => {
+test('the target moved while the candidate was built: rebuilt on the new base, counted (decision 16)', async () => {
   const f = fixture({ files: FILES });
   try {
     await product(f);
@@ -212,7 +212,7 @@ test('the target moved while the candidate was built: rebuilt on the new base, c
   }
 });
 
-test('a landing on a moved branch rebuilds the delivery (WI-05), 3 times per delivery, then leaves the delivery ref (WI-08)', { skip: !POSIX }, async () => {
+test('a landing on a moved branch rebuilds the delivery (WI-05), 3 times per delivery, then leaves the delivery ref (WI-08)', async () => {
   const f = fixture({ files: FILES });
   try {
     await product(f);
@@ -247,7 +247,7 @@ test('a landing on a moved branch rebuilds the delivery (WI-05), 3 times per del
   }
 });
 
-test('a crash between the delivery ref and its record: the next call reads the ref and records it; a ref pointing elsewhere is never overwritten (WI-20)', { skip: !POSIX }, async () => {
+test('a crash between the delivery ref and its record: the next call reads the ref and records it; a ref pointing elsewhere is never overwritten (WI-20)', async () => {
   const f = fixture({ files: FILES });
   try {
     await product(f);

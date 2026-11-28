@@ -10,7 +10,7 @@
 // Nothing is ever discovered from a `.git` file or the current directory.
 
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 import type { GitOid } from '../common/ids.ts';
 import { gitOid } from './objects.ts';
 import type { GitExec } from './plainGit.ts';
@@ -89,10 +89,24 @@ function readBytes(path: string): Buffer | null {
   }
 }
 
+/**
+ * A worktree path as git prints or stores it, in this platform's form. 4.4.1 (Windows): git writes
+ * "C:/x/y" where the program's own paths are "C:\x\y"; without this a registration whose directory
+ * is gone (realpath cannot help then) never compares equal to the program's path for it.
+ */
+export function nativeGitPath(p: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' && p !== '' ? win32.normalize(p) : p;
+}
+
 /** Where a linked git dir's `gitdir` file says the root is (git's get_linked_worktree: strip "/.git"; relative to the git dir). */
-export function rootFromGitdirFile(gitDir: string, content: Buffer): string {
+export function rootFromGitdirFile(gitDir: string, content: Buffer, platform: NodeJS.Platform = process.platform): string {
   let s = content.toString('utf8').replace(/\s+$/, '');
-  if (!isAbsolute(s)) s = resolve(gitDir, s);
+  if (platform === 'win32') {
+    // 4.4.1 (Windows): the native form, and a relative link resolved with Windows rules.
+    s = nativeGitPath(win32.isAbsolute(s) ? s : win32.resolve(gitDir, s), platform);
+    return s.endsWith('\\.git') ? s.slice(0, -'\\.git'.length) : s;
+  }
+  if (!posix.isAbsolute(s)) s = posix.resolve(gitDir, s);
   return s.endsWith('/.git') ? s.slice(0, -'/.git'.length) : s;
 }
 
@@ -123,7 +137,7 @@ export async function listWorktreesAt(git: GitExec, commonDir: string): Promise<
     const val = sp < 0 ? '' : rec.slice(sp + 1);
     if (key === 'worktree') {
       flush();
-      cur = { path: val, head: null, branch: null, bare: false, prunable: false };
+      cur = { path: nativeGitPath(val), head: null, branch: null, bare: false, prunable: false };
     } else if (cur !== null) {
       if (key === 'HEAD') cur.head = /^0+$/.test(val) ? null : gitOid(val);
       else if (key === 'branch') cur.branch = val;
