@@ -79,11 +79,11 @@ import {
 } from '../memory/index.ts';
 import { constraintLine, currentConstraints, recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
 import { planInEffect, submitPmBatch } from '../flow/planning.ts';
-import { constraintsForTask, isAddressed } from '../seat/cards/dynamic.ts';
+import { constraintsForTask, forRepairArchitect, isAddressed } from '../seat/cards/dynamic.ts';
 import { recordRepair, repairsOf } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
 import { answerEscalation, answerByPm, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
-import { eventsOf, flowCtx, missionClosed } from '../flow/context.ts';
+import { basisIndex, eventsOf, flowCtx, missionClosed } from '../flow/context.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import { pendingTasks } from '../flow/exploration/machine.ts';
 import { pmAmendAttempts, pmRerunAttempt, type AttemptsAmended, type AttemptsRerun } from './explorationAttempts.ts';
@@ -1288,7 +1288,7 @@ export interface ConstraintReach {
   readonly objects: number;
   /** Tasks of the plans in effect whose cards take the constraint (seat/cards/dynamic.ts constraintsForTask), as "<mission>/<task>". */
   readonly tasks: readonly string[];
-  /** 4.4 (G3): an addressed instruction: the repairs it names that exist (their Architect's card prints it). */
+  /** 4.4 (G3): an addressed instruction: the undecided repairs whose Architect card prints it (it names the repair, or the task the repair is about). */
   readonly repairs?: readonly string[];
   /** 4.4 (G3): an addressed instruction: the tasks and repairs it names that its mission does not have (yet): a warning, never a refusal. */
   readonly unknown?: readonly string[];
@@ -1305,10 +1305,13 @@ export async function constraintReach(ctx: ProcessContext, c: { readonly kind: '
   if (isAddressed(body) && c.scope.mission !== undefined) {
     const fctx = flowCtx(ctx.ports(), c.scope.mission as MissionId);
     const named = new Set(c.scope.tasks ?? []);
-    const repairs = (await repairsOf(fctx)).filter((r) => (c.scope.repairs ?? []).includes(r.id));
+    const all = await repairsOf(fctx);
+    const repairs = all.filter((r) => (c.scope.repairs ?? []).includes(r.id));
     for (const r of repairs) for (const t of [...r.added, ...(r.changed ?? []), ...r.reopened]) named.add(t);
     const plan = (await planInEffect(fctx))?.plan.tasks ?? [];
-    return { objects: 0, tasks: plan.filter((t) => named.has(t.id)).map((t) => `${c.scope.mission}/${t.id}`), repairs: repairs.map((r) => r.id), unknown: [...(c.scope.tasks ?? []).filter((t) => !plan.some((x) => x.id === t)), ...(c.scope.repairs ?? []).filter((r) => !repairs.some((x) => x.id === r))] };
+    // 4.4 (p6-8): the Architect cards that print it, by the card's own rule: undecided repairs it names, or whose task it names
+    const architects = all.filter((r) => (r.state === 'architect' || r.state === 'waiting') && forRepairArchitect(body, { repair: r.id, ...(r.about?.kind === 'task' ? { about: r.about.id } : {}) })).map((r) => r.id);
+    return { objects: 0, tasks: plan.filter((t) => named.has(t.id)).map((t) => `${c.scope.mission}/${t.id}`), repairs: architects, unknown: [...(c.scope.tasks ?? []).filter((t) => !plan.some((x) => x.id === t)), ...(c.scope.repairs ?? []).filter((r) => !all.some((x) => x.id === r))] };
   }
   const objects = c.kind !== 'object' ? 0 : ctx.memory.read((db) => {
     const rows = db.stmt("SELECT record FROM log WHERE kind = 'object.version'").all() as Array<{ record: string }>;
@@ -1400,7 +1403,8 @@ export async function secInstruct(ctx: ProcessContext, req: { readonly mission: 
   const bad = scope.paths.flatMap((p) => { const x = constraintPatternProblem(p); return x === null ? [] : [`"${p}": ${x.problem}; the nearest form is "${x.suggestion}"`]; });
   if (bad.length > 0) throw new ProcessError('NOT_ALLOWED', `the scope's path patterns: ${bad.join('; ')}. A scope path is ${CONSTRAINT_PATTERN_FORMS}. Nothing was recorded`);
   addressProblem('instruction', scope);
-  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: 'instruction', text: req.text, scope, author: 'secretary' });
+  // the version checked above (or none), checked again inside the write: a PM constraint recorded meanwhile under this id is never taken over
+  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: 'instruction', text: req.text, scope, author: 'secretary', expect: before?.version ?? null });
   const scopeChanged = before !== undefined && before.version === version && canonicalJson(before.scope) !== canonicalJson(scope);
   return { version, reach: await constraintReach(ctx, { kind: 'instruction', scope }), scopeChanged };
 }
@@ -1412,12 +1416,13 @@ export async function secWithdrawInstruction(ctx: ProcessContext, req: { readonl
   const line = constraintLine(req.constraint);
   const c = (await currentConstraints(flowCtx(ctx.ports(), 'project' as MissionId))).find((x) => x.line === line);
   if (c === undefined) {
-    // withdrawn already (a retry, or by the PM: the output says only that it is withdrawn), or never recorded (refused there)
-    await withdrawConstraint(ctx.ports(), { constraint: req.constraint, by: 'secretary', reason: req.reason });
-    return { already: true };
+    // withdrawn already (a retry, or by the PM: the output says only that it is withdrawn), or never recorded
+    if ((await basisIndex(flowCtx(ctx.ports(), 'project' as MissionId))).withdrawn.has(line)) return { already: true };
+    throw new ProcessError('NOT_ALLOWED', `no instruction ${req.constraint}: nothing was withdrawn`);
   }
   if (c.author !== 'secretary') throw new ProcessError('NOT_ALLOWED', `${req.constraint} is the PM's: only the PM withdraws it (mp pm constraint withdraw --words). Nothing was withdrawn`);
-  await withdrawConstraint(ctx.ports(), { constraint: req.constraint, by: 'secretary', reason: req.reason });
+  // the Secretary's version checked here is the one withdrawn, checked again inside the write
+  await withdrawConstraint(ctx.ports(), { constraint: req.constraint, by: 'secretary', reason: req.reason, expect: c.version });
   return { already: false };
 }
 

@@ -95,7 +95,9 @@ test('mp pm requirement add --tasks names a decision\'s tasks; on another type i
     const runCli = (await import('../src/cli/main.ts')).runCli;
     const r = await runCli(['pm', 'requirement', 'add', 'm1', 'd1', '--type', 'decision', '--text', 'LF line endings', '--quote', 'Use LF line endings', '--words', w, '--tasks', 'impl'], { cwd: p.dir, env: { MP_SECRETARY: '' }, process: { observe: () => ({ os: 'testos', osVersion: '1', arch: 'x64', versions: { 'node --version': 'v22' } }), ident: { name: 't', email: 't@t' } } });
     assert.equal(r.exitCode, 0, r.stderr);
-    assert.match(r.stdout, /Requirement item d1 \(decision\) of m1 recorded as item\.m1\.d1\.v1; of the tasks' cards, it is printed on those of impl only\./);
+    assert.match(r.stdout, /Requirement item d1 \(decision\) of m1 recorded as item\.m1\.d1\.v1; as a decision it is printed on the cards of impl only \(a task whose card links the item still lists it under its requirement items\)\./);
+    const help = await runCli(['help', 'pm', 'requirement'], { cwd: p.dir, env: { MP_SECRETARY: '' } });
+    assert.match(help.stdout, /a task whose own card links the item still lists its current text under its requirement items/);
     const item = p.ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as MissionId, line: 'requirements', event: 'item' }).map((e) => JSON.parse(p.ctx.memory.data.text(e.body)))).find((b: { line: string }) => b.line === 'item.m1.d1');
     assert.deepEqual(item.tasks, ['impl']);
     const goal = await command43(p, ['pm', 'requirement', 'add', 'm1', 'g1', '--type', 'goal', '--text', 'x', '--quote', 'Use LF line endings', '--words', w, '--tasks', 'impl']);

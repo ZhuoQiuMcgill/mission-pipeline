@@ -15,10 +15,10 @@ import { flowEvents, flowMissions, recordsByKind, factById, type Db } from '../m
 import type { DataStore } from '../memory/data.ts';
 import { resolveBases, resolveConstraints } from '../memory/domain/constraints.ts';
 import { constraintAuthor, type ConstraintBody } from '../flow/requirements.ts';
-import { DetailedPlanDoc, amendedPlan, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
+import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import type { FlowEvent } from '../flow/ports.ts';
 import type { EscalationBody } from '../flow/secretary.ts';
-import { addressee, constraintsForTask, isAddressed, planInEffect } from '../seat/cards/dynamic.ts';
+import { addressee, constraintsForTask, forRepairArchitect, isAddressed, planInEffect, repairReopensCarried } from '../seat/cards/dynamic.ts';
 import { lineAcceptance, taskLineage } from '../flow/execution.ts';
 import { repairLineage } from '../flow/repair.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED } from '../flow/exploration/machine.ts';
@@ -53,6 +53,19 @@ function snapshot(db: Db, data: DataStore, mission: string): Snapshot {
 const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
 const lineOf = (s: Snapshot, task: string): FlowEvent[] => s.events.filter((e) => e.line === `task:${task}`);
 
+/** 4.4 (G3): the version of an instruction the claimed card of a step's handed-back dispatch showed, or null (no such card). */
+function cardVersion(s: Snapshot, data: DataStore, step: string, line: string): string | null {
+  const d = s.dispatches.filter((x) => x.task === step && x.state === 'handed-back').at(-1);
+  const claimed = d === undefined ? undefined : s.events.find((e) => e.line === `dispatch:${d.dispatch}` && e.event === 'claimed' && e.key === 'spec');
+  if (claimed === undefined) return null;
+  try {
+    const card = (JSON.parse(data.text((claimed.body as { spec: string }).spec)) as { card?: { addressed?: Array<{ id: string; version: string }> } }).card;
+    return card?.addressed?.find((a) => a.id === line)?.version ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------- mp read constraints
 
 export interface ConstraintRead {
@@ -75,7 +88,7 @@ export interface ConstraintRead {
 export function constraintsRead(db: Db, data: DataStore, mission: string, reach: boolean): { mission: string; constraints: ConstraintRead[]; bytes: number } {
   const s = snapshot(db, data, mission);
   const decided = new Map(s.events.filter((e) => e.line === 'repairs' && e.event === 'decided').map((e) => [e.key, e.body as RepairDecidedBody]));
-  const repairIds = new Set(s.events.filter((e) => e.line === 'repairs' && e.event === 'repair').map((e) => e.key));
+  const repairs = s.events.filter((e) => e.line === 'repairs' && e.event === 'repair').map((e) => e.body as RepairBody);
   const out = s.constraints.map((c): ConstraintRead => {
     const addressed = isAddressed(c);
     const base: ConstraintRead = { id: c.line, version: c.version, kind: c.kind, author: constraintAuthor(c), words: c.words ?? null, address: addressed ? { tasks: [...(c.scope.tasks ?? [])], repairs: [...(c.scope.repairs ?? [])] } : null, scope: { paths: [...c.scope.paths], taskTypes: [...c.scope.taskTypes] }, first: clip(c.text.split('\n')[0] ?? '', 120), bytes: Buffer.byteLength(c.text, 'utf8') };
@@ -86,10 +99,14 @@ export function constraintsRead(db: Db, data: DataStore, mission: string, reach:
     for (const r of c.scope.repairs ?? []) { const d = decided.get(r); for (const t of d === undefined ? [] : [...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)]) named.add(t); }
     const answers: Array<{ task: string; review: string; response: string; reason: string }> = [];
     for (const t of tasks.filter((x) => named.has(x.id))) {
-      const latest = lineOf(s, t.id).filter((e) => e.event === 'review').map((e) => e.body as { task: string; instructions?: Array<{ instruction: string; response: string; reason: string }> }).flatMap((b) => (b.instructions ?? []).filter((i) => i.instruction === c.line).map((i) => ({ task: t.id, review: b.task, response: i.response, reason: i.reason }))).at(-1);
+      // 4.4 (G3, p6-5): an answer counts for the version its claimed card showed (an older answer without one: its card's)
+      const latest = lineOf(s, t.id).filter((e) => e.event === 'review').map((e) => e.body as { task: string; instructions?: Array<{ instruction: string; version?: string; response: string; reason: string }> })
+        .flatMap((b) => (b.instructions ?? []).filter((i) => i.instruction === c.line && (i.version ?? cardVersion(s, data, b.task, c.line)) === c.version).map((i) => ({ task: t.id, review: b.task, response: i.response, reason: i.reason }))).at(-1);
       if (latest !== undefined) answers.push(latest);
     }
-    return { ...base, reach: { tasks: tasks.filter((t) => named.has(t.id)).map((t) => t.id), architects: (c.scope.repairs ?? []).filter((r) => repairIds.has(r) && !decided.has(r)) }, answers };
+    // 4.4 (p6-8): an undecided repair's Architect card prints it in full by the card's own rule (the repair, or the task it is about)
+    const architects = repairs.filter((r) => !decided.has(r.id) && r.about?.kind !== 'exploration' && forRepairArchitect(c, { repair: r.id, ...(r.about?.kind === 'task' ? { about: r.about.id } : {}) })).map((r) => r.id);
+    return { ...base, reach: { tasks: tasks.filter((t) => named.has(t.id)).map((t) => t.id), architects }, answers };
   });
   return { mission, constraints: out, bytes: out.reduce((n, c) => n + c.bytes, 0) };
 }
@@ -165,23 +182,34 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
     }
     const decidedRev = d?.revision ?? Infinity;
     const added = (body?.add ?? []).map((t): RepairTaskState => { const st = taskState(lineOf(s, t)); return { task: t, state: st.state, done: st.accepted }; });
+    // 4.4 (F13, p6-3): the card this repair gave a changed task, as its amendment recorded it (plan and card hash)
+    const amendment = body === undefined ? undefined : latestEffectiveOf<{ dplan: string; amendments?: readonly AmendmentEntry[] }>(s.events, body.dplan)?.amendments?.find((a) => a.repair === r.id);
     const changed = (body?.changed ?? []).map((t): RepairTaskState => {
       const line = lineOf(s, t);
       const st = taskState(line);
-      // the card the repair gave it: the first spec after the decision
-      const spec = line.find((x) => x.event === 'spec' && x.revision > decidedRev);
-      return { task: t, state: spec === undefined ? `${st.state}; its changed card has no spec yet` : st.state, done: spec !== undefined && st.accepted && st.acceptedRev > spec.revision };
+      const card = amendment?.changed?.find((c) => c.id === t);
+      const hash = card === undefined ? null : taskCardHash(card);
+      // the spec that carries this repair: tagged with it, or (a task that had no spec yet) of its plan with its card's hash
+      const carries = (x: FlowEvent): boolean => { const b = x.body as { dplan?: string; hash?: string; repair?: string }; return b.repair === r.id || (b.repair === undefined && b.dplan === body!.dplan && hash !== null && b.hash === hash); };
+      const spec = line.find((x) => x.event === 'spec' && x.revision > decidedRev && carries(x));
+      // accepted under that spec: no other spec between it and the acceptance
+      const under = spec !== undefined && st.accepted && st.acceptedRev > spec.revision && !line.some((x) => x.event === 'spec' && x.revision > spec.revision && x.revision < st.acceptedRev);
+      const since = spec !== undefined && line.some((x) => x.event === 'spec' && x.revision > spec.revision);
+      return { task: t, state: spec === undefined ? `${st.state}; no card of this repair's has run yet` : `${st.state}${since ? '; its card changed since this repair' : ''}`, done: under };
     });
+    const secretaryEvents = s.events.filter((x) => x.line === 'secretary');
     const reopened = (body?.reopen ?? []).map((x): RepairTaskState => {
       const line = lineOf(s, x.task);
       const st = taskState(line);
-      // the reopened attempt: the rework this repair's reopen started (its card carries the repair's own issue)
-      const rw = line.find((y) => y.event === 'rework' && (y.body as { reopen?: { kind?: string; repair?: string } }).reopen?.repair === r.id && (y.body as { reopen?: { kind?: string } }).reopen?.kind === 'repair');
-      if (rw === undefined) return { task: x.task, state: `${st.state}; the reopen is not carried out yet`, done: false };
-      const j = Number(rw.key);
-      // a card given since (a re-plan) is not the card that carried the repair's issue: not shown done
-      const respec = line.some((y) => y.event === 'spec' && y.revision > rw.revision);
-      return { task: x.task, state: `reopened at attempt ${j}; ${st.state}${respec ? '; its card changed since' : ''}`, done: !respec && st.accepted && st.k >= j && st.acceptedRev > rw.revision };
+      // 4.4 (F13, p6-4): the attempts whose card carried this repair's own issue (its reopen, or a grant that covered it), under the current card
+      const carried = repairReopensCarried(mission, x.task, line, secretaryEvents).filter((c) => c.repair === r.id);
+      if (carried.length === 0) {
+        const before = line.some((y) => y.event === 'rework' && (y.body as { reopen?: { kind?: string; repair?: string } }).reopen?.repair === r.id);
+        return { task: x.task, state: `${st.state}; ${before ? 'its card changed since the reopen' : 'the reopen is not carried out yet'}`, done: false };
+      }
+      const at = carried.find((c) => c.attempt === st.k);
+      const done = st.accepted && at !== undefined && st.acceptedRev > at.revision;
+      return { task: x.task, state: `reopened at attempt ${carried.map((c) => c.attempt).join(', ')}; ${st.state}${st.accepted && !done ? "; the accepted attempt's card did not carry this repair's issue" : ''}`, done };
     });
     const open = escalations.find((q) => q.subject === `repair:${r.id}` && q.source === 'repair-question' && !applied.has(q.id));
     const lineage = repairLineage(mission, r.id);

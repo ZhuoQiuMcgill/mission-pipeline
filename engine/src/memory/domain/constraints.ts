@@ -91,7 +91,7 @@ export function constraintApplies(c: { readonly scope: ConstraintScope }, obj: {
  * Secretary withdraws an instruction of its own with a reason and no words (`by: "secretary"`); the PM's
  * withdrawal writes the 4.3 body.
  */
-export async function withdrawConstraint(ports: import('../../flow/ports.ts').FlowPorts, req: { constraint: string; words: string } | { constraint: string; by: 'secretary'; reason: string }): Promise<void> {
+export async function withdrawConstraint(ports: import('../../flow/ports.ts').FlowPorts, req: { constraint: string; words: string } | { constraint: string; by: 'secretary'; reason: string; expect: string }): Promise<void> {
   const { basisIndex, flowCtx, commit, ev } = await import('../../flow/context.ts');
   const { constraintLine } = await import('../../flow/requirements.ts');
   const ctx = flowCtx(ports, 'project' as import('../../common/ids.ts').MissionId);
@@ -103,5 +103,8 @@ export async function withdrawConstraint(ports: import('../../flow/ports.ts').Fl
   if (ix.withdrawn.has(line)) return;
   const owner = flowCtx(ports, rec.mission ?? ctx.mission);
   const body = 'words' in req ? { line, version: current, words: req.words } : { line, version: current, by: req.by, reason: req.reason };
-  await commit(owner, `flow:constraint-withdraw:${line}`, { events: [ev(owner, 'requirements', 'constraint-withdrawn', line, body)], records: [{ kind: 'basis.withdrawn', line: rec.line }] });
+  // 4.4 (G3): the Secretary withdraws the version of its own it checked, also inside the write: a PM version recorded meanwhile is never withdrawn
+  const stale = `constraint ${req.constraint} changed since it was read (another version was recorded): nothing was withdrawn; run the command again`;
+  if ('expect' in req && current !== req.expect) throw Object.assign(new Error(stale), { code: 'STALE_REQUEST' });
+  await commit(owner, `flow:constraint-withdraw:${line}`, { events: [ev(owner, 'requirements', 'constraint-withdrawn', line, body)], records: [{ kind: 'basis.withdrawn', line: rec.line }], ...('expect' in req ? { guard: { absent: [], constraints: [{ line, version: req.expect }], code: 'STALE_REQUEST', message: stale } } : {}) });
 }

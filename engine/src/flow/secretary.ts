@@ -204,12 +204,15 @@ export async function escalationsOf(ctx: FlowCtx, subject: string): Promise<Esca
   return (await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')).filter((e) => e.body.subject === subject).map((e) => e.body);
 }
 
-/** Raise an escalation (idempotent by id): the event, then the Secretary task. */
-export async function raiseEscalation(ctx: FlowCtx, spec: EscalationSpec): Promise<void> {
+/**
+ * Raise an escalation (idempotent by id): the event, then the Secretary task. 4.4 (G4): `guard`, the
+ * precondition its caller read, checked inside the write that records it (nothing is raised when it fails).
+ */
+export async function raiseEscalation(ctx: FlowCtx, spec: EscalationSpec, guard?: AppendGuard): Promise<void> {
   const id = safeId(spec.id);
   if ((await escalation(ctx, id)) !== null) return;
   const body: EscalationBody = { ...spec, id, task: escalationTask(id) };
-  await commit(ctx, `flow:escalation:${ctx.mission}:${id}`, { events: [ev(ctx, SECRETARY_LINE, 'escalation', id, body)] });
+  await commit(ctx, `flow:escalation:${ctx.mission}:${id}`, { events: [ev(ctx, SECRETARY_LINE, 'escalation', id, body)], ...(guard !== undefined ? { guard } : {}) });
   if (spec.source === 'plan-structure-change' || spec.source === 'plan-restarts-work') await escalateToUser(ctx, id, spec.summary, null);
   // 4.4 (G4): a repair Architect's question goes to the PM, whose filing on the user's words the repair is
   else if (spec.source === 'repair-question') await escalateToUser(ctx, id, REPAIR_QUESTION_TO_PM, null);

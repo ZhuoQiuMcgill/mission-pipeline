@@ -31,7 +31,7 @@ import { canonicalJson } from '../common/hash.ts';
 import type { BasisLineId, BasisVersionId, MissionId } from '../common/ids.ts';
 import type { BaseRecord } from '../common/records.ts';
 import { repairPlanMaterial, type ArchitectRepairCard, type ArchitectRepairResult } from '../seat/cards/architect.ts';
-import { addressedForPlanning, addressedIndexOf, planningConstraints } from '../seat/cards/dynamic.ts';
+import { addressedForPlanning, addressedIndexOf, answerText, planningConstraints } from '../seat/cards/dynamic.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, missionClosed, nextBasisVersion, notify, objectRecord, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
@@ -288,6 +288,16 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
 async function askPm(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, task: string, question: string): Promise<void> {
   const id = repairQuestionId(task);
   const short = question.replace(/\s+/g, ' ').trim();
+  // 4.4 (G4, p6-7): posted only while this attempt is the repair's latest and its plan is the one in effect, checked
+  // inside the write: another pass that moved the repair on (a new plan, its next attempt) leaves no orphan question
+  const effective = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).at(-1);
+  if (effective === undefined || effective.body.dplan !== a.dplan) return;
+  const guard = {
+    absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: 'attempt', key: `${r.id}#${a.k + 1}` }],
+    latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: effective.revision }],
+    code: 'STALE_REQUEST',
+    message: `repair ${r.id} moved on (a new plan, or its next Architect attempt) while its Architect's question was being posted: nothing was posted`,
+  };
   await raiseEscalation(ctx, {
     id,
     source: 'repair-question',
@@ -299,12 +309,13 @@ async function askPm(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, task: st
     options: ['answer'],
     facts: { repair: r.id, task, attempt: a.k },
     handover: { from: task, objects: [] },
-  });
+  }, guard);
   // raised by an earlier pass that stopped before handing it over: hand it over now (idempotent)
-  await escalateToUser(ctx, id, REPAIR_QUESTION_TO_PM, null);
+  if (!(await isApplied(ctx, id))) await escalateToUser(ctx, id, REPAIR_QUESTION_TO_PM, null);
   const d = await decisionFor(ctx, id);
   if (d === null || d.option !== 'answer' || (await isApplied(ctx, id))) return;
-  const next: RepairAttemptBody = { k: a.k + 1, dplan: a.dplan, reason: 'answered', mechanicalFailures: [], answered: { escalation: id, question, answer: d.instructions, by: d.by } };
+  // a user's answer recorded with words and no instructions carries those words (answerText)
+  const next: RepairAttemptBody = { k: a.k + 1, dplan: a.dplan, reason: 'answered', mechanicalFailures: [], answered: { escalation: id, question, answer: answerText(d), by: d.by } };
   await commitCarrying(ctx, `flow:repair-attempt:${ctx.mission}:${r.id}:${next.k}`, [ev(ctx, REPAIRS_LINE, 'attempt', `${r.id}#${next.k}`, next)], [await carryOut(ctx, id, { option: 'answer' })]);
 }
 

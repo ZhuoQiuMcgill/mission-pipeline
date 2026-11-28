@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan, repairsOfTaskWork, writtenForTask } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -127,7 +127,7 @@ interface ReviewBody {
   /** An integration review's reopen (D-6): the dependencies whose work causes the failure. */
   readonly reopen?: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly evidence?: string }>;
   /** 4.4 (G3): the Reviewer's answer to each instruction addressed to this work (it never changes the verdict). Absent: none on the card. */
-  readonly instructions?: ReadonlyArray<{ readonly instruction: string; readonly response: 'followed' | 'not-followed' | 'unclear'; readonly reason: string }>;
+  readonly instructions?: ReadonlyArray<{ readonly instruction: string; readonly version?: string; readonly response: 'followed' | 'not-followed' | 'unclear'; readonly reason: string }>;
 }
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
@@ -1448,18 +1448,8 @@ async function reopenFromReview(ctx: FlowCtx, plan: DetailedPlanDoc, t: Detailed
 
 /** Reopens represented by this escalation, from the kept verdicts of this task attempt. */
 function coveredReopens(ctx: FlowCtx, task: string, line: Line, e: { readonly body: EscalationBody; readonly revision: number }): string[] {
-  const esc = e.body;
-  const facts = esc.facts as { task?: string; attempt?: number; loop?: string } | undefined;
-  if (esc.source !== 'loop-exhausted' || esc.subject !== `task:${task}` || facts?.task !== task ||
-      facts.loop !== 'rework' || facts.attempt === undefined || facts.attempt > line.k || esc.lineage !== taskLineage(ctx.mission, task)) return [];
-  const attempt = facts.attempt;
-  const prefix = `exh.${esc.lineage}.${attempt}`;
-  const start = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt)?.revision ?? 0;
-  const end = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt + 1)?.revision ?? Infinity;
-  return line.all<{ proceed: boolean }>('loop-verdict')
-    .filter((v) => !v.body.proceed && v.key.startsWith('reopen:') && v.revision > start && v.revision < end &&
-      (esc.id === safeId(prefix) ? v.revision < e.revision : esc.id === safeId(`${prefix}.${idPart(v.key)}`)))
-    .map((v) => v.key);
+  // 4.4 (G3, F2): one pure mapping, which the cards and `mp read repairs` read too (seat/cards/dynamic.ts)
+  return coveredReopenKeys(ctx.mission, task, line.events, e);
 }
 
 /** One reopened task's new attempt (D-6, D-10), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. */
@@ -1518,10 +1508,21 @@ async function reopenRequests(ctx: FlowCtx): Promise<Array<{ task: string; attem
  * given under its earlier cards (writtenForTask).
  */
 async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<{ readonly repairs: RepairRef[]; readonly written: ReturnType<typeof writtenForTask> }> {
-  const ids = repairsOfTaskWork(eff.amendments, t.id, line.events, k);
+  const ids = repairsOfTaskWork(ctx.mission, eff.amendments, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), k);
   const all = ids.length === 0 ? [] : await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
   const written = writtenForTask(await currentConstraints(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), ctx.mission, t.id, ids);
   return { repairs: all.filter((r) => ids.includes(r.key)).map((r) => repairRef(r.body)), written };
+}
+
+/** 4.4 (G3): a Reviewer's answers to the instructions addressed to its work, each with the version its claimed card showed. */
+async function instructionAnswers(ctx: FlowCtx, dispatch: string | undefined, responses: NonNullable<ReviewerResult['instruction_responses']>): Promise<NonNullable<ReviewBody['instructions']>> {
+  if (responses.length === 0) return [];
+  const claimed = dispatch === undefined ? null : await eventOf<{ spec: string }>(ctx, `dispatch:${dispatch}`, 'claimed', 'spec');
+  const card = claimed === null ? null : (JSON.parse(ctx.ports.ledger.content.get(claimed.body.spec)) as { card?: { addressed?: Array<{ id: string; version: string }> } }).card;
+  return responses.map((i) => {
+    const version = card?.addressed?.find((a) => a.id === i.instruction)?.version;
+    return { instruction: i.instruction, ...(version !== undefined ? { version } : {}), response: i.response, reason: i.reason };
+  });
 }
 
 /** A Reviewer's accepted hand-back as the task line's "review" event (null: it carries no judgment, a defect told to the PM). */
@@ -1539,7 +1540,8 @@ async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string,
   ];
   const deferred = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`);
   const reopen = (r.reopen ?? []).map((x) => ({ task: x.task, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) }));
-  const answers = (r.instruction_responses ?? []).map((i) => ({ instruction: i.instruction, response: i.response, reason: i.reason }));
+  // 4.4 (G3, p6-5): each answer is of the version its claimed card showed, so a later text is never credited with it
+  const answers = await instructionAnswers(ctx, view.status.handBack?.dispatch, r.instruction_responses ?? []);
   const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}), ...(answers.length > 0 ? { instructions: answers } : {}) };
   for (const answer of r.issue_responses.filter((i) => i.response === 'deferred')) {
     await notify(ctx, {

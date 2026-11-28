@@ -72,7 +72,8 @@ describe('4.4 G3: an instruction addressed to a task reaches its cards only', ()
     const accepted = await ports.ledger.events({ mission: M, line: 'task:impl', event: 'accepted' });
     assert.equal(accepted.length, 1);
     const review = (await ports.ledger.events<{ instructions?: unknown }>({ mission: M, line: 'task:impl', event: 'review' })).at(-1)?.body;
-    assert.deepEqual(review?.instructions, [{ instruction: 'constraint.impl-only', response: 'not-followed', reason: 'checked against the candidate' }]);
+    // with the version its claimed card showed (review p6-5)
+    assert.deepEqual(review?.instructions, [{ instruction: 'constraint.impl-only', version: con.addressed?.[0]?.version, response: 'not-followed', reason: 'checked against the candidate' }]);
     // and the read shows its author, address, reach and the Reviewer's answer
     const r = ports.memory.read((db) => constraintsRead(db, ports.memory.data, 'm1', true));
     const c = r.constraints.find((x) => x.id === 'constraint.impl-only')!;
@@ -131,7 +132,7 @@ describe('4.4 G3: an instruction addressed to a task reaches its cards only', ()
     const { ports } = await setup();
     const v1 = (await instruction(ports, 'moving', 'Prefer small functions.')).version;
     await instruction(ports, 'moving', 'Prefer small, pure functions.');
-    await assert.rejects(recordConstraint(ports, { mission: M, constraint: 'moving', kind: 'instruction', text: 'Prefer small functions.', scope: { mission: 'm1', paths: ['**'], taskTypes: [], tasks: ['impl'] }, expect: v1 }), /has a new version since it was read/);
+    await assert.rejects(recordConstraint(ports, { mission: M, constraint: 'moving', kind: 'instruction', text: 'Prefer small functions.', scope: { mission: 'm1', paths: ['**'], taskTypes: [], tasks: ['impl'] }, expect: v1 }), /changed since it was read/);
     const r = ports.memory.read((db) => constraintsRead(db, ports.memory.data, 'm1', false)).constraints.find((c) => c.id === 'constraint.moving');
     assert.equal(r?.first, 'Prefer small, pure functions.');
     assert.equal(r?.address, null);

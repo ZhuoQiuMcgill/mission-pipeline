@@ -142,7 +142,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
   // 4.4 (G3): the repairs a task's work answers and what was written for it, by the queue-time builder's
   // derivation (a card queued by 4.3 gets them here); `k` null: the attempt is not known, the card's repairs stand
   const writtenFor = (c: ConstructorCard | ReviewerCard, t: DetailedTask, k: number | null): void => {
-    const ids = k === null ? (c.repairs ?? []).map((r) => r.id) : repairsOfTaskWork(planInEffect(events)?.amendments, t.id, lineOf(t.id), k);
+    const ids = k === null ? (c.repairs ?? []).map((r) => r.id) : repairsOfTaskWork(mission, planInEffect(events)?.amendments, t.id, lineOf(t.id), events.filter((e) => e.line === 'secretary'), k);
     const refs = events.filter((e) => e.line === 'repairs' && e.event === 'repair' && ids.includes(e.key)).map((e) => repairRef(e.body as RepairBody));
     if (refs.length > 0) c.repairs = refs;
     else delete c.repairs;

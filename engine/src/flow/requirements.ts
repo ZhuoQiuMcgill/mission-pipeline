@@ -231,14 +231,17 @@ export async function setContested(ctx: FlowCtx, line: string, contested: boolea
  */
 export async function recordConstraint(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly words?: string; readonly author?: 'secretary'; readonly expect?: string },
+  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly words?: string; readonly author?: 'secretary'; readonly expect?: string | null },
 ): Promise<string> {
   const ctx = flowCtx(ports, req.mission);
   const line = constraintLine(req.constraint);
   const ix = await basisIndex(ctx);
   if (ix.withdrawn.has(line)) throw new Error(`Constraint ${req.constraint} was withdrawn and stays withdrawn; use a new id.`);
-  // 4.4 (G3): a scope change of the version its caller read; another version current now would be written over with the old text
-  if (req.expect !== undefined && ix.current.get(line) !== req.expect) throw Object.assign(new Error(`constraint ${req.constraint} has a new version since it was read (${ix.current.get(line) ?? 'none'}): nothing was changed; run the command again`), { code: 'STALE_REQUEST' });
+  // 4.4 (G3): a write on the version its caller read (null: none yet), checked now and again inside the write, so
+  // another writer's version (a PM replacement, an object constraint) is never scoped, overwritten or taken over
+  const stale = `constraint ${req.constraint} changed since it was read (another version was recorded, or it was withdrawn): nothing was changed; run the command again`;
+  if (req.expect !== undefined && (ix.current.get(line) ?? null) !== req.expect) throw Object.assign(new Error(stale), { code: 'STALE_REQUEST' });
+  const guard = req.expect === undefined ? {} : { guard: { absent: [], constraints: [{ line, version: req.expect }], code: 'STALE_REQUEST', message: stale } };
   checkKind(ix, line, 'a project constraint', new Set(['constraint', 'instruction']), null);
   // 4.4 (G3): an address is for an instruction, bound to one mission (an object constraint's scope is a proof input)
   if ((req.scope.tasks !== undefined || req.scope.repairs !== undefined) && (req.kind !== 'instruction' || req.scope.mission === undefined)) throw new Error(`an address (tasks, repairs) is for an instruction of one mission: nothing was recorded`);
@@ -252,6 +255,7 @@ export async function recordConstraint(
     await commit(ctx, `flow:constraint-scope:${req.mission}:${line}:${n}`, {
       events: [ev(ctx, REQUIREMENTS_LINE, 'constraint-scope', `${line}#${n}`, { line, version: cur, scope: req.scope })],
       records: [{ kind: 'constraint.scope', line: line as BasisLineId, scope: req.scope }],
+      ...guard,
     });
     return cur;
   }
@@ -259,6 +263,7 @@ export async function recordConstraint(
   await commit(ctx, `flow:constraint:${req.mission}:${version}`, {
     events: [ev(ctx, REQUIREMENTS_LINE, 'constraint', version, body)],
     records: [{ kind: 'basis.version', basisKind: req.kind === 'object' ? 'constraint' : 'instruction', line: line as BasisLineId, version: version as BasisVersionId, mission: req.mission, scope: req.scope }],
+    ...guard,
   });
   return version;
 }

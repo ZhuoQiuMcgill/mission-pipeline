@@ -5,6 +5,8 @@ import type { DecisionBody, EscalationBody } from '../../flow/secretary.ts';
 import { scopesOverlap } from '../../flow/mechanical.ts';
 import { xid } from '../../flow/exploration/definition.ts';
 import { canonicalJson } from '../../common/hash.ts';
+import { idPart } from '../../common/ids.ts';
+import { safeId } from '../../flow/context.ts';
 import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
@@ -108,11 +110,15 @@ export function addressedForPlanning(constraints: readonly ConstraintBody[], mis
   const index: AddressedIndexEntry[] = [];
   for (const c of constraints) {
     if (!isAddressed(c) || c.scope.mission !== mission) continue;
-    const mine = (inHand.repair !== undefined && (c.scope.repairs ?? []).includes(inHand.repair)) || (inHand.about !== undefined && (c.scope.tasks ?? []).includes(inHand.about));
-    if (mine) full.push(addressedRef(c));
+    if (forRepairArchitect(c, inHand)) full.push(addressedRef(c));
     else index.push({ id: c.line, version: c.version, to: addressee(c.scope), first: line(c.text.split('\n')[0] ?? '', 100), bytes: Buffer.byteLength(c.text, 'utf8') });
   }
   return { full, index };
+}
+
+/** 4.4 (G3, F1): whether a repair's Architect card prints an addressed instruction in full: it names the repair, or the task the repair is about. */
+export function forRepairArchitect(c: Pick<ConstraintBody, 'kind' | 'scope'>, inHand: { readonly repair?: string; readonly about?: string }): boolean {
+  return isAddressed(c) && ((inHand.repair !== undefined && (c.scope.repairs ?? []).includes(inHand.repair)) || (inHand.about !== undefined && (c.scope.tasks ?? []).includes(inHand.about)));
 }
 
 /** The card fields of an Architect's addressed instructions (nothing when there are none). */
@@ -129,21 +135,78 @@ export function planReviewInstructions(constraints: readonly ConstraintBody[], m
 }
 
 /**
- * 4.4 (G3, F2): the repairs a task's work answers: the repair that added the task (every attempt), every repair
- * whose amendment changed its card, and every repair that reopened it under its current card at this attempt
- * or before (the reopened attempt and every later one). 4.3 showed the adding repair and this attempt's reopen only.
+ * 4.4 (G3, G4): the text of an "answer" decision as a seat reads it: its instructions, or, for a user's answer
+ * recorded with words and no instructions, those words as recorded (answerEscalation stores them as its reason).
  */
-export function repairsOfTaskWork(amendments: readonly AmendmentEntry[] | undefined, task: string, line: readonly { readonly event: string; readonly key: string; readonly body: unknown; readonly revision: number }[], k: number): string[] {
+export function answerText(d: Pick<DecisionBody, 'by' | 'instructions' | 'reason'>): string {
+  return d.instructions.trim() !== '' ? d.instructions : d.by === 'user' ? d.reason : '';
+}
+
+/** One event of a task line (or the secretary line), as the flows and the claim read them. */
+type LineEvent = { readonly event: string; readonly key: string; readonly body: unknown; readonly revision: number };
+
+/**
+ * The reopen requests (keys "reopen:…") an escalation of a used-up rework loop covers: the requests whose loop
+ * verdict did not proceed on the attempt it is about (execution.ts reworkAt: a grant gives the attempt after it
+ * their issues and instructions). Pure, over the task line's events, so the flow and the claim read the same.
+ */
+export function coveredReopenKeys(mission: string, task: string, line: readonly LineEvent[], e: { readonly body: EscalationBody; readonly revision: number }): string[] {
+  const esc = e.body;
+  const facts = esc.facts as { task?: string; attempt?: number; loop?: string } | undefined;
+  const reworks = line.filter((x) => x.event === 'rework');
+  if (esc.source !== 'loop-exhausted' || esc.subject !== `task:${task}` || facts?.task !== task ||
+      facts.loop !== 'rework' || facts.attempt === undefined || facts.attempt > 1 + reworks.length || esc.lineage !== safeId(`task.${mission}.${idPart(task)}`)) return [];
+  const attempt = facts.attempt;
+  const prefix = `exh.${esc.lineage}.${attempt}`;
+  const start = reworks.find((r) => (r.body as { k: number }).k === attempt)?.revision ?? 0;
+  const end = reworks.find((r) => (r.body as { k: number }).k === attempt + 1)?.revision ?? Infinity;
+  return line.filter((v) => v.event === 'loop-verdict')
+    .filter((v) => !(v.body as { proceed: boolean }).proceed && v.key.startsWith('reopen:') && v.revision > start && v.revision < end &&
+      (esc.id === safeId(prefix) ? v.revision < e.revision : esc.id === safeId(`${prefix}.${idPart(v.key)}`)))
+    .map((v) => v.key);
+}
+
+/**
+ * 4.4 (G3, F2, F13): each attempt of a task, under its current card, whose card carries a repair's reopen with
+ * its issue: the attempt the repair's reopen started (a "rework" with `reopen`), and the attempt a grant on a
+ * used-up rework loop started for it (its card carries the covered request's issue: execution.ts reworkAt). The
+ * one place the reopens of a repair are read (cards and `mp read repairs`); a later change of how reopens are
+ * carried (merged into an open attempt, pinned to a later one) is read here too.
+ */
+export function repairReopensCarried(mission: string, task: string, line: readonly LineEvent[], secretary: readonly LineEvent[]): Array<{ readonly attempt: number; readonly repair: string; readonly revision: number }> {
+  const spec = line.filter((e) => e.event === 'spec').at(-1)?.revision ?? 0;
+  const reworks = line.filter((e) => e.event === 'rework' && e.revision > spec);
+  const out: Array<{ attempt: number; repair: string; revision: number }> = [];
+  for (const e of reworks) {
+    const reopen = (e.body as { reopen?: { kind?: string; repair?: string } }).reopen;
+    if (reopen?.kind === 'repair' && typeof reopen.repair === 'string') out.push({ attempt: Number(e.key), repair: reopen.repair, revision: e.revision });
+  }
+  const granted = new Set(secretary.filter((e) => e.event === 'applied' && (e.body as { what?: { option?: string } }).what?.option === 'grant').map((e) => e.key));
+  for (const e of secretary) {
+    if (e.event !== 'escalation' || !granted.has(e.key)) continue;
+    const attempt = ((e.body as EscalationBody).facts as { attempt?: number } | undefined)?.attempt;
+    const next = attempt === undefined ? undefined : reworks.find((r) => Number(r.key) === attempt + 1);
+    if (next === undefined) continue;
+    for (const key of coveredReopenKeys(mission, task, line, { body: e.body as EscalationBody, revision: e.revision })) {
+      if (key.startsWith('reopen:repair:') && !out.some((x) => x.attempt === attempt! + 1 && x.repair === key.slice('reopen:repair:'.length))) out.push({ attempt: attempt! + 1, repair: key.slice('reopen:repair:'.length), revision: next.revision });
+    }
+  }
+  return out.sort((a, b) => a.attempt - b.attempt);
+}
+
+/**
+ * 4.4 (G3, F2): the repairs a task's work answers: the repair that added the task (every attempt), every repair
+ * whose amendment changed its card, and every repair whose reopen a card of the task carried under its current
+ * card at this attempt or before (repairReopensCarried: the reopened attempt and every later one, a granted
+ * reopen too). 4.3 showed the adding repair and this attempt's own reopen only.
+ */
+export function repairsOfTaskWork(mission: string, amendments: readonly AmendmentEntry[] | undefined, task: string, line: readonly LineEvent[], secretary: readonly LineEvent[], k: number): string[] {
   const ids: string[] = [];
   const add = (r: string): void => { if (!ids.includes(r)) ids.push(r); };
   const added = repairOfTask(amendments, task);
   if (added !== null) add(added);
   for (const a of amendments ?? []) if ((a.changed ?? []).some((t) => t.id === task)) add(a.repair);
-  const spec = line.filter((e) => e.event === 'spec').at(-1)?.revision ?? 0;
-  for (const e of line) {
-    const reopen = (e.body as { reopen?: { kind?: string; repair?: string } }).reopen;
-    if (e.event === 'rework' && e.revision > spec && Number(e.key) <= k && reopen?.kind === 'repair' && typeof reopen.repair === 'string') add(reopen.repair);
-  }
+  for (const c of repairReopensCarried(mission, task, line, secretary)) if (c.attempt <= k) add(c.repair);
   return ids;
 }
 
@@ -182,14 +245,18 @@ export function writtenForTask(constraints: readonly ConstraintBody[], events: r
   return { ...(addressed.length > 0 ? { addressed } : {}), ...(notes.length > 0 ? { architectNotes: notes } : {}), ...(earlier.length > 0 ? { earlierAnswers: earlier } : {}) };
 }
 
-/** The answer in effect on one escalation of a task (the user's first, then the PM's latest round, then the Secretary's), when it was carried out as an answer. */
-function carriedAnswer(events: readonly FlowEvent[], esc: EscalationBody): DecisionBody | null {
+/**
+ * The answer in effect on one escalation of a task (the user's first, then the PM's latest round, then the
+ * Secretary's), when it was carried out as an answer. `words`: also a user's answer recorded with words and no
+ * instructions (4.4, G3: the earlier-decisions list names it by those words; the current card keeps 4.3's rule).
+ */
+function carriedAnswer(events: readonly FlowEvent[], esc: EscalationBody, words = false): DecisionBody | null {
   const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id);
   const what = applied?.body as { what?: { option?: string }; by?: string } | undefined;
   if (what?.what?.option !== 'answer') return null;
   const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
   const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
-  return d?.option === 'answer' && d.by === what.by && d.instructions !== '' ? d : null;
+  return d?.option === 'answer' && d.by === what.by && (d.instructions !== '' || (words && answerText(d) !== '')) ? d : null;
 }
 
 /**
@@ -203,8 +270,8 @@ export function earlierTaskAnswers(events: readonly FlowEvent[], task: string): 
     if (e.line !== 'secretary' || e.event !== 'escalation' || e.revision >= spec) continue;
     const esc = e.body as EscalationBody;
     if (esc.subject !== `task:${task}`) continue;
-    const d = carriedAnswer(events, esc);
-    if (d !== null) out.push(`[${esc.id}] ${d.by}: ${line(d.instructions, 200)}`);
+    const d = carriedAnswer(events, esc, true);
+    if (d !== null) out.push(`[${esc.id}] ${d.by}: ${line(answerText(d), 200)}`);
   }
   return out;
 }

@@ -507,7 +507,7 @@ const requirement: Command = {
   name: ['requirement'],
   summary: 'requirement items: add one quoting the user verbatim (or resting on an authorization), or withdraw one (§6.1)',
   usage:
-    'mp pm requirement add <mission> <item> --type goal|limit|authorization|acceptance|decision --text "<item>" (--quote "<verbatim>" --words W-<n> | --authorization <item>) [--restatement "<text>"] [--confirmed-by W-<n>] [--notify "<condition>"] [--tasks <id,...>] | mp pm requirement withdraw <mission> <item> --words W-<n> [--reason "<text>"]\n       (--tasks: a decision names the tasks it concerns and is printed on their cards only)',
+    'mp pm requirement add <mission> <item> --type goal|limit|authorization|acceptance|decision --text "<item>" (--quote "<verbatim>" --words W-<n> | --authorization <item>) [--restatement "<text>"] [--confirmed-by W-<n>] [--notify "<condition>"] [--tasks <id,...>] | mp pm requirement withdraw <mission> <item> --words W-<n> [--reason "<text>"]\n       (--tasks: a decision names the tasks it concerns and is printed as a decision on their cards only; a task whose own card links the item still lists its current text under its requirement items, which its work is bound to)',
   flags: { type: 'string', text: 'string', quote: 'string', words: 'string', authorization: 'string', restatement: 'string', 'confirmed-by': 'string', notify: 'string', reason: 'string', tasks: 'list' },
   async run(c, args) {
     const p = P(c);
@@ -542,7 +542,7 @@ const requirement: Command = {
       ...given('tasks', flagList(args, 'tasks')),
     });
     const tasks = flagList(args, 'tasks');
-    return ok(`Requirement item ${item} (${type}) of ${m} recorded as ${r.version}${tasks.length > 0 ? `; of the tasks' cards, it is printed on those of ${tasks.join(', ')} only` : ''}.`, { mission: m, item, version: r.version });
+    return ok(`Requirement item ${item} (${type}) of ${m} recorded as ${r.version}${tasks.length > 0 ? `; as a decision it is printed on the cards of ${tasks.join(', ')} only (a task whose card links the item still lists it under its requirement items)` : ''}.`, { mission: m, item, version: r.version });
   },
 };
 
