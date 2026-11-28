@@ -4,13 +4,13 @@
 // native ("C:\x\y") and Node reports a file id as the inode.
 
 import assert from 'node:assert/strict';
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
 import { inferOrigin, statDiffers, type DebugEntry } from '../src/git/externalWorktrees.ts';
 import { nativeGitPath, rootFromGitdirFile } from '../src/git/worktreeRecord.ts';
-import { gitLinkPath, plainGit, type GitRunner } from '../src/memory/git.ts';
+import { gitLinkPath, linkInGitForm, plainGit, type GitRunner } from '../src/memory/git.ts';
 import { initMemory, openMemory } from '../src/memory/index.ts';
 import { git, repo } from './memory-fixtures.ts';
 
@@ -128,6 +128,86 @@ test('opening a copied folder never writes to the original folder, whatever git 
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
+  }
+});
+
+/** The paths whose bytes differ between two filesUnder snapshots, or that only one has. */
+function changedFiles(before: Map<string, string>, after: Map<string, string>): string[] {
+  return [...new Set([...before.keys(), ...after.keys()])].filter((k) => before.get(k) !== after.get(k)).sort();
+}
+
+test('a copy whose .git/worktrees is a link back to the original is held, and nothing under the original changes', () => {
+  const base = mkdtempSync(join(tmpdir(), 'mp-linked-admin-'));
+  try {
+    const original = join(base, 'original');
+    const copied = join(base, 'copy');
+    mkdirSync(original);
+    repo(original);
+    initMemory(original);
+    git(original, 'worktree', 'add', '-q', '--detach', join('.mission-pipeline', 'worktrees', 'D-1'));
+    cpSync(original, copied, { recursive: true });
+    // the copy's administrative directories are the original's, through a link (on Windows a
+    // directory junction, which needs no privilege); the copied worktree's .git still names the
+    // original's, whose commondir "../.." resolves, through the link, into the original
+    rmSync(join(copied, '.git', 'worktrees'), { recursive: true, force: true });
+    symlinkSync(join(original, '.git', 'worktrees'), join(copied, '.git', 'worktrees'), 'junction');
+    const before = filesUnder(original);
+    const m = openMemory(copied);
+    try {
+      const st = m.status();
+      assert.match(st.gitHold?.reason ?? '', /WI-31: copied worktree links could not be verified/);
+      assert.notEqual(st.movePending, null, 'the move waits for the links');
+    } finally {
+      m.close();
+    }
+    assert.deepEqual(changedFiles(before, filesUnder(original)), [], 'nothing under the original folder changed');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a link file holding a backslash is not in git\'s form on Windows only', () => {
+  assert.equal(linkInGitForm('gitdir: C:\\r\\.git\\worktrees\\D-1', 'win32'), false);
+  assert.equal(linkInGitForm('C:\\r\\.mission-pipeline\\worktrees\\D-1\\.git', 'win32'), false);
+  assert.equal(linkInGitForm('gitdir: C:/r/.git/worktrees/D-1', 'win32'), true);
+  assert.equal(linkInGitForm('gitdir: /r/odd\\name/.git/worktrees/D-1', 'linux'), true, 'off Windows a backslash is a name character');
+});
+
+test('a copy whose links an older engine wrote in the native form (backslashes on Windows, 4.3 and 4.4.0) is rewritten in git\'s form and is not held', () => {
+  const base = mkdtempSync(join(tmpdir(), 'mp-native-links-'));
+  try {
+    const original = join(base, 'original');
+    const copied = join(base, 'copy');
+    mkdirSync(original);
+    repo(original);
+    initMemory(original);
+    git(original, 'worktree', 'add', '-q', '--detach', join('.mission-pipeline', 'worktrees', 'D-1'));
+    cpSync(original, copied, { recursive: true });
+    const wt = join(copied, '.mission-pipeline', 'worktrees', 'D-1');
+    const admin = join(copied, '.git', 'worktrees', 'D-1');
+    // what the older direct repair left: both links into the copy, in the platform's native form
+    // (rewritten in place: Git for Windows hides a worktree's .git file, and Windows refuses to
+    // create over a hidden file)
+    const rewrite = (p: string, text: string): void => {
+      truncateSync(p, 0);
+      writeFileSync(p, text, { flag: 'r+' });
+    };
+    rewrite(join(wt, '.git'), `gitdir: ${admin}\n`);
+    rewrite(join(admin, 'gitdir'), `${join(wt, '.git')}\n`);
+    const m = openMemory(copied);
+    try {
+      assert.equal(m.status().gitHold, null, JSON.stringify(m.status().gitHold));
+      assert.equal(m.status().movePending, null);
+      assert.deepEqual(m.status().lastMove!.findings.git, { kind: 'repaired', worktrees: 1 });
+    } finally {
+      m.close();
+    }
+    assert.equal(readFileSync(join(wt, '.git'), 'utf8'), `gitdir: ${gitLinkPath(admin)}\n`);
+    assert.equal(readFileSync(join(admin, 'gitdir'), 'utf8'), `${gitLinkPath(join(wt, '.git'))}\n`);
+    const listed = git(copied, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => realpathSync(nativeGitPath(l.slice('worktree '.length))));
+    assert.ok(listed.includes(realpathSync(wt)), `git lists the worktree at its folder: ${listed.join(', ')}`);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });
 

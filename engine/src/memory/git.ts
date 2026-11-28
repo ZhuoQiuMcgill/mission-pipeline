@@ -183,44 +183,64 @@ export function gitLinkPath(p: string, platform: NodeJS.Platform = process.platf
   return platform === 'win32' ? p.replace(/\\/g, '/') : p;
 }
 
+/**
+ * Whether a worktree link file's text is in git's form. 4.4.1 (Windows): 4.3 and 4.4.0 wrote the
+ * links with backslashes; Node resolves those, git does not list the worktree at its folder, so a
+ * link holding a backslash is rewritten even when it resolves to the right place.
+ */
+export function linkInGitForm(text: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== 'win32' || !text.includes('\\');
+}
+
 /** Repair and verify every link without reading/writing HEAD, the index or worktree contents.
  * Each copied worktree's two link files are rewritten when they disagree, then verified again;
  * both lie inside the copy. commondir is verified, never guessed. A partial rewrite is safe to
  * retry on next open. 4.4.1: `git worktree repair` is not run: run in a copy, git 2.45 (Git for
  * Windows) followed the copied links back and rewrote the ORIGINAL folder's links to point into
  * the copy, while a newer git repairs the copy; a copy never writes where it came from.
- * (`git` is still the runner of the `git worktree list` check.) */
-export function repairWorktrees(git: GitRunner, projectDir: string, worktrees: readonly string[], commonDir?: string, previousDir = projectDir): GitResult {
+ * (`git` is still the runner of the `git worktree list` check.) 4.4.1: every check and write is
+ * on the physical (resolved) places: the admin directory inside the copied common directory,
+ * that inside the copy, so no link inside the copy (a `.git/worktrees` that leads back to the
+ * original, say) carries a write out of it; such a copy fails here and is held. */
+export function repairWorktrees(git: GitRunner, projectDir: string, worktrees: readonly string[], commonDir?: string, previousDir = projectDir, platform: NodeJS.Platform = process.platform): GitResult {
   const common = commonDir ?? repositoryLayout(git, projectDir).commonDir;
   if (common === null) return { code: 1, stdout: '', stderr: 'cannot identify the copied common git directory' };
   const targets = [...new Set(worktrees)].sort();
-  const plans: Array<{ worktree: string; dotgit: string; admin: string }> = [];
+  const plans: Array<{ worktree: string; dotgit: string; admin: string; physicalDotgit: string; physicalAdmin: string }> = [];
   try {
+    const folder = real(projectDir);
+    const physicalCommon = real(common);
+    if (!inside(physicalCommon, folder)) throw new Error(`the common git directory ${common} lies outside the copied folder`);
+    const physicalWorktrees = join(physicalCommon, 'worktrees');
     for (const worktree of targets) {
-      if (!inside(real(worktree), real(projectDir))) throw new Error(`worktree ${worktree} is outside the copied folder`);
+      const physicalWorktree = real(worktree);
+      if (!inside(physicalWorktree, folder)) throw new Error(`worktree ${worktree} is outside the copied folder`);
       const dotgit = join(worktree, '.git');
       const line = readFileSync(dotgit, 'utf8').trim();
       if (!line.startsWith('gitdir: ')) throw new Error(`${dotgit} is not a gitdir link`);
       const admin = movedPath(line.slice('gitdir: '.length), worktree, previousDir, projectDir);
-      if (!inside(real(admin), real(join(common, 'worktrees'))) || real(admin) === real(join(common, 'worktrees'))) throw new Error(`${dotgit} does not name an admin directory in the copied common directory`);
-      plans.push({ worktree, dotgit, admin });
+      const physicalAdmin = real(admin);
+      if (!inside(physicalAdmin, physicalWorktrees) || physicalAdmin === physicalWorktrees) throw new Error(`${dotgit} does not name an admin directory in the copied common directory`);
+      plans.push({ worktree, dotgit, admin, physicalDotgit: join(physicalWorktree, '.git'), physicalAdmin });
     }
     const linksValid = (): boolean => {
       try {
-        return plans.every(({ worktree, dotgit, admin }) => {
+        return plans.every(({ worktree, dotgit, physicalAdmin }) => {
           const forward = readFileSync(dotgit, 'utf8').trim();
-          return forward.startsWith('gitdir: ') && real(resolve(worktree, forward.slice(8))) === real(admin)
-            && real(resolve(admin, readFileSync(join(admin, 'gitdir'), 'utf8').trim())) === real(dotgit)
-            && real(resolve(admin, readFileSync(join(admin, 'commondir'), 'utf8').trim())) === real(common);
+          const back = readFileSync(join(physicalAdmin, 'gitdir'), 'utf8').trim();
+          return forward.startsWith('gitdir: ') && linkInGitForm(forward, platform) && linkInGitForm(back, platform)
+            && real(resolve(worktree, forward.slice(8))) === physicalAdmin
+            && real(resolve(physicalAdmin, back)) === real(dotgit)
+            && real(resolve(physicalAdmin, readFileSync(join(physicalAdmin, 'commondir'), 'utf8').trim())) === physicalCommon;
         });
       } catch { return false; }
     };
     if (!linksValid()) {
-      for (const { dotgit, admin } of plans) {
+      for (const { dotgit, admin, physicalDotgit, physicalAdmin } of plans) {
         // The commondir must already identify this copy; never write through an external path.
-        if (real(resolve(admin, readFileSync(join(admin, 'commondir'), 'utf8').trim())) !== real(common)) throw new Error(`${admin}/commondir does not resolve to the copied common directory`);
-        writeAtomic(dotgit, `gitdir: ${gitLinkPath(admin)}\n`);
-        writeAtomic(join(admin, 'gitdir'), `${gitLinkPath(dotgit)}\n`);
+        if (real(resolve(physicalAdmin, readFileSync(join(physicalAdmin, 'commondir'), 'utf8').trim())) !== physicalCommon) throw new Error(`${admin}/commondir does not resolve to the copied common directory`);
+        writeAtomic(physicalDotgit, `gitdir: ${gitLinkPath(admin, platform)}\n`);
+        writeAtomic(join(physicalAdmin, 'gitdir'), `${gitLinkPath(dotgit, platform)}\n`);
       }
     }
     if (!linksValid()) throw new Error('worktree links still disagree after direct repair');
