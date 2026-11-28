@@ -285,6 +285,23 @@ class Line {
   }
 }
 
+/**
+ * 4.4 (F13, final review F2-1): whether a task is given up under the card that is, or will be, in effect: given up
+ * under its latest spec, while execution will lay no new spec on it (taskStep's rule: the plan in effect holds that
+ * spec's card, and no drop is recorded after that spec). A task out of the plan in effect (`card` undefined) given
+ * up stays given up. The one reading wherever a giving-up ends a reopen (recorded as not carried out) or a wait (an
+ * edge of the gate, a hold of a repair's work, an edge of the circle check): a giving-up that a card about to be laid
+ * revokes ends nothing.
+ */
+export function givenUpUnderCard(events: Line['events'], card: DetailedTask | undefined): boolean {
+  const line = new Line(events);
+  if (!line.abandoned) return false;
+  if (card === undefined) return true;
+  const last = line.all<SpecBody>('spec').at(-1);
+  if (last === undefined || last.body.hash !== taskCardHash(card)) return false;
+  return !line.all('dropped').some((d) => d.revision > last.revision);
+}
+
 /** The key and op part of a giving-up under the n-th spec (the first keeps key "abandoned" and the plain op). */
 function abandonKey(line: Line): { readonly key: string; readonly op: string } {
   const n = line.specN;
@@ -1231,7 +1248,8 @@ export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: D
   const added = t.kind === 'integration' ? amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)) : new Set<string>();
   const after = afterOf(l, l.k);
   const givenUp = new Set<string>();
-  for (const x of plan.tasks) if ((added.has(x.id) || after.includes(x.id)) && (await readLine(ctx, x.id)).abandoned) givenUp.add(x.id);
+  // given up under the card in effect (F2-1): a card about to revive it keeps the edge
+  for (const x of plan.tasks) if ((added.has(x.id) || after.includes(x.id)) && givenUpUnderCard((await readLine(ctx, x.id)).events, x)) givenUp.add(x.id);
   return effectiveDependencies(plan, t, added, (id) => givenUp.has(id), after);
 }
 
@@ -1299,13 +1317,12 @@ export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { read
   const added = new Set([...amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)), ...d.add.map((t) => t.id)]);
   const lines = new Map<string, Line>();
   for (const t of after.tasks) lines.set(t.id, await readLine(ctx, t.id));
-  // 4.4 (p7-r3-2): a task given up stays given up only under the card it was given up under: one whose card this
-  // decision changes (or the plan in effect changed, and execution has not laid yet) is open again under that card,
-  // both as a task that waits and as the end of a wait
+  // 4.4 (p7-r3-2, F2-1): given up under the card it will have once this decision applies (givenUpUnderCard): one whose
+  // card this decision changes, the plan in effect changed, or a drop since its card brings back is open again under
+  // that card, both as a task that waits and as the end of a wait
   const givenUp = (id: string): boolean => {
     const l = lines.get(id);
-    const card = cards.get(id);
-    return l !== undefined && l.abandoned && card !== undefined && l.all<SpecBody>('spec').at(-1)?.body.hash === taskCardHash(card);
+    return l !== undefined && givenUpUnderCard(l.events, cards.get(id));
   };
   const waits = new Map<string, string[]>();
   const afterWaits = new Map<string, string[]>();
@@ -1316,7 +1333,7 @@ export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { read
     // an added task has no line yet, a changed one no accepted product: both are open
     const open = lineAcceptance(line.events).product === null;
     const pending: ReopenRequest[] = [];
-    for (const q of requests) if (q.task === t.id && (await waitingRequest(ctx, line, q))) pending.push(q);
+    for (const q of requests) if (q.task === t.id && (await waitingRequest(ctx, line, q, t))) pending.push(q);
     if (!open && here === undefined && pending.length === 0) continue;
     const waitsAfter = [...(here?.after ?? []), ...(open ? afterOf(line, line.k) : []), ...pending.flatMap((q) => q.after)].filter((x) => x !== t.id);
     waits.set(t.id, effectiveDependencies(after, t, added, givenUp, waitsAfter));
@@ -1501,7 +1518,7 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // 4.4 (F12 b, #59): a dependency that the repair this work answers reopens, while that reopen has not reached it
   // yet, holds this attempt: its new work comes first. Read before the dependencies' products (p7-2): a reopen carried
   // after this read has its dependency's next attempt written already, so the products read next show it not accepted
-  if (await sameRepairReopenPending(ctx, eff, t, line, depIds)) return null;
+  if (await sameRepairReopenPending(ctx, eff, plan, t, line, depIds)) return null;
   const deps: string[] = [];
   // config `startOnHandback` (a project setting: it removes no check, E-2): a dependency still in review counts
   // with its current attempt's verified hand-back; the dependent's own acceptance still waits for the
@@ -1557,7 +1574,7 @@ function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t
  * (startOnHandback) a verified hand-back in review, is the work the repair replaces: the task waits for the attempt
  * that carries the repair, and the gate reads that one once it is accepted. A reopen of 4.3 holds nothing (p7-r2-3).
  */
-async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
+async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
   if (depIds.length === 0) return false;
   // only a repair's reopen of a dependency can hold the attempt: while there is none, the plan's history (every
   // plan in effect so far, read for the repairs the work answers) is not read, on every pass of every task
@@ -1567,7 +1584,7 @@ async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, t: Deta
   if (causing.size === 0) return false;
   for (const r of requests) {
     if (r.source.kind !== 'repair' || !causing.has(r.source.repair)) continue;
-    if (await waitingRequest(ctx, await readLine(ctx, r.task), r)) return true;
+    if (await waitingRequest(ctx, await readLine(ctx, r.task), r, plan.tasks.find((x) => x.id === r.task))) return true;
   }
   return false;
 }
@@ -2047,10 +2064,11 @@ async function requestState(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise
 /**
  * Whether a reopen request a 4.4 decision made has still to reach its task: requested, or carried on an attempt no
  * seat took that the task moved past or that was accepted as it was (the next pass moves it on). A reopen of a 4.3
- * decision, or one 4.3 counted, holds nothing (p7-r2-3): no wait comes of it that 4.3 would not have had.
+ * decision, or one 4.3 counted, holds nothing (p7-r2-3): no wait comes of it that 4.3 would not have had. A task
+ * given up under the card in effect (`card`, givenUpUnderCard) ends it; one a card about to be laid revives does not.
  */
-async function waitingRequest(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise<boolean> {
-  if (r.source.kind !== 'repair' || !r.by44 || line.abandoned || countedBy43(line, r)) return false;
+async function waitingRequest(ctx: FlowCtx, line: Line, r: ReopenRequest, card: DetailedTask | undefined): Promise<boolean> {
+  if (r.source.kind !== 'repair' || !r.by44 || givenUpUnderCard(line.events, card) || countedBy43(line, r)) return false;
   const s = await requestState(ctx, line, r);
   return s.kind === 'requested' || (s.kind === 'carried' && !s.taken && (line.k > s.at || line.one('accepted', String(s.at)) !== null));
 }
@@ -2095,7 +2113,9 @@ async function repairReopen(ctx: FlowCtx, read: PlanRead, r: ReopenRequest): Pro
     return;
   }
   if (t === undefined) return reopenNotCarried(ctx, read, r, line, 'the plan in effect no longer has the task');
-  if (line.abandoned) return reopenNotCarried(ctx, read, r, line, 'the task was given up');
+  // given up under the card in effect: not carried out; given up under a card the plan in effect replaces (or a drop
+  // since brings back), it waits: execution lays that card first and the task goes on (F2-1)
+  if (line.abandoned) return givenUpUnderCard(line.events, t) ? reopenNotCarried(ctx, read, r, line, 'the task was given up') : undefined;
   const k = line.k;
   const from = s.at;
   if (k < from) return;
