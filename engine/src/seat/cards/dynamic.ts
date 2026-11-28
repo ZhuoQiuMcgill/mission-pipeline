@@ -271,8 +271,10 @@ export interface ArchitectText { readonly from: string; readonly repair: string 
  * changed or reopened; (G1) an Architect's answer on an escalation that names other tasks of the plan. An
  * answer of a kind carried out as an answer counts once it was carried out (one another decider's answer
  * overrode is not printed); a moot one never does. The asking task gets it as its escalation's answer.
+ * A decision 4.3 recorded has no `note`; its Architect wrote one in the accepted hand-back of the step the
+ * decision names (`arch`): `handBackNote` reads it (repairNoteOf), and it is printed the same way.
  */
-export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
+export function architectTexts(events: readonly FlowEvent[], handBackNote?: HandBackNote): ArchitectText[] {
   const out: ArchitectText[] = [];
   let sec: FlowEvent[] | undefined;
   for (const e of events) {
@@ -288,29 +290,69 @@ export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
     }
     if (e.line !== 'repairs' || e.event !== 'decided') continue;
     const d = e.body as RepairDecidedBody;
-    if (typeof d.note !== 'string' || d.note.trim() === '') continue;
-    out.push({ from: `repair ${d.repair}, the Architect's note on its decision`, repair: d.repair, tasks: [...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)], text: d.note });
+    const note = repairNoteOf(d, handBackNote);
+    if (note === null || note.trim() === '') continue;
+    out.push({ from: `repair ${d.repair}, the Architect's note on its decision`, repair: d.repair, tasks: [...d.add, ...(d.changed ?? []), ...d.reopen.map((x) => x.task)], text: note });
   }
   return out;
+}
+
+/**
+ * The 4.3 decisions among these repairs (a decision with no `note`) with the Architect step each names: the steps
+ * whose accepted hand-back holds the note (the flow reads them before it builds a card: its reads are async).
+ */
+export function stepsOfNotes43(events: readonly FlowEvent[], repairs: readonly string[]): string[] {
+  return events.filter((e) => e.line === 'repairs' && e.event === 'decided' && repairs.includes((e.body as RepairDecidedBody).repair) && (e.body as RepairDecidedBody).note === undefined)
+    .map((e) => (e.body as RepairDecidedBody).arch).filter((s): s is string => typeof s === 'string');
+}
+
+/** 4.4 (G3, G4): the note in the accepted hand-back of a repair's Architect step (by its step id); null: none, or not readable. */
+export type HandBackNote = (step: string) => string | null;
+
+/**
+ * 4.4 (G3, G4): the Architect's note of a repair decision: the decision's own (4.4 records one, an empty one too),
+ * else, for a decision 4.3 recorded (it has no `note`), the note of the accepted hand-back of its Architect step
+ * (`arch`). Null: none recorded or readable; a text that cannot be read is left out, it never fails a read or a claim.
+ */
+export function repairNoteOf(d: Pick<RepairDecidedBody, 'note' | 'arch'>, handBackNote?: HandBackNote): string | null {
+  if (typeof d.note === 'string') return d.note;
+  if (handBackNote === undefined || typeof d.arch !== 'string') return null;
+  try {
+    const note = handBackNote(d.arch);
+    return typeof note === 'string' && note.trim() !== '' ? note.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The note of an accepted Architect repair hand-back (its result's `note`), or null. */
+export function noteOfHandBack(hb: { readonly status: string; readonly result: unknown } | null | undefined): string | null {
+  if (hb?.status !== 'handed-back') return null;
+  const note = (hb.result as { note?: unknown } | null)?.note;
+  return typeof note === 'string' ? note : null;
 }
 
 /**
  * 4.4 (G3): the Architect's texts printed on a task's cards: those naming it; a repair's only while it is among the
  * repairs its work answers; (G1) an answer only while the task keeps the card it had when the answer was recorded.
  */
-export function architectNotesFor(events: readonly FlowEvent[], task: string, repairs: readonly string[]): Array<{ from: string; text: string }> {
+export function architectNotesFor(events: readonly FlowEvent[], task: string, repairs: readonly string[], handBackNote?: HandBackNote): Array<{ from: string; text: string }> {
   const spec = events.filter((e) => e.line === `task:${task}` && e.event === 'spec').at(-1)?.revision ?? 0;
-  return architectTexts(events).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair)) && (t.since === undefined || spec < t.since)).map((t) => ({ from: t.from, text: t.text }));
+  // a 4.3 note is read only for the repairs this work answers (one hand-back each)
+  const steps = handBackNote === undefined ? null : new Set(stepsOfNotes43(events, repairs));
+  const read: HandBackNote | undefined = steps === null ? undefined : (step) => (steps.has(step) ? handBackNote!(step) : null);
+  return architectTexts(events, read).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair)) && (t.since === undefined || spec < t.since)).map((t) => ({ from: t.from, text: t.text }));
 }
 
 /**
  * 4.4 (G3): what was written for a task's work, as its Constructor and Reviewer cards carry it (built alike at
  * queue time and at the claim): the instructions addressed to it or to a repair it answers, the Architect's
- * notes, and the answers given under its earlier cards. A field with nothing in it is left out.
+ * notes (a 4.3 decision's from its Architect's hand-back, `handBackNote`), and the answers given under its earlier
+ * cards. A field with nothing in it is left out.
  */
-export function writtenForTask(constraints: readonly ConstraintBody[], events: readonly FlowEvent[], mission: string, task: string, repairs: readonly string[]): { addressed?: AddressedRef[]; architectNotes?: Array<{ from: string; text: string }>; earlierAnswers?: string[] } {
+export function writtenForTask(constraints: readonly ConstraintBody[], events: readonly FlowEvent[], mission: string, task: string, repairs: readonly string[], handBackNote?: HandBackNote): { addressed?: AddressedRef[]; architectNotes?: Array<{ from: string; text: string }>; earlierAnswers?: string[] } {
   const addressed = addressedForTask(constraints, mission, task, repairs);
-  const notes = architectNotesFor(events, task, repairs);
+  const notes = architectNotesFor(events, task, repairs, handBackNote);
   const earlier = earlierTaskAnswers(events, task);
   return { ...(addressed.length > 0 ? { addressed } : {}), ...(notes.length > 0 ? { architectNotes: notes } : {}), ...(earlier.length > 0 ? { earlierAnswers: earlier } : {}) };
 }

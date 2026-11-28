@@ -156,7 +156,8 @@ describe('4.4 compatibility: a repair decided by 4.3 (no note)', () => {
     assert.equal(con.architectNotes, undefined);
     const r = repairs(ports).repairs[0]!;
     assert.equal(r.note, null);
-    assert.ok(repairsText(repairs(ports)).includes("the Architect's note: (not recorded: decided before 4.4)"));
+    // its Architect step left no hand-back here, so no note can be read from it (p44-p6-v1: one that did)
+    assert.ok(repairsText(repairs(ports)).includes("the Architect's note: (not recorded: decided under 4.3, and its Architect's hand-back has none that can be read)"));
     assert.equal(r.done, true);
   });
 });
