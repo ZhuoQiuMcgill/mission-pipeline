@@ -24,12 +24,13 @@ import { requirePm, requireDriver, requireSecretary, touchSecretary, generations
 import { PM_COMMANDS } from './commands/pm.ts';
 import { READ_COMMANDS } from './commands/read.ts';
 import { SEAT_COMMANDS } from './commands/seat.ts';
+import { HOLD_COMMANDS } from './commands/holds.ts';
 import { CliError, EXIT, errorMessage, toCliError, usage } from './errors.ts';
 import { actionArgs, beginAction, checkOpId, endAction, latestSession, newOpId, openProject, type CliIo, type Problem, type Project } from './project.ts';
 import { problemLines, wiText } from './render.ts';
 import { parseFiller } from '../process/index.ts';
 
-export const COMMANDS: readonly Command[] = [...PM_COMMANDS, ...RESIDENT_PM_COMMANDS, ...SEC_COMMANDS, ...SEAT_COMMANDS, ...READ_COMMANDS, ...ADMIN_COMMANDS];
+export const COMMANDS: readonly Command[] = [...PM_COMMANDS, ...RESIDENT_PM_COMMANDS, ...SEC_COMMANDS, ...SEAT_COMMANDS, ...READ_COMMANDS, ...HOLD_COMMANDS, ...ADMIN_COMMANDS];
 
 export interface CliOutput {
   readonly exitCode: number;
@@ -38,7 +39,7 @@ export interface CliOutput {
 }
 
 /** PM commands whose first positional is a sub-command (recorded as "<command> <sub>"). */
-const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission', 'secretary']);
+const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission', 'secretary', 'hold']);
 
 function groupHelp(group: string): string {
   const cs = COMMANDS.filter((c) => c.group === group);

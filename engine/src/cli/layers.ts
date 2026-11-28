@@ -42,8 +42,8 @@
 //     next step follows the flow's own rules: waiting on the user as `mp pm next` lists it →
 //     `mp pm answer`; a decision to carry out (decisionFor) → the next `mp pm next`; its Secretary
 //     in flight → wait for its hand-back; else the Secretary's step;
-//   - a step held by a stop, a closed mission, the git-writes hold or a lease (what `mp pm next`
-//     computes), a dispatch in flight under a stop, a hand-back that arrived after a stop, a
+//   - a step held by a stop, a closed mission, the git-writes hold, a lease, a hold or a disk limit (4.4,
+//     G6: what `mp pm next` computes), a dispatch in flight under a stop, a hand-back that arrived after a stop, a
 //     dispatch in flight longer than IN_FLIGHT_BLOCKED_MS without a hand-back (WI-28).
 // One subtask with several reasons is one blocked entry. The labels recomputing is a project
 // line, not a subtask.
@@ -435,15 +435,22 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       block(k, h.why, 'the PM takes a WI-34 exit with the user\'s words: the same PM plan resubmitted, or a changed one', h.wi);
       continue;
     }
-    const next = h.why.startsWith('a stop')
-      ? 'the stop is narrowed or released with the user (mp pm stop-narrow / mp pm stop-release)'
-      : h.why.startsWith('mission')
-        ? `open the mission again if the user wants its production to go on (mp pm mission open ${h.mission})`
-        : h.why.startsWith('git writes')
-          ? 'confirm this copy is the one in use (mp pm confirm-copy, WI-31)'
-          : h.why.startsWith('exploration')
-            ? 'it starts by itself once the explorations it waits for settle (their own blocks are listed here)'
-            : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
+    // 4.4 (G6, F6): a hold, or a disk limit passed; a hold beside an earlier reason (review p5-8) adds its own next step
+    const byHold = h.holds !== undefined ? `it waits while ${h.holds.map((x) => x.id).join(' and ')} hold${h.holds.length === 1 ? 's' : ''} it (mp read holds says how each ends)` : null;
+    const reason = h.why.startsWith('hold ')
+      ? null
+      : h.diskLimit === true
+        ? 'free disk space or worktrees (mp read scratch lists them; mp pm clean removes what is over), or change limits in config.json'
+        : h.why.startsWith('a stop')
+          ? 'the stop is narrowed or released with the user (mp pm stop-narrow / mp pm stop-release)'
+          : h.why.startsWith('mission')
+            ? `open the mission again if the user wants its production to go on (mp pm mission open ${h.mission})`
+            : h.why.startsWith('git writes')
+              ? 'confirm this copy is the one in use (mp pm confirm-copy, WI-31)'
+              : h.why.startsWith('exploration')
+                ? 'it starts by itself once the explorations it waits for settle (their own blocks are listed here)'
+                : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
+    const next = [reason, byHold].filter((x): x is string => x !== null).join('; ');
     block(ofStep(h.step, String(h.mission)), `${h.step} (${h.seat}) is held: ${h.why}`, next, h.wi);
   }
   // dispatches: in flight under a stop, in flight too long, a hand-back after a stop
