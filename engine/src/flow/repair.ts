@@ -271,10 +271,12 @@ export interface NewItem {
  * checked against (flow/requirements.ts newItemRecords: their term line and reqnew.<m>), and the work started on a
  * repair's light path in the same write: a filing on the repairs line (`entry: "extend"`, its `items`), which the repair
  * step takes to one Architect step under the mechanical checks. Its words and text are the first item's (verbatim). The
- * same filing again (the same items, each recorded with the same text and words) returns the one recorded. The write is
- * checked against the PM plan version it read as the latest (the items' term): a plan submitted in between refuses it.
+ * same filing again (the same items, each recorded with the same text and words) returns the one recorded while it stands
+ * (p12-8, recordRepair's check: undecided, or what it added is in the plan in effect); once a re-plan dropped its work, it
+ * is filed anew against the items as recorded (`again`: the filing before). The write is checked against the PM plan
+ * version it read as the latest (the items' term): a plan submitted in between refuses it.
  */
-export async function recordExtension(ports: FlowPorts, req: { readonly mission: MissionId; readonly items: readonly NewItem[]; readonly openItems?: readonly string[] }): Promise<{ readonly id: string; readonly repeated: boolean; readonly term: number; readonly versions: readonly string[] }> {
+export async function recordExtension(ports: FlowPorts, req: { readonly mission: MissionId; readonly items: readonly NewItem[]; readonly openItems?: readonly string[] }): Promise<{ readonly id: string; readonly repeated: boolean; readonly term: number; readonly versions: readonly string[]; readonly again?: string }> {
   const ctx = flowCtx(ports, req.mission);
   if (req.items.length === 0) throw new Error('a new requirement records at least one requirement item');
   if (req.items.length > EXTEND_ITEMS_MAX) throw new Error(`one filing records at most ${EXTEND_ITEMS_MAX} items (${req.items.length} given): file the rest in another one`);
@@ -289,16 +291,25 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   const existing = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
   const batches = await eventsOf<{ n: number }>(ctx, PLAN_LINE, 'pm-batch');
   const term = batches.at(-1)?.body.n ?? 0;
-  // the same filing again (a retry): its items recorded with the same text and words, by the filing that names them
-  const same = existing.find((e) => e.body.entry === 'extend' && canonicalJson(e.body.items ?? []) === canonicalJson(ids));
+  // the same filing again (a retry): its items recorded with the same text and words, by the latest filing that names them
+  const same = existing.filter((e) => e.body.entry === 'extend' && canonicalJson(e.body.items ?? []) === canonicalJson(ids)).at(-1);
+  const pie = await planInEffect(ctx);
+  let again: string | undefined;
   if (same !== undefined) {
     const recorded = new Map((await eventsOf<import('./requirements.ts').ItemVersionBody>(ctx, 'requirements', 'item')).map((e) => [e.body.version, e.body]));
     const ok = req.items.every((i) => { const b = recorded.get(safeId(`${itemLine(req.mission, i.item)}.v1`)); return b !== undefined && b.type === i.type && b.text === i.text && b.source.kind === 'words' && b.source.words === i.words && b.source.quote === i.quote; });
-    if (ok) return { id: same.key, repeated: true, term, versions: ids.map((i) => safeId(`${itemLine(req.mission, i)}.v1`)) };
+    // (p12-8) it stands while it is undecided (or ended), or while what it added is in the plan in effect, as a repair does
+    const d = ok ? (await eventOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided', same.key))?.body : undefined;
+    if (ok && (d === undefined || pie === null || d.add.every((t) => pie.plan.tasks.some((x) => x.id === t)))) return { id: same.key, repeated: true, term, versions: ids.map((i) => safeId(`${itemLine(req.mission, i)}.v1`)) };
+    if (ok) again = same.key;
   }
-  const pie = await planInEffect(ctx);
   if (pie === null) throw new Error(`mission ${req.mission} has no detailed plan in effect: a new requirement amends the plan in effect (plan the work with mp pm plan submit first)`);
-  const recs = await newItemRecords(ctx, term, req.items.map((i) => ({ item: i.item, type: i.type, text: i.text, source: { kind: 'words' as const, words: i.words, quote: i.quote } })));
+  // (p12-8) filed anew once its work is gone: against the items as recorded (no new item record), those in force
+  const ix = again === undefined ? null : await basisIndex(ctx);
+  if (ix !== null && ids.every((i) => ix.withdrawn.has(itemLine(req.mission, i)))) throw new Error(`every item of new requirement ${again} (${ids.join(', ')}) was withdrawn: there is nothing to file again (a new requirement gets new ids). Nothing was filed`);
+  const recs = ix !== null
+    ? { events: [], records: [], versions: ids.flatMap((i) => { const v = ix.current.get(itemLine(req.mission, i)); return v === undefined ? [] : [v]; }) }
+    : await newItemRecords(ctx, term, req.items.map((i) => ({ item: i.item, type: i.type, text: i.text, source: { kind: 'words' as const, words: i.words, quote: i.quote } })));
   // 4.4 (G4, G5 with G9): a new requirement's filing may name open items left at the cap as a repair does (the same field and checks)
   const open = [...new Set(req.openItems ?? [])].sort();
   if (open.length > 0) await openItemsProblem(ctx, open);
@@ -310,7 +321,7 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
     records: recs.records,
     guard: { absent: [{ mission: req.mission, line: PLAN_LINE, event: 'pm-batch', key: `b${term + 1}` }], code: 'STALE_REQUEST', message: `a PM plan version was submitted while the new requirement was being recorded: nothing was recorded; run the command again` },
   });
-  return { id, repeated: false, term, versions: recs.versions };
+  return { id, repeated: false, term, versions: recs.versions, ...(again !== undefined ? { again } : {}) };
 }
 
 /**
@@ -469,25 +480,36 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
     // 4.4 (F12 b, p7-4): no task may end up waiting in a circle with the waits the flow holds now (other repairs' reopens included)
     ...(await waitCircles(ctx, plan, result)),
     // 4.4 (G9): the items a task is named for are the filing's (a reopen), or in force (an added or changed card of a filing with items)
-    ...itemFailures(r, lines, ix, result),
+    ...itemFailures(r, lines, ix, result, plan),
   ];
   if (failures.length > 0) return repairReturn(ctx, r, a, task, failures);
-  await decide(ctx, r, task, eff, plan, result, mc, { effective: effective.revision, decided, withdrawn: withdrawals.at(-1)?.revision ?? null });
+  // 4.4 (G9, p12-6): the filing's items in force as this decision reads them (its write is checked against that read)
+  const live = lines.filter((l) => !ix.withdrawn.has(l));
+  await decide(ctx, r, task, eff, plan, result, mc, { effective: effective.revision, decided, withdrawn: withdrawals.at(-1)?.revision ?? null, live });
 }
 
 /**
  * 4.4 (G9): naming an item that is not an item of the filing is a mechanical failure of the hand-back (back to the Architect
- * by the mechanical-return loop): `items` of a reopen name the filing's items only (a repair that names none takes none);
- * an added or changed card of a filing with items names in `requirementItems` only items in force. A repair that names no
- * item keeps 4.3's rule for its cards.
+ * by the mechanical-return loop): `items` of a reopen name the filing's items in force only (a repair that names none takes
+ * none). On an added or changed card of a filing with items (p12-7), an item newly named in `requirementItems` must be an
+ * item of the filing in force; one already on the card of the task it changes stays while it is in force. A repair that
+ * names no item keeps 4.3's rule for its cards.
  */
-function itemFailures(r: RepairBody, filing: readonly string[], ix: Awaited<ReturnType<typeof basisIndex>>, result: ArchitectRepairResult): string[] {
+function itemFailures(r: RepairBody, filing: readonly string[], ix: Awaited<ReturnType<typeof basisIndex>>, result: ArchitectRepairResult, plan: Pick<DetailedPlanDoc, 'tasks'>): string[] {
   const out: string[] = [];
-  const of = filing.length === 0 ? `${r.id} names no requirement item` : `the items of ${r.id} are ${filing.join(', ')}`;
-  for (const x of result.reopen) for (const l of x.items ?? []) if (!filing.includes(l) || ix.withdrawn.has(l)) out.push(`reopen[${x.task}].items: "${l}" is not a requirement item of ${r.id} in force (${of})`);
+  const live = filing.filter((l) => !ix.withdrawn.has(l));
+  const of = filing.length === 0 ? `${r.id} names no requirement item` : live.length === 0 ? `no item of ${r.id} is in force` : `the items of ${r.id} in force are ${live.join(', ')}`;
+  for (const x of result.reopen) for (const l of x.items ?? []) if (!live.includes(l)) out.push(`reopen[${x.task}].items: "${l}" is not a requirement item of ${r.id} in force (${of})`);
   if (filing.length > 0) {
     for (const [where, t] of [...result.add.map((t) => ['add', t] as const), ...(result.change ?? []).map((t) => ['change', t] as const)]) {
-      for (const l of t.requirementItems) if (!ix.current.has(l) || ix.withdrawn.has(l)) out.push(`${where}[${t.id}].requirementItems: "${l}" is not a requirement item in force (${of})`);
+      const had = where === 'change' ? plan.tasks.find((x) => x.id === t.id)?.requirementItems ?? [] : [];
+      for (const l of t.requirementItems) {
+        if (live.includes(l)) continue;
+        if (had.includes(l) && ix.current.has(l) && !ix.withdrawn.has(l)) continue;
+        out.push(had.includes(l)
+          ? `${where}[${t.id}].requirementItems: "${l}" was on the task's card but is not in force now: leave it off (${of})`
+          : `${where}[${t.id}].requirementItems: "${l}" is not a requirement item of ${r.id} in force: name only the filing's items on a task (${of})`);
+      }
     }
   }
   return out;
@@ -613,13 +635,14 @@ async function repairReturn(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, t
  * as basis lines. Reopened tasks get their new attempts from execution (carryReopens). Each reopened
  * task is taken at the attempt it is accepted at now; one no longer accepted is left out, said.
  */
-async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveBody, plan: DetailedPlanDoc, result: ArchitectRepairResult, mc: MechanicalResult, read: { readonly effective: number; readonly decided: number | null; readonly withdrawn: number | null }): Promise<void> {
-  // 4.4 (G9): the work is bound to the filing's items: with one item, every task it adds, changes or reopens carries it
-  // with no action of the Architect's; with several, each carries those the Architect named on it (none: bound to none)
+async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveBody, plan: DetailedPlanDoc, result: ArchitectRepairResult, mc: MechanicalResult, read: { readonly effective: number; readonly decided: number | null; readonly withdrawn: number | null; readonly live: readonly string[] }): Promise<void> {
+  // 4.4 (G9, p12-6): the work is bound to the filing's items, by the number of them in force when the amendment is applied
+  // (`read.live`, checked in the write): exactly one, and every task it adds, changes or reopens carries it with no action
+  // of the Architect's; several, and each carries those the Architect named on it (none: bound to none)
   const filing = (r.items ?? []).map((i) => itemLine(ctx.mission, i));
-  const one = filing.length === 1 ? filing[0]! : null;
+  const one = read.live.length === 1 ? read.live[0]! : null;
   const bind = (t: DetailedTask): DetailedTask => (one === null || t.requirementItems.includes(one) ? t : { ...t, requirementItems: [...t.requirementItems, one] });
-  const reopenItems = (x: ArchitectRepairResult['reopen'][number]): { items?: string[] } => { const items = one !== null ? [one] : [...new Set((x.items ?? []).filter((l) => filing.includes(l)))]; return items.length > 0 ? { items } : {}; };
+  const reopenItems = (x: ArchitectRepairResult['reopen'][number]): { items?: string[] } => { const items = one !== null ? [one] : [...new Set((x.items ?? []).filter((l) => read.live.includes(l)))]; return items.length > 0 ? { items } : {}; };
   const reopen: Array<RepairDecidedBody['reopen'][number]> = [];
   const skipped: string[] = [];
   const notCarried: Array<{ readonly task: string; readonly attempt: number; readonly why: string }> = [];

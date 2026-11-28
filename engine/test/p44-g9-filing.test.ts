@@ -47,6 +47,7 @@ function claimed<C>(ports: World, task: string): C {
 const labels = async (ports: World, ids: readonly string[]): Promise<Record<string, unknown>> => (await ports.evaluator.labels(ids)).labels;
 const contractOf = async (ports: World, product: string): Promise<readonly string[]> => (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.object === product)?.reviews[0]?.basisLines ?? [];
 const acceptedOf = async (ports: World, task: string): Promise<string | undefined> => (await ports.ledger.events<{ product: string }>({ mission: M, line: `task:${task}`, event: 'accepted' })).at(-1)?.body.product;
+const current = async (ports: World, line: string): Promise<string | undefined> => (await basisIndex(flowCtx(ports, M))).current.get(line);
 
 const JSON_TASK: DetailedTask = {
   id: 'json', kind: 'implementation', module: 'parser', goal: 'Export rows as JSON', standards: [{ id: 'S1', text: 'Rows export as JSON' }], requirementItems: [],
@@ -379,5 +380,84 @@ describe('4.4 G9 review round 1: the item a filing gives its work stays with it'
     assert.ok(failed && ran.includes('con.m1.impl.3'), `a rework after the acceptance: ${ran.join(', ')}`);
     assert.ok((await contractOf(ports, 'prod.con.m1.impl.3')).includes('item.m1.g2'), 'attempt 3 is bound to the item');
     assert.ok(claimed<ConstructorCard>(ports, 'con.m1.impl.3').requirementItems.some((i) => i.id === 'item.m1.g2' && i.text === 'Rows keep the file order'), 'and its Constructor card shows it at the claim');
+  });
+});
+
+describe('4.4 G9 review round 1: the binding rule the card states is the one the amendment applies', () => {
+  it('p12-6: X and Y filed, Y withdrawn before the claim, a task added without naming X: the card says one item is in force and binds by itself, and X is bound', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }, { item: 'g3', text: 'Rows keep their order', quote: 'keep the order' }], 'Please export JSON and keep the order.');
+    await engine.reconcile(M);
+    const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    assert.ok(renderArchitectRepair(ports.scheduler.card<ArchitectRepairCard>(step)).includes('2 items of it are in force: item.m1.g2, item.m1.g3. Name on each task the items it serves'), 'queued with two in force');
+    await withdrawItem(ports, { mission: M, item: 'g3', reason: 'not now' });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'JSON only' } } : happyScript(M)(t, s)));
+    const text = renderArchitectRepair(claimed<ArchitectRepairCard>(ports, step));
+    assert.ok(text.includes('One item of it is in force: item.m1.g2. Every task you add, change or reopen for it is bound to this item by itself, with no action of yours'), text);
+    assert.ok(text.includes('The number of its items in force when your amendment is applied decides this.'), 'the card states the rule');
+    assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g2'], 'X is bound');
+    const product = (await acceptedOf(ports, 'json'))!;
+    assert.ok((await contractOf(ports, product)).includes('item.m1.g2'));
+    // revising X takes the product's proof off
+    const w = say(ports, 'As JSON lines.');
+    await pmRequirement(ports.ctx, { mission: M, item: 'g2', type: 'goal', text: 'JSON lines export', quote: 'As JSON lines', words: w });
+    assert.equal((await labels(ports, [product]))[product], 'not-fully-proven');
+  });
+
+  it('p12-7: on a filing with items, a newly named item must be the filing\'s in force: another mission\'s item and a plan item go back by the mechanical return; one already on a changed card stays', async () => {
+    const { ports, engine } = await setup('fast');
+    await seedMission(ports, 'm2' as MissionId);
+    // a plain repair adds a task bound to an item of the plan (4.3's rule for it); its work is not started
+    const w = say(ports, 'It should export JSON too.');
+    await pmRepair(ports.ctx, { mission: M, words: w, kind: 'missing', text: 'export JSON too' });
+    const notJson: Script = (t, s) => (t.task.startsWith('con.m1.json.') ? null : happyScript(M)(t, s));
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [{ ...JSON_TASK, requirementItems: ['item.m1.g1'] }], note: 'json' } } : notJson(t, s)));
+    assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g1']);
+    await extend(ports, [{ item: 'g2', text: 'JSON in order', quote: 'in order' }, { item: 'g3', text: 'Documented', quote: 'documented' }], 'Keep it in order and keep it documented.');
+    const DOCS: DetailedTask = { ...JSON_TASK, id: 'docs2', goal: 'Document it', writeScope: ['docs/json.md'] };
+    const changed: DetailedTask = { ...JSON_TASK, goal: 'Export rows as JSON, in order', requirementItems: ['item.m1.g1', 'item.m1.g2'] };
+    const cards: ArchitectRepairCard[] = [];
+    await drive(engine, ports.scheduler, (t, s) => {
+      if (t.card.seat !== 'architect-repair') return notJson(t, s);
+      cards.push(t.card as unknown as ArchitectRepairCard);
+      return cards.length === 1
+        ? { handBack: { reopen: [], add: [{ ...DOCS, requirementItems: ['item.m2.g1', 'item.m1.g1'] }], change: [changed], note: 'first try' } }
+        : { handBack: { reopen: [], add: [{ ...DOCS, requirementItems: ['item.m1.g3'] }], change: [changed], note: 'second try' } };
+    });
+    assert.equal(cards.length, 2, 'returned once');
+    const failures = cards[1]?.revision?.mechanicalFailures ?? [];
+    assert.ok(failures.some((f) => f.startsWith('add[docs2].requirementItems: "item.m2.g1" is not a requirement item of R-2 in force')), JSON.stringify(failures));
+    assert.ok(failures.some((f) => f.startsWith('add[docs2].requirementItems: "item.m1.g1" is not a requirement item of R-2 in force')), JSON.stringify(failures));
+    assert.ok(!failures.some((f) => f.startsWith('change[json]')), 'the binding already on the changed card stays');
+    const pie = await planInEffect(flowCtx(ports, M));
+    assert.deepEqual(pie?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g1', 'item.m1.g2']);
+    assert.deepEqual(pie?.plan.tasks.find((t) => t.id === 'docs2')?.requirementItems, ['item.m1.g3']);
+  });
+});
+
+describe('4.4 G9 review round 1: a new requirement whose work was re-planned away is filed again', () => {
+  it('p12-8: the same extend while its added task is in the plan returns the filing; once a changed plan drops the task, it files anew against the item as recorded, and an Architect step adds the work again', async () => {
+    const { ports, engine } = await setup('fast');
+    const w = say(ports, 'Please export JSON.');
+    const item = { item: 'g2', type: 'goal' as const, text: 'JSON export', quote: 'export JSON', words: w };
+    assert.equal((await pmExtend(ports.ctx, { mission: M, items: [item] })).repair, 'R-1');
+    const addJson: Script = (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'a new task' } } : happyScript(M)(t, s));
+    await drive(engine, ports.scheduler, addJson);
+    assert.ok((await planInEffect(flowCtx(ports, M)))?.plan.tasks.some((t) => t.id === 'json'));
+    assert.deepEqual(await pmExtend(ports.ctx, { mission: M, items: [item] }), { repair: 'R-1', repeated: true, term: 1, items: ['g2'], outsideOf: 'pmplan.m1.1', olderAudits: [] }, 'its work stands: the filing recorded');
+    // a changed plan re-plans the work: its detailed plan has no task for the item
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] }), userWords: ['W-1'] });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
+    assert.equal((await planInEffect(flowCtx(ports, M)))?.eff.pmPlan, 'pmplan.m1.2');
+    assert.ok(!(await planInEffect(flowCtx(ports, M)))?.plan.tasks.some((t) => t.id === 'json'), 'the work is gone');
+    const before = await current(ports, 'item.m1.g2');
+    const again = await pmExtend(ports.ctx, { mission: M, items: [item] });
+    assert.deepEqual([again.repair, again.repeated, again.again], ['R-2', false, 'R-1'], 'filed anew');
+    assert.equal(await current(ports, 'item.m1.g2'), before, 'against the item as recorded (no new version)');
+    const ran = await drive(engine, ports.scheduler, addJson);
+    assert.ok(ran.some((t) => t.startsWith('arch-repair.m1.R-2')), `its Architect step: ${ran.join(', ')}`);
+    assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g2'], 'the work is bound to the item again');
+    const read = repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')));
+    assert.ok(read.includes('filed again: the same items as new requirement R-1, whose work is no longer in the plan in effect'), read);
   });
 });

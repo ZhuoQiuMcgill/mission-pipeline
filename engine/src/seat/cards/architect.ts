@@ -581,10 +581,13 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
 function renderFilingItems(c: ArchitectRepairCard): string {
   const items = c.items ?? [];
   if (items.length === 0) return '';
+  // 4.4 (G9, p12-6): the rule is the one the amendment applies: by the number of the filing's items in force (this card is
+  // rebuilt at its claim, so it names them as they stand then)
   const live = items.filter((i) => i.withdrawn !== true);
-  const bound = live.length <= 1
-    ? 'Every task you add, change or reopen for it is bound to this item by itself: its Reviewer judges against it.'
-    : 'Name on each task the items it serves: in `requirementItems` of a task you add or change, in `items` of a reopen (their ids as listed). A task on which you name none is bound to none of them.';
+  const ids = live.map((i) => i.id).join(', ');
+  const bound = live.length === 1
+    ? `One item of it is in force: ${ids}. Every task you add, change or reopen for it is bound to this item by itself, with no action of yours: its Reviewer judges against it. (The number of its items in force when your amendment is applied decides this.)`
+    : `${live.length} items of it are in force: ${ids}. Name on each task the items it serves: in \`requirementItems\` of a task you add or change, in \`items\` of a reopen (their ids as listed). A task on which you name none is bound to none of them and is shown as naming none. Name only these items: one already on a card you change stays while it is in force; any other comes back to you as a mechanical failure. (The number of its items in force when your amendment is applied decides this.)`;
   return (
     list(c.entry === 'extend' ? 'Its requirement items' : 'The requirement item this repair falls short of', items.map((i) => `[${i.id}] (${i.type}) ${i.text}${i.quote !== undefined ? ` — the user's words (${i.words}): "${i.quote}"` : ''}${i.withdrawn === true ? ' (withdrawn since: plan nothing for it)' : ''}`)) +
     (live.length > 0 ? `${bound}\n\n` : '') +

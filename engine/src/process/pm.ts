@@ -1295,7 +1295,7 @@ export async function pmRepair(
  * checked against, and its work started on a repair's light path in the same write (one Architect step under the
  * mechanical checks; no Calibrator, no feasibility review, no approval).
  */
-export async function pmExtend(ctx: ProcessContext, req: { readonly mission: string; readonly items: readonly NewItem[]; readonly openItems?: readonly string[] }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly term: number; readonly items: readonly string[]; readonly outsideOf: string | null; readonly olderAudits: readonly string[] }> {
+export async function pmExtend(ctx: ProcessContext, req: { readonly mission: string; readonly items: readonly NewItem[]; readonly openItems?: readonly string[] }): Promise<{ readonly repair: string; readonly repeated: boolean; readonly term: number; readonly items: readonly string[]; readonly outsideOf: string | null; readonly olderAudits: readonly string[]; readonly again?: string }> {
   for (const i of req.items) ctx.memory.read((db) => checkQuote(db, ctx.memory.data, i.words, i.quote));
   const mission = req.mission as MissionId;
   let r: Awaited<ReturnType<typeof recordExtension>>;
@@ -1316,7 +1316,7 @@ export async function pmExtend(ctx: ProcessContext, req: { readonly mission: str
     const o = await objectRecord(fc, e.body.object);
     if (o !== null && !(o.reviews.find((x) => x.review === 'auditor-chain')?.basisLines ?? []).some((l) => l.startsWith('reqnew.'))) olderAudits.push(e.line.slice('audit:'.length));
   }
-  return { repair: r.id, repeated: r.repeated, term: r.term, items: req.items.map((i) => i.item), outsideOf: pie?.eff.pmPlan ?? null, olderAudits };
+  return { repair: r.id, repeated: r.repeated, term: r.term, items: req.items.map((i) => i.item), outsideOf: pie?.eff.pmPlan ?? null, olderAudits, ...(r.again !== undefined ? { again: r.again } : {}) };
 }
 
 export interface WaiveRequest {

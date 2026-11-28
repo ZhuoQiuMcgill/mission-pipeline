@@ -305,7 +305,9 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
     const tasks = new Set([...(body?.add ?? []), ...(body?.changed ?? []), ...(body?.reopen ?? []).map((x) => x.task)].map((t) => taskLineage(mission, t)));
     const all = [...added, ...changed, ...reopened];
     // 4.4 (F13): filed again, with --again or (its earlier one's work over) as the same repair
-    const same = on('repair').find((x) => x.revision < e.revision && sameRepair(x.body as RepairBody, r))?.key ?? null;
+    // 4.4 (G9, p12-8): a new requirement filed again (its earlier filing's work re-planned away) names the same items
+    const sameFiling = (x: RepairBody): boolean => x.entry === 'extend' && r.entry === 'extend' && canonicalJson(x.items ?? []) === canonicalJson(r.items ?? []);
+    const same = on('repair').find((x) => x.revision < e.revision && (sameRepair(x.body as RepairBody, r) || sameFiling(x.body as RepairBody)))?.key ?? null;
     const filedAgain = r.op !== undefined || same !== null ? { flag: r.op !== undefined, of: same } : null;
     // 4.4 (G4, G5): the open items it names and what its decision gave to which task (the cards it added or changed, its reopens)
     const took = new Map<string, string[]>();
@@ -360,7 +362,7 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
     if (x.state === 'decided') lines.push("    its work passed its Architect and the mechanical checks, no plan review (D-10)");
     if (x.addedNoItem) lines.push('    it added tasks and names no requirement item (a lead for a spot-check: was it a new requirement? mp pm extend records one)');
     if (x.unnamed.length > 0) lines.push(`    tasks on which its Architect named none of its items (bound to none): ${x.unnamed.join(', ')}`);
-    if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)` : ''}`);
+    if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? (x.entry === 'extend' ? `: the same items as new requirement ${x.filedAgain.of}, whose work is no longer in the plan in effect` : `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)`) : ''}`);
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
     if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
     for (const [label, ts] of [['added', x.added], ['changed', x.changed], ['reopened', x.reopened]] as const) for (const t of ts) lines.push(`    ${label} ${t.task}: ${t.state}`);

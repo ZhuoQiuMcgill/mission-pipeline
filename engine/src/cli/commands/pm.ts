@@ -675,15 +675,22 @@ const extend: Command = {
     const named = `item${r.items.length === 1 ? '' : 's'} ${r.items.join(', ')}`;
     const lines = r.repeated
       ? [`New requirement already recorded: ${r.repair} of ${m} (${named}): nothing new was recorded.`]
+      : r.again !== undefined
+      ? [
+          // 4.4 (G9, p12-8): its work was re-planned away: filed again against the items as recorded
+          `New requirement filed again: ${r.repair} of ${m}, ${named}: what ${r.again} added is no longer in the plan in effect. The items stay as recorded (no new version).`,
+          'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it.',
+          ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
+        ]
       : [
           `New requirement recorded: ${r.repair} of ${m}, ${named} (from ${[...new Set(items.map((i) => i.words))].join(', ')}).`,
           `The items are outside the set ${r.outsideOf !== null ? `PM plan ${r.outsideOf}` : 'the plan'} was checked against: its proof, and that of every product not bound to them, stay as they are; a changed plan submitted later is checked against them.`,
           'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it. Withdrawing every item before its amendment is applied ends the filing.',
           ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
         ];
-    // 4.4 (G9, P-4): an audit made before 4.4 does not bind the new items: said, with what to do
-    for (const l of r.olderAudits) lines.push(`Legalization ${l} was judged before 4.4 against the items the plan was checked against alone: these items do not take its stamp off; request it again to cover them.`);
-    return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: r.repeated, items: r.items, term: r.term, outsideOf: r.outsideOf, olderAudits: r.olderAudits });
+    // 4.4 (G9, P-4, p12-1): an audit made before 4.4 did not see the new items: it reads out of date now; said, with what to do
+    for (const l of r.olderAudits) lines.push(`Legalization ${l} was judged before 4.4 against the items the plan was checked against alone: it does not cover these items, so its audit is no longer current (the stamp it gave stays on the record); request it again to cover them.`);
+    return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: r.repeated, items: r.items, term: r.term, outsideOf: r.outsideOf, olderAudits: r.olderAudits, ...(r.again !== undefined ? { again: r.again } : {}) });
   },
 };
 
