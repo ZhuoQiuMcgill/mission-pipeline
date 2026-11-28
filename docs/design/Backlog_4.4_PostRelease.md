@@ -9,7 +9,8 @@ the 4.3 rulings (`DesignDoc_PMSecretary_2026-11-06_v03.md`, F-1 to F-9), with D-
 model and reviewed against the design by a second model in bounded rounds; each finding was fixed with
 a test that fails without the fix, or overruled with its reason. A verification then ran 4.4 on
 memories written by 4.3 (a copy of a three-week mission, and memories built with 4.3's own fixtures and
-continued under 4.4); four small follow-ups came of it. The release was then reviewed once as a whole.
+continued under 4.4); four small follow-ups came of it. The release was then reviewed once as a whole,
+its fixes were confirmed in one closing round, and the verification ran once more on the final engine.
 The items below were not fixed: they do not produce a wrong result in normal use, or they are
 4.3 behaviour that 4.4 leaves as it was. Under P-4 (D-1), a rare case gets detection, a safe default and
 a work-instruction line, not a new mechanism. What a user must know is in the CHANGELOG and in the
@@ -207,7 +208,8 @@ engine README's known limitations.
 ## Going back to 4.3
 
 - Going back is restoring the copy of `.mission-pipeline/` taken before the first 4.4 command (the
-  CHANGELOG and both handbooks say so); a 4.3 engine run on a memory 4.4 has written to misreads it.
+  CHANGELOG, the Secretary's handbook and both READMEs say so); a 4.3 engine run on a memory 4.4 has
+  written to misreads it.
   Beyond the limits the design names (a held step dispatched, an addressed instruction printed by its
   paths), it would apply a late Architect hand-back of a new requirement's filing the user withdrew
   (the filing has ended for 4.4 and is undecided for 4.3), record a Constructor's parked edits as a
