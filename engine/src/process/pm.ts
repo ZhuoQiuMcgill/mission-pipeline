@@ -333,14 +333,16 @@ export function readSteps(ctx: ProcessContext, o: { readonly afters?: AfterCheck
         continue;
       }
       // 4.4 (G6, F6): a hold in force, or a disk limit passed for a new Constructor step (holds.ts)
+      const busy = (spec.exclusive ?? []).filter((r) => leased.has(r));
+      const lease = `waits for ${busy.map((r) => `${r} (leased to ${leased.get(r)})`).join(', ')}`;
       const byHold = heldByHolds(holds, disk, q, spec, group);
       if (byHold !== null) {
-        held.push({ ...base, ...byHold });
+        // review p5-8: a lease the step also waits for is named beside the hold
+        held.push({ ...base, ...byHold, ...(busy.length > 0 ? { why: `${byHold.why}; also ${lease}`, wi: 'WI-28' } : {}) });
         continue;
       }
-      const busy = (spec.exclusive ?? []).filter((r) => leased.has(r));
       if (busy.length > 0) {
-        hold({ why: `waits for ${busy.map((r) => `${r} (leased to ${leased.get(r)})`).join(', ')}`, wi: 'WI-28' });
+        hold({ why: lease, wi: 'WI-28' });
         continue;
       }
       const dispatches = dispatchCount(db, q.task);

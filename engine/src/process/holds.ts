@@ -112,11 +112,21 @@ export function afterTask(after: string, mission: string | null): { readonly tas
   return i < 0 ? { task: after, mission } : { task: after.slice(i + 1), mission: after.slice(0, i) };
 }
 
-/** The current acceptance of a task of a mission (lineAcceptance), or null when it has no line. */
-function acceptanceOf(db: Db, data: Texts, mission: string, task: string): ReturnType<typeof lineAcceptance> | null {
-  const events = flowEvents(db, { mission: mission as MissionId, line: taskLine(task), limit: 10_000 }).map((e) => ({ revision: Number(e.revision), event: e.event, key: e.key, body: JSON.parse(data.text(e.body)) as unknown }));
+/** The current acceptance of a task of a mission (lineAcceptance over its whole line, read in pages), or null when it has no line. */
+function acceptanceOf(db: Db, data: Texts, mission: string, task: string, page = 10_000): ReturnType<typeof lineAcceptance> | null {
+  const events: Array<{ revision: number; event: string; key: string; body: unknown }> = [];
+  // review p5-3: every event of the line, so a rework beyond one page is never missed
+  for (let after = 0; ; ) {
+    const rows = flowEvents(db, { mission: mission as MissionId, line: taskLine(task), after, limit: page });
+    for (const e of rows) events.push({ revision: Number(e.revision), event: e.event, key: e.key, body: JSON.parse(data.text(e.body)) as unknown });
+    if (rows.length < page) break;
+    after = Number(rows.at(-1)!.revision);
+  }
   return events.length === 0 ? null : lineAcceptance(events);
 }
+
+/** Tests: the paging of acceptanceOf, with a page size of choice. */
+export const acceptanceForTest = acceptanceOf;
 
 /**
  * Whether an `after` task is accepted now, as production counts it: its current attempt's product, on a
@@ -352,10 +362,12 @@ export const HOLD_REASON_MAX = 2_000;
  * `mp pm hold add` / `mp sec hold add`: a hold placed. A task, and an `after` given without its mission,
  * are bound to their mission here; an id found in no mission or in several asks for `--mission` (or
  * `--after <mission>/<task>`). The same command run again (the same arguments as typed, a relative time
- * too) while its hold is in force or waiting is that hold. A words entry that does not resolve is
- * recorded as none, with a warning; nothing in the state of the work refuses a hold.
+ * too) while its hold is in force or waiting is that hold; `afters` (checkAfters, taken before the
+ * write) judges an earlier hold's `after` as production does, so one already over is no repeat. A words
+ * entry that does not resolve is recorded as none, with a warning; nothing in the state of the work
+ * refuses a hold.
  */
-export function placeHold(ctx: ProcessContext, o: HoldRequest & { readonly op: string }): Placed {
+export function placeHold(ctx: ProcessContext, o: HoldRequest & { readonly op: string; readonly afters?: AfterChecks }): Placed {
   const by: 'pm' | 'secretary' = ctx.secretary !== null ? 'secretary' : 'pm';
   const reason = o.reason.trim().slice(0, HOLD_REASON_MAX);
   if (reason === '') notAllowed('a hold says why: --reason "<the reason>"');
@@ -368,8 +380,9 @@ export function placeHold(ctx: ProcessContext, o: HoldRequest & { readonly op: s
   };
   const from = time(o.from, '--from');
   const until = time(o.until, '--until');
-  const given = { from: o.from ?? null, until: o.until ?? null };
-  const payload = { subject: o.subject, mission: o.mission ?? null, after: o.after ?? null, from: given.from, until: given.until, reason: o.reason, words: o.words ?? null };
+  // the arguments as typed (review p5-r2-1: the words id too, whether or not it resolves)
+  const given = { from: o.from ?? null, until: o.until ?? null, words: o.words ?? null };
+  const payload = { subject: o.subject, mission: o.mission ?? null, after: o.after ?? null, from: given.from, until: given.until, reason: o.reason, words: given.words };
   const out = ctx.memory.write({ op: `hold:${o.op}`, payload, command: by === 'pm' ? 'hold add' : 'sec hold add', filler: ctx.filler }, (tx): Placed => {
     const notes: string[] = [];
     // review p5-7: an entry that does not resolve is no reason to refuse; the hold is recorded without words
@@ -402,9 +415,11 @@ export function placeHold(ctx: ProcessContext, o: HoldRequest & { readonly op: s
     }
     const rec: Omit<HoldPlaced, 'hold'> = { kind: 'hold.placed', subject: o.subject, mission, after, from, until, given, reason, by, generation: ctx.secretary, words };
     const rows = holdRows(tx);
-    // review p5-6: a repeat matches on the arguments as typed (a relative time is the same text, not the same instant)
-    const key = (p: Omit<HoldPlaced, 'hold'> | HoldPlaced): string => canonicalJson([p.subject, p.mission, p.after, p.given?.from ?? null, p.given?.until ?? null, p.reason, p.by, p.words]);
-    const same = rows.find((r) => r.released === null && key(r.placed) === key(rec) && holdState(tx, tx.data, r, now).state !== 'over');
+    // review p5-6, p5-r2-1: a repeat matches on the arguments as typed (a relative time is the same text, not the
+    // same instant; a words id is the id given, not whether it resolved then); review p5-r2-2: an earlier hold
+    // whose `after` production counts as accepted is over, and no repeat
+    const key = (p: Omit<HoldPlaced, 'hold'> | HoldPlaced): string => canonicalJson([p.subject, p.mission, p.after, p.given?.from ?? null, p.given?.until ?? null, p.given?.words !== undefined ? p.given.words : p.words, p.reason, p.by]);
+    const same = rows.find((r) => r.released === null && key(r.placed) === key(rec) && holdState(tx, tx.data, r, now, o.afters).state !== 'over');
     if (same !== undefined) return { hold: same.placed.hold, repeated: true, by, mission, after, from: same.placed.from, until: same.placed.until, warnings: notes };
     const hold = `H-${rows.length + 1}`;
     tx.append({ ...rec, hold });

@@ -13,8 +13,8 @@ import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { raiseEscalation } from '../src/flow/secretary.ts';
 import { gitActions, openProcess, pmDispatch, type ProcessOptions } from '../src/process/index.ts';
-import { heldByHolds, holdsInForce, holdsOn, placeHold, type HoldRow } from '../src/process/holds.ts';
-import { appendRecords, queueTask } from '../src/memory/index.ts';
+import { acceptanceForTest, heldByHolds, holdsInForce, holdsOn, placeHold, type HoldRow } from '../src/process/holds.ts';
+import { acquireLease, appendRecords, queueTask } from '../src/memory/index.ts';
 import { canonicalJson } from '../src/common/hash.ts';
 import { secWait, secretaryWakes, SECRETARY_WAKE } from '../src/process/secretary.ts';
 import type { TaskSpecDoc } from '../src/process/ports.ts';
@@ -444,6 +444,85 @@ test('G6: holds live in the log: a rebuild of the state tables (as after a copy 
     assert.deepEqual((await done(p, ['read', 'holds', '--all'])).holds, before);
     assert.ok((await done(p, ['pm', 'next'])).held.some((x: any) => x.step === constructor && x.holds[0].id === 'H-1'));
     assert.equal((await done(p, ['pm', 'hold', 'add', '--step', constructor, '--reason', 'one step'])).hold, 'H-3');
+  } finally {
+    p.cleanup();
+  }
+});
+
+/** An acceptance recorded before prerequisite pins, of task `legacy` in an open mission m2 (its dispatch carries none). */
+function legacyAcceptance(p: ProcessProject, extra: Array<[string, string, unknown]> = []): void {
+  p.ctx.memory.write({ op: `legacy-${extra.length}`, payload: extra.length }, (tx) => {
+    const ev = (event: string, key: string, body: unknown) => ({ kind: 'flow.event' as const, mission: 'm2' as MissionId, line: 'task:legacy', event, key, body: tx.data.put(JSON.stringify(body)) as never });
+    appendRecords(tx, extra.length > 0 ? extra.map(([e, k, b]) => ev(e, k, b)) : [ev('dispatched', 'con.m2.legacy.1', { k: 1, snapshot: 'x', commit: 'x', dplan: 'dplan.m2.1.1' }), ev('accepted', '1', { k: 1, product: 'prod.legacy', judgment: 'j.legacy' })]);
+  });
+}
+const startValid: ProcessOptions = { actions: (ctx) => ({ ...gitActions(ctx), startHolds: async () => ({ holds: true, missing: [] }) }) };
+
+test('G6 (review p5-r2-1): a repeat matches on the words id as typed, so a hold placed while its entry was missing is the same hold once the entry exists', async () => {
+  const p = project43();
+  try {
+    await atConstructor(p);
+    const missing = await done(p, ['pm', 'hold', 'add', '--all', '--reason', 'maintenance', '--words', 'W-2']);
+    assert.equal((await done(p, ['read', 'holds'])).holds[0].words, null, 'the entry did not resolve: no citation is recorded');
+    assert.equal(await userWords(p, 'Hold everything for maintenance.'), 'W-2');
+    const again = await done(p, ['pm', 'hold', 'add', '--all', '--reason', 'maintenance', '--words', 'W-2']);
+    assert.deepEqual([again.hold, again.repeated], [missing.hold, true], 'before the fix a second hold was placed');
+    await done(p, ['pm', 'hold', 'release', again.hold]);
+    assert.deepEqual((await done(p, ['read', 'holds'])).holds, [], 'releasing the id it returned leaves no hold in force');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('G6 (review p5-r2-2): an earlier hold whose --after task production counts as accepted is over, so the same placement gets a fresh id and end', async () => {
+  const p = project43();
+  try {
+    await atConstructor(p);
+    await done(p, ['pm', 'mission', 'open', 'm2']);
+    legacyAcceptance(p);
+    const t0 = Date.UTC(2026, 10, 28, 9, 0);
+    const args = ['pm', 'hold', 'add', '--all', '--mission', 'm1', '--after', 'm2/legacy', '--until', '+1h', '--reason', 'gate'];
+    // its start cannot be checked here: not accepted, the hold is in force
+    const first = await done(p, args, { process: { now: () => t0 } });
+    assert.equal(first.state, 'in-force');
+    // its start found valid half an hour later: the first hold is over, the same command places a new one
+    const t1 = t0 + 30 * 60_000;
+    const second = await done(p, args, { process: { ...startValid, now: () => t1 } });
+    assert.deepEqual([second.hold, second.repeated, second.until], ['H-2', false, t1 + 3_600_000], 'before the fix it returned H-1 and its end');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('G6 (review p5-3, the rest): the claim\'s recheck reads the whole task line, past one page', async () => {
+  const p = project43();
+  try {
+    await done(p, ['pm', 'mission', 'open', 'm2']);
+    legacyAcceptance(p);
+    const read = (page: number) => p.ctx.memory.read((db) => acceptanceForTest(db, p.ctx.memory.data, 'm2', 'legacy', page));
+    assert.equal(read(2)?.product, 'prod.legacy');
+    legacyAcceptance(p, [['rework', '2', { k: 2, reason: 'reopened' }]]);
+    assert.equal(read(2)?.product, null, 'a rework on the second page is seen: before the fix only the first page was read');
+    assert.equal(read(10_000)?.product, null);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('G6 (review p5-8, a lease): a lease the held step also waits for is named beside the hold', async () => {
+  const p = project43();
+  try {
+    const constructor = await atConstructor(p);
+    const d = pmDispatch(p.ctx, constructor, { filledBy: 'test/scripted' });
+    const spec = { ...syntheticSpec('reviewer', ['simulator']), task: 'rev.m1.sim.1', lineage: 'L-sim' };
+    p.ctx.memory.write({ op: 'queue-sim', payload: 1 }, (tx) => {
+      acquireLease(tx, { resource: 'simulator', dispatch: d.dispatch });
+      queueTask(tx, { task: spec.task, lineage: spec.lineage, mission: 'm1' as MissionId, card: tx.data.put(canonicalJson(spec)) as never });
+    });
+    await done(p, ['pm', 'hold', 'add', '--step', spec.task, '--reason', 'a ruling is pending']);
+    const held = (await done(p, ['pm', 'next'])).held.find((x: any) => x.step === spec.task);
+    assert.match(held.why, new RegExp(`^hold H-1 \\(the PM\\): a ruling is pending; .*; also waits for simulator \\(leased to ${d.dispatch}\\)$`), 'before the fix the hold hid the lease');
+    assert.deepEqual([held.holds[0].id, held.wi], ['H-1', 'WI-28']);
   } finally {
     p.cleanup();
   }

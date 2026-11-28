@@ -59,11 +59,12 @@ export type ResidentEvent =
    * 4.4 (G6, the plan's F6): "not this yet" on the record. `mission`: the mission of a task or a step,
    * resolved at placement; for a resource or everything, the one it is narrowed to (null: every mission).
    * `after` (`<mission>/<task>`, resolved at placement): in force while that task is not accepted.
-   * `from` / `until` (ms): in force from / until that time; `given`: the two as they were typed (a
-   * repeat of the same command matches on them). `by` the PM (with the user's words) or the Secretary
-   * (its own reason, no words). A 4.3 engine ignores both kinds.
+   * `from` / `until` (ms): in force from / until that time; `given`: the two and the words id as they
+   * were typed (a repeat of the same command matches on them). `words`: the verified citation (null when
+   * none was given or the id did not resolve). `by` the PM (with the user's words) or the Secretary (its
+   * own reason, no words). A 4.3 engine ignores both kinds.
    */
-  | { readonly kind: 'hold.placed'; readonly hold: string; readonly subject: HoldSubject; readonly mission: string | null; readonly after: string | null; readonly from: number | null; readonly until: number | null; readonly given: { readonly from: string | null; readonly until: string | null }; readonly reason: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null }
+  | { readonly kind: 'hold.placed'; readonly hold: string; readonly subject: HoldSubject; readonly mission: string | null; readonly after: string | null; readonly from: number | null; readonly until: number | null; readonly given: { readonly from: string | null; readonly until: string | null; readonly words?: string | null }; readonly reason: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null }
   /** 4.4 (G6): a hold released by hand. */
   | { readonly kind: 'hold.released'; readonly hold: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null; readonly reason: string | null };
 

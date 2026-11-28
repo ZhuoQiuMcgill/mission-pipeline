@@ -62,7 +62,9 @@ async function holdRun(group: 'pm' | 'sec', c: RunContext, a: ParsedArgs): Promi
       const v = flagStr(a, f);
       if (v !== null && parseHoldTime(v, p.ctx.now()) === null) throw usage(`--${f} is a time: an ISO date and time such as 2026-11-28T09:00Z (without a zone, local time), or +<n>m, +<n>h, +<n>d from now`);
     }
-    const r = placeHold(p.ctx, { op: c.op!, subject, mission, after: flagStr(a, 'after'), from: flagStr(a, 'from'), until: flagStr(a, 'until'), reason, words });
+    // review p5-r2-2: the earlier holds' `after` verdicts, as production counts them, judge whether this is a repeat
+    const before = await checkAfters(p.ctx);
+    const r = placeHold(p.ctx, { op: c.op!, subject, mission, after: flagStr(a, 'after'), from: flagStr(a, 'from'), until: flagStr(a, 'until'), reason, words, afters: before });
     // its state and what it holds now, in one read after the write (an unpinned acceptance its `after` names counted as production counts it)
     const afters = await checkAfters(p.ctx);
     const { view, holdsNow } = p.ctx.memory.read((db) => ({
