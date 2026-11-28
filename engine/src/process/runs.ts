@@ -57,7 +57,7 @@ import { join, posix } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import { normalRelDir } from '../common/fullSuite.ts';
-import type { EnvSnapshotId, EvidenceId, MissionId } from '../common/ids.ts';
+import type { ContentHash, EnvSnapshotId, EvidenceId, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord, RunClass } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
@@ -67,8 +67,10 @@ import { reusableMethodRun } from '../evaluator/runs.ts';
 import { withoutRepositoryLocators } from '../git/plainGit.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir } from '../git/workspace.ts';
 import { appendRecords, LedgerError, tryLock, type ProcessLock, type WriteTx } from '../memory/index.ts';
+import type { RunArtifactT } from '../seat/card.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
+import { ARTIFACTS_LINE, KEPT_ARTIFACTS, keepArtifacts, keepBudget, type KeptArtifactsBody } from './keptFiles.ts';
 
 // ---------------------------------------------------------------- running one command
 
@@ -263,6 +265,8 @@ export interface DeclaredCommand {
   readonly cwd?: string;
   readonly sampled?: boolean;
   readonly network?: boolean;
+  /** 4.4 (F10): the files it writes that mp keeps with its run (relative to the repository root). */
+  readonly artifacts?: readonly string[];
 }
 
 // ---------------------------------------------------------------- per-test results (TAP)
@@ -425,6 +429,8 @@ export interface RecordedRun {
   readonly reused: boolean;
   /** Failure of this call's setup-only execution; never evidence. */
   readonly setupFailure?: string;
+  /** 4.4 (F10): the files the command named as its artifacts, as this execution kept them (absent: it names none, or the run was reused). */
+  readonly artifacts?: readonly RunArtifactT[];
 }
 
 /** A run id that names a directory and a leaf (letters, digits and "-"). */
@@ -472,6 +478,8 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
     lines.push(`- Evidence: ${r.evidence}${r.reused ? ' (reused; execution only as setup)' : ''}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (${r.tail !== '' ? 'its last lines are below; ' : ''}the whole output is not kept)`);
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
+    // 4.4 (F10): the files the command wrote that mp kept
+    if (r.artifacts !== undefined && !r.reused) lines.push('- Files it wrote:', ...r.artifacts.map((a) => `  - ${a.path}: ${a.kept !== undefined ? `kept at ${a.kept} (sha256 ${a.sha256}, ${a.size} bytes)` : `not kept (${a.why})`}`));
     // a failing command's last lines, a failing setup's, and a rerun's whether it passed or failed (4.1.3)
     if (r.tail !== '') lines.push('', 'Last lines of the output:', '', fence(r.tail), r.tail, fence(r.tail));
     lines.push('');
@@ -585,6 +593,8 @@ async function executeRuns(
   const staged = new Map<string, RecordedRun>();
   const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
   let cleanup: readonly CleanupFailure[] = [];
+  // 4.4 (F10): the kept files of this run share one bound
+  const budget = keepBudget();
   const timeoutMs = commandTimeoutFor(ctx, req.declaration);
   const shell = commandShellFor(ctx, req.declaration);
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
@@ -618,7 +628,9 @@ async function executeRuns(
       validateRecord(rec);
       records.push(rec);
       const passed = fields['status'] === 'completed' && fields['exit'] === '0';
-      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed && req.keepPassingTail !== true ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false };
+      // 4.4 (F10): the files the command names are kept before the checkout is removed (bounded; never refuses the run)
+      const artifacts = (c.artifacts ?? []).length > 0 ? await keepArtifacts(ctx.memory.paths.root, dir, c.artifacts!, budget) : [];
+      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed && req.keepPassingTail !== true ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false, ...(artifacts.length > 0 ? { artifacts } : {}) };
       executed.push(recorded);
       if (runClass === 'declared') staged.set(key, recorded);
     }
@@ -632,6 +644,12 @@ async function executeRuns(
   const leaf = runLeaf(req.mission, run);
   const record = () => ctx.memory.write({ admittedResult: true, op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
     if (records.length > 0) appendRecords(tx, records as BaseRecord[]);
+    // 4.4 (F10): the files each command kept, with the run's record (keyed by its evidence)
+    for (const x of executed) {
+      if (x.reused || x.artifacts === undefined) continue;
+      const body: KeptArtifactsBody = { evidence: x.evidence, run, command: x.command.id, artifacts: x.artifacts };
+      appendRecords(tx, [{ kind: 'flow.event', mission: req.mission as MissionId, line: ARTIFACTS_LINE, event: KEPT_ARTIFACTS, key: x.evidence, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
+    }
     tx.leaves.writeDocument(leaf, text);
     return req.also?.(tx, executed, run, records);
   });

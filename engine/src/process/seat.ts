@@ -64,8 +64,12 @@ import { isFullSuiteCommand } from '../common/fullSuite.ts';
 import type { ReviewerCard } from '../seat/card.ts';
 import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/common.ts';
 import { handBackDataTexts, handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
-import { dataPaths, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
-import { checkDataFiles } from '../common/dataFile.ts';
+import { dataPaths, dataPointers, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
+import { checkDataFile, checkDataFiles } from '../common/dataFile.ts';
+import { OUTSIDE_DATA_EVENT, OUTSIDE_DATA_LINE, outsideDataKey } from '../evaluator/renew.ts';
+import { keepBudget, keepFile, runArtifactsOf } from './keptFiles.ts';
+import type { RunArtifactT } from '../seat/card.ts';
+import { tellReviewHealth } from './reviews.ts';
 import { explorationCardAtHandBack } from './explorationSnapshot.ts';
 import { citedEvidence, constructorQuestions, findingRecords, judgmentRecord, type ConstructorResult, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, deferredItemBodies, laterItemBodies, type OpenItemBody } from '../flow/openItems.ts';
@@ -273,6 +277,8 @@ export interface RerunResult {
   readonly leaf: string | null;
   /** The last lines of its output, passing or failing (4.1.3, #37), within RERUN_TAIL. */
   readonly tail: string;
+  /** 4.4 (F10): the files the command names as its artifacts, as mp kept them with the run. */
+  readonly artifacts?: readonly RunArtifactT[];
 }
 
 /**
@@ -315,7 +321,7 @@ export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId
   // 4.4 (F5): its start is recorded once its checkout is made, immediately before it executes; its evidence when it ends, as before
   const r = await runOnCommit(ctx, { ...rerunRequest(t), beforeExecute: (run) => recordRunStart(ctx, t.v, run, { run, command: t.c.id }) });
   const x = r.runs[0]!;
-  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail };
+  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail, ...(x.artifacts !== undefined ? { artifacts: x.artifacts } : {}) };
 }
 
 /** 4.4 (F5): the flow event (line "dispatch:<id>", key: the run) a seat's foreground run records when it is admitted, before it executes. */
@@ -395,7 +401,7 @@ export async function seatRerunWorker(ctx: ProcessContext, dispatch: string, com
   try {
     const r = await runOnCommit(ctx, { ...rerunRequest(t, { detached: run, check }), alreadyAdmitted: true, run, evidenceId: () => evidence, runner, cleanupRunner, recordRetries: 3 });
     const x = r.runs[0]!;
-    return { start, state: 'finished', result: { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail } };
+    return { start, state: 'finished', result: { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail, ...(x.artifacts !== undefined ? { artifacts: x.artifacts } : {}) } };
   } catch (e) {
     const stopped = e instanceof RunStopped || o.stopping?.aborted === true;
     const why = stopped ? `stopped: ${e instanceof RunStopped ? e.message : 'the worker was told to stop'}` : `its worker failed: ${(e as Error).message}`;
@@ -447,7 +453,9 @@ export async function seatWait(ctx: ProcessContext, dispatch: string, runId: str
     if (r.state === 'running' && noticeLost(ctx, r)) r = ctx.memory.read((db) => stepRuns(db, data, v.info)).find((x) => x.run === r!.run) ?? r;
     const waitedMs = Date.now() - t0;
     if (r.state !== 'running' || Date.now() >= deadline) {
-      const result = r.state === 'finished' ? { run: r.evidence, passed: r.passed === true, summary: r.summary ?? '', leaf: r.leaf, tail: r.tail } : null;
+      // 4.4 (F10): the files the run kept, from its record
+      const artifacts = r.state === 'finished' ? ctx.memory.read((db) => runArtifactsOf(db, data, v.info.mission, r!.evidence)) : null;
+      const result = r.state === 'finished' ? { run: r.evidence, passed: r.passed === true, summary: r.summary ?? '', leaf: r.leaf, tail: r.tail, ...(artifacts !== null ? { artifacts } : {}) } : null;
       return { run: r.run, evidence: r.evidence, state: r.state, result, why: r.why, since: r.detached?.startedAt ?? null, startedBy: r.dispatch, waitedMs };
     }
     await new Promise((res) => setTimeout(res, Math.max(1, Math.min(o.pollMs ?? WAIT_POLL_MS, deadline - Date.now()))));
@@ -612,6 +620,11 @@ export interface HandBackInput {
   readonly filler?: Filler | null;
   /** Advance the process after recording (default true; a test that drives the flows itself passes false). */
   readonly advance?: boolean;
+  /**
+   * 4.4 (F10, issue 65): leave `tmp/<dispatch>/` in place: the caller removes it once it has printed the
+   * result (`mp seat <id> handback`, with dispatchOver). Default false: removed here, once recorded.
+   */
+  readonly keepScratch?: boolean;
 }
 
 /** The flow event (line "dispatch:<id>") holding the program's check results of a refused hand-back. */
@@ -638,8 +651,8 @@ function refuse(ctx: ProcessContext, dispatch: string, command: 'handback' | 're
   return { kind: 'refused', dispatch, problems };
 }
 
-/** `mp seat <id> handback --report <file.md> --result <file.json>` (decision 7). */
-export async function seatHandback(ctx: ProcessContext, dispatch: string, files: { readonly report: string; readonly result: string; readonly filler?: Filler | null }): Promise<HandBackAnswer> {
+/** `mp seat <id> handback --report <file.md> --result <file.json>` (decision 7). `keepScratch`: see HandBackInput. */
+export async function seatHandback(ctx: ProcessContext, dispatch: string, files: { readonly report: string; readonly result: string; readonly filler?: Filler | null; readonly keepScratch?: boolean }): Promise<HandBackAnswer> {
   const report = readHandBackFile(ctx, dispatch, files.report, 'report');
   const raw = readHandBackFile(ctx, dispatch, files.result, 'result');
   let fields: unknown;
@@ -648,7 +661,7 @@ export async function seatHandback(ctx: ProcessContext, dispatch: string, files:
   } catch (e) {
     return refuse(ctx, dispatch, 'handback', [`the result file is not JSON: ${(e as Error).message}`]);
   }
-  return recordSeatHandBack(ctx, dispatch, { report, fields, ...(files.filler !== undefined ? { filler: files.filler } : {}) });
+  return recordSeatHandBack(ctx, dispatch, { report, fields, ...(files.filler !== undefined ? { filler: files.filler } : {}), ...(files.keepScratch === true ? { keepScratch: true } : {}) });
 }
 
 /** The seat's records of an accepted hand-back (the Reviewer's judgment and findings are built here). */
@@ -670,11 +683,48 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
 /**
  * 4.1.3 (E-4): the data files a hand-back's data pointers name, each checked once, here, before
  * the write transaction (hashing a large file never runs inside it). Undefined when it cites none:
- * such a hand-back is checked exactly as before.
+ * such a hand-back is checked exactly as before. 4.4 (F10): a Reviewer citing a file the Constructor
+ * handed in, as its card lists it, whose path is gone (its hand-back folder was removed) is checked on
+ * the copy mp kept of it; `viaCopy` names those paths.
  */
-async function handBackDataChecks(v: DispatchView, fields: unknown): Promise<DataChecks | undefined> {
+async function handBackDataChecks(ctx: ProcessContext, v: DispatchView, fields: unknown): Promise<{ readonly checks: DataChecks; readonly viaCopy: ReadonlySet<string> } | undefined> {
   const paths = dataPaths(handBackDataTexts(v.card, fields));
-  return paths.length === 0 ? undefined : await checkDataFiles(paths);
+  if (paths.length === 0) return undefined;
+  const checks = await checkDataFiles(paths);
+  const viaCopy = new Set<string>();
+  const handedIn = (v.card.seat === 'reviewer' ? (v.card['handedIn'] as ReviewerCard['handedIn']) : undefined) ?? [];
+  for (const [path, c] of checks) {
+    if (c.state !== 'missing') continue;
+    const f = handedIn.find((x) => x.kept !== undefined && dataPointers(x.pointer)[0]?.path === path);
+    if (f === undefined) continue;
+    const copy = await checkDataFile(join(ctx.memory.paths.project, ...f.kept!.split('/')));
+    if (copy.state !== 'ok') continue;
+    checks.set(path, { ...copy, path });
+    viaCopy.add(path);
+  }
+  return { checks, viaCopy };
+}
+
+/** 4.4 (F10): the label of data cited from the copy mp kept when the Constructor handed it in. */
+const VIA_COPY_LABEL = 'outside the commit (sha256 checked at hand-back, on the copy mp kept when the Constructor handed it in)';
+
+/**
+ * 4.4 (F10, issue 65): the files a Constructor's hand-back names, each copied into the kept files before
+ * the write (its hand-back folder goes once the hand-back is printed); the record says where each copy
+ * is, or why none was kept. Never refuses the hand-back.
+ */
+async function keepHandedIn(ctx: ProcessContext, data: readonly RecordedData[]): Promise<RecordedData[]> {
+  const budget = keepBudget();
+  const out: RecordedData[] = [];
+  for (const d of data) {
+    if (d.check !== 'full') {
+      out.push({ ...d, notKept: 'only part of it was hashed (a file over 2 GiB): no copy is kept' });
+      continue;
+    }
+    const k = await keepFile(ctx.memory.paths.root, d.path, budget, { sha256: d.sha256, size: d.size });
+    out.push('kept' in k ? { ...d, kept: k.kept } : { ...d, notKept: k.why });
+  }
+  return out;
 }
 
 /** The flow event that records why a Secretary dispatch was taken back at its hand-back (its escalation was already decided or closed). */
@@ -741,7 +791,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const reads = ctx.memory.read((db) => dispatchReads(db, v.info));
     const snap = cardSnapshot(v);
     const snapFiles = snap !== null && COMMIT.test(snap) ? (ctx.snapshotFiles !== null ? ctx.snapshotFiles(snap) : commitFiles(ctx, snap)) : null;
-    dataChecks = await handBackDataChecks(v, input.fields);
+    const checked = await handBackDataChecks(ctx, v, input.fields);
+    dataChecks = checked?.checks;
     const problems = [
       // 4.4 (F16): the receipt records a fetch; mp cannot see reading, and says so
       ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not fetched (mp seat ${dispatch} read <material> --page <n>)`),
@@ -760,8 +811,12 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     }
     records = recordsOf(ctx, v, input.fields, runs, { report: input.report, ...(dataChecks !== undefined ? { data: dataChecks } : {}) });
     // every seat's data pointers, with the check made, kept with the hand-back's records (one parser and renderer for all)
-    if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks);
+    if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks).map((d) => (checked!.viaCopy.has(d.path) ? { ...d, label: VIA_COPY_LABEL } : d));
+    // 4.4 (F10, issue 65): the files a Constructor hands in are copied before its hand-back folder goes
+    if (v.card.seat === 'constructor' && dataCited.length > 0) dataCited = await keepHandedIn(ctx, dataCited);
   }
+  // 4.4 (F10): a Reviewer's judgment that cites data outside the commit is marked for renewal (a rerun does not repeat it)
+  const judgment = v.card.seat === 'reviewer' && dataCited.length > 0 ? (v.card as unknown as ReviewerCard).binding.judgment : null;
   const out = ctx.memory.write({ op: `handback:${dispatch}`, payload: { seat: seatHash } }, (tx) => {
     if (v.card.seat === 'secretary') {
       const claim = flowEvents(tx, {mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'claimed'}).find((e) => e.key === 'spec');
@@ -798,12 +853,20 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     if (r.accepted && kept.length > 0) appendRecords(tx, kept);
     // 4.4 (F4; G5): a question raised as later, or put off by an answer, is an open item from this write
     if (r.accepted) appendRecords(tx, questionItems(tx, v, input.fields));
+    if (r.accepted && judgment !== null && kept.some((x) => x.kind === 'judgment' && x.judgment === judgment)) {
+      appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: OUTSIDE_DATA_LINE, event: OUTSIDE_DATA_EVENT, key: outsideDataKey(judgment), body: tx.data.put(canonicalJson({ judgment, dispatch, data: dataCited.slice(0, 50).map((d) => d.pointer) })) as ContentHash }]);
+    }
     return { outcome: r.outcome, accepted: r.accepted, report: r.report, closed: close !== null, moot: moot ?? mootBefore };
   });
+  // 4.4 (F10, P12): a fall in the pass share after the Reviewer's filler changed is told to the Secretary's loop (best effort)
+  if (out.accepted && v.card.seat === 'reviewer') tellReviewHealth(ctx, v.info.mission);
   const notes: string[] = out.closed ? [`mission ${v.info.mission} closed before this hand-back: it is recorded, not accepted; the step waits until the mission is opened again`] : [];
   if (out.moot !== null) notes.push(`${out.moot} before this hand-back: it is recorded, not accepted, and nothing it decides is carried out`);
-  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
-  notes.push(...dispatchOver(ctx, dispatch));
+  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held. 4.4 (F10, #65): the
+  // seat's command leaves it until it has printed its result
+  if (input.keepScratch !== true) notes.push(...dispatchOver(ctx, dispatch));
+  // 4.4 (F10): what became of the files handed in, from the hand-back's record
+  if (out.accepted && v.card.seat === 'constructor') for (const d of dataCited) notes.push(d.kept !== undefined ? `Kept with this hand-back: ${d.path} (a copy at .mission-pipeline/${d.kept})` : `Recorded, no copy kept: ${d.path} (${d.notKept ?? 'no copy was made'})`);
   let verification: VerificationRun[] | null = null;
   // 4.4 (F19, #64): the recorded candidate is held by a ref, so git's garbage collection keeps it (4.4, F4: a
   // parked commit too, for as long as its attempt can be resumed: the ref is never removed)

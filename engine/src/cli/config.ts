@@ -37,6 +37,8 @@
 //                           the project's disk has fewer free bytes, new Constructor steps are held
 //                           with the reason shown (`mp read scratch` lists the space); default none;
 //                           claims at the same moment can exceed a limit by a few (it is no quota)
+//   standardsWarn           (4.4) above this many standards on a task, the feasibility reviewer and the PM
+//                           are told (rework rises with their number); default 7; it refuses nothing
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -95,6 +97,8 @@ export const ConfigSchema = z
     mustReadWarnPages: z.number().int().min(1).max(10_000).optional(),
     // 4.4 (F6, H-3): while one is passed, new Constructor steps are held with the reason shown; default none
     limits: z.object({ worktrees: z.number().int().min(1).max(100_000).optional(), freeBytes: z.number().int().min(0).optional() }).strict().optional(),
+    // 4.4 (F10): above this many standards on a task the feasibility reviewer and the PM are told; default 7; it refuses nothing
+    standardsWarn: z.number().int().min(1).max(1_000).optional(),
   })
   .strict();
 

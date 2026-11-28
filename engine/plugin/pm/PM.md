@@ -170,6 +170,7 @@ A changed requirement removes proof from the plan and its dependents.
 If the plan still holds, submit it unchanged with `--changed <item>`; Calibrator ① re-checks the same version, with no Architect.
 Its pass restores indirect proof; a product bound directly to the changed item needs its own review.
 A changed plan document is a new version; the Secretary handles rebinds, reviews and restarts.
+`many-standards`: a task of the detailed plan carries more standards than `standardsWarn` (default 7); rework rises with their number. A warning only: a revision with the user may split or tighten them.
 A plan-constraint gap reaches your inbox: the PM-plan-only exit resubmits the unchanged plan on the user's new words; a detailed-plan gap needs an agreed changed plan on new words.
 Keep the current mode; do not invent a cosmetic change to bypass the gap.
 

@@ -188,7 +188,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
         }
       }
     } else {
-      result = await cmd.run({ io, project, op: null, now }, args);
+      // 4.4 (F10): a seat's command may commit something once its output is out too (afterOutput)
+      ran = { io, project, op: null, now };
+      result = await cmd.run(ran, args);
     }
     const stdout = render(result, { json, op, replayed, problems, project: project?.dir ?? null, command: commandName(cmd) });
     // 4.4 (F8): what a command commits once its output is out (written here when the caller gives a writer)

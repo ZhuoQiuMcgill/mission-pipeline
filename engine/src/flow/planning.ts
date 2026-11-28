@@ -42,7 +42,7 @@ import { productionDisputed, planningConstraints } from '../seat/cards/dynamic.t
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId, ObjectVersionId } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
 import type { BaseRecord, JudgmentRecord, ObjectVersionRecord, UserWordsRecord } from '../common/records.ts';
-import { PREVIOUS_PLAN_MATERIAL, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
+import { PREVIOUS_PLAN_MATERIAL, manyStandards, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
 import { normalizeCommand } from '../common/fullSuite.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
@@ -1036,6 +1036,8 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
 
   }
   if (mc.ok) await restartNotice(ctx, dplan, plan);
+  // 4.4 (F10): a warning, not a refusal: the PM is told once per plan version which tasks carry many standards
+  if (mc.ok) await manyStandardsNotice(ctx, dplan, plan);
   if (!mc.ok) {
     await planReturn(ctx, b, a, dplan, 'mechanical', { mechanicalFailures: mc.failures }, `mech:${shortHash([...mc.failures].sort())}`, 'mechanical');
     return;
@@ -1546,10 +1548,37 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
     earlierFindings: [...a.feasibilityFindings],
     binding: binding(ctx, { judgment: `j.${task}`, constraints: constraints.checks, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'feasibility', b.plan) }),
     ...attach([report]),
+    // 4.4 (F10): the card names the tasks with more standards than this
+    standardsWarn: standardsWarnOf(ctx),
   };
   await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });
   ctx.progressed = true;
+}
+
+/** 4.4 (F10): the standards on a task above which the feasibility reviewer and the PM are told (config `standardsWarn`, default 7). */
+export const STANDARDS_WARN_DEFAULT = 7;
+function standardsWarnOf(ctx: FlowCtx): number {
+  return ctx.ports.project?.standardsWarn ?? STANDARDS_WARN_DEFAULT;
+}
+
+/**
+ * 4.4 (F10, P10): rework rises with the number of standards on a task. A plan whose tasks
+ * carry more than `standardsWarn` tells the PM once per plan version (a notice, idempotent by its key);
+ * nothing is refused or held.
+ */
+async function manyStandardsNotice(ctx: FlowCtx, dplan: string, plan: DetailedPlanDoc): Promise<void> {
+  const limit = standardsWarnOf(ctx);
+  const many = manyStandards(plan, limit);
+  if (many.length === 0) return;
+  await notify(ctx, {
+    category: 'many-standards',
+    wi: null,
+    key: dplan,
+    trigger: `detailed plan ${dplan} has tasks with more than ${limit} standards (standardsWarn): ${many.join(', ')}`,
+    defaultAction: 'nothing is held or refused; rework rises with the number of standards on a task, so a plan revision with the user may split or tighten them',
+    detail: { dplan, limit, tasks: plan.tasks.filter((t) => t.standards.length > limit).map((t) => ({ task: t.id, standards: t.standards.length })) },
+  });
 }
 
 async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody, dplan: string, plan: DetailedPlanDoc, task: string, forceFull: boolean): Promise<void> {

@@ -27,6 +27,8 @@ import type { ContentHash, EvidenceId, IssueId, JudgmentId, ModuleId, ObjectVers
 import type { IssueRecord, IssueResponse, JudgmentRecord, ListRef, Verdict } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import type { ConstructorCard, ReviewerCard, SeatCard } from './card.ts';
+import { standardCheck } from './cards/common.ts';
+import { DATA_POINTER_FORM, dataPointerProblems, dataPointers, type DataChecks, type DataText } from './cards/experiment.ts';
 
 /** 4.4 (F4): when a Constructor's question must be settled; a plain string (the 4.3 shape) reads as before-review. */
 export type QuestionWhen = 'before-review' | 'later';
@@ -41,7 +43,22 @@ export const ConstructorResultShape = {
     .array(z.union([z.string(), z.object({ question: z.string().min(1), when: z.enum(['before-review', 'later']) })]))
     .describe('Questions that need a decision (including "needs more resources"). Each says when it must be settled: {"question": "...", "when": "before-review"} (the review waits for its answer) or "later" (it stays open and is answered later). A plain string is before-review.'),
   blocked: z.boolean().optional().describe('true: you stop to ask and hand in no finished work. Your questions go in decisions_needed; your edits so far are kept, nothing is verified or reviewed, and the answer resumes this attempt on them.'),
+  files: z
+    .array(z.string().min(1))
+    .max(20)
+    .optional()
+    .describe(`Files outside the commit that show your work (a run's report, a log), at most 20, each as ${DATA_POINTER_FORM}. mp checks each, keeps a copy with this hand-back, and lists it on the Reviewer's card as handed in with this attempt.`),
 };
+
+/** 4.4 (F10, E-4): the files a Constructor's hand-back names, as data texts (a pointer field: an incomplete pointer is refused). */
+export function constructorDataTexts(r: Pick<ConstructorResult, 'files'>): DataText[] {
+  return (r.files ?? []).map((f, i) => ({ where: `files[${i}]`, text: f, pointers: true }));
+}
+
+/** 4.4 (F10, E-4): the evidence pointers of a Reviewer's judgments that cite data outside the commit (`data:`), as data texts. */
+export function reviewerDataTexts(r: Pick<ReviewerResult, 'judgments'>): DataText[] {
+  return r.judgments.flatMap((j) => j.evidence.filter((e) => e.startsWith('data:')).map((e) => ({ where: `judgments[${j.standard}]`, text: e, pointers: true })));
+}
 
 /** 4.4 (F4): a hand-back's questions with when each must be settled (a 4.3 string: before-review). */
 export function constructorQuestions(r: Pick<ConstructorResult, 'decisions_needed'>): Array<{ readonly text: string; readonly when: QuestionWhen }> {
@@ -53,12 +70,13 @@ export const ReviewerResultShape = {
     .array(
       z.object({
         standard: z.string().describe('A standard id from the card.'),
-        met: z.enum(['yes', 'no', 'unclear']),
+        met: z.enum(['yes', 'no', 'unclear', 'cannot-verify']).describe('cannot-verify: it cannot be verified from what you can see; say in "needed" what would be needed.'),
         reason: z.string(),
-        evidence: z.array(z.string()).describe('Pointers: "evidence:<id>" from the card, or "file:<path>:<line>".'),
+        needed: z.string().optional().describe('For cannot-verify: what would be needed to verify it (a run, a file, a person who looks).'),
+        evidence: z.array(z.string()).describe(`Pointers: "evidence:<id>" from the card, "file:<path>:<line>", ${DATA_POINTER_FORM} (a file outside the commit), or "report" (only for a standard checked by report). None needed for cannot-verify.`),
       }),
     )
-    .describe('Exactly one judgment per standard on the card.'),
+    .describe('Exactly one judgment per standard on the card, except those a person checks.'),
   gap_responses: z.array(z.object({ gap: z.string().describe("A gap id from the card."), response: z.string() })),
   issue_responses: z.array(z.object({
     issue: z.string(),
@@ -67,7 +85,7 @@ export const ReviewerResultShape = {
     owner: z.string().optional().describe('Required for deferred: who owns the issue next. It is shown as "deferred to <owner>", outside the task fix list.'),
   })).describe('Answer every listed issue on this version, including previously deferred issues. For deferred include both owner and reason; repeating a deferral does not require rework.'),
   findings: z.array(z.string()).describe('Problems outside the standards (they become issue records).'),
-  verdict: z.enum(['pass', 'rework', 'needs-decision']),
+  verdict: z.enum(['pass', 'rework', 'needs-decision']).describe('pass: every standard you judge is met. A review whose only open standards are cannot-verify (and nothing else open) goes to a decider, not back to the Constructor: hand it back as needs-decision.'),
   reopen: z
     .array(z.object({ task: z.string().min(1).describe('A dependency listed on your card.'), issue: z.string().min(1).describe('What is wrong in its work.'), evidence: z.string().optional().describe('The run or file that shows it.') }))
     .optional()
@@ -100,6 +118,8 @@ export interface ResultContext {
   readonly snapshot: SnapshotFiles;
   /** The runs this dispatch had `mp` rerun (`mp seat <id> rerun`): citable as evidence:<id>. */
   readonly runs?: ReadonlyArray<{ readonly run: string; readonly completed: boolean }>;
+  /** 4.4 (F10, E-4): the data files the hand-back's data pointers name, checked before the write (by path). */
+  readonly data?: DataChecks;
 }
 
 /** Where the records' documents and lists go: the memory's data table (DataStore satisfies it). */
@@ -169,31 +189,50 @@ export function resultProblems(card: SeatCard, raw: unknown, ctx: ResultContext)
   if (card.seat === 'constructor') {
     const r = ConstructorResultSchema.safeParse(raw);
     if (!r.success) return r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
-    return constructorProblems(card, r.data);
+    return constructorProblems(card, r.data, ctx);
   }
   const r = ReviewerResultSchema.safeParse(raw);
   if (!r.success) return r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
   return reviewerProblems(card, r.data, ctx);
 }
 
-function constructorProblems(card: ConstructorCard, r: ConstructorResult): string[] {
+function constructorProblems(card: ConstructorCard, r: ConstructorResult, ctx: ResultContext): string[] {
   const ids = new Set(card.standards.map((s) => s.id));
   const out = r.unmet_standards.filter((u) => !ids.has(u.standard)).map((u) => `unmet_standards: "${u.standard}" is not a standard on the card`);
   // 4.4 (F4): a stop to ask carries its questions
   if (r.blocked === true && r.decisions_needed.length === 0) out.push('blocked: name the questions you stopped for in decisions_needed');
+  // 4.4 (F10, E-4): each file named is one data pointer, checked as cited (the copy mp keeps is of that file)
+  for (const t of constructorDataTexts(r)) {
+    const ps = dataPointers(t.text);
+    if (ps.length !== 1 || ps[0]!.text !== t.text.trim()) out.push(`${t.where}: "${t.text}" is not one data pointer (${DATA_POINTER_FORM}; a space in the path is written %20)`);
+    else out.push(...dataPointerProblems(t.where, ps[0]!, ctx.data));
+  }
   return out;
 }
 
 const FILE_POINTER = /^file:([^\s:]+)(?::(\d+)(?:-(\d+))?)?$/;
 
+/** 4.4 (F3, F10): the material that holds the Constructor's hand-back on a Reviewer's card. */
+const CLAIMS_MATERIAL = 'constructor-claims';
+
 /**
- * Problems of one evidence pointer (empty: valid). The one place a pointer is admitted: 4.4 (F3, E-4)
- * gives the Reviewer the Constructor's hand-back as a material to read, and it is not evidence for a
- * standard (F10 adds the `report` check, the only standard it may support, here).
+ * Problems of one evidence pointer (empty: valid). The one place a pointer is admitted. 4.4 (F3, E-4):
+ * the Constructor's hand-back is a material to read; 4.4 (F10) admits it, as `report`, only for a
+ * standard checked by report, and only when the card carries it. A file outside the commit is cited as
+ * a data pointer, checked against the file at hand-back (E-4: labelled outside the commit, not refused).
  */
-export function pointerProblems(card: ReviewerCard, pointer: string, ctx: ResultContext): string[] {
+export function pointerProblems(card: ReviewerCard, pointer: string, ctx: ResultContext, standard?: string): string[] {
   if (pointer === 'report' || pointer.startsWith('report:') || pointer.startsWith('material:')) {
-    return [`${pointer}: the Constructor's claims and other materials are read, not cited: cite a run (evidence:<id>) or a file of the candidate (file:<path>:<line>)`];
+    const s = card.standards.find((x) => x.id === standard);
+    if (pointer !== 'material:' + CLAIMS_MATERIAL && pointer.startsWith('material:')) return [`${pointer}: a material is read, not cited: cite a run (evidence:<id>) or a file of the candidate (file:<path>:<line>)`];
+    if (s === undefined || standardCheck(s) !== 'report') return [`${pointer}: the Constructor's report is cited only for a standard checked by report; for this one cite a run (evidence:<id>), a file of the candidate (file:<path>:<line>) or a file outside the commit (data:…)`];
+    if (!(card.materials ?? []).some((m) => m.id === CLAIMS_MATERIAL)) return [`${pointer}: this card carries no Constructor's report to cite; if you cannot verify the standard from what you can see, answer cannot-verify`];
+    return [];
+  }
+  if (pointer.startsWith('data:')) {
+    const ps = dataPointers(pointer);
+    if (ps.length !== 1 || ps[0]!.text !== pointer) return [`"${pointer}" is not a complete data pointer (${DATA_POINTER_FORM}; a space in the path is written %20)`];
+    return dataPointerProblems('', ps[0]!, ctx.data).map((p) => p.replace(/^: /, ''));
   }
   if (pointer.startsWith('evidence:')) {
     const id = pointer.slice('evidence:'.length);
@@ -217,18 +256,27 @@ export function pointerProblems(card: ReviewerCard, pointer: string, ctx: Result
 
 function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultContext): string[] {
   const out: string[] = [];
-  const standards = card.standards.map((s) => s.id);
+  // 4.4 (F10): a standard a person checks is not the Reviewer's to judge
+  const byPerson = new Set(card.standards.filter((s) => standardCheck(s) === 'person').map((s) => s.id));
+  const standards = card.standards.map((s) => s.id).filter((s) => !byPerson.has(s));
   const judged = r.judgments.map((j) => j.standard);
   for (const s of standards) {
     const n = judged.filter((j) => j === s).length;
     if (n === 0) out.push(`judgments: standard "${s}" is not judged`);
     if (n > 1) out.push(`judgments: standard "${s}" is judged ${n} times`);
   }
-  for (const j of judged) if (!standards.includes(j)) out.push(`judgments: "${j}" is not a standard on the card`);
+  for (const j of new Set(judged)) {
+    if (byPerson.has(j)) out.push(`judgments: standard "${j}" is checked by a person: it is not yours to judge; leave it out`);
+    else if (!standards.includes(j)) out.push(`judgments: "${j}" is not a standard on the card`);
+  }
   for (const j of r.judgments) {
+    if (byPerson.has(j.standard)) continue;
     if (j.reason.trim() === '') out.push(`judgments[${j.standard}]: give the reason for the judgment`);
-    if (j.evidence.length === 0) out.push(`judgments[${j.standard}]: cite at least one evidence pointer (evidence:<id> or file:<path>:<line>)`);
-    for (const e of j.evidence) for (const p of pointerProblems(card, e, ctx)) out.push(`judgments[${j.standard}]: ${p}`);
+    // 4.4 (F10): the fourth answer says what would be needed, and needs no pointer
+    if (j.met === 'cannot-verify') {
+      if ((j.needed ?? '').trim() === '') out.push(`judgments[${j.standard}]: cannot-verify says in "needed" what would be needed to verify it`);
+    } else if (j.evidence.length === 0) out.push(`judgments[${j.standard}]: cite at least one evidence pointer (evidence:<id> or file:<path>:<line>)`);
+    for (const e of j.evidence) for (const p of pointerProblems(card, e, ctx, j.standard)) out.push(`judgments[${j.standard}]: ${p}`);
   }
   const gaps = r.gap_responses.map((g) => g.gap);
   for (const g of card.selfReportedGaps) if (!gaps.includes(g.id)) out.push(`gap_responses: gap "${g.id}" is not answered`);
@@ -237,7 +285,7 @@ function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultCont
   for (const i of r.issue_responses) {
     if (i.response === 'deferred' && (!i.owner?.trim() || !i.reason.trim())) out.push(`issue_responses: deferred issue "${i.issue}" needs an owner and a reason`);
   }
-  if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes')) out.push('verdict: "pass" leaves a standard not met or unclear');
+  if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes' && !byPerson.has(j.standard))) out.push(r.judgments.every((j) => j.met === 'yes' || j.met === 'cannot-verify' || byPerson.has(j.standard)) ? 'verdict: "pass" leaves a standard that cannot be verified: hand back "needs-decision"; a decider settles it' : 'verdict: "pass" leaves a standard not met or unclear');
   out.push(...reopenProblems(card, r));
   return out;
 }

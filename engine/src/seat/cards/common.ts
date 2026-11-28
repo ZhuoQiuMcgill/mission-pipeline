@@ -16,8 +16,27 @@ export const CARD_FORMAT = 'mp41.seat-card.v1' as const;
 
 export const Item = z.object({ id: z.string().min(1), text: z.string().min(1) });
 export const Interface = z.object({ name: z.string().min(1), definition: z.string() });
-/** A command the card declares (§6.5: `sampled` makes its runs sampling runs; `network` makes them other runs). */
-export const Command = z.object({ id: z.string().min(1), command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional() });
+/**
+ * 4.4 (F10): how a standard is checked: by a declared command, by reading the candidate, by a statement
+ * the Constructor's hand-back must make, by a file a declared run writes outside the commit, or by a
+ * person (never put to the Reviewer as met or not met). A standard of a 4.3 plan has none: reading.
+ */
+export const STANDARD_CHECKS = ['command', 'reading', 'report', 'artifact', 'person'] as const;
+export type StandardCheck = (typeof STANDARD_CHECKS)[number];
+export function standardCheck(s: { readonly check?: StandardCheck | undefined }): StandardCheck {
+  return s.check ?? 'reading';
+}
+/** A card's acceptance standard; 4.4 (F10): with how it is checked (absent on a card built from a 4.3 plan). */
+export const Standard = Item.extend({ check: z.enum(STANDARD_CHECKS).optional() });
+/** 4.4 (F10): a standard as a card line: its id, its text and, when the plan names one, how it is checked. */
+export function standardLine(s: { readonly id: string; readonly text: string; readonly check?: StandardCheck | undefined }): string {
+  return `[${s.id}] ${s.text}${s.check !== undefined ? ` (check: ${s.check})` : ''}`;
+}
+/**
+ * A command the card declares (§6.5: `sampled` makes its runs sampling runs; `network` makes them other runs).
+ * 4.4 (F10): `artifacts`, the files it writes (relative to the repository root) that mp keeps with its run.
+ */
+export const Command = z.object({ id: z.string().min(1), command: z.string().min(1), cwd: z.string().optional(), sampled: z.boolean().optional(), network: z.boolean().optional(), artifacts: z.array(z.string().min(1)).optional() });
 export const ListRefSchema = z.object({ hash: z.string().regex(/^[0-9a-f]{64}$/), count: z.number().int().nonnegative() });
 export const Hash = z.string().regex(/^[0-9a-f]{64}$/);
 

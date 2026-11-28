@@ -21,7 +21,7 @@ import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
 import { DetailedPlanDoc, DetailedTask, TaskProvenance, elementsOf, feasibilityRequired, planIdProblems, taskCardHash, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import { MECHANICAL_RULES } from '../../flow/mechanical.ts';
-import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, type MaterialRef } from './common.ts';
+import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, standardLine, type MaterialRef } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
@@ -148,8 +148,15 @@ export const ArchitectFeasibilityCardSchema = z.object({
   binding: Binding,
   /** 4.4 (F3): on a revision, the previous feasibility report (optional reading). Absent before 4.4. */
   materials: z.array(Material).optional(),
+  /** 4.4 (F10): above this many standards on a task, the card names the task (config `standardsWarn`). Absent before 4.4: none named. */
+  standardsWarn: z.number().int().positive().optional(),
 });
 export type ArchitectFeasibilityCard = z.infer<typeof ArchitectFeasibilityCardSchema>;
+
+/** 4.4 (F10): the tasks of a plan with more standards than `limit`, as "task: n standards" (empty: none). */
+export function manyStandards(plan: Pick<DetailedPlanDoc, 'tasks'>, limit: number): string[] {
+  return plan.tasks.filter((t) => t.standards.length > limit).map((t) => `${t.id}: ${t.standards.length} standards`);
+}
 
 export const ArchitectFeasibilityResultShape = {
   findings: z
@@ -209,9 +216,9 @@ export function previousPlanText(id: string | null, plan: DetailedPlanDoc): stri
 
 const prov = (p: z.infer<typeof DetailedTask>['provenance']): string => (p === 'architect' ? 'architect' : `plan element${p.planElements.length === 1 ? '' : 's'} ${p.planElements.join(', ')}`);
 
-/** What a Reviewer can see, so standards are written to be judged from it (4.1.2, item 7). */
+/** What a Reviewer can see, so standards are written to be judged from it (4.1.2, item 7; 4.4, F10: with a finite check each). */
 export const REVIEWER_EVIDENCE_TEXT =
-  'What a Reviewer can see: the change, the local runs\' exit codes, durations and failing output; for the integration task, the full run. The output of passing runs is not kept: write standards a Reviewer can judge from these.';
+  'What a Reviewer can see: the change, the local runs\' exit codes, durations and failing output, and the files a verification command names as its artifacts (kept with its run); the Constructor\'s hand-back and the files it hands in; for the integration task, the full run. The output of passing runs is not kept. Give each standard a finite check and say how it is checked (check: command, reading, report, artifact or person); a standard only a person can check is never put to the Reviewer.';
 
 /** The planning rules every Architect card shows (decomposition, revision, repair): one change that covers several elements is one task; the mechanical checks; the commands; what a Reviewer sees. */
 export function renderPlanningRules(commands: ProjectCommandsT | undefined): string {
@@ -298,6 +305,8 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
           taskDetail(t),
       ),
     ) +
+    // 4.4 (F10): a warning, not a refusal: rework rises with the number of standards on a task
+    (c.standardsWarn === undefined ? '' : list(`Tasks with more than ${c.standardsWarn} standards (standardsWarn; rework rises with their number: say whether each has a finite check)`, manyStandards(p, c.standardsWarn))) +
     list('Risks the Architect listed', p.risks) +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms`)) +
     list('Findings of the earlier review this revision answers', c.earlierFindings) +
@@ -308,7 +317,7 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
 /** 4.4 (F3): what the feasibility review judges of a task besides its line: its standards, requirement items, files to read and interface links. */
 function taskDetail(t: z.infer<typeof DetailedTask>): string {
   return (
-    `\n  standards: ${t.standards.map((s) => `[${s.id}] ${s.text}`).join('; ')}` +
+    `\n  standards: ${t.standards.map(standardLine).join('; ')}` +
     `\n  requirement items: ${t.requirementItems.join(', ') || 'none'}` +
     `\n  files to read: ${t.readableFiles.join(', ') || 'none'}` +
     `\n  implements: ${t.implements.join(', ') || 'none'}; calls: ${t.calls.join(', ') || 'none'}`

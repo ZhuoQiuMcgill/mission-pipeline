@@ -409,6 +409,8 @@ export interface FlowProject {
   readonly planReviewsWaived?: readonly string[];
   /** Missions whose tasks start on their dependencies' verified hand-backs (config `startOnHandback`). */
   readonly startOnHandback?: readonly string[];
+  /** 4.4 (F10): above this many standards on a task the feasibility reviewer and the PM are told (config `standardsWarn`). Absent: 7. */
+  readonly standardsWarn?: number;
 }
 
 /** The three ports together, plus the clock and the project's declared commands. */

@@ -166,6 +166,10 @@ export interface RecordedData {
   /** A partial check: the sha256 of the first and last 64 MiB together (a later check compares it). */
   readonly sample?: string;
   readonly label: string;
+  /** 4.4 (F10, #65): the copy mp kept of it, relative to the memory folder (a Constructor's handed-in file); absent: none was made. */
+  readonly kept?: string;
+  /** 4.4 (F10): why no copy was kept (over the limit, unreadable), when one was tried. */
+  readonly notKept?: string;
 }
 
 /** The data pointers of these texts that the program checked and found to hold, each once. */
@@ -193,7 +197,7 @@ export function blindDataTexts(r: BlindResult): DataText[] {
 
 /** One data pointer on one line, as the reads show it. */
 export function recordedDataLine(d: RecordedData): string {
-  return `${d.path}${d.line !== null ? `:${d.line}` : ''} — ${d.size} bytes, sha256 ${d.sha256.slice(0, 16)}…; ${d.label}`;
+  return `${d.path}${d.line !== null ? `:${d.line}` : ''} — ${d.size} bytes, sha256 ${d.sha256.slice(0, 16)}…; ${d.label}${d.kept !== undefined ? `; a copy kept at .mission-pipeline/${d.kept}` : d.notKept !== undefined ? `; no copy kept: ${d.notKept}` : ''}`;
 }
 
 /** The data pointers an evidence record's report document keeps (none in a record from before 4.1.3). */
