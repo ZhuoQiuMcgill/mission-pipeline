@@ -43,7 +43,7 @@
 //     `mp pm answer`; a decision to carry out (decisionFor) → the next `mp pm next`; its Secretary
 //     in flight → wait for its hand-back; else the Secretary's step;
 //   - a step held by a stop, a closed mission, the git-writes hold, a lease, a hold or a disk limit (4.4,
-//     G6: what `mp pm next` computes), a dispatch in flight under a stop, a hand-back that arrived after a stop, a
+//     G6: what `mp pm next` computes), a review that waits for its Constructor's questions (4.4, F4), a dispatch in flight under a stop, a hand-back that arrived after a stop, a
 //     dispatch in flight longer than IN_FLIGHT_BLOCKED_MS without a hand-back (WI-28).
 // One subtask with several reasons is one blocked entry. The labels recomputing is a project
 // line, not a subtask.
@@ -449,7 +449,9 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
               ? 'confirm this copy is the one in use (mp pm confirm-copy, WI-31)'
               : h.why.startsWith('exploration')
                 ? 'it starts by itself once the explorations it waits for settle (their own blocks are listed here)'
-                : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
+                : h.why.startsWith('the review waits')
+                  ? 'it is ready once the escalation it names is carried out as an answer (the Secretary decides it, or the PM answers it: mp pm answer); one carried out without an answer waits until the re-plan or the next attempt retires the review'
+                  : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
     const next = [reason, byHold].filter((x): x is string => x !== null).join('; ');
     block(ofStep(h.step, String(h.mission)), `${h.step} (${h.seat}) is held: ${h.why}`, next, h.wi);
   }

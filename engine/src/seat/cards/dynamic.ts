@@ -8,6 +8,7 @@ import { canonicalJson } from '../../common/hash.ts';
 import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
+import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -90,7 +91,9 @@ export function taskDecisionQuotes(items: readonly CurrentItem[], events: readon
     if (what?.what?.option !== 'answer') continue;
     const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
     const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
-    if (d?.option === 'answer' && d.by === what.by && d.instructions !== '') out.push(d.instructions);
+    // 4.4 (F4, review r2): the text of an answer, one function everywhere: its instructions, or else the user's cited words
+    const text = d?.option === 'answer' && d.by === what.by ? answerText(d) : '';
+    if (text.trim() !== '') out.push(text);
   }
   return [...new Set(out)];
 }
@@ -123,6 +126,7 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
   const request = [`Escalation ${e.id} from ${e.source} on ${e.subject}`, e.summary, e.original ? `Original:\n${e.original}` : '', e.changed ? `Changed:\n${e.changed}` : '', e.reasons.length > 0 ? `Reasons:\n${e.reasons.map((r) => `- ${r}`).join('\n')}` : '', e.facts !== undefined ? `Facts:\n${JSON.stringify(e.facts, null, 2)}` : ''].filter(Boolean).join('\n\n');
   const batches = events.filter((b) => b.line === 'plan' && b.event === 'pm-batch');
   const taskLine = task === undefined ? [] : events.filter((x) => x.line === `task:${task.id}`);
+  const openItems = task === undefined ? [] : openItemsOf(events).filter((i) => i.task === task.id);
   return {
     // 4.1.2 (item 7): the earlier decisions on the same line, so a ruling is not made again blind
     earlierDecisions: earlierDecisionsOf(e, events),
@@ -139,8 +143,9 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('alignment', 'Alignment record (PM batches)', batches.map((b) => `${b.key}: user messages ${(b.body as { userWords: string[] }).userWords.join(', ') || 'none'}`).join('\n') || '(none)', 'record'),
       // 4.4 (F16, P5): a digest that can be read, in place of every event of the task line in full; the
       // constraints are on the card already and are not repeated here
-      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine), 'record'),
-      ...(task === undefined ? [] : [material('task-line', `Task ${task.id}: its card and every event of its line, in full (not must-read)`, canonicalJson({ task, events: taskLine.map((x) => ({ event: x.event, key: x.key, body: x.body })) }), 'record', false)]),
+      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, openItems), 'record'),
+      // 4.4 (F4, review r2): the task's open items in full, with their answers, when it has any
+      ...(task === undefined ? [] : [material('task-line', `Task ${task.id}: its card and every event of its line, in full (not must-read)`, canonicalJson({ task, events: taskLine.map((x) => ({ event: x.event, key: x.key, body: x.body })), ...(openItems.length > 0 ? { openItems: openItems.map((i) => ({ id: i.id, attempt: i.attempt, when: i.when, question: i.text, answer: i.answer })) } : {}) }), 'record', false)]),
     ],
   };
 }
@@ -151,11 +156,17 @@ function line(text: string, n = 160): string {
   return t.length <= n ? t : `${t.slice(0, n - 1)}…`;
 }
 
+/** 4.4 (F4, review r2): one line of an open item; when it is cut, it says so and where it is in full. */
+function cut(text: string, n: number): string {
+  const t = line(text, n);
+  return t.length < text.replace(/\s+/g, ' ').trim().length ? `${t} (cut; in full: material task-line)` : t;
+}
+
 /**
  * 4.4 (F16): the Secretary's current facts as a digest: the escalation, the selected items by id and one
  * line, the authorizations, the task's goal and standards, one line per event of the task line.
  */
-function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[]): string {
+function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths: readonly CurrentItem[], task: DetailedTask | undefined, taskLine: readonly FlowEvent[], open: readonly OpenItem[] = []): string {
   const section = (title: string, lines: readonly string[]): string => `${title}:\n${lines.length === 0 ? '(none)' : lines.map((l) => `- ${l}`).join('\n')}`;
   return [
     `Escalation ${e.id} (${e.source}) on ${e.subject}: ${line(e.summary, 300)} (its reasons and facts in full: material request)`,
@@ -164,6 +175,8 @@ function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths
     ...(task === undefined ? [] : [
       `Task ${task.id} (${task.kind}): ${line(task.goal, 300)}`,
       section('Its standards', task.standards.map((s) => `[${s.id}] ${line(s.text, 300)}`)),
+      // 4.4 (F4; G5): a Constructor's question left open is listed on every card of its task, and its answer on the next ones
+      ...(open.length > 0 ? [section('Its open items (questions left open, and their answers)', open.map((i) => `[${i.id}] attempt ${i.attempt}, ${i.when}: ${cut(i.text, 160)}${i.answer === null ? ': open' : `: answered by ${i.answer.by === 'pm' ? 'the PM' : i.answer.by === 'user' ? 'the user' : 'the Secretary'}: ${cut(i.answer.answer, 300)}`}`))] : []),
       section(`Its line, one event each (in full: material task-line)`, taskLine.map((x) => `${x.event} ${x.key}: ${line(canonicalJson(x.body), 120)}`)),
     ]),
   ].join('\n\n');

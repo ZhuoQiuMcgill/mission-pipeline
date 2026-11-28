@@ -185,13 +185,19 @@ type FlowRow = ReturnType<typeof allFlow>[number];
 
 type Decided = {notice: string; reason: string; authorization?: string | null; inputs?: readonly {line: string; version: string}[]};
 
+/** 4.4 (F4): the accepted hand-back of a Secretary decision step, as the inbox reads it (in any snapshot, a write's too). */
+export function handedBackResult(db: Db, data: {text(h: string): string}, task: string): SecretaryResult | undefined {
+  const s = taskStatus(db, data, task);
+  return s?.state !== 'done' || s.handBack === null ? undefined : (s.handBack.result as SecretaryResult);
+}
+
 /**
  * 4.4 (F9, issue 62): a Secretary decision handed back before any pass recorded it, read from its accepted
  * hand-back, with the versions its card was claimed with (what a pass records as the decision's inputs).
  */
 function handedBackDecision(ctx: ProcessContext, task: string): (SecretaryResult & {inputs?: readonly {line: string; version: string}[]}) | undefined {
   const s = taskStatus(ctx.memory, ctx.memory.data, task);
-  if (s?.state !== 'done' || s.handBack === null) return undefined;
+  if (handedBackResult(ctx.memory, ctx.memory.data, task) === undefined || s === null || s.handBack === null) return undefined;
   const claimed = flowEvents(ctx.memory, {mission: dispatchInfo(ctx.memory, s.handBack.dispatch)!.mission, line: `dispatch:${s.handBack.dispatch}`, event: 'claimed'})[0];
   const spec = claimed === undefined ? null : JSON.parse(ctx.memory.data.text((JSON.parse(ctx.memory.data.text(claimed.body)) as {spec: string}).spec)) as {card?: {contextItems?: {line: string; version: string}[]}};
   return {...(s.handBack.result as SecretaryResult), ...(spec?.card?.contextItems !== undefined ? {inputs: spec.card.contextItems} : {})};

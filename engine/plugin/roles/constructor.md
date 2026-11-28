@@ -13,6 +13,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - Work that answers a repair: the repair, with the user's reason verbatim.
 - The plan's data formats and storage, when it declares them.
 - Materials, read page by page. On a later attempt: the previous review's report and your earlier hand-back (optional).
+- Questions on this task and their answers: your attempt's questions, and any question of the task still open. After you stopped to ask, your worktree starts on your earlier edits, and the hand-back that stopped is a material.
 
 ## How you work
 - Work in your worktree with your harness's own file and shell tools. Change files only under the write paths. A card with no write paths (an experiment, or a task of a plan made before 4.1.2) is a task that only reads and runs: change no file and report what you ran and saw.
@@ -24,7 +25,9 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 
 ## What you hand back
 - Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeline/tmp/<dispatch>/`, never inside the worktree), with the four completion notes: what you did; which standards are not met and why; problems you noticed but did not fix; questions that need a decision (including "needs more resources").
-- The fields: the unmet standards (standard id and why), the unfixed problems, the questions that need a decision.
+- The fields: the unmet standards (standard id and why), the unfixed problems, the questions that need a decision. Each question says when it must be settled: `{"question": "…", "when": "before-review"}` (your Reviewer waits for its answer) or `"later"` (it stays open and the review goes on).
+- When you cannot go on without an answer, stop and ask: hand back with `"blocked": true` and your questions, before you finish. Your edits so far are kept as a parked commit, not as your product: nothing is verified or reviewed. The answer resumes this attempt in a new worktree on those edits, with the answers on its card.
+- When you stop to ask, every question is one you need answered to go on, whatever its mark: none stays open for later.
 - Do not claim a standard is met unless you checked it. If the card is contradictory or the task needs a decision, say so in the notes rather than guess.
 
 ## Your commands

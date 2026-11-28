@@ -39,7 +39,7 @@ export interface CliOutput {
 }
 
 /** PM commands whose first positional is a sub-command (recorded as "<command> <sub>"). */
-const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission', 'secretary', 'hold']);
+const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission', 'secretary', 'open-item', 'hold']);
 
 function groupHelp(group: string): string {
   const cs = COMMANDS.filter((c) => c.group === group);

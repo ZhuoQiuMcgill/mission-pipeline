@@ -90,6 +90,10 @@ export const SecretaryResultShape = {
     .describe('For "grant" on an exploration (optional): the ids of the findings the granted round is for, general ones too, as the reasons list them. The author gets a turn on them. Omit otherwise.'),
   notice: z.string().describe('What the PM is told: with needs-pm, the brief in four parts (see Classification). Empty only for a detail.'),
   mayMatter: z.boolean().describe('A detail that is clearly reversible but the user might care about: noted as "may matter".'),
+  defer: z
+    .array(z.number().int().positive())
+    .optional()
+    .describe('For "answer" on a Constructor\'s questions (optional): the numbers (Q1 is 1) of the questions you put off. Each stays an open item that its decider answers later; your instructions answer the others. A question marked later stays open unless answered later. Omit otherwise.'),
 };
 const SecretaryResultSchema = z.object(SecretaryResultShape);
 export type SecretaryResult = z.infer<typeof SecretaryResultSchema>;
@@ -130,6 +134,15 @@ export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: Re
     if (r.grantExtra < 1) out.push('grantExtra: give 1 or 2 extra attempts');
   } else if (r.grantExtra !== 0) out.push('grantExtra: only for option "grant"');
   if (r.option !== 'grant' && (r.findings ?? []).length > 0) out.push('findings: only for option "grant"');
+  // 4.4 (F4): a deferral names questions of this escalation by their numbers
+  if ((r.defer ?? []).length > 0) {
+    // the numbered questions of a 4.4 escalation (a retried round appends its reason after them); 4.3's reasons are its questions
+    const questions = c.request.reasons.filter((x) => /^Q\d+ \((before-review|later)\): /.test(x)).length || c.request.reasons.length;
+    if (r.option !== 'answer' || c.request.source !== 'constructor-decision') out.push('defer: only for option "answer" on a Constructor\'s questions');
+    // review r2 (p8-7): a pause's questions are all needed before the work resumes (its escalation is cblk.<step>.<n>)
+    else if (c.request.id.startsWith('cblk.')) out.push('defer: a Constructor that stopped to ask needs each of its questions answered before the work resumes: none is put off');
+    else if ((r.defer ?? []).some((n) => n > questions)) out.push(`defer: name questions by their numbers, 1 to ${questions}`);
+  }
   if ((r.option === 'send-back' || r.option === 'replan' || r.option === 'rework' || r.option === 'answer') && r.instructions.trim() === '') out.push(`instructions: option "${r.option}" needs the instructions`);
   if (r.classification !== 'detail' && r.notice.trim() === '') out.push('notice: write what the PM is told');
   if (r.reason.trim() === '') out.push('reason: say why');
