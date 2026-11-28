@@ -37,11 +37,13 @@ export const ESCALATION_SOURCES = [
   'cost-overrun',
   'plan-restarts-work',
   'plan-structure-change',
+  // 4.4 (G4): a repair Architect's question, handed to the PM directly (flow/secretary.ts DIRECT_TO_PM)
+  'repair-question',
 ] as const;
 export type EscalationSource = (typeof ESCALATION_SOURCES)[number];
 
-/** What the program can do with a decision, mechanically. */
-export const DECISION_OPTIONS = ['accept', 'accept-risk', 'send-back', 'replan', 'grant', 'restart', 'abandon', 'answer', 'rework', 'ask-user', 'ask-pm', 'approve'] as const;
+/** What the program can do with a decision, mechanically. 4.4 (G1): `ask-architect`, one Architect step answers a question of design. */
+export const DECISION_OPTIONS = ['accept', 'accept-risk', 'send-back', 'replan', 'grant', 'restart', 'abandon', 'answer', 'rework', 'ask-user', 'ask-pm', 'approve', 'ask-architect'] as const;
 export type DecisionOption = (typeof DECISION_OPTIONS)[number];
 
 export const SecretaryCardSchema = z.object({
@@ -82,14 +84,18 @@ export const SecretaryResultShape = {
     .describe('detail: recorded only; important-within-authority: takes effect and the PM is told (cite the authorization); needs-user: related work pauses and the user decides (option "ask-user").'),
   authorization: z.string().nullable().describe('The authorization id you rely on (required for important-within-authority).'),
   reason: z.string().describe('Why, in a few sentences.'),
-  instructions: z.string().describe('For send-back, replan, rework and answer: what exactly must change, or the decision itself. For "grant" on an exploration (optional): what the next round must do; it is shown on that round\'s cards. Empty otherwise.'),
+  instructions: z.string().describe('For send-back, replan, rework and answer: what exactly must change, or the decision itself. For ask-architect: what you ask the Architect and what it should know. For "grant" on an exploration (optional): what the next round must do; it is shown on that round\'s cards. Empty otherwise.'),
   grantExtra: z.number().int().min(0).max(2).describe('For "grant": 1 or 2 extra attempts; 0 otherwise.'),
   findings: z
     .array(z.string().min(1))
     .optional()
     .describe('For "grant" on an exploration (optional): the ids of the findings the granted round is for, general ones too, as the reasons list them. The author gets a turn on them. Omit otherwise.'),
-  notice: z.string().describe('What the PM is told (empty only for a detail).'),
+  notice: z.string().describe('What the PM is told: with needs-pm, the brief in four parts (see Classification). Empty only for a detail.'),
   mayMatter: z.boolean().describe('A detail that is clearly reversible but the user might care about: noted as "may matter".'),
+  defer: z
+    .array(z.number().int().positive())
+    .optional()
+    .describe('For "answer" on a Constructor\'s questions (optional): the numbers (Q1 is 1) of the questions you put off. Each stays an open item that its decider answers later; your instructions answer the others. A question marked later stays open unless answered later. Omit otherwise.'),
 };
 const SecretaryResultSchema = z.object(SecretaryResultShape);
 export type SecretaryResult = z.infer<typeof SecretaryResultSchema>;
@@ -104,17 +110,24 @@ export function renderSecretary(c: SecretaryCard): string {
     (r.changed !== '' ? `## Changed\n${r.changed}\n\n` : '') +
     list("The escalating party's reasons", r.reasons) +
     list('Authorizations (verbatim)', c.authorizations.map((a) => `[${a.id}] "${a.quote}"${a.notifyCondition !== null ? ` (tell the user when: ${a.notifyCondition})` : ''}`)) +
-    list('Requirement items involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
+    // 4.4 (F16): each decision once on the card, here with its id (not again as a verbatim quote)
+    list('Requirement items and decisions involved', c.items.map((i) => `[${i.id}] ${i.text}`)) +
     renderMaterials(c.materials) +
     list(`Earlier decisions on ${r.subject} (decide this one knowing them)`, (c.earlierDecisions ?? []).map((d) => `${d.escalation} (${d.source}): ${d.option} by ${d.by}${d.reason !== '' ? `: ${d.reason}` : ''} (${d.applied})`)) +
-    '## Classification\nNew decisions: detail (with mayMatter when relevant), or needs-pm with ask-pm. A replan that adds or drops deliverables, changes module interfaces, data formats or storage needs the PM.\n\n' +
+    // 4.4 (G2): the notice is what the PM decides from; nothing checks its form
+    '## Classification\nNew decisions: detail (with mayMatter when relevant), or needs-pm with ask-pm. A replan that adds or drops deliverables, changes module interfaces, data formats or storage needs the PM.\nWith needs-pm the notice is the PM\'s whole brief, in four parts: the question; the options and what each leads to; which words of the user bear on it; what you would choose and why.\n' +
+    // 4.4 (G1; F-3): what is reversible and within the plan is the Secretary's; a question of design is the Architect's
+    (c.options.some((o) => o.id === 'ask-architect')
+      ? `Settle what is reversible and within the plan yourself, a reading of the plan or of the user's words included. A question of design (the plan would have to say something it does not say) goes to the Architect: ask-architect, with your instructions. It is not the PM's because it is about design.${r.source === 'loop-exhausted' ? ' At a used-up loop, when what is left is a question of design, ask the Architect or choose replan, not an acceptance: an acceptance with risk leaves each of its reasons open, as an open item of the task.' : ''}\n`
+      : '') +
+    '\n' +
     list('Options', c.options.map((o) => `${o.id}: ${o.label}. Outcome: ${o.outcome}`)) +
     `## Your extra grant on lineage ${r.lineage}\n${c.grantAvailable ? 'Available (once per lineage, at most 2 attempts).' : c.classifications !== undefined ? 'Already used: ask the PM for further grants (choose ask-pm).' : 'Already used: only the user can grant more (choose ask-user if more attempts are the only way).'}\n\n`
   );
 }
 
 export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: ReadonlySet<string> | undefined): string[] {
-  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not read`);
+  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not fetched`);
   if (c.classifications !== undefined && r.classification === 'important-within-authority') out.push('classification: new decisions use detail or needs-pm; PM-class questions go to the PM');
   if (c.classifications !== undefined && (c.request.source === 'plan-structure-change' || c.request.source === 'plan-restarts-work') && !isAskOption(r.option)) out.push('plan structure is the PM’s decision');
   if (!c.options.some((o) => sameDecisionOption(o.id, r.option))) out.push(`option: "${r.option}" is not an option on the card (${c.options.map((o) => o.id).join(', ')})`);
@@ -128,7 +141,16 @@ export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: Re
     if (r.grantExtra < 1) out.push('grantExtra: give 1 or 2 extra attempts');
   } else if (r.grantExtra !== 0) out.push('grantExtra: only for option "grant"');
   if (r.option !== 'grant' && (r.findings ?? []).length > 0) out.push('findings: only for option "grant"');
-  if ((r.option === 'send-back' || r.option === 'replan' || r.option === 'rework' || r.option === 'answer') && r.instructions.trim() === '') out.push(`instructions: option "${r.option}" needs the instructions`);
+  // 4.4 (F4): a deferral names questions of this escalation by their numbers
+  if ((r.defer ?? []).length > 0) {
+    // the numbered questions of a 4.4 escalation (a retried round appends its reason after them); 4.3's reasons are its questions
+    const questions = c.request.reasons.filter((x) => /^Q\d+ \((before-review|later)\): /.test(x)).length || c.request.reasons.length;
+    if (r.option !== 'answer' || c.request.source !== 'constructor-decision') out.push('defer: only for option "answer" on a Constructor\'s questions');
+    // review r2 (p8-7): a pause's questions are all needed before the work resumes (its escalation is cblk.<step>.<n>)
+    else if (c.request.id.startsWith('cblk.')) out.push('defer: a Constructor that stopped to ask needs each of its questions answered before the work resumes: none is put off');
+    else if ((r.defer ?? []).some((n) => n > questions)) out.push(`defer: name questions by their numbers, 1 to ${questions}`);
+  }
+  if ((r.option === 'send-back' || r.option === 'replan' || r.option === 'rework' || r.option === 'answer' || r.option === 'ask-architect') && r.instructions.trim() === '') out.push(`instructions: option "${r.option}" needs the instructions`);
   if (r.classification !== 'detail' && r.notice.trim() === '') out.push('notice: write what the PM is told');
   if (r.reason.trim() === '') out.push('reason: say why');
   return out;

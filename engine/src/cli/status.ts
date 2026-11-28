@@ -10,7 +10,8 @@ import type { MissionId } from '../common/ids.ts';
 import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnvironment } from '../evaluator/index.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import { attemptRecorded, olderSnapshotEvidence, type AttemptsAmendedBody, type XState } from '../flow/exploration/machine.ts';
-import { PLAN_LINE } from '../flow/plandoc.ts';
+import { PLAN_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
+import { ARCHITECT_ANSWER, type ArchitectAnswerBody } from '../flow/architectAnswers.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
 import type { Project } from './project.ts';
@@ -295,13 +296,28 @@ export async function showItem(p: Project, kind: string, id: string, o: { readon
     }
     extraJson['mechanicalChecks'] = checks;
   }
+  if (kind === 'escalation') {
+    // 4.4 (G2): the read the PM inbox names for the rest of an escalation's reasons
+    const bodies = ctx.memory.read((db) => found.filter((n) => n.mission !== null).flatMap((n) => flowEvents(db, { mission: n.mission as MissionId, line: SECRETARY_LINE, event: 'escalation', limit: 10_000 }).filter((e) => `${n.mission}/${e.key}` === n.id).map((e) => JSON.parse(ctx.memory.data.text(e.body)) as { reasons?: string[]; original?: string; changed?: string })));
+    for (const b of bodies) {
+      if (b.original) extra.push(`  original: ${b.original}`);
+      if (b.changed) extra.push(`  changed: ${b.changed}`);
+      extra.push(...section('  reasons (in full)', (b.reasons ?? []).map((r) => `- ${r}`)));
+    }
+    extraJson['escalations'] = bodies;
+    // 4.4 (G1): the replies of the Architects asked on it, each as recorded (a moot one says why it changed nothing)
+    const architect = ctx.memory.read((db) => found.filter((n) => n.mission !== null).flatMap((n) => flowEvents(db, { mission: n.mission as MissionId, line: SECRETARY_LINE, event: ARCHITECT_ANSWER, limit: 10_000 }).map((e) => JSON.parse(ctx.memory.data.text(e.body)) as ArchitectAnswerBody).filter((x) => `${n.mission}/${x.escalation}` === n.id)));
+    extra.push(...section('  the Architect asked', architect.map((x) => `- ${x.step} (asked by ${x.ask.by === 'pm' ? 'the PM' : 'the Secretary'}): ${x.reply}: ${x.text}${x.why !== undefined ? `; why: ${x.why}` : ''}${(x.tasks ?? []).length > 0 ? `; names ${x.tasks!.join(', ')}` : ''}${x.moot !== undefined ? ` (moot, changes nothing: ${x.moot})` : ''}`)));
+    if (architect.length > 0) extraJson['architect'] = architect;
+  }
   if (kind === 'dispatch' && found[0] !== undefined) {
     const d = found[0].id;
     const reads = ctx.memory.read((db) => {
       const info = db.stmt('SELECT mission FROM dispatches WHERE dispatch = ?').get(d) as { mission: string } | undefined;
       return info === undefined ? [] : flowEvents(db, { mission: info.mission as MissionId, line: `dispatch:${d}`, event: 'read', limit: 10_000 }).map((e) => e.key);
     });
-    if (reads.length > 0) extra.push(`  material pages read: ${reads.join(', ')}`);
+    // 4.4 (F16): a receipt shows a page was fetched, not that it was read
+    if (reads.length > 0) extra.push(`  material pages fetched: ${reads.join(', ')}`);
     extraJson['reads'] = reads;
     // 4.1.3: the data outside the commit its hand-back cites, as checked at hand-back (--check-data: again, read-only)
     const dd = await dispatchDataLines(p, d, o);

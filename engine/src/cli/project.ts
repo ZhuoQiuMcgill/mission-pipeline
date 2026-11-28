@@ -145,7 +145,7 @@ export async function openProject(io: CliIo, o: { readonly flag: string | null; 
   // the project's commands, read once from the config into the context (4.1.2): its full suite
   // (`fullSuite`, `closingChecks` its alias: fullSuiteOf) and its local tests; the flows read both there.
   // Its cleanup commands run after each run's commands, before the run's checkout is removed (runs.ts)
-  const ctx = openProcess(dir, { secretary: o.secretary ?? null, pendingSecretary: o.pending === true, seatResult: o.seatResult === true, open: {deferResidentRecovery: o.secretary == null || o.seatResult === true, ...(o.seatResult === true ? {} : {secretaryIdentity: o.secretary ?? null, pendingSecretary: o.pending === true})}, git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), ...(config.experimentShell === undefined ? {} : { experimentShell: config.experimentShell }), ...(config.shell === undefined ? {} : { shell: config.shell }), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, planReviewsWaived: config.planReviewsWaived ?? [], startOnHandback: config.startOnHandback ?? [], filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
+  const ctx = openProcess(dir, { secretary: o.secretary ?? null, pendingSecretary: o.pending === true, seatResult: o.seatResult === true, open: {deferResidentRecovery: o.secretary == null || o.seatResult === true, ...(o.seatResult === true ? {} : {secretaryIdentity: o.secretary ?? null, pendingSecretary: o.pending === true})}, git, targetBranch: config.targetBranch, commandTimeoutMs: config.commandTimeoutMs, experimentCommandTimeoutMs: experimentCommandTimeoutOf(config), ...(config.experimentShell === undefined ? {} : { experimentShell: config.experimentShell }), ...(config.shell === undefined ? {} : { shell: config.shell }), fullSuite: fullSuiteOf(config), localCommands: config.verificationCommands, cleanupCommands: config.cleanupCommands, planReviewsWaived: config.planReviewsWaived ?? [], startOnHandback: config.startOnHandback ?? [], ...(config.mustReadWarnPages === undefined ? {} : { mustReadWarnPages: config.mustReadWarnPages }), ...(config.cardWarnBytes === undefined ? {} : { cardWarnBytes: config.cardWarnBytes }), ...(config.loops?.rework === undefined ? {} : { reworkCap: config.loops.rework }), ...(config.limits === undefined ? {} : { limits: config.limits }), ...(config.standardsWarn === undefined ? {} : { standardsWarn: config.standardsWarn }), filler: o.filler ?? null, ...(ids.author !== undefined ? { ident: ids.author } : {}), ...(ids.committer !== undefined ? { committer: ids.committer } : {}), ...(io.process ?? {}) });
   const problems: Problem[] = [];
   let landings: LandingResult[] = [];
   try {
@@ -217,7 +217,12 @@ export interface Recorded {
   readonly exitCode: number;
   readonly text: string;
   readonly json: unknown;
+  /** 4.4: named after the "cut" mark when the stored text is cut at the receipt's limit. Never stored itself. */
+  readonly cutNote?: string;
 }
+
+/** The characters of a command's text a receipt keeps (a replay prints at most these). */
+export const RECEIPT_TEXT_LIMIT = 16_000;
 
 /** The arguments as an action records them: long strings by their hash (an action's arguments are at most 256 KiB). */
 export function actionArgs(x: unknown): unknown {
@@ -255,7 +260,8 @@ export function beginAction(memory: Memory, a: { readonly op: string; readonly c
 
 /** End a PM action with its result (best effort: the command's own records are already committed). */
 export function endAction(memory: Memory, a: { readonly op: string; readonly command: string; readonly args: unknown; readonly wi?: string | null; readonly stop?: boolean }, r: Recorded, failed: boolean): void {
-  const bounded = (s: string): string => (s.length <= 16_000 ? s : `${s.slice(0, 16_000)}…`);
+  // 4.4: a cut text says that it was cut, and names the read for the rest where the command gives one
+  const bounded = (s: string): string => (s.length <= RECEIPT_TEXT_LIMIT ? s : `${s.slice(0, RECEIPT_TEXT_LIMIT)}…\n(cut here: the receipt keeps the first ${RECEIPT_TEXT_LIMIT} characters of the output${r.cutNote !== undefined ? `; ${r.cutNote}` : ''})`);
   const json = JSON.stringify(r.json ?? null);
   const result = { exitCode: r.exitCode, text: bounded(r.text), json: json.length <= 64_000 ? r.json : { truncated: true } };
   try {

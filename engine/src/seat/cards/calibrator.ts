@@ -176,7 +176,7 @@ function onePerFocus(focus: readonly string[], judged: readonly string[], what: 
 }
 
 export function calibrator1Problems(c: Calibrator1Card, r: Calibrator1Result, read: ReadonlySet<string> | undefined): string[] {
-  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not read`);
+  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not fetched`);
   out.push(...onePerFocus(c.focus, r.elements.map((e) => e.element), 'elements'));
   const materials = new Set(c.materials.map((m) => m.id));
   const roleOf = (q: string): string | undefined => c.materials.find((m) => m.id === /^(.+)#\d+$/.exec(q)?.[1])?.role;
@@ -209,7 +209,7 @@ export function calibrator1Problems(c: Calibrator1Card, r: Calibrator1Result, re
 }
 
 export function calibrator2Problems(c: Calibrator2Card, r: Calibrator2Result, read: ReadonlySet<string> | undefined): string[] {
-  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not read`);
+  const out = unreadMustRead(c.materials, read).map((k) => `must-read page ${k} was not fetched`);
   const byId = new Map(c.elements.map((e) => [e.id, e]));
   const focusMapped = c.focus.filter((f) => (byId.get(f)?.mapsTo ?? null) !== null);
   const focusAdded = c.focus.filter((f) => (byId.get(f)?.mapsTo ?? null) === null);

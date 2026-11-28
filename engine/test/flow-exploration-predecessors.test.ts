@@ -133,7 +133,7 @@ describe('an exploration planned after others', () => {
     // must read: a hand-back that skipped A's hand-off is refused
     const unread = new Set(card.materials.filter((m) => m.id !== 'after-A-handoff').flatMap((m) => Array.from({ length: m.pages }, (_, i) => `${m.id}#${i + 1}`)));
     const problems = await w.scheduler.run(bt.task, { handBack: submit('design B v1'), materialsRead: unread });
-    assert.ok(problems.some((x) => x.includes('must-read page after-A-handoff#1 was not read')), problems.join('; '));
+    assert.ok(problems.some((x) => x.includes('must-read page after-A-handoff#1 was not fetched')), problems.join('; '));
     // mp seat read serves it: A's settle and the hand-off of the stop it settled on
     const d = w.scheduler.dispatchOf(bt.task);
     const handoff = seatRead(w.ctx, d, 'after-A-handoff');

@@ -4,7 +4,8 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, seatRerunDetached, seatRerunWorker, seatWait, WAIT_DEFAULT_SECONDS, type FullRunMarker, type HandBackAnswer, type RerunResult, type WorkerMessage } from '../../process/index.ts';
+import { dispatchOver, parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, seatRerunDetached, seatRerunWorker, seatWait, WAIT_DEFAULT_SECONDS, type FullRunMarker, type HandBackAnswer, type RerunResult, type WorkerMessage } from '../../process/index.ts';
+import { artifactLines } from '../../seat/card.ts';
 import { LedgerError } from '../../memory/index.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
@@ -38,9 +39,14 @@ function answerResult(a: HandBackAnswer, p?: Project): CommandResult {
   const lines = [
     a.repeated ? `Hand-back of ${a.dispatch} was already recorded: nothing new${gone}.` : a.outcome === 'accepted' ? `Hand-back of ${a.dispatch} recorded${gone}.` : `Hand-back of ${a.dispatch} recorded but not accepted (${a.outcome === 'after-release' ? 'the dispatch was released before it arrived' : 'a stop covers it'})${gone}.`,
     ...(a.report !== null ? [`Report: .mission-pipeline/${a.report}`] : []),
-    ...(a.candidate !== null ? [`Candidate commit ${a.candidate.commit} on base ${a.candidate.base}: ${a.candidate.changedPaths.join(', ') || 'no changes'}`] : []),
+    // 4.4 (F4): what a Constructor that stopped to ask handed in is a parked commit, not a candidate
+    ...(a.candidate !== null ? [`${a.parked === true ? 'Parked commit (your edits so far, not a product)' : 'Candidate commit'} ${a.candidate.commit} on base ${a.candidate.base}: ${a.candidate.changedPaths.join(', ') || 'no changes'}`] : []),
     ...(a.candidate !== null && a.candidate.ignored.length > 0 ? [`Ignored files inside your write paths were not collected: ${a.candidate.ignored.join(', ')}${a.candidate.ignoredTotal > a.candidate.ignored.length ? ` (and ${a.candidate.ignoredTotal - a.candidate.ignored.length} more)` : ''}`] : []),
     ...(a.verification !== null ? a.verification.map((v) => `Verification ${v.evidence}: ${v.passed ? 'passed' : 'failed'} — ${v.summary}`) : []),
+    // 4.4 (F9): a Secretary decision says what became of it
+    ...(a.decision !== undefined ? [`Decision on ${a.decision.mission}/${a.decision.escalation}: ${a.decision.text}`] : []),
+    // 4.4 (G1): an Architect's reply says what became of it
+    ...(a.reply !== undefined ? [`Your reply on ${a.reply.mission}/${a.reply.escalation}: ${a.reply.text}`] : []),
     ...a.notes,
     'You are done: end here.',
   ];
@@ -62,7 +68,7 @@ const card: Command = {
 const read: Command = {
   group: 'seat',
   name: ['read'],
-  summary: 'one page of a material on your card (hash-checked; a missing or edited material is reported, never served)',
+  summary: 'fetch one page of a material on your card (hash-checked; the fetch is recorded; a missing or edited material is reported, never served)',
   usage: 'mp seat <dispatch> read <material> [--page <n>]',
   flags: { page: 'string' },
   async run(c, args) {
@@ -77,7 +83,7 @@ const read: Command = {
 const checkout: Command = {
   group: 'seat',
   name: ['checkout'],
-  summary: 'print the path of a read-only directory holding the commit your card names (shared with the other seats reading that commit; read there, never write); a repair Architect reads an accepted product with --product <task>',
+  summary: 'print the path of a read-only directory holding the commit your card names (shared with the other seats reading that commit; read there, never write); a repair Architect, or an Architect answering a question on a task with an accepted product, reads it with --product <task>',
   usage: 'mp seat <dispatch> checkout [--product <task>]',
   flags: { product: 'string' },
   async run(c, args) {
@@ -94,7 +100,7 @@ const checkout: Command = {
 /** A rerun's result as the seat reads it, foreground or from `wait` (4.1.3: with the last lines of its output, passing or failing). */
 function rerunLines(r: RerunResult): string[] {
   return [
-    `Run ${r.run}: ${r.passed ? 'passed' : 'failed'} — ${r.summary}${r.leaf !== null ? `\nSummary: .mission-pipeline/${r.leaf}` : ''}`,
+    `Run ${r.run}: ${r.passed ? 'passed' : 'failed'} — ${r.summary}${r.leaf !== null ? `\nSummary: .mission-pipeline/${r.leaf}` : ''}${artifactLines(r.artifacts ?? [])}`,
     ...(r.tail !== '' ? ['Last lines of its output:', r.tail, '(end of the output)'] : []),
     `Cite it as your card says: evidence:${r.run} (a judgment) or run:${r.run} (a blind experiment).`,
   ];
@@ -274,7 +280,7 @@ function stdinFiles(c: RunContext, dispatch: string, args: ParsedArgs, names: { 
 const handback: Command = {
   group: 'seat',
   name: ['handback'],
-  summary: 'hand back once: your report (Markdown) with your structured fields (JSON) on stdin, or as two files in .mission-pipeline/tmp/<dispatch>/',
+  summary: 'hand back once: your report (Markdown) with your structured fields (JSON) on stdin, or as two files in .mission-pipeline/tmp/<dispatch>/ (a Constructor that must stop to ask: "blocked": true with its questions; files outside the commit it hands in: "files", kept by mp); the folder is removed after the result is printed',
   usage: "mp seat <dispatch> handback --stdin [--result-json '<json>']   (the report on stdin; the fields as its LAST ```json block, or --result-json)\n       mp seat <dispatch> handback --report <report.md> --result <result.json>   [--filled-by \"<harness>/<model>\"]",
   flags: { report: 'string', result: 'string', stdin: 'boolean', 'result-json': 'string', 'filled-by': 'string' },
   decides: true,
@@ -290,8 +296,14 @@ const handback: Command = {
       result = files.json;
     } else if (flagStr(args, 'result-json') !== null) throw usage('--result-json goes with --stdin');
     if (report === null || result === null) throw usage("--stdin (your report on stdin, the fields as its last ```json block), or --report <file.md> --result <file.json>");
-    const a = await seatHandback(P(c).ctx, d, { report: fileArg(c, report), result: fileArg(c, result), ...(f !== null ? { filler: parseFiller(f) } : {}) });
+    // 4.4 (F10, issue 65): the hand-back folder stays until the result is printed (afterOutput removes it)
+    const a = await seatHandback(P(c).ctx, d, { report: fileArg(c, report), result: fileArg(c, result), keepScratch: true, ...(f !== null ? { filler: parseFiller(f) } : {}) });
     return answerResult(a, P(c));
+  },
+  afterOutput(c, r) {
+    const a = r.json as HandBackAnswer;
+    // review p9-5: a cited file of the folder that could not be copied keeps it (the sweep may remove it later)
+    if (a.kind === 'recorded' && c.project !== null) dispatchOver(c.project.ctx, a.dispatch, undefined, { keepTmp: a.keepScratch === true });
   },
 };
 

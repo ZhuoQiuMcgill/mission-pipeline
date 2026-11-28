@@ -22,7 +22,7 @@ import { RENEW_LINE, REVIEW_NEEDED, type DetailedPlanDoc, type ReviewNeededBody 
 import { submitPmBatch } from '../src/flow/planning.ts';
 import type { FlowEvaluatorPort } from '../src/flow/ports.ts';
 import { recordConstraint, recordItem } from '../src/flow/requirements.ts';
-import { answerEscalation, raiseEscalation } from '../src/flow/secretary.ts';
+import { answerEscalation, escalation, raiseEscalation } from '../src/flow/secretary.ts';
 import { cal1Fail, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { gitActions } from '../src/process/actions.ts';
 import { dispatchView } from '../src/process/seat.ts';
@@ -511,6 +511,19 @@ describe('rebind regressions: seat authority, lineage, cancellation and deferred
     });
   }
 
+  it('4.4 (G1 with F10): a re-bind review\'s needs-decision offers ask-architect; one whose only open standard could not be verified does not', async () => {
+    for (const unverified of [false, true]) {
+      const { ports, engine, base } = await waitingRebind();
+      const card = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1');
+      const r = reviewer(card, unverified ? 'pass' : 'needs-decision');
+      const handBack = unverified ? { ...r, verdict: 'needs-decision' as const, judgments: r.judgments.map((j, i) => (i === 0 ? { ...j, met: 'cannot-verify' as const, needed: 'the device log', evidence: [] } : j)) } : r;
+      assert.deepEqual(await ports.scheduler.run(card.task, { handBack }), []);
+      await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'secretary' || t.card.seat === 'reviewer' ? null : base(t, s));
+      const e = (await escalation(flowCtx(ports, M), 'rnd.rev.m1.iface.1.b1'))!;
+      assert.equal(e.options.includes('ask-architect'), !unverified, JSON.stringify([unverified, e.summary, e.options]));
+    }
+  });
+
   it('needs-decision waits for the Secretary and its answer starts a second review of the same .b version', async () => {
     const { ports, engine, base } = await waitingRebind();
     const card = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1');
@@ -524,6 +537,22 @@ describe('rebind regressions: seat authority, lineage, cancellation and deferred
     const again = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1.r1');
     assert.equal(again.target, card.target);
     assert.ok(again.decisionQuotes.includes('Reject trailing commas'));
+    await drive(engine, ports.scheduler, base);
+    assert.equal(await current(ports, 'iface'), card.target);
+  });
+
+  it('4.4 (F10, review p9-3): a re-bind review whose only open standard cannot be verified waits for its decider, not a rework, and the answer starts a second review', async () => {
+    const { ports, engine, base } = await waitingRebind();
+    const card = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1');
+    const r = reviewer(card, 'pass');
+    await ports.scheduler.run(card.task, { handBack: { ...r, verdict: 'rework', judgments: r.judgments.map((j) => ({ ...j, met: 'cannot-verify' as const, needed: 'the compiler on the new plan', evidence: [] })) } });
+    await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'secretary' || t.card.seat === 'reviewer' ? null : base(t, s));
+    const sec = ports.scheduler.queued('secretary')[0]!;
+    assert.match((sec.card as SecretaryCard).request.summary, /could not verify S1 from what it can see, and nothing else is open/);
+    assert.ok(!(await lineEvents(ports, 'iface', 'rework')).some((e) => e.key === '2'), 'not sent back to the Constructor');
+    await ports.scheduler.run(sec.task, { handBack: secretary(sec.card as SecretaryCard, 'answer', { instructions: 'The compiler is on the declared run' }) });
+    await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'reviewer' ? null : base(t, s));
+    assert.equal(ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1.r1').target, card.target, 'the same version is reviewed again');
     await drive(engine, ports.scheduler, base);
     assert.equal(await current(ports, 'iface'), card.target);
   });

@@ -37,7 +37,7 @@ Your reads use your own cursor (`asked.sec`), separate from the PM's.
 
 For a Secretary decision step, use your own card/read/decide lifecycle below; never spawn a one-shot Secretary.
 Wait returns at once on a change after R that calls for you; otherwise it waits up to 300 s by default.
-A hand-back, release, queued step, PM decision or answer, note, question, reply, constraint change, stop, notice that names a WI, ended detached run or unconfirmed seat wakes it; a seat's claim, read or refused hand-back does not.
+A hand-back, release, queued step, PM decision or answer, note, question, reply, constraint change, stop, change of hold, a hold's time, notice that names a WI, ended detached run or unconfirmed seat wakes it; a seat's claim, read or refused hand-back does not.
 Every 30 s while waiting, it checks detached workers, label batches and landing recovery too; these checks mark no notice delivered and move no cursor.
 Work moves while your Secretary session runs; closing the PM conversation does not end your work.
 
@@ -45,23 +45,34 @@ Every command prints its operation id; `--op <id>` returns a completed result on
 "Busy, retry" (exit 75) means nothing was written; run the same command again.
 A dispatch write over budget (`OVER_BUDGET`) retries once after a short wait; after two failures it says nothing was written, so retry it.
 `NOT_READY` means the step changed or must wait: read next again and use what it offers.
+A held step is listed with its hold's id and reason (`holds` in the JSON); its claim is refused while the hold is in force.
 Dispatch refreshes decisions, authorizations and constraints in the card; a contested fast-mode input can hold production.
+A dispatch prints its must-read pages and its card's size with the largest sections; past config `mustReadWarnPages` (default 6) or `cardWarnBytes` (default 64 KiB) it warns you that the card is heavy. Nothing waits on it.
 A seat's hand-back can record a note about a write its sandbox could not make (older text: "left to the PM"); your next pass carries it out.
 
 ## Decisions
 
 `mp sec card <escalation>` claims the current decision round and prints its card; retrying returns the same claim.
-`mp sec read <escalation> <material> [--page <n>]` records your reads against that round's dispatch.
+`mp sec read <escalation> <material> [--page <n>]` fetches one page and records the fetch against that round's dispatch; a receipt shows a fetch, not a reading.
 Read every page of every must-read material; another round's receipts do not count.
-`mp sec decide <escalation> ...` submits the decision fields the card requires.
+`current-facts` is a digest; `task-line` holds the task's card and every event of its line in full and is not must-read.
+`mp sec decide <escalation> ...` submits the decision fields the card requires; it is recorded and carried out in the same command, and says what happened: applied, sent to the PM, or left to the next pass with the reason.
+`mp seat <D> handback` of your decision step, run under your identity, does the same.
 Use the card's exact fields and command form; `mp help sec decide` shows the arguments.
 The current round may be `sec.<id>` or its latest retry; replacement during a decision leaves its dispatch in flight, so the new Secretary releases it `--ended` after harness confirmation and claims afresh.
 
 Choose only an offered option, with a short reason and the instructions its next seat needs.
 Use `detail` for matters within the plan; mark `may matter` when reversible but the user might care.
 When unsure: reversible means decide; irreversible means escalate.
+Settle what is reversible and within the plan yourself, a reading of the plan or of the user's words included.
+A question of design (the plan would have to say something it does not say) goes to the Architect: `ask-architect`, offered on a Constructor's questions, a Reviewer's "needs a decision" (not one whose only open standards it could not verify) and a used-up rework loop, with `--instructions` saying what you ask. It is not the PM's because it is about design.
+One Architect step (`arch-ask.*`, a ready step like any other) answers it and changes no card, standard or plan; the work waits as for any decision. Its answer is carried out as the escalation's answer; on a used-up loop it comes back to you, and a grant carries the latest answer to the next attempt's cards.
+When the Architect says the plan has to change, or asks a question first, the escalation comes back to you in a fresh round with its reply in the reasons, also when the PM asked: choose `replan`, `ask-pm` where the change is of the PM's class, or answer its question in your instructions and ask again. When you already know the plan must change, choose `replan` directly.
+The fresh round replaces any earlier round of yours still in flight: that round's hand-back is recorded and changes nothing (nothing it decides or puts off is written). The PM's inbox does not list the escalation while the fresh round is yours; your `ask-pm`, or a grant the ledger refuses, sends it there with the new brief.
+At a used-up loop, a question of design is the Architect's or a re-plan's, not an acceptance's (Reviews and reworks).
 PM-class decisions are plan structure (adding or dropping tasks or deliverables, interfaces between modules, data formats or storage), a change to what the user gets, an irreversible step outside the project, or a conflict with what they said.
 Use classification `needs-pm` and option `ask-pm` for them, even if a recorded authorization appears to cover a choice.
+With `needs-pm` the notice is the PM's whole brief, shown in its inbox: the question; the options and what each leads to; which words of the user bear on it; what you would choose and why.
 The PM decides on the words or asks the user under F-3; you never decide that class yourself.
 For a revised detailed plan, any structural diff in task set (including split or merge), declared interfaces, data formats or storage goes straight to the PM as `plan-structure-change`.
 It takes effect only on `approve`; `send-back` instructs the Architect.
@@ -73,6 +84,12 @@ A failed old one-shot Secretary step also routes to the PM inbox; do not ask the
 The program validates the option, authority, classification, grant limit and must-reads before carrying it out.
 It writes your ruling `j.sec.<id>` with its effect; a PM answer gets `j.pm.<id>` only at application.
 Changed authority can return an escalation for a fresh round.
+
+An operating ruling you would give again and again: say it once, `mp sec instruct <mission> <id> --text "…" [--tasks <ids> | --repair <R-n>]`; it is yours, within the plan, never a proof input or a standard.
+Addressed, it reaches those tasks' cards (or the repair's Architect and the tasks it touched) and nowhere else; unaddressed, it follows `--paths` and `--task-types`.
+An instruction is not a design ruling: what the plan would have to say is the Architect's, and the user's long-term rules are the PM's constraints.
+`mp sec instruct --withdraw <id> --reason "…"` takes back one of yours; the PM's constraints are not yours to change.
+A repair Architect's question goes to the PM directly, not to you: the repair is the PM's filing on the user's words.
 
 You have one grant per lineage, for 1–2 extra attempts or rounds; after that, send it to the PM.
 A PM grant does not consume yours and is not blocked by yours being spent.
@@ -92,6 +109,17 @@ For example, WI-19's transform alert needs `mp sec ask-pm "Was the transform cha
 Do not turn a question into an instruction or send routine progress messages.
 A harness wake-up never substitutes for a note, question, answer or decision in memory.
 PM commands in resident mode record without reconciling; next and wait do the operational work, and wait wakes on what calls for you.
+
+## Holds: "not this yet"
+
+The order of work within the plan is yours: hold what must not start yet, for your own reason and with no words, and never keep it in your own log only.
+`mp sec hold add --task <id> | --step <id> | --resource <name> | --all [--mission <m>] [--after [<mission>/]<task>] [--from <time>] [--until <time>] --reason "<why>"`; `mp sec hold release <H-n>`.
+A task's hold holds its Constructor steps in its own mission (no new attempt; its reviews and decisions go on; `--mission` names the mission when the id is in several); a step's holds one queued step (a review, a repair's Architect step); a resource's every step that leases or needs it, a Secretary decision too; `--all` every step but a Secretary decision.
+It blocks new dispatches only: dispatches in flight, hand-backs, runs, delivery and landing go on; a stop is a stop, never a hold.
+It ends when released by hand, at its `--until` time, or when its `--after` task is accepted; `--from` starts it later. `mp read holds` lists them, with the steps each holds now.
+A hold the PM placed on the user's words is the PM's to release; if you release one, the command warns: tell the PM (`mp sec ask-pm`).
+A note may still carry an order of work; carry it out with a hold of your own.
+A harness's usage threshold is a hold `--all --until <the reset time>`, or one released by hand; `mp` keeps no accounting.
 
 ## Stops and confirmations
 
@@ -185,8 +213,14 @@ A repair without a change form about an exploration gives its author the turn at
 In the attempts phase, runs already in flight finish; queued attempts the new method changes or drops are withdrawn; unchanged records keep counting.
 Other repairs go to the Architect: reopen responsible work, change a card with no accepted product, or add unowned work.
 Only mechanical checks apply; nothing else loses proof; accepted tasks keep their cards and a changed card starts a new attempt carrying prior work.
+A decision that changes a card another repair changed since its Architect's card was built goes back to that Architect once, as a mechanical return.
+A repair's reopen is not counted: its work gets a fresh rework loop. A reopen that may come after other work of its repair waits for it, and that repair's tasks wait while a dependency it reopens is pending.
+A reopen never joins an open attempt: a repair's reopen of a task with an attempt queued, claimed, paused (its Constructor stopped to ask) or in review waits for that attempt to be accepted (`reopen-pinned`), then opens the next attempt with its issue (`reopen-carried`); an issue on an attempt no seat took before it was superseded or accepted as it was goes on to the next. Notice `reopen-not-carried` (PM inbox): the task was given up or left the plan in effect, nothing is reopened for it, and the repair does not read as done. Only a reopen decided by 4.4 holds the other work of its repair; one decided or counted by 4.3 runs as 4.3 ran it.
 A changed card also answers a waiting re-plan; `repair-decided` names a pass, and used-up returns go to WI-08.
 The reason appears on cards, in why and at close; repairs require an open mission.
+The Architect's note on a repair decision is recorded and printed on the cards of the tasks it added, changed or reopened, with the repair, on every later attempt too.
+An Architect that cannot decide hands back a question with no edit; it waits in the PM inbox (`repair-question`), and the PM's answer starts the repair's next Architect step with it on the card.
+`mp read repairs <mission>` shows each repair, its note, whether it was filed again (`--again`), the tasks it touched with their state, and whether it is done. A reopen decided by 4.4 reads from its records: waiting for an attempt, carried out at an attempt (done once the task is accepted there or later, also after a re-plan or a further rework), or not carried out with the reason (the repair is then not done).
 
 An exploration planned after others starts once they settle; its author must read their hand-offs and latest versions, its Crititor, Stabilizer and interpreter may, and blind executors do not see them.
 Without `after`, other explorations' results do not reach the seats.
@@ -218,9 +252,16 @@ Integration never starts early; stable mode still requires proven dependencies.
 
 ## Reviews and reworks
 
-- A Reviewer may answer an open issue `deferred`, naming an owner and a reason (notice `reviewer-issue-deferred`): the issue stays unfixed, later cards show it as "deferred to <owner>", every later Reviewer answers it again, and the close lists it as a risk. Route it with a re-plan or a repair, or send the decision to the PM (`ask-pm`).
-- A task's used-up rework loop, and a Reviewer's `needs-decision`, offer `accept-risk` when the attempt has a verified hand-back: the product is accepted as it is, its open findings quoted as risks, on the Secretary's, PM's or user's ruling (no Reviewer pass is written). It passes the same dependency gate as a Reviewer's pass: while a dependency is reopened or still in review, the decision waits, and it takes effect once that dependency is accepted again (WI-08).
-- A review's reopen of a dependency with a used-up loop also offers the Secretary, PM and user `accept-risk`: the dependency keeps its accepted product, and the reviewed integration attempt is accepted as it is, with its open findings quoted as risks and no further review round. A repair's reopen does not offer this exit (WI-08). The accepted rebuild adopts the reviewed product with its original source; a later environment renewal or kept-product rebind still runs normally.
+- A Constructor's questions (`constructor-decision`) are numbered, each `before-review` or `later`. The review of that attempt is held in next, naming the escalation, until an answer is carried out; after `replan` it stays held until the re-plan retires it. A `later` question is an open item from the hand-back and holds nothing; questions that are all `later` raise no decision (find them in `mp read open-items` and the task's digest).
+- A blocked hand-back (`cblk.<step>.<n>`, the n-th pause of an attempt): the Constructor stopped to ask, and its edits are a parked commit. Only that task waits. Each of its questions is needed before the work resumes (none is put off). An answer resumes the attempt with a new Constructor step on those edits (no rework, no re-dispatch); `replan` re-plans as usual. A third pause in one attempt is accepted and raises `constructor-paused-again` (WI-08).
+- `mp sec decide <escalation> --option answer --instructions "…" --defer <n,…>` puts those questions off: each stays an open item, and your instructions answer the rest. Put one off only when it need not be settled before the review.
+- `mp read open-items <mission>` lists open items. Answer one of yours at any time with `mp sec open-item answer <item> --answer "…"`; the answer reaches the task's next cards. One whose escalation went to the PM is the PM's.
+- A Reviewer may answer an open issue `deferred`, naming an owner and a reason (notice `reviewer-issue-deferred`, once per task and issue): the issue stays unfixed and is an open item, later cards show it as "deferred to <owner>", every later Reviewer answers it again, and the close lists it as a risk. Route it with a re-plan or a repair, or send the decision to the PM (`ask-pm`).
+- A task's used-up rework loop, and a Reviewer's `needs-decision`, offer `accept-risk` when the attempt has a verified hand-back: the product is accepted as it is, its open findings quoted as risks and each recorded as an open item (`mp read open-items`), on the Secretary's, PM's or user's ruling (no Reviewer pass is written). It passes the same dependency gate as a Reviewer's pass: while a dependency is reopened or still in review, the decision waits, and it takes effect once that dependency is accepted again (WI-08).
+- Your card for a used-up loop lists what is left open on the task (items of earlier acceptances with risk, deferrals, items it took). When what is left is a question of design, ask the Architect (`ask-architect`) or choose `replan`, not an acceptance: an acceptance with risk leaves each of its reasons open, as an open item. An item a task took that is accepted again not fixed stays open, carried; nothing happens by itself.
+- A review whose only open standards the Reviewer could not verify from what it can see (`unv.<review>`) is not sent back by itself and spends no rework: `accept-risk` accepts the verified product with each such standard among its risks, with what would be needed (each an open item to verify); `rework` sends it back with your instructions; `answer` says what is missing or where it is, and the same candidate is reviewed again. It does not offer `ask-architect`: what could not be verified is a question of evidence, not of design. A standard checked by a person is never put to the Reviewer: when its task is accepted it is an open item to verify.
+- `review-health` (only informs): after the Reviewer's filler changed, the pass share of its last 20 reviews fell under half of the share before; `mp read reviews <mission>` gives the shares per filler and per week. Nothing is held.
+- A review's reopen of a dependency with a used-up loop also offers the Secretary, PM and user `accept-risk`: the dependency keeps its accepted product, and the reviewed integration attempt is accepted as it is, with its open findings quoted as risks and no further review round. A repair's reopen does not offer this exit; its work's fresh loop offers `accept-risk` at its end, as for any attempt (WI-08). The accepted rebuild adopts the reviewed product with its original source; a later environment renewal or kept-product rebind still runs normally.
 - After landing (WI-04), supported eol/ident normalization applies only where both the blob and conversion are unchanged from the base. A changed blob or conversion needs the delivery's exact checkout bytes; otherwise the worktree is reported as inconsistent.
 - `accept-risk-waits`: the decision is kept and checked every pass until every dependency is accepted at the version the reviewed integration used. `accept-risk-moot`: no integration waits for that reopen any more, or another grant moved the dependency beyond the reviewed attempt; nothing is accepted and the decision is closed.
 - A decision that chose `replan` is routed to an Architect attempt in the same write when the decision layer is idle. Otherwise the task waits and you get notice `replan-waits` (WI-08), which says what the routing waits on and what to do. A repair that changes the task's card also answers it.
@@ -247,6 +288,7 @@ Legalization starts only on the user's request and consent through the PM; dispa
 Each recorded candidate commit is held by a ref under `refs/mission-pipeline/kept/`, so `git gc` keeps accepted work before delivery; each pass also anchors a product of an open mission that has none (one from 4.3). It is no branch or tag, never pushed, and stays after landing.
 Next sweeps killed processes' leftovers for at most 1.5 s per call.
 Between missions, `mp pm clean` removes the rest and reports space freed and what it kept and why.
+`mp read scratch` lists the worktrees, shared checkouts and scratch folders with size, owner and age; config `limits: { worktrees, freeBytes }` holds new Constructor steps (an experiment's too) while one is passed, with the reason in next (none by default; claims at the same moment can exceed a limit by a few, and the next one is held).
 Never delete under `.mission-pipeline/` by hand.
 
 ## Upgrading to 4.3

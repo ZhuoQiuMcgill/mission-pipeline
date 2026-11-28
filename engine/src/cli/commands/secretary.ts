@@ -9,9 +9,11 @@ import { seatRead } from '../../process/seat.ts';
 import { claimSecretary, generations, notAllowed, requirePm, startSecretary, writeGeneration } from '../../memory/resident.ts';
 import { summarizeWords, tagWords, tagsReportLines, taggedWords } from '../../memory/words.ts';
 import { keepNextReport, secNextSeen, storedNextReport, type SecretaryNext } from '../../process/secretary.ts';
-import { escalationsNamedIn, pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary } from '../../process/secretary.ts';
+import { escalationsNamedIn, pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary, type InboxBrief } from '../../process/secretary.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
-import { renderNext, PM_COMMANDS } from './pm.ts';
+import { deferArg, openItemAnswered, renderNext, PM_COMMANDS, reachLines } from './pm.ts';
+import { secInstruct, secWithdrawInstruction } from '../../process/pm.ts';
+import { answerOpenItem } from '../../process/openItems.ts';
 
 function P(c: RunContext) {if (c.project === null) throw usage('this command needs an initialized project'); return c.project;}
 function op(c: RunContext): string {return c.op!;}
@@ -70,7 +72,8 @@ function renderSecNext(p: ReturnType<typeof P>, r: SecretaryNext): [string, Secr
     `Unconfirmed seats: ${r.unconfirmed.map((d) => `${d.dispatch} (${d.mission}; ${d.stops.join(', ')})`).join(', ') || 'none'}`,
     ...r.notes.map((n) => `[${n.id}] PM note: ${n.text}; mp sec ack-note ${n.id}`), ...r.questions.map((q) => `[${q.id}] PM question: ${q.text}; mp sec reply ${q.id} "<answer>"`),
     ...r.replies.map((r) => `[${r.id}] PM reply to ${JSON.stringify(r.question)}${r.about ? ` (about ${r.about})` : ''}: ${r.text}${r.words ? ` (${r.words})` : ''}`),
-    ...r.decisions.map((e: any) => `[${e.mission}/${e.key}] ${e.body.by} decision in effect: ${e.body.what?.option ?? ''}`), renderNext(p, r, p.config.fillers).replaceAll('mp pm ', 'mp sec '),
+    // 4.4 (F9): what waits on the user waits for the PM to record the answer (the Secretary has no answer command)
+    ...r.decisions.map((e: any) => `[${e.mission}/${e.key}] ${e.body.by} decision in effect: ${e.body.what?.option ?? ''}`), renderNext(p, r, p.config.fillers, {resident: true}).replaceAll('mp pm ', 'mp sec '),
     ...(earlier.length > 0 ? [`Seen before (${r.since === null ? '' : `up to rev ${r.since}; `}mp sec next --all prints them): ${earlier.join('; ')}`] : []), `rev ${r.revision}`];
   return [lines.join('\n'), r];
 }
@@ -78,26 +81,55 @@ const wait: Command = {
   group: 'sec', name: ['wait'], summary: 'wait for a change after R that calls for the Secretary (not a seat’s claim, read or refused hand-back), reconciling every 30 s', usage: 'mp sec wait --since <R> [--timeout <seconds>]', flags: {since: 'string', timeout: 'string'},
   async run(c, a) {const since = Number(flagStr(a, 'since') ?? 'NaN'), timeout = Number(flagStr(a, 'timeout') ?? '300'); if (!Number.isSafeInteger(since) || since < 0 || !Number.isFinite(timeout) || timeout < 0) throw usage('--since is a nonnegative revision; --timeout is nonnegative seconds'); const r = await secWait(P(c).ctx, {since, timeout}); return ok([`rev ${r.revision}${r.timedOut ? ' (timeout)' : ''}${r.unconfirmed.length ? `; unconfirmed seats: ${r.unconfirmed.map((d) => d.dispatch).join(', ')}` : ''}`, ...r.replies.map((r) => `[${r.id}] PM reply: ${r.text}${r.words ? ` (${r.words})` : ''}`)].join('\n'), r);},
 };
+/** 4.4 (F16): a card and the warnings of its size report (a result recorded without one has none). */
+function cardWithWarnings(text: string, size: Dispatched['size'] | undefined): string {
+  return [text, ...(size?.warnings ?? []).map((w) => `\nWarning: this card's ${w.replace(/^its /, '')}`)].join('\n');
+}
 const card: Command = {
   group: 'sec', name: ['card'], summary: 'claim the current decision round and read its card', usage: 'mp sec card <escalation>', flags: {},
-  async run(c, a) {const r = await secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok(r.card, r);},
+  async run(c, a) {const r = await secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok(cardWithWarnings(r.card, r.size), r);},
   // 4.4 (F17): the recorded result names the card's leaf and hash, not its text; a retry reads the leaf
   recorded: (_c, r) => {const {card: _text, ...rest} = r.json as Dispatched; return {exitCode: r.exitCode, text: `card ${rest.cardLeaf} (sha256 ${rest.cardSha256})`, json: rest};},
   replay: (c, prior) => {
     const j = prior.json as Partial<Dispatched> | null;
     if (j === null || typeof j.card === 'string' || typeof j.cardLeaf !== 'string' || typeof j.dispatch !== 'string') return prior;
     const text = storedCard(P(c).ctx, {dispatch: j.dispatch, cardLeaf: j.cardLeaf, worktree: null, ...(typeof j.cardSha256 === 'string' ? {cardSha256: j.cardSha256} : {})});
-    return ok(text, {...j, card: text});
+    // 4.4 (F16): the size warnings the first output printed come from the recorded size report
+    return ok(cardWithWarnings(text, j.size), {...j, card: text});
   },
 };
 const read: Command = {
-  group: 'sec', name: ['read'], summary: 'record a material read against this round’s decision dispatch', usage: 'mp sec read <escalation> <material> [--page n]', flags: {page: 'string'},
+  group: 'sec', name: ['read'], summary: 'fetch one page of a material; the fetch is recorded against this round’s decision dispatch', usage: 'mp sec read <escalation> <material> [--page n]', flags: {page: 'string'},
   async run(c, a) {const p = P(c); const page = Number(flagStr(a, 'page') ?? '1'); if (!Number.isSafeInteger(page) || page < 1) throw usage('--page is a positive integer'); const r = seatRead(p.ctx, secDecisionDispatch(p.ctx, positional(a, 0, 'escalation')), positional(a, 1, 'material'), page); return ok(r.text, r);},
 };
 const decide: Command = {
-  group: 'sec', name: ['decide'], summary: 'hand the current round back with the validated decision', usage: 'mp sec decide <escalation> --option <option> --classification detail|needs-pm --reason "…" [--instructions "…"] [--extra n] [--authorization <item>] [--notice "…"] [--may-matter]',
-  flags: {option: 'string', classification: 'string', reason: 'string', instructions: 'string', extra: 'string', findings: 'list', authorization: 'string', notice: 'string', 'may-matter': 'boolean'},
-  async run(c, a) {const option = flagStr(a, 'option'); const classification = flagStr(a, 'classification') ?? (option === 'ask-pm' || option === 'ask-user' ? 'needs-pm' : 'detail'); if (!(DECISION_OPTIONS as readonly string[]).includes(option ?? '') || (classification !== 'detail' && classification !== 'needs-pm')) throw usage('choose an offered --option and --classification detail|needs-pm'); const r = await secDecide(P(c).ctx, positional(a, 0, 'escalation'), {option: option as DecisionOption, classification, reason: flagStr(a, 'reason') ?? '', instructions: flagStr(a, 'instructions') ?? '', grantExtra: Number(flagStr(a, 'extra') ?? '0'), findings: [...flagList(a, 'findings')], authorization: flagStr(a, 'authorization'), notice: flagStr(a, 'notice') ?? (classification === 'needs-pm' ? flagStr(a, 'reason') ?? '' : ''), mayMatter: flagBool(a, 'may-matter')}); if (r.kind === 'refused') throw refused('NOT_ALLOWED', r.problems.join('; '), null, {problems: r.problems}); return ok(JSON.stringify(r), r);},
+  group: 'sec', name: ['decide'], summary: 'hand the current round back with the validated decision; it is recorded and carried out in the same command, and says what happened', usage: 'mp sec decide <escalation> --option <option> --classification detail|needs-pm --reason "…" [--instructions "…"] [--extra n] [--findings <ids>] [--defer <n,…>] [--authorization <item>] [--notice "…"] [--may-matter]   (with needs-pm, --notice is the PM’s brief: the question; the options and what each leads to; the user’s words that bear on it; what you would choose and why; --defer: an answer to a Constructor’s questions puts these off, by number: each stays an open item, answered later with mp sec open-item answer; --option ask-architect with --instructions: one Architect step answers a question of design, its answer is carried out and any other reply comes back to you)',
+  flags: {option: 'string', classification: 'string', reason: 'string', instructions: 'string', extra: 'string', findings: 'list', defer: 'list', authorization: 'string', notice: 'string', 'may-matter': 'boolean'},
+  // 4.4 (F4): `defer` enters the result only when given, so a 4.3 decision's hand-back is what 4.3 handed back
+  async run(c, a) {const option = flagStr(a, 'option'); const classification = flagStr(a, 'classification') ?? (option === 'ask-pm' || option === 'ask-user' ? 'needs-pm' : 'detail'); if (!(DECISION_OPTIONS as readonly string[]).includes(option ?? '') || (classification !== 'detail' && classification !== 'needs-pm')) throw usage('choose an offered --option and --classification detail|needs-pm'); const defer = deferArg(a); const r = await secDecide(P(c).ctx, positional(a, 0, 'escalation'), {option: option as DecisionOption, classification, reason: flagStr(a, 'reason') ?? '', instructions: flagStr(a, 'instructions') ?? '', grantExtra: Number(flagStr(a, 'extra') ?? '0'), findings: [...flagList(a, 'findings')], authorization: flagStr(a, 'authorization'), notice: flagStr(a, 'notice') ?? (classification === 'needs-pm' ? flagStr(a, 'reason') ?? '' : ''), mayMatter: flagBool(a, 'may-matter'), ...(defer.length > 0 ? {defer} : {})}); if (r.kind === 'refused') throw refused('NOT_ALLOWED', r.problems.join('; '), null, {problems: r.problems});
+    // 4.4 (F9): say what happened, as the seat way says it
+    const head = r.repeated ? `Decision ${r.dispatch} was already recorded: nothing new.` : r.outcome !== 'accepted' ? `Decision ${r.dispatch} recorded but not accepted.` : `Decision ${r.dispatch} on ${positional(a, 0, 'escalation')}: ${r.decision?.text ?? 'recorded'}`;
+    return ok([head, ...r.notes].join('\n'), r);},
+};
+// 4.4 (G3): the Secretary says once what it would otherwise answer many times: an instruction of its own, within the plan
+const instruct: Command = {
+  group: 'sec', name: ['instruct'], summary: 'record an instruction of your own for one mission\'s work (a ruling within the plan, never a proof input), addressed to tasks or a repair or by its scope; --withdraw takes one of yours back',
+  usage: 'mp sec instruct <mission> <id> --text "<instruction>" [--tasks <id,...>] [--repair <R-n,...>] [--paths <pattern,...>] [--task-types <type,...>]\n       mp sec instruct --withdraw <id> --reason "<why it no longer holds>"\n       (addressed: printed on those tasks\' cards, or on the repair\'s Architect card and the cards of the tasks it added, changed or reopened, and nowhere else)',
+  flags: {text: 'string', tasks: 'list', repair: 'list', paths: 'list', 'task-types': 'list', withdraw: 'string', reason: 'string'},
+  async run(c, a) {
+    const p = P(c); const w = flagStr(a, 'withdraw');
+    if (w !== null) {const r = await secWithdrawInstruction(p.ctx, {constraint: w, reason: flagStr(a, 'reason') ?? ''}); return ok(r.already ? `Instruction ${w} was withdrawn already; nothing was written.` : `Instruction ${w} withdrawn by the Secretary; its record is kept.`, {constraint: w, withdrawn: true, already: r.already});}
+    const mission = positional(a, 0, 'mission'), id = positional(a, 1, 'instruction id');
+    const text = flagStr(a, 'text'); if (text === null || text.trim() === '') throw usage('--text: the instruction');
+    const address = {...given('tasks', flagList(a, 'tasks')), ...given('repairs', flagList(a, 'repair'))};
+    const r = await secInstruct(p.ctx, {mission, constraint: id, text, paths: flagList(a, 'paths'), taskTypes: flagList(a, 'task-types'), ...address});
+    return ok([`Instruction ${id} recorded as ${r.version}, the Secretary's: a ruling within the plan, never a proof input${r.scopeChanged ? ' (the same text: the version is kept and its scope is changed)' : ''}.`, ...reachLines('instruction', r.reach, {mission, ...address})].join('\n'), {mission, constraint: id, version: r.version, scopeChanged: r.scopeChanged, reach: r.reach});
+  },
+};
+// 4.4 (F4; G5): the Secretary answers an open item of its own (within the plan, F-3)
+const openItem: Command = {
+  group: 'sec', name: ['open-item'], summary: 'answer an open item of your own (a Constructor\'s question put off or raised as later, within the plan); the answer goes onto the task\'s next cards', usage: 'mp sec open-item answer <[mission/]item> --answer "<text>"   (mp read open-items <mission> lists them; one the PM decided is the PM\'s)', flags: {answer: 'string'},
+  async run(c, a) {if (positional(a, 0, 'answer') !== 'answer') throw usage('mp sec open-item answer <[mission/]item> --answer "<text>"'); const r = answerOpenItem(P(c).ctx, {op: op(c), ref: positional(a, 1, 'open item'), by: 'secretary', answer: flagStr(a, 'answer') ?? ''}); return ok(openItemAnswered(r), r);},
 };
 const reply: Command = {group: 'sec', name: ['reply'], summary: 'answer a PM progress question', usage: 'mp sec reply <Q-n> "<text>"', flags: {}, async run(c, a) {const id = positional(a, 0, 'question'); secReply(P(c).ctx, {op: op(c), id, text: a.positionals.slice(1).join(' ')}); return ok(`${id} answered.`, {id});}};
 const askPm: Command = {group: 'sec', name: ['ask-pm'], summary: 'ask the PM an operational question without an escalation', usage: 'mp sec ask-pm "<question>" [--about <notice or item id>]', flags: {about: 'string'}, async run(c, a) {const id = secQuestion(P(c).ctx, {op: op(c), text: a.positionals.join(' '), about: flagStr(a, 'about')}); return ok(`Question ${id} sent to the PM inbox.`, {id});}};
@@ -127,9 +159,23 @@ const note: Command = {
 };
 const question: Command = {group: 'pm', name: ['ask-secretary'], summary: 'ask for progress details on the user’s request', usage: 'mp pm ask-secretary "<question>"', flags: {}, async run(c, a) {const id = pmQuestion(P(c).ctx, {op: op(c), text: a.positionals.join(' ')}); return ok(`Question ${id} recorded.`, {id});}};
 const inbox: Command = {
-  group: 'pm', name: ['inbox'], summary: 'pending PM decisions, notices and Secretary replies', usage: 'mp pm inbox [--asked-user <item>] [--ack <item>]', flags: {'asked-user': 'string', ack: 'string'},
-  async run(c, a) {const p = P(c); const asked = flagStr(a, 'asked-user'), ack = flagStr(a, 'ack'); if (asked !== null || ack !== null) markInbox(p.ctx, {op: op(c), id: (asked ?? ack)!, asked: asked !== null}); const items = pmInbox(p.ctx); return ok(items.length ? items.map((i) => `[${i.id}] ${i.state}: ${i.text}${i.about ? ` (about ${i.about})` : ''}${i.options?.length ? ` (options: ${i.options.join(' / ')})` : ''}\n  Action: ${i.action}; resolved when ${i.resolution}`).join('\n') : 'PM inbox: empty.', {items});},
+  group: 'pm', name: ['inbox'], summary: 'pending PM decisions, each with the Secretary’s brief, PM notices and Secretary replies', usage: 'mp pm inbox [--asked-user <item>] [--ack <item>]', flags: {'asked-user': 'string', ack: 'string'},
+  async run(c, a) {const p = P(c); const asked = flagStr(a, 'asked-user'), ack = flagStr(a, 'ack'); if (asked !== null || ack !== null) markInbox(p.ctx, {op: op(c), id: (asked ?? ack)!, asked: asked !== null}); const items = pmInbox(p.ctx); return ok(items.length ? items.map((i) => [`[${i.id}] ${i.state}: ${i.text}${i.about ? ` (about ${i.about})` : ''}${i.options?.length && i.brief === undefined ? ` (options: ${i.options.join(' / ')})` : ''}`, ...(i.brief !== undefined ? briefLines(i.brief) : []), `  Action: ${i.action}; resolved when ${i.resolution}`].join('\n')).join('\n') : 'PM inbox: empty.', {items});},
 };
+
+/** 4.4 (G2): a decision item's brief, so the PM decides from the item and the user's words. */
+function briefLines(b: InboxBrief): string[] {
+  const indent = (s: string): string => s.trim().split('\n').join('\n    ');
+  return [
+    ...(b.notice.trim() !== '' ? [`  ${b.by === 'program' ? 'The program' : 'The Secretary'}'s notice:\n    ${indent(b.notice)}`] : []),
+    ...(b.reason.trim() !== '' ? [`  Its reason: ${indent(b.reason)}`] : []),
+    ...(b.handedOver !== undefined ? [`  Handed to you by the flow: ${indent(b.handedOver)}`] : []),
+    ...(b.options.length > 0 ? ['  Options:', ...b.options.map((o) => `    ${o.id}: ${o.outcome}`)] : []),
+    `  Rests on: items ${b.items.join(', ') || 'none named'}; words ${b.words.join(', ') || 'none named'}`,
+    ...(b.revised ?? []).map((r) => `  The decision cites ${r.line} as ${r.decided}; ${r.current === null ? 'it is withdrawn since' : `it is ${r.current} now`} (the words of both are named above)`),
+    ...(b.reasons.length > 0 ? [`  The escalation's reasons, shortened (in full: ${b.more}):`, ...b.reasons.map((r) => `    - ${r}`)] : []),
+  ];
+}
 // 4.4 (G7): tag and retag take --supersedes too; what rests on the changed entries and is not named is kept and listed
 const tag: Command = {
   group: 'pm', name: ['tag'], summary: 'give an untyped legacy entry its first tags, or name the tags an entry supersedes (its own tags unchanged)', usage: 'mp pm tag W-n --tag <type[@mission][:"quote"]> … [--supersedes W-m#k,…] [--withdraw-items <ids>] [--keep-items <ids>]\n       mp pm tag W-n --supersedes W-m#k,… [--withdraw-items <ids>] [--keep-items <ids>]   (an entry that has its tags)', flags: {tag: 'repeat', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list'},
@@ -148,4 +194,4 @@ const summary: Command = {
 };
 
 export const RESIDENT_PM_COMMANDS: readonly Command[] = [secretary, note, question, pmReplyCommand, inbox, tag, retag, summary];
-export const SEC_COMMANDS: readonly Command[] = [session, handbook, next, wait, card, read, decide, askPm, reply, ack, ...['dispatch', 'release', 'drain', 'renew', 'alerts', 'ack'].map((name) => ({...PM_COMMANDS.find((c) => c.name[0] === name)!, group: 'sec' as const, usage: PM_COMMANDS.find((c) => c.name[0] === name)!.usage.replaceAll('mp pm ', 'mp sec ')}))];
+export const SEC_COMMANDS: readonly Command[] = [session, handbook, next, wait, card, read, decide, instruct, openItem, askPm, reply, ack, ...['dispatch', 'release', 'drain', 'renew', 'alerts', 'ack'].map((name) => ({...PM_COMMANDS.find((c) => c.name[0] === name)!, group: 'sec' as const, usage: PM_COMMANDS.find((c) => c.name[0] === name)!.usage.replaceAll('mp pm ', 'mp sec ')}))];

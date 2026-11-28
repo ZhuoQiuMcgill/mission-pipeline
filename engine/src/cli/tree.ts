@@ -44,6 +44,7 @@ import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
 import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
+import { acceptanceSummary, riskRecord, withRiskText, type RiskRecord } from '../flow/riskItems.ts';
 import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverBy, waiverEnds, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
 import { pmNotes } from '../process/secretary.ts';
@@ -223,6 +224,11 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       flows.push({ mission: r.mission, line: r.line, event: r.event, key: r.key, body: parse(r.body) ?? {}, rev: Number(r.revision) });
     }
 
+    // 4.4 (G5): what became of the risks an acceptance with risk took on (its open items), per mission
+    // (p10-4): the items the acceptance created or carried, by the one function status and mp read items use
+    const riskRecords = new Map<string, RiskRecord>();
+    const riskOf = (m: string): RiskRecord => riskRecords.get(m) ?? (riskRecords.set(m, riskRecord(flows.filter((f) => f.mission === m).map((f) => ({ revision: f.rev, line: f.line, event: f.event, key: f.key, body: f.body })))), riskRecords.get(m)!);
+    const riskLine = (f: FlowRow): string => `${withRiskText(riskOf(f.mission), acceptanceSummary(riskOf(f.mission), f.line, f.event, f.key))} (mp read open-items ${f.mission})`;
     const decisionHistory = new Map<string, string[]>();
     const decisionRev = new Map<string, number>();
     const byKey = new Map<string, FlowRow>();
@@ -268,7 +274,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       else if (f.event === 'constraint') {
         const id = String(b['version'] ?? f.key);
         const n = node('constraint', id, f.mission, f.rev, `${String(b['kind'] ?? '')}: ${clip(String(b['text'] ?? ''), 120)}`);
-        n.by = pmBy.get(n.key) ?? 'the PM via `mp pm constraint add`';
+        // 4.4 (G3): the author of the version (a 4.3 one is the PM's)
+        n.by = b['author'] === 'secretary' ? 'the Secretary via `mp sec instruct`' : pmBy.get(n.key) ?? 'the PM via `mp pm constraint add`';
         n.state = 'recorded';
         n.leaves.push(...leafOf(f.rev, /requirements\.md#|constraints\.md#/));
         latestConstraint.set(String(b['line'] ?? ''), n);
@@ -283,7 +290,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         // a 4.3 tagging wrote the words into its fixed reason only ("withdrawn with words tags by W-n")
         const words = typeof b['words'] === 'string' ? b['words'] : /^withdrawn with words tags by (W-[0-9]+)$/.exec(String(b['reason'] ?? ''))?.[1];
         if (n !== undefined) {
-          n.state = `withdrawn${words !== undefined ? ` on ${words}` : ''}`;
+          n.state = `withdrawn${words !== undefined ? ` on ${words}` : b['by'] === 'secretary' ? ' by the Secretary' : ''}`;
           if (words !== undefined) {
             node('words', words, null, 0);
             edge(n.key, `words:${words}`, 'was withdrawn on');
@@ -412,7 +419,9 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       edge(n.key, `task:${String(row['task'])}`, 'claimed');
       const cand = doc?.['candidate']?.['commit'];
       if (typeof cand === 'string') {
-        const c = node('commit', cand, String(row['mission']), Number(row['claimed_rev']), `the candidate collected from dispatch ${d}`);
+        // 4.4 (F4): a Constructor that stopped to ask handed in a parked commit, not a candidate
+        const parked = doc?.['fields']?.['blocked'] === true;
+        const c = node('commit', cand, String(row['mission']), Number(row['claimed_rev']), parked ? `the parked commit of dispatch ${d} (its edits when it stopped to ask; not a product)` : `the candidate collected from dispatch ${d}`);
         edge(c.key, n.key, 'collected from');
       }
     }
@@ -478,7 +487,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
           if (n !== undefined) {
             const dec = (b['decision'] ?? null) as Json | null;
             // 4.1.3 (E-1): accepted by a decision with its risks: whose decision, and the open findings it took on
-            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : dec['by'] === 'pm' ? 'the PM' : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${((b['risks'] ?? []) as unknown[]).length} open finding(s) on the risk list`);
+            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? `the user${typeof dec['words'] === 'string' ? ` (${dec['words']})` : ''}` : dec['by'] === 'pm' ? 'the PM' : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${riskLine(f)}`);
             else addCheck(n, `accepted (${String(b['judgment'] ?? '')})`);
             // the acceptance names its judgment; the judgment names its Reviewer dispatch and the runs it cites
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
@@ -491,7 +500,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         } else if (f.event === 'rebound' && typeof b['product'] === 'string') {
           const n = nodes.get(objKey(b['product']));
           if (n !== undefined) {
-            addCheck(n, `accepted (${String(b['judgment'] ?? '')}${b['how'] === 'carried' ? ', the judgment carried over' : ''})`);
+            const dec = (b['decision'] ?? null) as Json | null;
+            // 4.4 (G5): a re-bound version accepted with its risk (#57) says so, as an acceptance with risk does
+            if (dec !== null) addCheck(n, `accepted with its risk by ${dec['by'] === 'user' ? 'the user' : dec['by'] === 'pm' ? 'the PM' : 'the Secretary'} on ${String(dec['escalation'] ?? '')} (${String(b['judgment'] ?? '')}; no Reviewer passed it): ${riskLine(f)}`);
+            else addCheck(n, `accepted (${String(b['judgment'] ?? '')}${b['how'] === 'carried' ? ', the judgment carried over' : ''})`);
             if (typeof b['judgment'] === 'string') edge(n.key, `judgment:${b['judgment']}`, 'accepted by');
           }
         }

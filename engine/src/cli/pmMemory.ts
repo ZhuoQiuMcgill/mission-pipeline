@@ -3,11 +3,13 @@ import { pmInbox, unconfirmedSeats } from '../process/secretary.ts';
 import type { ProcessContext } from '../process/context.ts';
 
 /**
- * 4.4 (G7): whether a constraint takes a line in layer 1. Today one case takes none: every mission
- * its scope names is closed (a constraint with no mission applies to every mission, open or to come).
- * The author and the address of a constraint arrive later; their cases are added here.
+ * 4.4 (G7, G3): whether a constraint takes a line in layer 1. Of constraints, layer 1 lists the PM's that
+ * carry no address: the Secretary's instructions, addressed instructions, and constraints whose missions
+ * are all closed take none (a constraint with no mission applies to every mission, open or to come).
  */
-export function constraintTakesLayer1Line(c: {readonly scope?: {readonly mission?: string | null} | null}, closed: ReadonlySet<string>): boolean {
+export function constraintTakesLayer1Line(c: {readonly scope?: {readonly mission?: string | null; readonly tasks?: readonly string[]; readonly repairs?: readonly string[]} | null; readonly author?: string; readonly kind?: string}, closed: ReadonlySet<string>): boolean {
+  if (c.author === 'secretary') return false;
+  if (c.kind === 'instruction' && ((c.scope?.tasks?.length ?? 0) > 0 || (c.scope?.repairs?.length ?? 0) > 0)) return false;
   const missions = c.scope?.mission == null ? [] : [c.scope.mission];
   return missions.length === 0 || !missions.every((m) => closed.has(m));
 }
@@ -54,7 +56,7 @@ export function pmLayer1(ctx: ProcessContext): string {
     if (e.line === 'requirements' && e.event === 'constraint' && !seen.has(b.line)) {
       seen.add(b.line);
       const scope = scopes.get(b.line) ?? b.scope;
-      if (!withdrawn.has(b.line) && constraintTakesLayer1Line({scope}, closed)) projectLines.push(`[${b.line}] constraint${scope?.mission ? ` @${scope.mission}` : ' project'}: ${short(b.text)}${mark(b.line)}`);
+      if (!withdrawn.has(b.line) && constraintTakesLayer1Line({scope, author: b.author, kind: b.kind}, closed)) projectLines.push(`[${b.line}] constraint${scope?.mission ? ` @${scope.mission}` : ' project'}: ${short(b.text)}${mark(b.line)}`);
     } else if (open && e.line === 'requirements' && e.event === 'item' && !withdrawn.has(b.line) && contested.get(b.line) !== true && !seen.has(b.line)) {
       seen.add(b.line); missionLines.push({text: `[${b.line}] @${e.mission} requirement ${b.type}: ${short(b.text)}${mark(b.line)}`, rev: e.revision});
     } else if (open && e.line === 'plan' && e.event === 'effective' && !seen.has(`plan:${e.mission}`)) {

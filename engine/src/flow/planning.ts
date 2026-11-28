@@ -1,6 +1,6 @@
 import { reviewInputVersions, objectConstraints, boundObjectConstraints, changedPlanningInputs, planningContext, type PlanningInputs, withdrawnPlanReason, standardLine } from '../seat/cards/inputs.ts';
 export { standardLine } from '../seat/cards/inputs.ts';
-import { productionDisputed, planningConstraints } from '../seat/cards/dynamic.ts';
+import { productionDisputed, planningConstraints, addressedForPlanning, addressedIndexOf, planReviewInstructions } from '../seat/cards/dynamic.ts';
 // The decision layer (design 3.1–3.10): PM plan → Calibrator ① → Architect (decomposition) →
 // program mechanical checks → feasibility review → Calibrator ② → the plan's tasks released;
 // Secretary escalations on the way; the plan grows by rounds.
@@ -42,7 +42,7 @@ import { productionDisputed, planningConstraints } from '../seat/cards/dynamic.t
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId, ObjectVersionId } from '../common/ids.ts';
 import { canonicalJson } from '../common/hash.ts';
 import type { BaseRecord, JudgmentRecord, ObjectVersionRecord, UserWordsRecord } from '../common/records.ts';
-import { PREVIOUS_PLAN_MATERIAL, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
+import { OPEN_ITEMS_LISTED, PREVIOUS_PLAN_MATERIAL, manyStandards, previousPlanText, type ArchitectDecomposeCard, type ArchitectFeasibilityCard, type ArchitectFeasibilityResult, type ProjectCommandsT } from '../seat/cards/architect.ts';
 import { normalizeCommand } from '../common/fullSuite.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
@@ -99,6 +99,7 @@ import type { FlowEventInput, FlowPorts } from './ports.ts';
 import { currentItems, currentConstraints, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
+import { itemIds, riskItemsOf } from './riskItems.ts';
 import { currentSettle, settledArtifactProven } from './exploration/step.ts';
 import { planReviewsWaiver, waiverLabel, type PlanReviewsWaiver } from './waivers.ts';
 
@@ -798,7 +799,8 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
       ? `Re-check the PM plan in effect (${b.plan}, unchanged) against the requirement items as they are now (batch ${recheck.batch}): judge whether each focus element still holds against the changed items and the user's words; report every item the plan now leaves out or goes against; ask what only the user can decide.`
       : "Audit the direction of this PM plan batch against the user's words; report every finding; ask what only the user can decide.";
   const card: Calibrator1Card = {
-    ...cardBase(ctx, task, { duties, constraints: constraints.list }),
+    // 4.4 (G3, F1): with the instructions whose task types name "pm-plan" (never a proof input)
+    ...cardBase(ctx, task, { duties, constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'pm-plan')] }),
     seat: 'calibrator-1',
     target: b.plan,
     review: 'calibrator-1',
@@ -1030,12 +1032,16 @@ async function decompositionStep(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc): 
     const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'architect' });
     // tasks repairs added stay outside the integration rule when a revision carries them (4.1.2, D-10)
     const amended = amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body));
-    mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }), fullSuite: ctx.ports.project?.fullSuite ?? [], ...(amended.size > 0 ? { amended } : {}) });
+    // 4.4 (G5): the open items a task may take (read only when a task names one)
+    const named = plan.tasks.some((t) => (t.openItems ?? []).length > 0);
+    mc = await mechanicalCheck({ pmPlan: doc, plan, unsettled: ex.unsettled, hasSymbol: (file, symbol) => ctx.ports.scheduler.findSymbol({ snapshot: snap.path, file, symbol }), fullSuite: ctx.ports.project?.fullSuite ?? [], ...(amended.size > 0 ? { amended } : {}), ...(named ? { openItems: itemIds(await ctx.ports.ledger.events({ mission: ctx.mission })) } : {}) });
     await commit(ctx, `flow:mechanical:${ctx.mission}:${dplan}`, { events: [ev(ctx, PLAN_LINE, 'mechanical-check', dplan, mc)] });
     // before its reviews, the PM learns which work the plan would restart once in effect (told once, with the check)
 
   }
   if (mc.ok) await restartNotice(ctx, dplan, plan);
+  // 4.4 (F10): a warning, not a refusal: the PM is told once per plan version which tasks carry many standards
+  if (mc.ok) await manyStandardsNotice(ctx, dplan, plan);
   if (!mc.ok) {
     await planReturn(ctx, b, a, dplan, 'mechanical', { mechanicalFailures: mc.failures }, `mech:${shortHash([...mc.failures].sort())}`, 'mechanical');
     return;
@@ -1473,6 +1479,10 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   const previousWaiver = revision && a.previous !== null ? await planReviewsWaiver(ctx, a.previous) : null;
   const nextWaiver = await planReviewsWaiver(ctx, dplan);
   const feasReport = revision ? await returnedFeasibility(ctx, a) : null;
+  // 4.4 (G5): the open items no task of the plan it revises takes, so a re-plan can give them to a task
+  const taken = new Set((previous?.plan.tasks ?? []).flatMap((t) => t.openItems ?? []));
+  const left = riskItemsOf(await ctx.ports.ledger.events({ mission: ctx.mission })).filter((i) => i.closed === null && !taken.has(i.id));
+  const listed = left.slice(0, OPEN_ITEMS_LISTED).map((i) => ({ id: i.id, kind: i.kind, text: i.text.length > 200 ? `${i.text.slice(0, 199)}…` : i.text, from: `task ${i.task}, attempt ${i.attempt}` }));
   const card: ArchitectDecomposeCard = {
     ...cardBase(ctx, task, {
       duties: revision
@@ -1481,6 +1491,8 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
       // 4.1.2 (item 7): the project constraints that apply, so the plan respects them from the start
       constraints: planningConstraints(await currentConstraints(ctx), ctx.mission),
     }),
+    // 4.4 (G3, F1): the instructions addressed to tasks or repairs, as an index (each reaches only what it names)
+    ...addressedIndexOf(addressedForPlanning(await currentConstraints(ctx), ctx.mission).index),
     seat: 'architect-decompose',
     workspace: { snapshot: snap.path, writablePaths: [] },
     pmPlan: {
@@ -1508,6 +1520,8 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
     },
     projectCommands: projectCommandsOf(ctx),
     ...(previousWaiver !== null || nextWaiver !== null ? { planReviews: { previous: previousWaiver === null ? null : waiverLabel(previousWaiver), next: nextWaiver === null ? null : waiverLabel(nextWaiver) } } : {}),
+    ...(listed.length > 0 ? { openItems: listed } : {}),
+    ...(left.length > listed.length ? { openItemsMore: left.length - listed.length } : {}),
   };
   // the elements tab must not be empty (a plan with only explorations has nothing to decompose yet)
   if (card.pmPlan.elements.length === 0) return;
@@ -1536,7 +1550,8 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
   // 4.4 (F3): the report of the review that returned the plan this one revises (optional)
   const report = await returnedFeasibility(ctx, a);
   const card: ArchitectFeasibilityCard = {
-    ...cardBase(ctx, task, { constraints: constraints.list, duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
+    // 4.4 (G3, F1): with the instructions whose task types name "detailed-plan" (never a proof input)
+    ...cardBase(ctx, task, { constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'detailed-plan')], duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
     seat: 'architect-feasibility',
     workspace: { snapshot: snap.path, writablePaths: [] },
     target: dplan,
@@ -1546,10 +1561,37 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
     earlierFindings: [...a.feasibilityFindings],
     binding: binding(ctx, { judgment: `j.${task}`, constraints: constraints.checks, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'feasibility', b.plan) }),
     ...attach([report]),
+    // 4.4 (F10): the card names the tasks with more standards than this
+    standardsWarn: standardsWarnOf(ctx),
   };
   await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });
   ctx.progressed = true;
+}
+
+/** 4.4 (F10): the standards on a task above which the feasibility reviewer and the PM are told (config `standardsWarn`, default 7). */
+export const STANDARDS_WARN_DEFAULT = 7;
+function standardsWarnOf(ctx: FlowCtx): number {
+  return ctx.ports.project?.standardsWarn ?? STANDARDS_WARN_DEFAULT;
+}
+
+/**
+ * 4.4 (F10, P10): rework rises with the number of standards on a task. A plan whose tasks
+ * carry more than `standardsWarn` tells the PM once per plan version (a notice, idempotent by its key);
+ * nothing is refused or held.
+ */
+async function manyStandardsNotice(ctx: FlowCtx, dplan: string, plan: DetailedPlanDoc): Promise<void> {
+  const limit = standardsWarnOf(ctx);
+  const many = manyStandards(plan, limit);
+  if (many.length === 0) return;
+  await notify(ctx, {
+    category: 'many-standards',
+    wi: null,
+    key: dplan,
+    trigger: `detailed plan ${dplan} has tasks with more than ${limit} standards (standardsWarn): ${many.join(', ')}`,
+    defaultAction: 'nothing is held or refused; rework rises with the number of standards on a task, so a plan revision with the user may split or tighten them',
+    detail: { dplan, limit, tasks: plan.tasks.filter((t) => t.standards.length > limit).map((t) => ({ task: t.id, standards: t.standards.length })) },
+  });
 }
 
 async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: AttemptBody, dplan: string, plan: DetailedPlanDoc, task: string, forceFull: boolean): Promise<void> {
@@ -1581,7 +1623,7 @@ async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a
     material(ctx, 'authorizations', 'Authorizations (verbatim)', renderItems(items.filter((i) => i.type === 'authorization')) || '(none)', true, 'authorizations'),
   ];
   const card: Calibrator2Card = {
-    ...cardBase(ctx, task, { constraints: constraints.list, duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
+    ...cardBase(ctx, task, { constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'detailed-plan')], duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
     seat: 'calibrator-2',
     target: dplan,
     review: 'calibrator-2',

@@ -177,7 +177,7 @@ function verdictOn(card: Pick<StabilizerCard, 'findings' | 'earlier' | 'pendingD
 }
 
 function stabilizerProblems(card: StabilizerCard, r: StabilizerResult, read: ReadonlySet<string> | undefined): string[] {
-  const out = unreadMustRead(card.materials, read).map((k) => `must-read page ${k} was not read`);
+  const out = unreadMustRead(card.materials, read).map((k) => `must-read page ${k} was not fetched`);
   const ids = card.findings.map((f) => f.id);
   for (const id of ids) {
     const n = r.findings.filter((x) => x.finding === id).length;

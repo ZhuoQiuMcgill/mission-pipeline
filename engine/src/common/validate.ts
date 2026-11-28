@@ -73,6 +73,9 @@ function scope(r: Obj, k: string, nullable: boolean): void {
   strings(v, 'paths');
   strings(v, 'taskTypes');
   if (v['mission'] !== undefined && missionIdProblem(v['mission']) !== null) fail(String(r.kind), 'scope.mission is not a mission id');
+  // 4.4 (G3): an address names tasks or repairs of one mission
+  for (const k of ['tasks', 'repairs']) if (v[k] !== undefined) strings(v, k);
+  if ((v['tasks'] !== undefined || v['repairs'] !== undefined) && v['mission'] === undefined) fail(String(r.kind), 'an address (scope.tasks, scope.repairs) is bound to scope.mission');
 }
 
 /** 4.1 §6.5: an environment identity's parts: bounded strings, at most 64 version commands. */

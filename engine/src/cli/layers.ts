@@ -42,8 +42,8 @@
 //     next step follows the flow's own rules: waiting on the user as `mp pm next` lists it →
 //     `mp pm answer`; a decision to carry out (decisionFor) → the next `mp pm next`; its Secretary
 //     in flight → wait for its hand-back; else the Secretary's step;
-//   - a step held by a stop, a closed mission, the git-writes hold or a lease (what `mp pm next`
-//     computes), a dispatch in flight under a stop, a hand-back that arrived after a stop, a
+//   - a step held by a stop, a closed mission, the git-writes hold, a lease, a hold or a disk limit (4.4,
+//     G6: what `mp pm next` computes), a review that waits for its Constructor's questions (4.4, F4), a dispatch in flight under a stop, a hand-back that arrived after a stop, a
 //     dispatch in flight longer than IN_FLIGHT_BLOCKED_MS without a hand-back (WI-28).
 // One subtask with several reasons is one blocked entry. The labels recomputing is a project
 // line, not a subtask.
@@ -51,12 +51,15 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof } from '../evaluator/index.ts';
 import { flowCtx } from '../flow/context.ts';
-import { bySeat, taskLineage } from '../flow/execution.ts';
+import { bySeat, currentRiskEscalation, taskLineage } from '../flow/execution.ts';
+import { OPEN_ITEMS_LINE } from '../flow/openItems.ts';
+import { acceptanceOf, riskRecord, withRiskText, type RiskRecord } from '../flow/riskItems.ts';
 import { latestEffective } from '../flow/planning.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import type { SettleRecord } from '../flow/exploration/machine.ts';
 import { PLAN_LINE, PM_PLAN_EFFECTIVE, REQUIREMENTS_LINE, SECRETARY_LINE, explorationLine, taskLine } from '../flow/plandoc.ts';
 import { decisionFor } from '../flow/secretary.ts';
+import { askTask } from '../flow/architectAsk.ts';
 import { activeStopScopes, stopCovers, type Db } from '../memory/index.ts';
 import { purposeOf, readSteps, type ProcessContext } from '../process/index.ts';
 import { age, clip } from './render.ts';
@@ -167,7 +170,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     const flows: Flow[] = (
       db.stmt('SELECT mission, line, event, key, body, revision FROM flow_events ORDER BY revision').all() as Array<{ mission: string; line: string; event: string; key: string; body: string; revision: number }>
     )
-      .filter((r) => r.line === REQUIREMENTS_LINE || r.line === PLAN_LINE || r.line === SECRETARY_LINE || r.line.startsWith('task:') || r.line.startsWith('exploration:'))
+      .filter((r) => r.line === REQUIREMENTS_LINE || r.line === PLAN_LINE || r.line === SECRETARY_LINE || r.line === OPEN_ITEMS_LINE || r.line.startsWith('task:') || r.line.startsWith('exploration:'))
       .map((r) => ({ mission: r.mission, line: r.line, event: r.event, key: r.key, body: parse(r.body), rev: Number(r.revision) }));
     const steps: Step[] = (db.stmt('SELECT task, lineage, mission, card, state, queued_rev, queued_at FROM tasks ORDER BY queued_rev').all() as Array<Json>).map((r) => ({
       task: String(r['task']),
@@ -267,6 +270,16 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     return true;
   };
 
+  // 4.4 (G5): an acceptance with risk is told apart from one after a pass, with what it left still open
+  // (p10-4): the items its current acceptance created or carried, by the one function the tree and mp read items use
+  const riskByMission = new Map<string, RiskRecord>();
+  const risksOf = (m: string): RiskRecord => riskByMission.get(m) ?? (riskByMission.set(m, riskRecord(raw.flows.filter((f) => f.mission === m).map((f) => ({ revision: f.rev, line: f.line, event: f.event, key: f.key, body: f.body })))), riskByMission.get(m)!);
+  const withRisk = (m: string, id: string, fs: readonly Flow[], label: string): string => {
+    const esc = currentRiskEscalation(fs.map((f) => ({ revision: f.rev, event: f.event, key: f.key, body: f.body })));
+    if (esc === null || !label.startsWith('accepted')) return label;
+    const r = risksOf(m);
+    return `accepted with risk (${withRiskText(r, acceptanceOf(r, id, esc))})${label.slice('accepted'.length)}`;
+  };
   for (const [m, ids] of taskIds) {
     for (const id of ids) {
       const fs = flowsByLine.get(`${m}\n${taskLine(id)}`) ?? [];
@@ -277,7 +290,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       stepsOf.set(k, steps);
       for (const s of steps) owner.set(s.task, k);
       const last = fs.at(-1);
-      let label = last === undefined ? 'planned' : (TASK_LABEL[last.event]?.(last.body) ?? last.event);
+      let label = last === undefined ? 'planned' : withRisk(m, id, fs, TASK_LABEL[last.event]?.(last.body) ?? last.event);
       let rev = last?.rev ?? 0;
       // an attempt that a rework started says so (a Reviewer's rejection is a change of state)
       const attempt = Math.max(0, ...fs.map((f) => Number(f.body['k'] ?? 0)).filter((n) => Number.isFinite(n)));
@@ -395,6 +408,8 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
   const sec = (m: string, event: string, k: string): Flow | undefined => (flowsByLine.get(`${m}\n${SECRETARY_LINE}`) ?? []).find((f) => f.event === event && f.key === k);
   /** The Secretary steps of escalations the flows no longer consume: no block comes from them. */
   const orphaned = new Set<string>();
+  // 4.4 (G1): the Architect step of an ask: the PM's round, or the Secretary's (its retries so far)
+  const askStep = (m: string, id: string, d: { readonly by: string; readonly answerRound?: number }): string => askTask(m, d.by === 'pm' ? { escalation: id, by: 'pm', round: d.answerRound ?? 1 } : { escalation: id, by: 'secretary', round: (flowsByLine.get(`${m}\n${SECRETARY_LINE}`) ?? []).filter((f) => f.event === 'secretary-retry' && f.body['id'] === id).length });
   for (const e of escalations) {
     const source = String(e.body['source'] ?? '');
     const subject = String(e.body['subject'] ?? '');
@@ -413,16 +428,27 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       if (typeof e.body['task'] === 'string') owner.set(e.body['task'], k);
     }
     const id = String(e.body['id'] ?? e.key);
-    const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user');
-    const onUser = waiting.has(`${e.mission}\n${id}`);
-    const deciding = steps.inFlight.find((d) => d.step === e.body['task']);
-    const next = onUser
-      ? `ask the user; then mp pm answer ${e.mission} ${id} --option <${options.join('|')}> --words W-<n>`
-      : (await decisionFor(flowCtx(ports, e.mission as MissionId), id)) !== null
-        ? 'the decision is carried out on the next mp pm next'
-        : deciding !== undefined
-          ? `the Secretary is deciding (${deciding.dispatch} in flight): wait for its hand-back`
-          : 'the Secretary decides: dispatch its step (mp pm next)';
+    // the user's own answer: 4.4 (G1) the user does not ask the Architect (the PM does, --by pm)
+    const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user' && o !== 'ask-architect');
+    // the Secretary step of the escalation's current round (4.4, G1, review p11-r2-3: one a fresh round replaced is not deciding)
+    const roundTask = (flowsByLine.get(`${e.mission}\n${SECRETARY_LINE}`) ?? []).filter((f) => f.event === 'secretary-retry' && f.body['id'] === id).at(-1)?.body['task'] ?? e.body['task'];
+    const deciding = steps.inFlight.find((d) => d.step === roundTask);
+    // 4.4 (G1, review p11-8): the consultation in effect first: an ask of the Architect waits for its step, named with
+    // where it stands, also after an earlier hand-up to the PM (readSteps lists no pending ask as waiting on the user)
+    const current = waiting.has(`${e.mission}\n${id}`) ? null : await decisionFor(flowCtx(ports, e.mission as MissionId), id);
+    const ask = current?.option === 'ask-architect' ? askStep(e.mission, id, current) : null;
+    const onUser = ask === null && waiting.has(`${e.mission}\n${id}`);
+    const decided = onUser ? null : current;
+    const answering = ask === null ? undefined : steps.inFlight.find((d) => d.step === ask);
+    const next = ask !== null
+      ? `the Architect answers it: step ${ask} ${answering !== undefined ? `(${answering.dispatch} in flight): wait for its hand-back` : steps.ready.some((r) => r.step === ask) ? 'is ready: dispatch it (mp pm next)' : 'is queued by the next pass (mp pm next)'}`
+      : onUser
+        ? `ask the user; then mp pm answer ${e.mission} ${id} --option <${options.join('|')}> --words W-<n>`
+        : decided !== null
+          ? 'the decision is carried out on the next mp pm next'
+          : deciding !== undefined
+            ? `the Secretary is deciding (${deciding.dispatch} in flight): wait for its hand-back`
+            : 'the Secretary decides: dispatch its step (mp pm next)';
     block(k, `escalation ${id} is open (${source}: ${clip(String(e.body['summary'] ?? ''), 120)})`, next, ESCALATION_WI[source] ?? (onUser ? 'WI-24' : null));
   }
   // steps held (what mp pm next computes)
@@ -435,15 +461,24 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       block(k, h.why, 'the PM takes a WI-34 exit with the user\'s words: the same PM plan resubmitted, or a changed one', h.wi);
       continue;
     }
-    const next = h.why.startsWith('a stop')
-      ? 'the stop is narrowed or released with the user (mp pm stop-narrow / mp pm stop-release)'
-      : h.why.startsWith('mission')
-        ? `open the mission again if the user wants its production to go on (mp pm mission open ${h.mission})`
-        : h.why.startsWith('git writes')
-          ? 'confirm this copy is the one in use (mp pm confirm-copy, WI-31)'
-          : h.why.startsWith('exploration')
-            ? 'it starts by itself once the explorations it waits for settle (their own blocks are listed here)'
-            : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
+    // 4.4 (G6, F6): a hold, or a disk limit passed; a hold beside an earlier reason (review p5-8) adds its own next step
+    const byHold = h.holds !== undefined ? `it waits while ${h.holds.map((x) => x.id).join(' and ')} hold${h.holds.length === 1 ? 's' : ''} it (mp read holds says how each ends)` : null;
+    const reason = h.why.startsWith('hold ')
+      ? null
+      : h.diskLimit === true
+        ? 'free disk space or worktrees (mp read scratch lists them; mp pm clean removes what is over), or change limits in config.json'
+        : h.why.startsWith('a stop')
+          ? 'the stop is narrowed or released with the user (mp pm stop-narrow / mp pm stop-release)'
+          : h.why.startsWith('mission')
+            ? `open the mission again if the user wants its production to go on (mp pm mission open ${h.mission})`
+            : h.why.startsWith('git writes')
+              ? 'confirm this copy is the one in use (mp pm confirm-copy, WI-31)'
+              : h.why.startsWith('exploration')
+                ? 'it starts by itself once the explorations it waits for settle (their own blocks are listed here)'
+                : h.why.startsWith('the review waits')
+                  ? 'it is ready once the escalation it names is carried out as an answer (the Secretary decides it, or the PM answers it: mp pm answer); one carried out without an answer waits until the re-plan or the next attempt retires the review'
+                  : 'it starts once the resource is free; a lease held by a released seat goes with mp pm release <id> --ended (WI-28)';
+    const next = [reason, byHold].filter((x): x is string => x !== null).join('; ');
     block(ofStep(h.step, String(h.mission)), `${h.step} (${h.seat}) is held: ${h.why}`, next, h.wi);
   }
   // dispatches: in flight under a stop, in flight too long, a hand-back after a stop

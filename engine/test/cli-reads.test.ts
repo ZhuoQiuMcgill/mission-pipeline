@@ -77,7 +77,7 @@ describe('mp read on an exploration with a Stabilizer round', () => {
     const st = await cli(p.dir, ['read', 'status', '--json', '--no-mark']);
     assert.equal(st.json.result.missions[0].mission, M);
     const d = await cli(p.dir, ['read', 'show', 'dispatch', 'D-1']);
-    assert.match(d.out, /material pages read: /);
+    assert.match(d.out, /material pages fetched: /);
     assert.equal((await cli(p.dir, ['read', 'show', 'dispatch', 'D-99'])).code, 3);
   });
 });
