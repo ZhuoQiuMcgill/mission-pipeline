@@ -408,7 +408,8 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       const specs = line.filter((x) => x.event === 'spec');
       const first = specs.find((x) => x.revision > decidedRev);
       const carries = (x: FlowEvent): boolean => { const b = x.body as { dplan?: string; hash?: string; repair?: string }; return (b.repair === undefined || b.repair === r.id) && ((hash !== null && b.hash === hash) || (x === first && b.dplan === body!.dplan)); };
-      const credit = creditOf(line, (k) => { const sp = specOfAttempt(line, k); return sp !== undefined && carries(sp); });
+      // (closing confirmation C-3) an attempt under a card laid before this repair was decided is never this repair's
+      const credit = creditOf(line, (k) => { const sp = specOfAttempt(line, k); return sp !== undefined && sp.revision > decidedRev && carries(sp); });
       const from = specs.filter((x) => x.revision > decidedRev && carries(x)).at(-1)?.revision ?? decidedRev;
       const replacedBy = specs.filter((x) => x.revision > from && !carries(x)).map((x) => cardSourceOf(s.events, x, t, r.id, body!.dplan) ?? 'a later plan').at(0) ?? null;
       if (credit !== null) return { task: t, state: st.accepted && st.k === credit.attempt ? st.state : `accepted under this repair's card at attempt ${credit.attempt} (${credit.product})${replacedBy !== null ? `; later changed by ${replacedBy === 'a later plan' ? 'a plan' : replacedBy}` : ''}; ${st.state}`, done: true, credited: credit };

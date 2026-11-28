@@ -155,3 +155,25 @@ describe('final review: a repair is credited with the attempt that carried it, a
 });
 
 void (null as unknown as EscalationBody);
+
+describe('closing confirmation: an acceptance before a repair\'s decision is never that repair\'s', () => {
+  it('C-3: R-1 adds json, accepted at attempt 1; a re-plan drops it; R-2 adds the identical card again, attempt 2 queued: R-2 is not done and claims no product, R-1 stays done with attempt 1', async () => {
+    const { ports, engine } = await setup();
+    await pmRepair(ports.ctx, { mission: M, words: say(ports, 'It should export JSON too.'), kind: 'missing', text: 'export JSON too' });
+    await drive(engine, ports.scheduler, architect({ reopen: [], add: [JSON_TASK], note: 'json' }));
+    assert.ok((await events<{ k: number }>(ports, 'task:json', 'accepted')).some((e) => e.body.k === 1), 'attempt 1 accepted');
+    await replan(ports, engine, (t) => t);
+    assert.ok((await events(ports, 'task:json', 'dropped')).length > 0, 'the drop is recorded');
+    await pmRepair(ports.ctx, { mission: M, words: say(ports, 'Bring the JSON export back.'), kind: 'missing', text: 'Bring the JSON export back' });
+    await drive(engine, ports.scheduler, (t, s) => (t.task.startsWith('con.m1.json.') ? null : architect({ reopen: [], add: [JSON_TASK], note: 'json again' })(t, s)));
+    assert.ok(ports.scheduler.queued().some((t) => t.task === 'con.m1.json.2'), 'attempt 2 queued');
+    const r2 = repair(ports, 'R-2');
+    assert.deepEqual([r2.done, r2.added[0]?.done, r2.added[0]?.credited, r2.added[0]?.superseded], [false, false, undefined, undefined]);
+    assert.match(r2.added[0]!.state, /^attempt 2 in work/);
+    const r1 = repair(ports, 'R-1');
+    assert.deepEqual([r1.done, r1.added[0]?.credited?.attempt, r1.added[0]?.credited?.product], [true, 1, 'prod.con.m1.json.1']);
+    const row = readItems(ports.ctx, 'm1').find((x) => x.id === 'R-2')!;
+    assert.equal(row.proof, null, 'no proof of attempt 1\'s product');
+    assert.ok(!['accepted after a passing review', 'accepted with risk', 'delivered', 'landed'].includes(row.state), row.state);
+  });
+});
