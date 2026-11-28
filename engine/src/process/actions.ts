@@ -33,10 +33,10 @@ import type { GitOid, MissionId, ModuleId, ObjectVersionId, ProofUnitId } from '
 import type { ObjectVersionRecord } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import { buildCandidate, landedVersions, startHolds, versionOrigin } from '../delivery/candidate.ts';
-import { buildManifest, type DeliveryManifest } from '../delivery/manifest.ts';
+import { buildManifest, manifestVersions, type DeliveryManifest } from '../delivery/manifest.ts';
 import { deriveScope, scopeStopped } from '../delivery/scope.ts';
 import { memoryProofView } from '../delivery/memoryView.ts';
-import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
+import type { DeliveryObject, DeliveryProofView, DeliveryTarget } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
 import { keptRef, programRef } from '../git/refs.ts';
@@ -116,6 +116,14 @@ interface Shared {
   description: Promise<TransformDescription> | null;
 }
 
+/** 4.4 (F14): how many prerequisite closures `composition` built (the others were the same list under the same records). */
+export const COMPOSITIONS = { built: 0 };
+
+/** The revision of the last object version or proof unit recorded: what every composition rests on. */
+function structureRevision(db: { stmt(sql: string): { get(...a: never[]): unknown } }): number {
+  return Number((db.stmt("SELECT COALESCE(MAX(rev), 0) AS r FROM log WHERE kind IN ('object.version', 'proof.unit')").get() as { r: number }).r);
+}
+
 /**
  * The commands of a task the program runs at hand-back and in the flow's verification (4.1.2, D-4,
  * D-5, D-7): its declared commands without the project's full suite (by normalized text and working directory), for every
@@ -134,9 +142,20 @@ export function verificationStopped(ctx: ProcessContext, mission: MissionId): bo
  * Composition labels confer no proof; delivery still applies its compatibility checks.
  */
 export function compose(view: DeliveryProofView, products: readonly string[]): DeliveryManifest {
-  const built = buildManifest(view, products.map((id) => view.unitMembers(id as ProofUnitId) !== null ? { kind: 'unit', id: id as ProofUnitId } : { kind: 'object', id: id as ObjectVersionId }), { compositionOnly: true });
+  const built = buildManifest(view, composeTargets(view, products), { compositionOnly: true });
   if (built.kind !== 'manifest') throw new ActionError('unknown-product', 'the snapshot products have an unknown or unplaced prerequisite', built);
   return built.manifest;
+}
+
+/** 4.4 (F14): the product versions of `compose(view, products)`'s entries, in their order, without building the rest of the manifest. */
+export function composedProducts(view: DeliveryProofView, products: readonly string[]): string[] {
+  const built = manifestVersions(view, composeTargets(view, products));
+  if (built.kind !== 'versions') throw new ActionError('unknown-product', 'the snapshot products have an unknown or unplaced prerequisite', built);
+  return built.versions.filter((o) => o.kind === 'product').map((o) => o.id);
+}
+
+function composeTargets(view: DeliveryProofView, products: readonly string[]): DeliveryTarget[] {
+  return products.map((id) => view.unitMembers(id as ProofUnitId) !== null ? { kind: 'unit', id: id as ProofUnitId } : { kind: 'object', id: id as ObjectVersionId });
 }
 
 export function gitActions(ctx: ProcessContext): GitActions {
@@ -144,6 +163,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
   const repo = (): Promise<RepoLayout> => (shared.repo ??= discoverRepo(ctx.git, ctx.projectDir));
   const description = async (): Promise<TransformDescription> => (shared.description ??= readTransformDescription(ctx.git, await repo(), ctx.projectDir));
   const compositionView = () => memoryProofView(ctx.memory, { revision: ctx.memory.head(), recomputing: false, recomputingIn: () => false, labelOf: () => 'unaccepted', decidingRuns: () => [] });
+  const compositions: { structure: number; view: DeliveryProofView | null; results: Map<string, readonly string[]> } = { structure: -1, view: null, results: new Map() };
 
   /** The mission's base: the target branch's head (a mission starts from where it will land). */
   function missionBase(): string {
@@ -266,7 +286,23 @@ export function gitActions(ctx: ProcessContext): GitActions {
     },
 
     async composition(products) {
-      return compose(compositionView(), products).entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
+      // 4.4 (F14, #69): a closure rests on object versions and proof units only, which are never rewritten: while
+      // none is recorded, one view serves every call and a product list's closure is built once, for the life of
+      // the process context (every kept task of a pass, and every pass of a long `mp sec wait`)
+      const structure = structureRevision(ctx.memory);
+      if (structure !== compositions.structure || compositions.view === null) {
+        compositions.structure = structure;
+        compositions.view = compositionView();
+        compositions.results.clear();
+      }
+      const key = JSON.stringify(products);
+      let out = compositions.results.get(key);
+      if (out === undefined) {
+        COMPOSITIONS.built++;
+        out = composedProducts(compositions.view, products);
+        compositions.results.set(key, out);
+      }
+      return [...out];
     },
 
     async snapshot(req) {
