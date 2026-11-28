@@ -16,7 +16,7 @@ The PM stays the user's anchor on long missions, and each seat gets what its par
 - Each decision in the PM inbox carries the Secretary's brief: its notice in full, its reason, each option with what it does, the items and words entries the work rests on, and the escalation's reasons shortened (G2). The Secretary's card asks for the notice in four parts: the question, the options, the user's words that bear on it, its own choice.
 - An escalation sent to the PM is in its inbox from the moment the Secretary hands it back, also the seat way (#62); a decision handed back the seat way under the Secretary's identity takes effect in that command, as `mp sec decide` does, and both say what happened (F9).
 - `mp pm answer` says what happened to that very answer, and prints the principles in force and a count of the other tags in place of every tag's text (G2).
-- Superseding or re-tagging words keeps the requirement items and constraints the command does not name, lists them and marks them "rests on words that were superseded"; authorizations and waivers are still named one by one (G7).
+- Superseding or re-tagging words keeps the requirement items and constraints the command does not name, lists them and marks them "rests on words that were superseded"; authorizations and waivers are still named one by one; `mp pm tag` and `mp pm retag` take `--supersedes` too (G7).
 - Layer 1 counts the inbox in one line right after the principles; the Secretary's instructions, addressed instructions and constraints of closed missions take no line (G7).
 - A repair's scope is its Architect's: the note of its decision is recorded and printed on the cards of every task the repair added, changed or reopened, and the repair shows on every later attempt of a task it reopened (G3, G4).
 - An acceptance with risk records one open item per risk it took on; status and the tree read "accepted with risk (n open)", apart from an acceptance after a pass; the ruling keeps the Reviewer's answers on the accepted product (G5).
@@ -36,7 +36,7 @@ The PM stays the user's anchor on long missions, and each seat gets what its par
 - `mp pm renew` and `mp sec renew` cover the missions that are not closed (F14).
 - The Secretary's decision card: `current-facts` is a digest, the task's line in full a material that is not must-read, each decision printed once; outputs say a page was "fetched" (F16). On a copy of a three-week mission, a decision's must-read material went from 25 pages to 4.
 - The stored response of a dispatch names its card's leaf and hash, not its text (F17).
-- An idle `mp sec next` builds no prerequisite closure it built before in that process.
+- A pass builds each list of kept products' prerequisite closures once per process, not on every call; an idle pass of a long mission takes less time than under 4.3.
 
 ### Added
 
