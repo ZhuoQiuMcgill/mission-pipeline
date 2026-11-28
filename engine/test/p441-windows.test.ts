@@ -24,6 +24,7 @@ import { parseArgs } from '../src/cli/args.ts';
 import { secretaryLaunch } from '../src/cli/commands/secretary.ts';
 import { openProcess, seatPrompt } from '../src/process/index.ts';
 import { wordsEntry } from '../src/memory/index.ts';
+import { residentRecords } from '../src/memory/words.ts';
 import { cal1Pass } from '../src/flow/scripted.ts';
 import { addPlan } from './process-fixtures.ts';
 import { ENGINE, ENV_A, cardOf, gitProject, materialPages, type TestProject } from './cli-fixtures.ts';
@@ -240,6 +241,18 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       }
       const piped = await ok(p.dir, ['pm', 'say', '--stdin'], Buffer.concat([BOM, Buffer.from(text)]));
       assert.deepEqual([piped.result.words, piped.result.repeated], ['W-1', true], 'a BOM on the standard input is dropped');
+      // a note and a summary from a file: the same reader
+      await ok(p.dir, ['pm', 'note', '--file', join(p.base, 'utf16.txt')]);
+      assert.equal((await ok(p.dir, ['read', 'notes'])).result.notes[0].text, text);
+      await ok(p.dir, ['pm', 'tag', 'W-1', '--tag', 'principle']);
+      await ok(p.dir, ['pm', 'summary', '--file', join(p.base, 'bom.txt'), '--covers', 'W-1#1']);
+      forgetObservedEnvironment();
+      const ctx = openProcess(p.dir, { observe: () => ENV_A });
+      try {
+        assert.equal(residentRecords(ctx.memory, 'words.summary')[0]?.text, text);
+      } finally {
+        ctx.memory.close();
+      }
       // without a mark, what the operation is identified by is 4.4.0's: the file's text as Node reads it
       const plan = COMMANDS.find((c) => c.group === 'pm' && c.name[0] === 'plan')!;
       const args = parseArgs(['submit', 'm1', '--file', join(p.base, 'plain.txt')], plan.flags);
@@ -274,6 +287,10 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       const w = (await ok(p.dir, ['pm', 'say', 'Please write an add function, with a check that it works. The details are yours to decide.'])).result.words as string;
       await ok(p.dir, ['pm', 'requirement', 'add', 'm1', 'g1', '--type', 'goal', '--text', 'An add function', '--quote', 'an add function', '--words', w]);
       await ok(p.dir, ['pm', 'requirement', 'add', 'm1', 'a1', '--type', 'authorization', '--text', "Details are the PM's", '--quote', 'The details are yours to decide', '--words', w]);
+      writeFileSync(join(p.base, 'plan16.json'), Buffer.from(JSON.stringify(addPlan('m1', w)), 'utf16le'));
+      const nul = await mp(p.dir, ['pm', 'plan', 'submit', 'm1', '--file', join(p.base, 'plan16.json'), '--words', w]);
+      assert.equal(nul.code, 64, 'refused as 4.4.0 refused it (not JSON)');
+      assert.match(nul.json.error.message, /cannot read the plan .*\(it holds NUL characters: it is probably UTF-16 without a byte-order mark/);
       writeFileSync(join(p.base, 'plan.json'), Buffer.concat([BOM, Buffer.from(JSON.stringify(addPlan('m1', w), null, 2))]));
       const plan = await ok(p.dir, ['pm', 'plan', 'submit', 'm1', '--file', join(p.base, 'plan.json'), '--words', w]);
       assert.equal(plan.result.plan, 'pmplan.m1.1');
@@ -286,6 +303,13 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       assert.equal(shown.code, 0, shown.out);
       assert.equal(shown.json.result.projectName, 'bom-project');
       assert.equal((await mp(p.dir, ['read', 'status'])).code, 0);
+      // a name saved in the system code page: read with U+FFFD, and mp config says so
+      const [head, tail] = JSON.stringify({ ...json, projectName: 'caf\u0001' }).split('\\u0001');
+      writeFileSync(cfg, Buffer.concat([Buffer.from(head!), Buffer.from([0xe9]), Buffer.from(tail!)]));
+      const warned = await runCli(['config'], { cwd: p.dir, env: { ...process.env, MP_PROJECT: '', MP_SECRETARY: '' }, process: { observe: () => ENV_A, git: PlainGit.create() } });
+      assert.equal(warned.exitCode, 0, warned.stderr);
+      assert.match(warned.stdout, /config\.json is valid\.\nWarning: \.mission-pipeline\/config\.json holds bytes that are not UTF-8; they are shown as U\+FFFD/);
+      assert.equal(readConfig(p.dir).projectName, 'caf�');
     } finally {
       p.cleanup();
     }
@@ -304,6 +328,15 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       const card = await runCli(['seat', d, 'card'], { cwd: p.dir, env: { ...process.env, MP_PROJECT: '', MP_SECRETARY: '' }, process: { observe: () => ENV_A, git: PlainGit.create() } });
       assert.ok(card.stdout.includes(`PowerShell: the same document between a line \`@'\` and a line \`'@ | mp.ps1 seat ${d} handback --stdin\` (a here-string, piped).`), card.stdout.slice(-3000));
       for (const [m, page] of materialPages(cardOf(p.dir, d))) await ok(p.dir, ['seat', d, 'read', m, '--page', String(page)]);
+      // the file form: a report in the system code page and fields in UTF-16 are read (4.4.0: "not JSON"); fields that do not fit the card are refused, with the reader's warning
+      const tmp = join(p.dir, '.mission-pipeline', 'tmp', d);
+      writeFileSync(join(tmp, 'report.md'), Buffer.from([0x23, 0x20, 0x63, 0x61, 0x66, 0xe9, 0x0a]));
+      writeFileSync(join(tmp, 'result.json'), utf16le('{"verdict": "not a verdict"}'));
+      const refusedFiles = await mp(p.dir, ['seat', d, 'handback', '--report', join(tmp, 'report.md'), '--result', join(tmp, 'result.json')]);
+      assert.equal(refusedFiles.code, 3, refusedFiles.out);
+      const problems = refusedFiles.json.result.problems as string[];
+      assert.ok(!problems.some((x) => /not JSON/.test(x)), problems.join('\n'));
+      assert.ok(problems.some((x) => /^Warning: the report file .*report\.md holds bytes that are not UTF-8/.test(x)), problems.join('\n'));
       const doc = `# Report\r\n\r\nDone.\r\n\r\n\`\`\`json\r\n${JSON.stringify(cal1Pass(cardOf(p.dir, d)))}\r\n\`\`\`\r\n`;
       const r = await ok(p.dir, ['seat', d, 'handback', '--stdin'], Buffer.concat([BOM, Buffer.from(doc)]));
       assert.equal(r.result.kind, 'recorded', JSON.stringify(r.result));
