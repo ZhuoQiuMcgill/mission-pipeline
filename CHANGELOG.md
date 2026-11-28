@@ -8,7 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ## [4.4.1] - 2026-11-28
 
-The engine runs without error in PowerShell on Windows. 4.4.0 was built and tested on Linux only; on Linux and macOS only the pages, the card's hand-back line and the fixes below change. What stays is in `docs/design/Backlog_4.4_PostRelease.md` ("Windows and PowerShell").
+The engine runs without error in PowerShell on Windows, and its test suite passes there. 4.4.0 was built and tested on Linux only. The commands a PM and a seat type were measured in PowerShell 7 and Windows PowerShell 5.1, and the suite was run on Windows for the first time: the defects below came of it, several of them as old as 4.3. On Linux and macOS only the pages, the card's hand-back line and the fixes below change. What stays is in `docs/design/Backlog_4.4_PostRelease.md` ("Windows and PowerShell").
 
 ### Changed
 
@@ -20,7 +20,7 @@ The engine runs without error in PowerShell on Windows. 4.4.0 was built and test
 
 - `plugin/bin/mp.ps1`: the PowerShell entry of the optional adapter, beside `mp` and `mp.cmd`.
 - `engine/README.md`: a section "Windows and PowerShell".
-<!-- 4.4.1 integration: the line "The test suite passes on Windows" goes here, from the packages that make it pass. -->
+- Tests of the Windows default git configuration (`core.autocrlf=true`) end to end, on every system: a dispatch worktree, a candidate built from a seat's edits, a stacked product, a run checkout, a delivery and a landing. The worktree shows CRLF, the stored blobs are LF, and nothing unedited reads as modified.
 
 ### Fixed
 
@@ -28,6 +28,10 @@ The engine runs without error in PowerShell on Windows. 4.4.0 was built and test
 - Text Windows PowerShell 5.1 pipes to `--stdin` with its default ASCII pipe has lost its characters outside ASCII to `?`, which the engine cannot restore: when the standard input begins with the byte-order mark that pipe writes and holds a `?`, the command goes on and says so in one warning line (check the recorded text, with the read that shows it, or pass the text with `--file`).
 - Bytes that are not UTF-8 (a file saved in the system code page) are read as U+FFFD as before, and the command now says so in one warning line. A NUL with no byte-order mark is refused where it was, and the refusal says the file is probably UTF-16 without a mark: save it as UTF-8.
 - A quote of the user's words (a tag, a requirement item, a repair's reason, `mp pm extend`, a stop's words) that spans a line break matches whether the words and the quote use CRLF or LF; what is recorded does not change.
+- Opening a copied project folder no longer runs `git worktree repair`: run in the copy, git 2.45 (Git for Windows) rewrote the original folder's worktree links to point into the copy. The copy's own two link files per worktree are rewritten and verified instead, and only where they physically lie inside the copy: a copy whose git folder links back to the original is held with nothing written (also 4.3).
+- On Windows a copy with a dispatch worktree no longer stays held and reported as moved on every command: the worktree links are written in git's path form, and links that 4.3 or 4.4.0 already wrote with backslashes are rewritten (also 4.3).
+- On Windows git's worktree paths (`C:/x/y`) are read in the program's form (`C:\x\y`): detaching a duplicate checkout (WI-01 option 2) no longer refuses every worktree, a dispatch worktree whose folder is gone loses its registration when removed, and the notice about external work (WI-03) no longer counts the mission's own dispatch worktrees or reads every file as changed (Git for Windows records no inode in the index) (also 4.3).
+- Storing a Git LFS object no longer fails on Windows (a directory cannot be opened for fsync there; the step is skipped, as the memory's own writes already did) (also 4.3).
 
 ### Compatibility
 
@@ -35,6 +39,7 @@ The engine runs without error in PowerShell on Windows. 4.4.0 was built and test
 - With no byte-order mark, the text the engine reads, an operation's identity and its payload are 4.4.0's; a 4.4.0 command retried with the same `--op` replays its receipt (an operation's identity still fingerprints a file as 4.4.0 read it, a mark included).
 - What 4.4.0 recorded with a leading U+FEFF stays as it was; the same file recorded again under 4.4.1 is a new entry.
 - New JSON: `launchHintPowerShell` on Windows (`mp pm secretary start`). A command that read such an input carries the reader's warning line when there is one (in its text; a hand-back's `notes`, `mp pm note`'s `warnings`).
+- The test suite runs on Windows as on Linux. Fixture repositories set their own line endings; a test that needs a POSIX shell script as the git program, a file mode, a FIFO, `/proc`, a symbolic link the account may not create, or the executable bit is skipped on Windows with its reason. No product write went over its time budget on Windows.
 
 ### Upgrade steps
 
