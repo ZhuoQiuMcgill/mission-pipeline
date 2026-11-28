@@ -174,7 +174,8 @@ describe('INT r3: dispatch under the plan in effect', () => {
     // Secretary: an escalation on the kept task, queued and dispatched under plan2
     await raiseEscalation(flowCtx(w, M), { id: 'kept-question', source: 'constructor-decision', lineage: 'task.m1.iface', subject: 'task:iface', summary: 'Question', reasons: ['Choose'], options: ['answer', 'abandon', 'ask-user'], items: ['item.m1.g1'] });
     const sd = pmDispatch(w.ctx, 'sec.kept-question');
-    const facts = (dispatchView(w.ctx, sd.dispatch).card['materials'] as Array<{ id: string; ref: string }>).find((m) => m.id === 'current-facts')!;
+    // 4.4 (F16): the task's card in full is the not-must-read material task-line; current-facts is a digest
+    const facts = (dispatchView(w.ctx, sd.dispatch).card['materials'] as Array<{ id: string; ref: string }>).find((m) => m.id === 'task-line')!;
     const task = (JSON.parse(w.memory.data.text(facts.ref)) as { task: DetailedTask | null }).task;
     assert.deepEqual(task, iface(), 'the card in force, unchanged under plan2');
   });

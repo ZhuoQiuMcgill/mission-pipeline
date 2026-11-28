@@ -24,12 +24,13 @@ import { requirePm, requireDriver, requireSecretary, touchSecretary, generations
 import { PM_COMMANDS } from './commands/pm.ts';
 import { READ_COMMANDS } from './commands/read.ts';
 import { SEAT_COMMANDS } from './commands/seat.ts';
+import { HOLD_COMMANDS } from './commands/holds.ts';
 import { CliError, EXIT, errorMessage, toCliError, usage } from './errors.ts';
 import { actionArgs, beginAction, checkOpId, endAction, latestSession, newOpId, openProject, type CliIo, type Problem, type Project } from './project.ts';
 import { problemLines, wiText } from './render.ts';
 import { parseFiller } from '../process/index.ts';
 
-export const COMMANDS: readonly Command[] = [...PM_COMMANDS, ...RESIDENT_PM_COMMANDS, ...SEC_COMMANDS, ...SEAT_COMMANDS, ...READ_COMMANDS, ...ADMIN_COMMANDS];
+export const COMMANDS: readonly Command[] = [...PM_COMMANDS, ...RESIDENT_PM_COMMANDS, ...SEC_COMMANDS, ...SEAT_COMMANDS, ...READ_COMMANDS, ...HOLD_COMMANDS, ...ADMIN_COMMANDS];
 
 export interface CliOutput {
   readonly exitCode: number;
@@ -38,7 +39,7 @@ export interface CliOutput {
 }
 
 /** PM commands whose first positional is a sub-command (recorded as "<command> <sub>"). */
-const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission', 'secretary']);
+const WITH_SUB = new Set(['requirement', 'constraint', 'plan', 'legalize', 'mission', 'secretary', 'open-item', 'hold']);
 
 function groupHelp(group: string): string {
   const cs = COMMANDS.filter((c) => c.group === group);
@@ -151,6 +152,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
     }
     let replayed = false;
     let result: CommandResult;
+    let ran: RunContext | null = null;
     if ((cmd.group === 'pm' || cmd.group === 'sec') && project !== null) {
       op = checkOpId(flagStr(args, 'op') ?? newOpId(cmd.name[0]!, now));
       // decision 8: the PM's filler is the latest session's (`--filled-by` overrides it; on dispatch it names the seat's filler)
@@ -159,6 +161,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
       project.ctx.filler = own ?? session?.filler ?? null;
       const action = { op, command: [...(cmd.group === 'sec' ? ['sec'] : []), cmd.name[0]!, ...(WITH_SUB.has(cmd.name[0]!) && args.positionals[0] !== undefined ? [args.positionals[0]] : [])].join(' '), args: cmd.group === 'sec' ? {generation: identity, args: identityOf(cmd, args)} : identityOf(cmd, args), stop: cmd.stop === true };
       const c: RunContext = { io, project, op, now };
+      ran = c;
       if (cmd.unrecorded === true) result = await cmd.run(c, args);
       else if (cmd.stop === true) {
         // Appendix E: the stop is written first; its PM action is recorded after it
@@ -172,7 +175,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
         const prior = beginAction(project.ctx.memory, { ...action, filler: project.ctx.filler });
         if (prior !== null) {
           replayed = true;
-          result = prior;
+          result = cmd.replay !== undefined ? cmd.replay(c, prior) : prior;
         } else {
           try {
             result = await cmd.run(c, args);
@@ -181,13 +184,26 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<CliOut
             endAction(project.ctx.memory, action, { exitCode: err.exitCode, text: `Error (${err.code}): ${err.message}`, json: { error: { code: err.code, message: err.message, wi: err.wi } } }, true);
             throw err;
           }
-          endAction(project.ctx.memory, action, result, result.exitCode !== 0);
+          endAction(project.ctx.memory, action, cmd.recorded !== undefined ? cmd.recorded(c, result) : result, result.exitCode !== 0);
         }
       }
     } else {
-      result = await cmd.run({ io, project, op: null, now }, args);
+      // 4.4 (F10): a seat's command may commit something once its output is out too (afterOutput)
+      ran = { io, project, op: null, now };
+      result = await cmd.run(ran, args);
     }
-    return { exitCode: result.exitCode, stdout: render(result, { json, op, replayed, problems, project: project?.dir ?? null, command: commandName(cmd) }), stderr: '' };
+    const stdout = render(result, { json, op, replayed, problems, project: project?.dir ?? null, command: commandName(cmd) });
+    // 4.4 (F8): what a command commits once its output is out (written here when the caller gives a writer)
+    if (cmd.afterOutput !== undefined && ran !== null && result.exitCode === 0) {
+      if (io.out !== undefined) await io.out(stdout);
+      try {
+        cmd.afterOutput(ran, result);
+      } catch {
+        /* not committed: the next pass shows its items again */
+      }
+      if (io.out !== undefined) return { exitCode: result.exitCode, stdout: '', stderr: '' };
+    }
+    return { exitCode: result.exitCode, stdout, stderr: '' };
   } catch (e) {
     const err = toCliError(e);
     const dir = project?.dir ?? null;
@@ -202,6 +218,7 @@ async function main(): Promise<void> {
     cwd: process.cwd(),
     env: process.env,
     stdin: () => readFileSync(0, 'utf8'),
+    out: (text) => written(process.stdout, text),
   });
   // 4.1.3: wait until the output is written: past a full pipe (64 KiB), a write is queued, and the
   // forced exit below would drop its end while a slow reader (a harness) has not read it yet

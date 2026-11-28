@@ -98,9 +98,11 @@ export function constructorDone(o: Partial<ConstructorResult> = {}): Constructor
   return { done: 'implemented', unmet_standards: [], unfixed_problems: [], decisions_needed: [], ...o };
 }
 
-export function reviewer(c: ReviewerCard, verdict: ReviewerResult['verdict'], o: { findings?: string[]; failing?: string } = {}): ReviewerResult {
+export function reviewer(c: ReviewerCard, verdict: ReviewerResult['verdict'], o: { findings?: string[]; failing?: string; instructions?: 'followed' | 'not-followed' | 'unclear' } = {}): ReviewerResult {
   const ev = c.verificationRuns[0]?.evidence;
   return {
+    // 4.4 (G3): every instruction addressed to the work is answered (none on the card: the field is left out)
+    ...((c.addressed ?? []).length > 0 ? { instruction_responses: (c.addressed ?? []).map((a) => ({ instruction: a.id, response: o.instructions ?? 'followed', reason: 'checked against the candidate' })) } : {}),
     judgments: c.standards.map((s) => ({
       standard: s.id,
       met: verdict === 'pass' ? 'yes' : s.id === (o.failing ?? c.standards[0]?.id) ? (verdict === 'rework' ? 'no' : 'unclear') : 'yes',
@@ -110,6 +112,8 @@ export function reviewer(c: ReviewerCard, verdict: ReviewerResult['verdict'], o:
     gap_responses: c.selfReportedGaps.map((g) => ({ gap: g.id, response: 'noted' })),
     issue_responses: c.openIssues.map((i) => ({ issue: i.issue, response: verdict === 'pass' ? 'fixed' : 'not-fixed', reason: 'checked' })),
     findings: o.findings ?? [],
+    // 4.4 (G5): the open items the task took
+    ...((c.openItems ?? []).length > 0 ? { item_responses: c.openItems!.map((i) => ({ item: i.id, response: verdict === 'pass' ? 'fixed' as const : 'not-fixed' as const, reason: 'checked' })) } : {}),
     verdict,
   };
 }

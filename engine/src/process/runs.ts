@@ -57,7 +57,7 @@ import { join, posix } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import { normalRelDir } from '../common/fullSuite.ts';
-import type { EnvSnapshotId, EvidenceId, MissionId } from '../common/ids.ts';
+import type { ContentHash, EnvSnapshotId, EvidenceId, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord, RunClass } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
@@ -67,8 +67,10 @@ import { reusableMethodRun } from '../evaluator/runs.ts';
 import { withoutRepositoryLocators } from '../git/plainGit.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir } from '../git/workspace.ts';
 import { appendRecords, LedgerError, tryLock, type ProcessLock, type WriteTx } from '../memory/index.ts';
+import type { RunArtifactT } from '../seat/card.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
+import { ARTIFACTS_LINE, KEPT_ARTIFACTS, artifactStates, keepArtifacts, keepBudget, type KeptArtifactsBody } from './keptFiles.ts';
 
 // ---------------------------------------------------------------- running one command
 
@@ -233,6 +235,48 @@ export function normalizeCwd(cwd: string | undefined | null): string {
   return n;
 }
 
+/** 4.4 (F10, review p9-r2-2): the evidence field naming, by content hash, the files each command of the run's group names. */
+export const GROUP_FILES_FIELD = 'groupFiles';
+
+/**
+ * The command group a recorded run belongs to (its `group` field), each command with the files it names: from
+ * `groupFiles` (a data value, by index), or inline in the group (a record of the first 4.4 builds). Null: the
+ * record names no group (the caller rebuilds it from the log, as 4.3 does); undefined entries are refused there.
+ */
+export function recordedGroup(fields: Readonly<Record<string, string>>, text: (hash: string) => string): Array<Omit<DeclaredCommand, 'id'>> | null {
+  if (fields['group'] === undefined) return null;
+  const group = JSON.parse(fields['group']) as Array<Omit<DeclaredCommand, 'id'>>;
+  const ref = fields[GROUP_FILES_FIELD];
+  if (ref === undefined || !Array.isArray(group)) return group;
+  const files = JSON.parse(text(ref)) as unknown[];
+  return group.map((cmd, i) => {
+    const f = Array.isArray(files) ? files[i] : undefined;
+    return Array.isArray(f) && f.length > 0 ? { ...cmd, artifacts: f as string[] } : cmd;
+  });
+}
+
+/**
+ * 4.4 (F10; review F2-3): the renewal group of a recorded run: its candidate and its command group together with
+ * the files its commands name (two runs of one command on one commit that named different files are two groups,
+ * and neither lends the other its list), else its own run.
+ */
+export function renewalGroupKey(candidate: string, rec: { readonly evidence: string; readonly fields: Readonly<Record<string, string>> }): string {
+  const f = rec.fields;
+  return canonicalJson([candidate, f['group'] === undefined ? ['run', f['run'] ?? rec.evidence] : ['group', f['group'], f[GROUP_FILES_FIELD] ?? null]]);
+}
+
+/**
+ * 4.4 (F10; review F2-3): the files a recorded run's own command named, from its own record's group (none: the
+ * record names no group, as 4.3's do, or its command named no file). A renewal compares each original run with
+ * what it named itself, never with another run's declarations.
+ */
+export function ownDeclaredFiles(rec: { readonly fields: Readonly<Record<string, string>> }, command: string, cwd: string, text: (hash: string) => string): readonly string[] {
+  const group = recordedGroup(rec.fields, text);
+  if (!Array.isArray(group)) return [];
+  const own = group.find((cmd) => cmd?.command === command && (cmd.cwd ?? '.') === cwd && Array.isArray(cmd.artifacts) && cmd.artifacts.length > 0);
+  return own === undefined ? [] : [...own.artifacts!];
+}
+
 /** The working directory a recorded run ran in ("." when it recorded none). */
 export function runCwd(fields: Readonly<Record<string, string>>): string {
   return Object.hasOwn(fields, CWD_FIELD) ? fields[CWD_FIELD]! : '.';
@@ -263,6 +307,8 @@ export interface DeclaredCommand {
   readonly cwd?: string;
   readonly sampled?: boolean;
   readonly network?: boolean;
+  /** 4.4 (F10): the files it writes that mp keeps with its run (relative to the repository root). */
+  readonly artifacts?: readonly string[];
 }
 
 // ---------------------------------------------------------------- per-test results (TAP)
@@ -425,6 +471,8 @@ export interface RecordedRun {
   readonly reused: boolean;
   /** Failure of this call's setup-only execution; never evidence. */
   readonly setupFailure?: string;
+  /** 4.4 (F10): the files the command named as its artifacts, as this execution kept them (absent: it names none, or the run was reused). */
+  readonly artifacts?: readonly RunArtifactT[];
 }
 
 /** A run id that names a directory and a leaf (letters, digits and "-"). */
@@ -472,6 +520,8 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
     lines.push(`- Evidence: ${r.evidence}${r.reused ? ' (reused; execution only as setup)' : ''}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (${r.tail !== '' ? 'its last lines are below; ' : ''}the whole output is not kept)`);
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
+    // 4.4 (F10): the files the command names, as mp kept them (review p9-r2-3: what the record cannot establish is said so)
+    if (r.artifacts !== undefined && !r.reused) lines.push('- Files it names:', ...r.artifacts.map((a) => `  - ${a.path}: ${a.kept !== undefined ? `kept at ${a.kept} (sha256 ${a.sha256}, ${a.size} bytes)` : `not kept (${a.why})`}${a.kept === undefined ? '' : a.origin === 'not-established' ? '; it was there before the command ran and is unchanged: that the command wrote it is not established' : a.origin === 'unknown' ? '; it was there before the command ran, and whether the command wrote it is unknown' : ''}`));
     // a failing command's last lines, a failing setup's, and a rerun's whether it passed or failed (4.1.3)
     if (r.tail !== '') lines.push('', 'Last lines of the output:', '', fence(r.tail), r.tail, fence(r.tail));
     lines.push('');
@@ -540,6 +590,8 @@ export async function runOnCommit(
     readonly cleanupRunner?: CommandRunner;
     /** Retry the recording write this many times when the memory is busy or the write ran over its budget (a detached run's worker: its result must not be lost to a moment of load). */
     readonly recordRetries?: number;
+    /** 4.4 (F5): called once the run locks are held and the checkout is made, immediately before the first command executes (a seat's run records its start); a throw runs nothing. */
+    readonly beforeExecute?: (run: string) => void;
   },
 ): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
   if (ctx.secretary !== null && req.alreadyAdmitted !== true) ctx.memory.write({}, (tx) => {requireSecretary(tx, ctx.secretary);});
@@ -582,16 +634,30 @@ async function executeRuns(
   const records: EvidenceRecord[] = [];
   const staged = new Map<string, RecordedRun>();
   const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
+  // 4.4 (F10, review p9-2, p9-r2-2): the commands' named files, stored once by content hash and named from each
+  // evidence record (`groupFiles`), so a renewal reruns them with their files; absent: no command names any (4.3's group)
+  const named = req.commands.some((c) => (c.artifacts ?? []).length > 0) ? ctx.memory.data.put(canonicalJson(req.commands.map((c) => [...(c.artifacts ?? [])]))) : null;
   let cleanup: readonly CleanupFailure[] = [];
+  // 4.4 (F10): the kept files of this run share one bound
+  const budget = keepBudget();
   const timeoutMs = commandTimeoutFor(ctx, req.declaration);
   const shell = commandShellFor(ctx, req.declaration);
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
   await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
+  // 4.4 (F5): the caller's last word before anything executes; a refusal there runs nothing (no command, no cleanup)
+  try {
+    req.beforeExecute?.(run);
+  } catch (e) {
+    removeCheckout(ctx.gitCtx, dir);
+    throw e;
+  }
   try {
     for (const [i, c] of req.commands.entries()) {
       const rel = normalizeCwd(c.cwd);
       const cwd = rel === '.' ? dir : join(dir, ...rel.split('/'));
       mkdirSync(cwd, { recursive: true });
+      // review p9-7: the named files as they are before this command (an earlier one, or the commit, may have written them)
+      const before = (c.artifacts ?? []).length > 0 ? await artifactStates(dir, c.artifacts!) : undefined;
       const out = await runner({ command: c.command, cwd, timeoutMs, ...(shell === undefined ? {} : { shell }) });
       const runClass = classOf(c);
       const key = canonicalJson({ command: c.command, cwd: rel });
@@ -603,13 +669,15 @@ async function executeRuns(
         executed.push({ ...prior, command: c, reused: true, ...(setupFailure === undefined ? {} : { setupFailure, tail: tail(out.output, req.tail ?? LOCAL_TAIL) }) });
         continue;
       }
-      const fields = fieldsOf(out, { ...(req.fields ?? {}), group, [RUN_FIELD.method]: RUN_METHOD, [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: c.command, [CWD_FIELD]: rel, commandId: c.id.slice(0, 200), run, purpose: req.purpose.slice(0, 200) });
+      const fields = fieldsOf(out, { ...(req.fields ?? {}), group, ...(named !== null ? { [GROUP_FILES_FIELD]: named } : {}), [RUN_FIELD.method]: RUN_METHOD, [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: c.command, [CWD_FIELD]: rel, commandId: c.id.slice(0, 200), run, purpose: req.purpose.slice(0, 200) });
       const evidence = req.evidenceId?.(run, c) ?? (runClass === 'sampling' ? sampleRunId(`${run}.${idPart(c.id)}`) : `${run}.${idPart(c.id)}`);
       const rec: EvidenceRecord = { kind: 'evidence', evidence: evidence as EvidenceId, envLine: ENV_LINE, envSnapshot: env.identity as EnvSnapshotId, runClass, fields };
       validateRecord(rec);
       records.push(rec);
       const passed = fields['status'] === 'completed' && fields['exit'] === '0';
-      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed && req.keepPassingTail !== true ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false };
+      // 4.4 (F10): the files the command names are kept before the checkout is removed (bounded; never refuses the run)
+      const artifacts = (c.artifacts ?? []).length > 0 ? await keepArtifacts(ctx.memory.paths.root, dir, c.artifacts!, budget, before) : [];
+      const recorded = { evidence, command: c, passed, summary: summaryOf(fields), fields, tail: passed && req.keepPassingTail !== true ? '' : tail(out.output, req.tail ?? LOCAL_TAIL), reused: false, ...(artifacts.length > 0 ? { artifacts } : {}) };
       executed.push(recorded);
       if (runClass === 'declared') staged.set(key, recorded);
     }
@@ -623,6 +691,12 @@ async function executeRuns(
   const leaf = runLeaf(req.mission, run);
   const record = () => ctx.memory.write({ admittedResult: true, op: req.op ?? `run:${run}`, payload: { run, evidence: records.map((r) => r.evidence) } }, (tx) => {
     if (records.length > 0) appendRecords(tx, records as BaseRecord[]);
+    // 4.4 (F10): the files each command kept, with the run's record (keyed by its evidence)
+    for (const x of executed) {
+      if (x.reused || x.artifacts === undefined) continue;
+      const body: KeptArtifactsBody = { evidence: x.evidence, run, command: x.command.id, artifacts: x.artifacts };
+      appendRecords(tx, [{ kind: 'flow.event', mission: req.mission as MissionId, line: ARTIFACTS_LINE, event: KEPT_ARTIFACTS, key: x.evidence, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
+    }
     tx.leaves.writeDocument(leaf, text);
     return req.also?.(tx, executed, run, records);
   });

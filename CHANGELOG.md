@@ -6,6 +6,107 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.4.0] - 2026-11-28
+
+The PM stays the user's anchor on long missions, and each seat gets what its part needs. Design: `docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md` (G1 to G9; it rules) and `docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md` (F1 to F19, as amended); what was built differently and what is left: `docs/design/Backlog_4.4_PostRelease.md`.
+
+### Changed
+
+- The PM keeps dispatch detail out of its context: a question of design is the Architect's, text that reaches a task comes from the Secretary or the Architect, and the PM writes for a task only when the user said it (G1 to G4).
+- Each decision in the PM inbox carries the Secretary's brief: its notice in full, its reason, each option with what it does, the items and words entries the work rests on, and the escalation's reasons shortened (G2). The Secretary's card asks for the notice in four parts: the question, the options, the user's words that bear on it, its own choice.
+- An escalation sent to the PM is in its inbox from the moment the Secretary hands it back, also the seat way (#62); a decision handed back the seat way under the Secretary's identity takes effect in that command, as `mp sec decide` does, and both say what happened (F9).
+- `mp pm answer` says what happened to that very answer, and prints the principles in force and a count of the other tags in place of every tag's text (G2).
+- Superseding or re-tagging words keeps the requirement items and constraints the command does not name, lists them and marks them "rests on words that were superseded"; authorizations and waivers are still named one by one; `mp pm tag` and `mp pm retag` take `--supersedes` too (G7).
+- Layer 1 counts the inbox in one line right after the principles; the Secretary's instructions, addressed instructions and constraints of closed missions take no line (G7).
+- A repair's scope is its Architect's: the note of its decision is recorded and printed on the cards of every task the repair added, changed or reopened, also under a later plan that keeps the card, and the repair shows on every later attempt of a task it reopened (G3, G4).
+- An acceptance with risk records one open item per risk it took on; status and the tree read "accepted with risk (n open)", apart from an acceptance after a pass; the ruling keeps the Reviewer's answers on the accepted product (G5).
+- `mp pm repair --kind missing` still files a repair, and points to `mp pm extend` (G9).
+- The review of an attempt waits until the answer to its Constructor's before-review questions is carried out, in the ready list and in the claim (F4).
+- The Reviewer gets the Constructor's hand-back as claims to check, a rework's Constructor the previous review and its own earlier hand-back, the feasibility card each task's standards, items, files and interfaces; the plan's data formats and storage reach the Constructor's and the Reviewer's cards (F3).
+- The Reviewer's card shows the text of the requirement items its judgment is bound to, and the text an item had when the task was last judged (G9).
+- An execution Reviewer may cite a file outside the commit by path, sha256 and size: checked at hand-back, labelled "outside the commit", not refused; a judgment that cites one beside its runs is not renewed mechanically after an environment change (F10, E-4).
+- The architect-repair card is rebuilt at its claim from the constraints, the plan in effect and the accepted work in force then (#53, #68; F5).
+- A repair's reopen is new work on a fresh rework loop, with `accept-risk` at its end; it never joins an open attempt, but waits for its acceptance and opens the next attempt with its issue (F12 a, F13).
+- A repair decision that changes a card another repair changed since its Architect's card was built goes back to that Architect once (#61).
+- A release of a dispatch that had not started costs no re-dispatch; the third in a row on one step raises `unstarted-releases` (WI-28) (F5).
+- `mp sec next` shows what changed since the caller's last pass; what it showed before is one count line each (F8).
+- `mp sec wait` wakes only on what calls for the Secretary, not on a seat's own claim, read, checkout or refused hand-back (F8).
+- A notice that only informs is shown once and needs no acknowledgement; a notice about a closed mission, a superseded plan or a decided escalation is born resolved (F8, F19).
+- `kept-product-not-rebound` is one notice per product and plan; a prerequisite re-bound to a successor of the same content is not stale (#66; F14).
+- `mp pm renew` and `mp sec renew` cover the missions that are not closed (F14).
+- The Secretary's decision card: `current-facts` is a digest, the task's line in full a material that is not must-read, each decision printed once; outputs say a page was "fetched" (F16). On a copy of a three-week mission, a decision's must-read material went from 25 pages to 4.
+- The stored response of a dispatch names its card's leaf and hash, not its text (F17).
+- A pass builds each list of kept products' prerequisite closures once per process, not on every call; an idle pass of a long mission takes less time than under 4.3.
+
+### Added
+
+- `mp pm extend <mission> --words W-n --item <id> --text … --quote …`: a new requirement recorded as one, one or several items a filing, its work started in the same write on a repair's light path (one Architect step under the mechanical checks, no plan review). Its items stay outside the set the plan was checked against, so nothing else loses proof or waits (G9).
+- The work of a filing is bound to its items: with exactly one in force when the amendment is applied, every task the Architect adds, changes or reopens carries it; with several, the Architect names them per task, and a task with none named is bound to none and shown so (G9).
+- The user can take a filing back: withdrawing every item before its amendment is applied ends it; its Architect step is no longer claimed, and a hand-back that still comes is kept and not applied (G9).
+- `mp pm repair --item <id>` (the requirement item it falls short of), `--again` (file a decided repair anew, #60), `--open-items <ids>` (what was left at the cap that it is for).
+- Option `ask-architect` on a Constructor's questions, a Reviewer's needs-decision and a used-up rework loop: one Architect step (`architect-answer` card) answers a question of design and changes nothing; its answer is carried out, any other reply returns to the Secretary (G1).
+- A repair's Architect that cannot decide hands back its question to the PM's inbox (`repair-question`) (G4).
+- `mp sec instruct`: the Secretary's own instruction within the plan, never a proof input (G3).
+- An instruction addressed to tasks or a repair of one mission reaches those cards only: `mp pm constraint add … --tasks | --repair`, `mp pm constraint scope`; `mp pm requirement add --type decision --tasks`; the Reviewer answers each addressed instruction, which never decides its verdict (G3).
+- Holds: `mp pm hold add|release` on the user's words, `mp sec hold add|release` for the Secretary's own reasons, `mp read holds`; a hold names a task, a queued step, a resource or everything, blocks new dispatches only, and ends by hand, at a time or when a task is accepted (G6).
+- Config `limits` with `mp read scratch`: new Constructor steps are held while a worktree or free-disk limit is passed (H-3).
+- Notes: `mp pm note --replaces`, `--file`, `mp read notes`; a note naming an open escalation warns (G8).
+- Open items: `mp read open-items [--open | --all]`, `mp pm open-item answer | close`, `mp sec open-item answer`, `--defer` on `mp pm answer` and `mp sec decide`, `mp pm verified` (the user's statement that something was checked in the field, never proof) (G5, F4).
+- Reads: `mp read items` (the state of each requirement item and repair), `mp read repairs`, `mp read constraints [--reach]`, `mp read reviews`, `mp read show escalation`; `mp read from W-n` also reaches constraints, waivers and notes (G5, G7, F13, F15). `mp read items` and `mp read repairs` credit a repair, a filing or an item only with the attempt that carried it, and take its acceptance, risk, proof and delivery from that attempt's product.
+- A Constructor can stop and ask: `"blocked": true` keeps its edits as a parked commit, nothing is verified or reviewed, and the answer resumes the attempt on them, counted on no loop; a third pause raises `constructor-paused-again` (WI-08) (F4).
+- Each question in `decisions_needed` may say when it must be settled: `before-review` or `later` (F4).
+- A standard says how it is checked (`check`: command, reading, report, artifact, person); a `person` standard is not put to the Reviewer; the fourth answer `cannot-verify` with `needed` sends a review to a decider; `standardsWarn` and the notice `many-standards` (F10).
+- A Constructor's `files` and a command's `artifacts` are checked and kept under `.mission-pipeline/files/<sha256>` for the Reviewer (F10, #65).
+- `mp seat <id> checkout --product <task>` for a repair Architect, and for an Architect answering a question (F3).
+- A repair's reopen may name `after`: the tasks of its repair whose new work it builds on (F12 b).
+- `review-health` (the Secretary's, only informs) and `mp read reviews`: the pass share per filler of the Reviewer seat (F10).
+- `reopen-not-carried` (PM inbox): a repair's reopen that will not be carried out (F13).
+- Config `loops.rework` (default 2), `mustReadWarnPages` (default 6), `cardWarnBytes` (default 65536); a dispatch prints its card's size and must-read pages and warns past them.
+- `mp sec next --all`, `--since <R>`; `mp pm renew --mission`, `mp sec renew --mission`; `mp pm secretary stop --idle` (F8, F14, F19).
+- Kept refs `refs/mission-pipeline/kept/<mission>/<commit>` for every candidate, parked and accepted commit of a mission not closed (#64).
+- Record kinds `hold.placed`, `hold.released`.
+
+### Fixed
+
+- #51: a non-review rework that meets a used-up loop is no longer dropped when the attempt's own loop escalation was already decided (pull request 70).
+- #53, #68: a queued architect-repair step no longer keeps the constraints of the moment it was queued.
+- #54: stable production held by an object constraint the plan's passes do not cover shows a held line (WI-34) in `mp sec next` and `mp read blocked`.
+- #57: a kept product accepted with risks whose re-bind review fails can be accepted with its risks again (pull request 70).
+- #58: an integration's later attempt no longer waits for a review reopen an accept-risk ruling settled (pull request 70).
+- #59: a dependent of a repair's work is no longer offered while a dependency the same repair reopens is pending.
+- #60: a repair whose words, kind, text and subject equal a decided one can be filed again (`--again`).
+- #61: a second repair's change to a card another repair changed since goes back to its Architect instead of overwriting it.
+- #62: an escalation sent to the PM is in its inbox at once.
+- #63: rule 4 (integration) leaves out implementation tasks that depend on the integration task (pull request 70).
+- #64: candidate and accepted commits are reachable before delivery, those of a mission upgraded from 4.3 too.
+- #65: evidence written to the hand-back folder is kept for the Reviewer; the folder is removed only after the hand-back's result is printed.
+- #66: `kept-product-not-rebound` no longer fires for a prerequisite re-bound to a successor of the same content.
+- #67: `accept-risk` is offered to the PM and the user on a used-up rework loop whose attempt's program runs failed (pull request 70).
+- #69: `mp sec next` no longer reads a mission's whole flow once per escalation, nor hashes every body on every read (pull request 70).
+- A notice stored with no detail no longer makes `mp read status`, `mp pm inbox` and `mp sec next` fail (also in 4.3).
+- `mp sec next` no longer names a `mp sec answer` command, which does not exist.
+
+### Compatibility
+
+- A 4.3 memory opens with no migration, and nothing rewrites an earlier record: new record kinds, flow events and fields are additions, and a record without a new field reads as 4.3 wrote it. On a copy of a three-week mission written by 4.3 (about 80,000 log rows), 4.4 left every earlier row as it was.
+- Work begun under 4.3 goes on: a step queued or claimed by 4.3 gets its 4.4 card at its claim; an escalation raised before 4.4 keeps its options (no `ask-architect`); a Constructor's question raised by 4.3 reads as before-review; a reopen 4.3 decided or counted runs as 4.3 ran it; a release of a dispatch claimed by 4.3 counts as before.
+- A command of 4.3 retried with the same `--op` replays its receipt: when a command's new options are absent, its identity and what it writes are 4.3's.
+- A repair decided under 4.3 shows its Architect's note (read from its hand-back) and reads only what its record establishes; the risk sentences of acceptances made before 4.4 are counted apart from open items (what became of them is not recorded).
+- Going back to 4.3 is restoring a copy: copy `.mission-pipeline/` before the first 4.4 command on a mission in progress, restore that copy to go back, and do not run a 4.3 engine on a memory 4.4 has written to. A 4.3 engine refuses a `config.json` with any of the keys 4.4 adds (`loops`, `limits`, `mustReadWarnPages`, `cardWarnBytes`, `standardsWarn`), but nothing else stops it, and it misreads what 4.4 wrote: it would dispatch a held step, print an addressed instruction by its paths alone, record a Constructor's parked edits as a product and queue a review, re-plan a task whose card takes an open item, queue a Secretary step for a repair Architect's question, mark a PM's question to the Architect applied, and apply a late Architect hand-back of a new requirement's filing that the user withdrew.
+- JSON that changed: `mp pm answer` replaces `uncited` with `principles`, `otherTags`, `round`, `applied` and `resident`; `mp sec decide` prints text instead of its raw result; `mp sec next`'s `revision` is the revision its report was built from (new `since`, `all`, `earlier`); a stored dispatch response and the recorded result of `mp sec card` name the card's leaf and sha256 instead of its text (a 4.3 one still reads); the Secretary card's `current-facts` is text (a digest) and its `decisionQuotes` is empty.
+
+### Upgrade steps
+
+- Before the first 4.4 command on a mission in progress, copy `.mission-pipeline/` (with no `mp` command running and no seat working): it is the way back to 4.3.
+- Run `mp docs update`; the PM reads its new core, and the Secretary reads its handbook again ("Upgrading to 4.4").
+- The first `mp sec next` after the upgrade is slower once: it takes the older notices into one notice per product and plan and anchors the older accepted commits. On a copy of a three-week mission it took about 24 s, then about 12 s a pass, where 4.3 took about 14 s; from the second pass on it printed about 29 KB, where 4.3 printed about 164 KB.
+- Holds and orders of work kept in notes or in the Secretary's own log: the Secretary places them as holds (`mp sec hold add`), the PM those that rest on the user's words (`mp pm hold add … --words W-n`).
+- Constraints written for one repair or one task stay on every card until they are addressed, one command each and no new version: `mp pm constraint scope <id> --mission <m> --repair R-n` or `--tasks <ids>`. Until then cards stay as large as before.
+- The risk sentences of earlier acceptances are listed as accepted before 4.4, counted apart and per task, so the default `mp read open-items` stays short (under 4 KB on the three-week copy; `--all` lists them in full); one becomes a recorded open item when someone acts on it (a repair or a re-plan names it, or the user's words close it).
+- `mp sec renew` without `--mission` covers the missions that are not closed; name a closed one if its proof matters.
+- To go back to 4.3, restore the copy taken before the upgrade; do not run a 4.3 engine on a memory 4.4 has written to.
+- Optional: set `loops.rework`, `limits`, `mustReadWarnPages`, `cardWarnBytes` and `standardsWarn` in `.mission-pipeline/config.json`.
+
 ## [4.3.0] - 2026-11-06
 
 ### Changed

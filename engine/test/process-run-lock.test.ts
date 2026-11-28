@@ -26,6 +26,10 @@ import { ENV_LINE } from '../src/evaluator/index.ts';
 import { RUN_FIELD } from '../src/evaluator/runs.ts';
 import { RunInProgress } from '../src/process/runs.ts';
 import { dispatchView } from '../src/process/seat.ts';
+import { openProcess } from '../src/process/context.ts';
+import { secNext, secWait } from '../src/process/secretary.ts';
+import { claimSecretary, startSecretary } from '../src/memory/resident.ts';
+import { PlainGit } from '../src/git/plainGit.ts';
 import { addDetailedPlan, CHECK_JS, ENV_A, handBack, processProject, readAll, readyOf, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 
 const M = 'm1' as MissionId;
@@ -338,6 +342,47 @@ describe('the run lock: a declared run executes once while other processes advan
     assert.deepEqual(card.verificationRuns.map((r) => r.evidence), [answer.verification![0]!.evidence]);
     assert.equal(executions(g.counter), 1, 'exactly one execution in all');
     assert.equal(evidenceOf(ctx, g.command).length, 1);
+  });
+
+  it('4.4 (F19): while a hand-back verifies its candidate, a concurrent mp sec next and mp sec wait run nothing twice', async () => {
+    p = processProject();
+    const g = gatedCommand(p);
+    const ctx = p.ctx;
+    await startAddMission(ctx, M);
+    await step(ctx, 'calibrator-1', (c) => cal1Pass(c));
+    await step(ctx, 'architect-decompose', () => addDetailedPlan(M, { verification: [{ id: 'check', command: g.command }] }));
+    await step(ctx, 'calibrator-2', (c) => cal2Pass(c));
+    const d = pmDispatch(ctx, (await readyOf(ctx, 'constructor')).step);
+    readAll(ctx, d.dispatch);
+    const wt = join(p.dir, d.worktree!);
+    write(wt, 'src/add.js', 'exports.add = (a, b) => a + b;\n');
+    write(wt, 'src/check.js', CHECK_JS);
+    const dir = join(ctx.memory.paths.tmp, d.dispatch);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'report.md'), `# Report of ${d.dispatch}\n\nDone as the card says.\n`);
+    writeFileSync(join(dir, 'result.json'), JSON.stringify({ done: 'implemented add', unmet_standards: [], unfixed_problems: [], decisions_needed: [] }));
+    // a resident Secretary adopts the dispatch in flight
+    const g1 = startSecretary(ctx.memory, { op: 'start', name: 'test-Secretary' });
+    claimSecretary(ctx.memory, g1.generation, { op: 'session', filler: null });
+    const sec = openProcess(p.dir, { git: PlainGit.create(), secretary: g1.generation, observe: () => ENV_A, ident: { name: 'mp test', email: 'mp@test' } });
+    try {
+      const seat = child({ action: 'handback', dir: p.dir, env: ENV_A, dispatch: d.dispatch, report: `.mission-pipeline/tmp/${d.dispatch}/report.md`, result: `.mission-pipeline/tmp/${d.dispatch}/result.json` });
+      await waitFor("the hand-back's verification to start", () => executions(g.counter) === 1);
+      for (let i = 0; i < 2; i++) {
+        const [next] = await Promise.all([secNext(sec), secWait(sec, { since: Number(sec.memory.head()), timeout: 0.2, pollMs: 5, periodicMs: 20 })]);
+        assert.deepEqual(next.errors, [], 'no flow step failed');
+        assert.ok(!next.ready.some((r) => r.kind === 'reviewer'), 'the task waits for its runs');
+      }
+      assert.equal(executions(g.counter), 1, 'neither sec next nor sec wait ran the verification again');
+      writeFileSync(g.gate, '');
+      const answer = (await seat.answer) as { kind: string; verification: Array<{ passed: boolean }> | null };
+      assert.equal(answer.kind, 'recorded', JSON.stringify(answer));
+      await secNext(sec);
+      assert.equal(executions(g.counter), 1, 'exactly one execution in all');
+      assert.equal(evidenceOf(ctx, g.command).length, 1);
+    } finally {
+      sec.memory.close();
+    }
   });
 
   it('a hand-back whose verification is pending in another process is recorded once, runs nothing, and the flow gets the result later', async () => {

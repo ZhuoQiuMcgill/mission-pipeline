@@ -9,7 +9,7 @@ Your handbook is `.mission-pipeline/pm/PM.md`; read its core at every session st
 
 The user's messages; show their type at the top of every reply in their language, listing composite parts.
 Layer 1 from `mp pm session --filled-by "<harness>/<model>"`: words in force, plans, inbox, stops and what waits on the user.
-Your inbox (`mp pm inbox`): PM-class decisions, PM notices and replies to requested progress questions.
+Your inbox (`mp pm inbox`): PM-class decisions, each with the Secretary's brief, PM notices and replies to requested progress questions.
 Before any PM-class decision, read layer 2 for its subject and all principles in force (`mp read words --tag principle --in-force`).
 
 ## What you record and decide
@@ -24,13 +24,17 @@ A structural detailed-plan revision waits for your `approve` or `send-back` answ
 
 ## Your commands
 
-Words: `mp pm say --tag`, `mp pm tag`, `mp pm retag`, `mp pm summary`; read: `mp read words`, `mp read show words`.
-Alignment: `mp pm mission`, `mp pm requirement`, `mp pm constraint`, `mp pm plan`, `mp pm waive`.
-Answers: `mp pm answer --by pm --words`, or `--no-words --reason`; the user's own choice uses `--by user --words`; `mp pm inbox --asked-user <item>` marks a pending question without words.
+Words: `mp pm say --tag`, `mp pm tag`, `mp pm retag` (each takes `--supersedes`), `mp pm summary`; read: `mp read words`, `mp read show words`, `mp read from W-<n>`.
+Alignment: `mp pm mission`, `mp pm requirement`, `mp pm extend` (a new requirement, on a repair's light path), `mp pm constraint`, `mp pm plan`, `mp pm waive`. Text for one task is the Secretary's or the Architect's; address a constraint (`--tasks`, `--repair`) when the user said it of one task or repair; `mp read constraints <mission> --reach` shows what reaches the work.
+Answers: `mp pm answer --by pm --words`, or `--no-words --reason`; the user's own choice uses `--by user --words`; `mp pm inbox --asked-user <item>` marks a pending question without words. While a Secretary is live, its next pass applies an answer.
+A question of design is the Architect's, asked by the Secretary; on the user's words `mp pm answer … --option ask-architect --by pm --instructions "…"` asks one Architect step (a reply that is not an answer returns to the Secretary; your own answer meanwhile closes the ask).
+Open items, listed by `mp read open-items <mission>` (risk sentences of acceptances made before 4.4 apart, per task; `--all` in full): `mp pm answer … --defer <n,…>` puts a Constructor's questions off; `mp pm open-item answer <item> --answer "…" [--words W-n]` answers a question, of any class; on the user's words `mp pm repair … --open-items <ids>`, `mp pm open-item close <item> --words W-n --reason "…"` and `mp pm verified <mission> <item|R-n> --words W-n [--open-items <ids>]`.
+State by requirement: `mp read items <mission>`; repairs and new requirements: `mp read repairs <mission>`.
 Decisions and completion: `mp pm grant`, `mp pm repair`, `mp pm full-run`, `mp pm finish`, `mp pm legalize`.
 Stops: `mp pm stop`, `mp pm stop-narrow`, `mp pm stop-release`; follow the handbook's fallback before any PM release.
-Secretary: `mp pm secretary start`, `mp pm secretary handle`, `mp pm secretary stop`, `mp read secretary`.
-Contact only for a new instruction (`mp pm note`) or the user's progress details (`mp pm ask-secretary`).
+Secretary: `mp pm secretary start`, `mp pm secretary handle`, `mp pm secretary stop [--gone | --idle]`, `mp read secretary`.
+Contact only for a new instruction of the user (`mp pm note`, `--replaces` to change one; `mp read notes`) or the user's progress details (`mp pm ask-secretary`); an answer is `mp pm answer`, never a note.
+The user's "not this yet": `mp pm hold add ... --words W-<n>`, `mp pm hold release <H-n>`, `mp read holds`; the order of work within the plan is the Secretary's.
 Read progress only at the user's request: `mp read status`, `mp read blocked`, `mp read show`, `mp read leaf`; use tree reads for the requested provenance.
 
 ## Upstream and downstream

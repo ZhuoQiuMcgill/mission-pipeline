@@ -109,7 +109,7 @@ describe('flow: the Reviewer rework loop (8.1, 6.5)', () => {
     assert.equal(secretaries.length, 1);
     assert.equal(secretaries[0]?.request.source, 'loop-exhausted');
     // 4.1.3 (E-1, #35): the attempt has a verified hand-back, so the decision may also accept it with its risks
-    assert.deepEqual(secretaries[0]?.options.map((o) => o.id), ['grant', 'replan', 'accept-risk', 'abandon', 'ask-user']);
+    assert.deepEqual(secretaries[0]?.options.map((o) => o.id), ['grant', 'ask-architect', 'replan', 'accept-risk', 'abandon', 'ask-user']);
     assert.equal(ports.ledger.notices.filter((n) => n.wi === 'WI-08').length, 1);
     assert.deepEqual(await accepted(ports), ['task:iface', 'task:impl']);
     assert.equal((await new FlowEngine(ports).reconcile(M))[0]?.passes, 1, 'settled');
@@ -178,7 +178,8 @@ describe('flow: escalations from execution (3.8, 3.2)', () => {
     assert.equal((await new FlowEngine(ports).reconcile(M))[0]?.passes, 1, 'settled');
   });
 
-  it("the Constructor's questions go to the Secretary without stopping the review", async () => {
+  // 4.4 (F4): the review waits for the answer (it used to go on beside the question)
+  it("the Constructor's questions go to the Secretary; the task is not stopped, and its review waits for the answer", async () => {
     const { ports, engine } = await setup();
     const asked: SecretaryCard[] = [];
     await drive(
@@ -194,6 +195,9 @@ describe('flow: escalations from execution (3.8, 3.2)', () => {
       }),
     );
     assert.equal(asked[0]?.request.source, 'constructor-decision');
+    const applied = (await ports.ledger.events({ mission: M, line: 'secretary', event: 'applied' })).find((e) => e.key === 'cdec.con.m1.impl.1');
+    const claimed = ports.ctx.memory.read((db) => db.stmt("SELECT claimed_rev FROM dispatches WHERE task = 'rev.m1.impl.1'").get() as { claimed_rev: number });
+    assert.ok(applied !== undefined && Number(claimed.claimed_rev) > applied.revision, 'the review is claimed after the answer is carried out');
     assert.deepEqual(await accepted(ports), ['task:iface', 'task:impl']);
     assert.equal((await new FlowEngine(ports).reconcile(M))[0]?.passes, 1, 'settled');
   });

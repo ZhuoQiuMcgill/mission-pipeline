@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildManifest } from '../src/delivery/manifest.ts';
+import { buildManifest, manifestVersions } from '../src/delivery/manifest.ts';
 import { FakeProofView, fakeObject, mod, obj, ov, pu, unit } from './delivery-fixtures.test.ts';
 
 const ids = (xs: readonly { readonly id: string }[]): string[] => xs.map((x) => x.id);
@@ -104,4 +104,33 @@ test('unknown ids are reported as such, and prerequisite cycles without a unit s
   const c = buildManifest(cyclic, [obj('a1')]);
   assert.equal(c.kind, 'manifest');
   if (c.kind === 'manifest') assert.deepEqual(c.manifest.entries.map((e) => e.object.id), ['a1', 'b1']);
+});
+
+test('4.4: manifestVersions holds exactly the objects of a composition-only manifest, in its order, or the same refusal', () => {
+  const view = new FakeProofView()
+    .add(
+      fakeObject('a1', { paths: ['a/x'], prerequisites: [obj('b1')] }),
+      fakeObject('b1', { paths: ['b/y'], prerequisites: [obj('c1')] }),
+      { ...fakeObject('b2', { paths: ['b/y'], prerequisites: [obj('c1')] }), predecessor: ov('b1') },
+      fakeObject('c1', { paths: ['c/z'] }),
+      fakeObject('d1', { paths: ['b/y'], prerequisites: [obj('b2'), obj('plan1')] }),
+      fakeObject('plan1', { kind: 'plan', module: null, paths: ['docs/plan.md'] }),
+      fakeObject('x1', { paths: ['x/f'], prerequisites: [obj('y1')] }),
+      fakeObject('y1', { paths: ['y/f'], prerequisites: [obj('x1')] }),
+      fakeObject('z1', { paths: ['z/f'], prerequisites: [obj('y1'), obj('a1')] }),
+      fakeObject('p1', { paths: ['p/f'], placed: false }),
+      fakeObject('q1', { paths: ['q/f'], prerequisites: [obj('p1')] }),
+    )
+    .unit(pu('u1'), [ov('x1'), ov('y1')]);
+  const selections = [[obj('a1')], [obj('a1'), obj('d1')], [obj('d1'), obj('a1')], [obj('z1')], [unit('u1'), obj('d1')], [obj('q1')], [obj('nope')], []];
+  for (const selected of selections) {
+    const full = buildManifest(view, selected, { compositionOnly: true });
+    const just = manifestVersions(view, selected);
+    if (full.kind === 'manifest') {
+      assert.equal(just.kind, 'versions', JSON.stringify(selected));
+      if (just.kind === 'versions') assert.deepEqual(just.versions, full.manifest.entries.map((e) => e.object), JSON.stringify(selected));
+    } else assert.deepEqual(just, full, JSON.stringify(selected));
+  }
+  const both = buildManifest(view, [obj('a1'), obj('d1')], { compositionOnly: true });
+  assert.ok(both.kind === 'manifest' && both.manifest.superseded?.has(ov('b1')), 'the case of a superseded version is covered');
 });

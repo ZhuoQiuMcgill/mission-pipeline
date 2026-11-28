@@ -1,21 +1,27 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MissionId, ContentHash } from '../common/ids.ts';
-import { canonicalJson } from '../common/hash.ts';
-import { activeStops, appendRecords, dispatchInfo, wordsEntry, flowEvents, listDispatches, type Db } from '../memory/index.ts';
+import { canonicalJson, sha256 } from '../common/hash.ts';
+import { activeStops, appendRecords, cursor, dispatchInfo, factById, wordsEntry, flowEventExists, flowEvents, listDispatches, setCursor, type Db } from '../memory/index.ts';
+import type { ObjectVersionRecord } from '../common/records.ts';
+import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, type AmendmentEntry, type StoredDetailedPlan } from '../flow/plandoc.ts';
+import type { ItemVersionBody } from '../flow/requirements.ts';
+import { DIRECT_TO_PM, pmOptions } from '../flow/secretary.ts';
+import { taskStatus } from './ports.ts';
 import { generations, liveSecretary, notAllowed, requireSecretary, requirePm, touchSecretary, writeGeneration } from '../memory/resident.ts';
 import { residentRecords, wordsAuthority } from '../memory/words.ts';
 import { stopCovers } from '../memory/stopTypes.ts';
 import type { ProcessContext } from './context.ts';
-import { advance } from './advance.ts';
-import { pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
-import { dispatchView, seatCard, seatHandback } from './seat.ts';
-import { listNotices, markNotices } from './notices.ts';
+import { cardSizeReport, pmDispatchChecked, pmReconcile, readNextReport, type Dispatched, type NextReport } from './pm.ts';
+import { dispatchView, recordServed, seatCard, seatHandback } from './seat.ts';
+import { listNotices, markNotices, onlyInforms } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
 import type { DecisionBody, EscalationBody } from '../flow/secretary.ts';
 import { secretaryRoundInputs } from '../seat/cards/dynamic.ts';
+import { currentHandUp, reopenedAt } from '../flow/architectAnswers.ts';
 import { handBackFiles } from '../seat/card.ts';
 import type { SecretaryResult } from '../seat/cards/secretary.ts';
+import { holdTimeReached } from './holds.ts';
 
 export function unconfirmedSeats(db: Db): {dispatch: string; mission: string; seat: string; stops: string[]}[] {
   const stops = activeStops(db);
@@ -25,34 +31,92 @@ export function unconfirmedSeats(db: Db): {dispatch: string; mission: string; se
   });
 }
 
-export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolean}): {generation: string; stopHint: string} {
+export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolean; idle?: boolean}): {generation: string; stopHint: string} {
   return ctx.memory.write({op: `secretary:stop:${o.op}`, payload: o, stop: true, command: 'secretary stop'}, (tx) => {
     const g = generations(tx).filter((g) => g.state !== 'retired').at(-1);
     if (g === undefined) notAllowed('there is no pending or live Secretary to stop');
-    const stops = activeStops(tx);
-    const lastStop = stops.at(-1);
-    if (g.state === 'live' && o.gone !== true && (lastStop === undefined || ctx.now() < Math.max(Number(lastStop.committedAt), g.lastCommandAt ?? g.createdAt) + 60_000)) notAllowed('the Secretary has not exceeded the stop’s 60 s grace; --gone records that the user says the session is gone');
+    // 4.4 (F19): --idle retires a generation, pending or live, with no stop when no mission is open and nothing
+    // may still run: no dispatch in flight or released unconfirmed, no detached run without a result or an end
+    const idle = o.idle === true;
+    if (idle) {
+      const open = (tx.stmt("SELECT mission FROM missions WHERE state = 'open' ORDER BY mission").all() as {mission: string}[]).map((r) => r.mission);
+      const flying = (tx.stmt("SELECT dispatch FROM dispatches WHERE state = 'in-flight' OR (state = 'released' AND released = 'abandoned') ORDER BY claimed_rev").all() as {dispatch: string}[]).map((r) => r.dispatch);
+      const running = (tx.stmt("SELECT mission, line, key, body FROM flow_events WHERE event = 'detached' ORDER BY revision").all() as {mission: string; line: string; key: string; body: string}[])
+        .filter((e) => !flowEventExists(tx, {mission: e.mission, line: e.line, event: 'detached-end', key: e.key}) && !flowEventExists(tx, {mission: e.mission, line: e.line, event: 'run', key: String((JSON.parse(tx.data.text(e.body)) as {evidence?: unknown}).evidence)}))
+        .map((e) => e.key);
+      // 4.4 (F19): a worker lost without a trace (a power loss) leaves its run recorded as running: the plain stop is the way through
+      if (open.length > 0 || flying.length > 0 || running.length > 0) notAllowed(`--idle retires the Secretary only when no mission is open and nothing is in flight (open: ${open.join(', ') || 'none'}; in flight or not confirmed ended: ${flying.join(', ') || 'none'}; detached runs still running: ${running.join(', ') || 'none'})${running.length > 0 ? `; it waits for detached run${running.length === 1 ? '' : 's'} ${running.join(', ')}, which may have no result or end because its worker was lost` : ''}. mp pm secretary stop without --idle retires the generation (after the stop's 60 s grace, or with --gone)`);
+    } else {
+      const stops = activeStops(tx);
+      const lastStop = stops.at(-1);
+      if (g.state === 'live' && o.gone !== true && (lastStop === undefined || ctx.now() < Math.max(Number(lastStop.committedAt), g.lastCommandAt ?? g.createdAt) + 60_000)) notAllowed('the Secretary has not exceeded the stop’s 60 s grace; --gone records that the user says the session is gone; --idle retires it when no mission is open and nothing is in flight');
+    }
     writeGeneration(tx, {...g, state: 'retired'});
-    return {generation: g.generation, stopHint: g.handle === null ? `Stop ${g.name} in your harness by name, confirm its seats ended, then mp pm release <D> --ended.` : `Stop the session with handle ${g.handle} in your harness (Claude Code hint: claude stop ${shellQuote(g.handle)}). Confirm its seats ended, then mp pm release <D> --ended.`};
+    const harness = g.handle === null ? `Stop ${g.name} in your harness by name` : `Stop the session with handle ${g.handle} in your harness (Claude Code hint: claude stop ${shellQuote(g.handle)})`;
+    return {generation: g.generation, stopHint: idle ? `${harness}; nothing was in flight.` : `${harness}${g.handle === null ? ', confirm its seats ended, then mp pm release <D> --ended.' : '. Confirm its seats ended, then mp pm release <D> --ended.'}`};
   });
 }
 
 export function shellQuote(text: string): string { return `'${text.replace(/'/g, `'"'"'`)}'`; }
 
 export function channel(ctx: ProcessContext) {
-  const notes = new Map(residentRecords(ctx.memory, 'pm.note').map((n) => [n.id, n]));
+  // 4.4 (G8): the notes and their replacements come from one read of the records, so a note committed in between cannot hide both
+  const rows = residentRecords(ctx.memory, 'pm.note');
+  const notes = new Map(rows.map((n) => [n.id, n]));
+  const replaced = replacedNotes(rows);
   const replied = new Set(residentRecords(ctx.memory, 'sec.reply').map((r) => r.id));
   const questions = new Map(residentRecords(ctx.memory, 'sec.question').map((q) => [q.id, q]));
-  return {notes: [...notes.values()].filter((n) => !n.acknowledged), questions: residentRecords(ctx.memory, 'pm.question').filter((q) => !replied.has(q.id)), replies: residentRecords(ctx.memory, 'pm.reply').map((r) => ({...r, question: questions.get(r.id)?.text ?? '', about: questions.get(r.id)?.about ?? null}))};
+  // 4.4 (G8): a replaced note is no longer a current instruction for the Secretary
+  return {notes: [...notes.values()].filter((n) => !n.acknowledged && !replaced.has(n.id)), questions: residentRecords(ctx.memory, 'pm.question').filter((q) => !replied.has(q.id)), replies: residentRecords(ctx.memory, 'pm.reply').map((r) => ({...r, question: questions.get(r.id)?.text ?? '', about: questions.get(r.id)?.about ?? null}))};
 }
 
-export function pmNote(ctx: ProcessContext, o: {op: string; text: string; words?: string | null}): string {
+/** 4.4 (G8): each replaced note and the note that replaced it first. A 4.3 note replaces nothing. */
+function replacedNotes(rows: ReturnType<typeof residentRecords<'pm.note'>>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const n of rows) if (n.replaces !== undefined && !out.has(n.replaces)) out.set(n.replaces, n.id);
+  return out;
+}
+
+export interface NoteView {readonly id: string; readonly text: string; readonly words: string | null; readonly replaces: string | null; readonly state: 'current' | 'acknowledged' | 'replaced'; readonly replacedBy: string | null; readonly acknowledged: boolean}
+/** 4.4 (G8): every note with its state, oldest first: replaced (by a later note), acknowledged by the Secretary, or current. */
+export function pmNotes(db: Db): NoteView[] {
+  // an acknowledgement appends a copy of the note: the last record of an id is its state; one read gives both
+  const rows = residentRecords(db, 'pm.note');
+  const latest = new Map(rows.map((n) => [n.id, n]));
+  const replaced = replacedNotes(rows);
+  return [...latest.values()].map((n) => {
+    const by = replaced.get(n.id) ?? null;
+    return {id: n.id, text: n.text, words: n.words, replaces: n.replaces ?? null, state: by !== null ? 'replaced' as const : n.acknowledged ? 'acknowledged' as const : 'current' as const, replacedBy: by, acknowledged: n.acknowledged};
+  });
+}
+
+/** 4.4 (G8): the open escalations (raised, not applied) whose id a text names, as `<mission>/<id>`. A warning reads it; nothing is refused. */
+export function escalationsNamedIn(db: Db, text: string): {mission: string; escalation: string}[] {
+  const rows = db.stmt("SELECT mission, event, key FROM flow_events WHERE line = 'secretary' AND event IN ('escalation', 'applied') ORDER BY revision").all() as {mission: string; event: string; key: string}[];
+  const applied = new Set(rows.filter((r) => r.event === 'applied').map((r) => `${r.mission}/${r.key}`));
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const out: {mission: string; escalation: string}[] = [];
+  for (const r of rows) {
+    if (r.event !== 'escalation' || applied.has(`${r.mission}/${r.key}`) || out.some((o) => o.mission === r.mission && o.escalation === r.key)) continue;
+    // an id is a whole token: "rnd.4" is not named by "rnd.42"; a sentence's full stop after it still names it
+    if (new RegExp(`(?<![A-Za-z0-9_.-])${escape(r.key)}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`).test(text)) out.push({mission: r.mission, escalation: r.key});
+  }
+  return out;
+}
+
+export function pmNote(ctx: ProcessContext, o: {op: string; text: string; words?: string | null; replaces?: string | null}): string {
   requirePm(ctx.secretary);
   return ctx.memory.write({op: `note:${o.op}`, payload: o, command: 'note', filler: ctx.filler}, (tx) => {
     if (o.text.trim() === '') notAllowed('a note needs text');
     if (o.words != null && wordsEntry(tx, o.words) === null) notAllowed(`no words entry ${o.words}`);
+    if (o.replaces != null) {
+      // 4.4 (G8): a note replaces one current note; a replaced one points to its replacement
+      if (!residentRecords(tx, 'pm.note').some((n) => n.id === o.replaces)) notAllowed(`no PM note ${o.replaces}`);
+      const by = replacedNotes(residentRecords(tx, 'pm.note')).get(o.replaces);
+      if (by !== undefined) notAllowed(`${o.replaces} was already replaced by ${by}; replace ${by} instead`);
+    }
     const id = `N-${new Set(residentRecords(tx, 'pm.note').map((n) => n.id)).size + 1}`;
-    tx.append({kind: 'pm.note', id, text: o.text, words: o.words ?? null, acknowledged: false}); return id;
+    tx.append({kind: 'pm.note', id, text: o.text, words: o.words ?? null, acknowledged: false, ...(o.replaces != null ? {replaces: o.replaces} : {})}); return id;
   });
 }
 
@@ -108,14 +172,95 @@ export function secAckNote(ctx: ProcessContext, o: {op: string; id: string}): vo
   });
 }
 
-export interface InboxItem {id: string; kind: 'decision' | 'notice' | 'question' | 'reply'; mission: string | null; text: string; state: string; action: string; resolution: string; round?: number; options?: readonly string[]; facts?: unknown; about?: string | null; acknowledgeable?: boolean}
+/**
+ * 4.4 (G2): what reaches the PM with a decision item: the Secretary's notice in full, its reason, each
+ * option with what it does, the requirement items and words entries the work rests on (by id), and the
+ * escalation's reasons shortened, with the read that gives the rest. Nothing in it is checked.
+ */
+export interface InboxBrief {readonly by: string | null; readonly notice: string; readonly reason: string; readonly handedOver?: string; readonly options: readonly {id: string; outcome: string}[]; readonly items: readonly string[]; readonly words: readonly string[]; readonly revised?: readonly CitedVersion[]; readonly reasons: readonly string[]; readonly more: string}
+export interface InboxItem {id: string; kind: 'decision' | 'notice' | 'question' | 'reply'; mission: string | null; text: string; state: string; action: string; resolution: string; round?: number; options?: readonly string[]; facts?: unknown; about?: string | null; acknowledgeable?: boolean; brief?: InboxBrief}
 function allFlow(ctx: ProcessContext) {
   return (ctx.memory.stmt('SELECT mission, line, event, key, body, revision AS rev FROM flow_events ORDER BY revision').all() as {mission: string; line: string; event: string; key: string; body: string; rev: number}[]).map((e) => ({...e, revision: Number(e.rev), mission: e.mission as MissionId, body: JSON.parse(ctx.memory.data.text(e.body)) as any}));
 }
+type FlowRow = ReturnType<typeof allFlow>[number];
 
+type Decided = {notice: string; reason: string; authorization?: string | null; inputs?: readonly {line: string; version: string}[]};
+
+/** 4.4 (F4): the accepted hand-back of a Secretary decision step, as the inbox reads it (in any snapshot, a write's too). */
+export function handedBackResult(db: Db, data: {text(h: string): string}, task: string): SecretaryResult | undefined {
+  const s = taskStatus(db, data, task);
+  return s?.state !== 'done' || s.handBack === null ? undefined : (s.handBack.result as SecretaryResult);
+}
+
+/**
+ * 4.4 (F9, issue 62): a Secretary decision handed back before any pass recorded it, read from its accepted
+ * hand-back, with the versions its card was claimed with (what a pass records as the decision's inputs).
+ */
+function handedBackDecision(ctx: ProcessContext, task: string): (SecretaryResult & {inputs?: readonly {line: string; version: string}[]}) | undefined {
+  const s = taskStatus(ctx.memory, ctx.memory.data, task);
+  if (handedBackResult(ctx.memory, ctx.memory.data, task) === undefined || s === null || s.handBack === null) return undefined;
+  const claimed = flowEvents(ctx.memory, {mission: dispatchInfo(ctx.memory, s.handBack.dispatch)!.mission, line: `dispatch:${s.handBack.dispatch}`, event: 'claimed'})[0];
+  const spec = claimed === undefined ? null : JSON.parse(ctx.memory.data.text((JSON.parse(ctx.memory.data.text(claimed.body)) as {spec: string}).spec)) as {card?: {contextItems?: {line: string; version: string}[]}};
+  return {...(s.handBack.result as SecretaryResult), ...(spec?.card?.contextItems !== undefined ? {inputs: spec.card.contextItems} : {})};
+}
+
+/** An authorization the decision cites, at the version it was decided on, and the version in force now when it differs. */
+export interface CitedVersion {readonly line: string; readonly decided: string; readonly current: string | null}
+
+/**
+ * 4.4 (G2): the requirement items an escalation's work rests on (its own, its task's in the plan in effect,
+ * the authorization the decision cites, and the authorizations they rest on) and their words entries. A cited
+ * authorization counts at the version the decision recorded, and at its current one too when it was revised.
+ */
+function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationBody, plans: Map<string, DetailedPlanDoc | null>, cited: readonly {line: string; version: string | null}[]): {items: string[]; words: string[]; revised: CitedVersion[]} {
+  const items = new Set([...(esc.items ?? []), ...cited.map((c) => c.line)]);
+  const taskId = esc.subject.startsWith('task:') ? esc.subject.slice('task:'.length) : null;
+  const dplan = taskId === null ? undefined : mine.filter((e) => e.line === `task:${taskId}` && e.event === 'spec').at(-1)?.body.dplan as string | undefined;
+  if (dplan !== undefined && !plans.has(dplan)) {
+    const obj = factById(ctx.memory, 'object.version', dplan)?.record as ObjectVersionRecord | undefined;
+    plans.set(dplan, obj === undefined ? null : amendedPlan(DetailedPlanDoc.parse((JSON.parse(ctx.memory.data.text(obj.content)) as StoredDetailedPlan).plan), latestEffectiveOf<{dplan: string; amendments?: readonly AmendmentEntry[]}>(mine, dplan)?.amendments));
+  }
+  for (const line of (dplan === undefined ? null : plans.get(dplan))?.tasks.find((t) => t.id === taskId)?.requirementItems ?? []) items.add(line);
+  const latest = new Map<string, ItemVersionBody>();
+  const byVersion = new Map<string, ItemVersionBody>();
+  for (const e of mine) if (e.line === 'requirements' && e.event === 'item') {latest.set((e.body as ItemVersionBody).line, e.body as ItemVersionBody); byVersion.set((e.body as ItemVersionBody).version, e.body as ItemVersionBody);}
+  const words = new Set<string>();
+  const wordsOf = (s: ItemVersionBody['source'] | undefined): void => {
+    if (s?.kind === 'authorization') {items.add(s.line); const a = latest.get(s.line)?.source; if (a?.kind === 'words') words.add(a.words);}
+    else if (s?.kind === 'words') words.add(s.words);
+  };
+  // the version the decision rested on first (its words entry stays named after a revision), then the current one
+  const revised: CitedVersion[] = [];
+  for (const c of cited) {
+    if (c.version === null) continue;
+    wordsOf(byVersion.get(c.version)?.source);
+    const now = latest.get(c.line);
+    if (now?.version !== c.version) revised.push({line: c.line, decided: c.version, current: now?.version ?? null});
+  }
+  for (const line of [...items]) wordsOf(latest.get(line)?.source);
+  return {items: [...items], words: [...words], revised};
+}
+
+const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
+
+function inboxBrief(ctx: ProcessContext, mission: string, mine: readonly FlowRow[], esc: EscalationBody, decided: Decided | undefined, by: string | null, plans: Map<string, DetailedPlanDoc | null>, handedOver: string | null): InboxBrief {
+  // the hand-back and the decision event carry the same `authorization` field, and the versions it was decided on: one rule for both
+  const auth = typeof decided?.authorization === 'string' ? decided.authorization : null;
+  const rest = restsOn(ctx, mine, esc, plans, auth === null ? [] : [{line: auth, version: decided?.inputs?.find((i) => i.line === auth)?.version ?? null}]);
+  const shown = esc.reasons.slice(0, 5).map((r) => clip(r, 200));
+  return {by, notice: decided?.notice ?? '', reason: decided?.reason ?? '', ...(handedOver !== null ? {handedOver} : {}), options: pmOptions(esc), items: rest.items, words: rest.words, ...(rest.revised.length > 0 ? {revised: rest.revised} : {}), reasons: esc.reasons.length > shown.length ? [...shown, `(${esc.reasons.length - shown.length} more)`] : shown, more: `mp read show escalation ${mission}/${esc.id}`};
+}
+
+/** The PM inbox, read in one snapshot of the memory (4.4: its items and their briefs never mix two states). */
 export function pmInbox(ctx: ProcessContext): InboxItem[] {
+  return ctx.memory.read(() => inboxItems(ctx));
+}
+
+function inboxItems(ctx: ProcessContext): InboxItem[] {
   const events = allFlow(ctx);
   const out: InboxItem[] = [];
+  const plans = new Map<string, DetailedPlanDoc | null>();
+  const held = new Set<string>();
   const is = (mission: string, event: string, key: string) => events.some((e) => e.mission === mission && e.line === 'secretary' && e.event === event && e.key === key);
   const answered = (mission: string, id: string) => {
     if (is(mission, 'applied', id) || is(mission, 'user-answer', id)) return true;
@@ -129,20 +274,38 @@ export function pmInbox(ctx: ProcessContext): InboxItem[] {
     const pmRound = events.filter((r) => r.mission === e.mission && r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key.startsWith(`${esc.id}#`)).length + 1;
     const answer = events.find((a) => a.mission === e.mission && a.line === 'secretary' && a.event === 'pm-answer' && a.key === `${esc.id}#${pmRound}`);
     if (answer !== undefined && (answer.body.words ?? []).every((w: {id: string; fingerprint: string}) => wordsAuthority(ctx.memory, ctx.memory.data, w.id, e.mission) === w.fingerprint)) continue;
-    const round = secretaryRoundInputs(esc, events.filter((r) => r.mission === e.mission));
+    const mine = events.filter((r) => r.mission === e.mission);
+    const round = secretaryRoundInputs(esc, mine);
     const d = events.find((d) => d.mission === e.mission && d.line === 'secretary' && d.event === 'decision' && d.key === round.key)?.body as DecisionBody | undefined;
-    const routed = is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || d?.classification === 'needs-user' || d?.classification === 'needs-pm' || answer !== undefined || esc.source === 'plan-structure-change' || esc.source === 'plan-restarts-work';
-    if (!routed) continue;
+    // 4.4 (F9, issue 62): listed from the moment the hand-back is recorded, before a pass writes the decision
+    const handed = d === undefined ? handedBackDecision(ctx, round.esc.task) : undefined;
+    const decided = d ?? handed;
+    // 4.4 (G1, review p11-2, p11-r2-2): a Secretary round an Architect's reply reopened is the Secretary's: listed only once
+    // that round sends it up (its decision, or its own hand-up, as a refused grant writes); its earlier notices wait with it
+    const sec = mine.filter((r) => r.line === 'secretary');
+    const reopened = reopenedAt(sec, esc.id) !== null;
+    const handUp = currentHandUp(sec, esc.id);
+    const routed = reopened ? decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || handUp !== undefined : handUp !== undefined || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || DIRECT_TO_PM.has(esc.source);
+    if (!routed) {
+      if (reopened) held.add(`${e.mission}/${esc.id}`);
+      continue;
+    }
     const id = `${e.mission}/${esc.id}`;
     const asked = is(e.mission, 'asked-user', esc.id);
-    out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${pmRound > 1 ? '; the words it rested on changed' : ''}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound});
+    // 4.4 (G1): a round the PM itself closed (an ask it answered over), or one the Architect's reply closed, says so
+    const closed = pmRound > 1 ? events.find((r) => r.mission === e.mission && r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === `${esc.id}#${pmRound - 1}`)?.body as {why?: string; architect?: string; closedBy?: string} | undefined : undefined;
+    const back = pmRound <= 1 ? '' : typeof closed?.architect === 'string' ? `; your earlier ask of the Architect came back to the Secretary: ${clip(closed.why ?? '', 600)}` : closed?.closedBy === 'pm' ? '' : '; the words it rested on changed';
+    out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${back}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound,
+      brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans, (handUp?.body as {why?: string} | undefined)?.why ?? null)});
   }
   for (const n of listNotices(ctx.memory, ctx.memory.data, {audience: 'pm'})) {
     const detail = n.detail as {escalation?: string | {id?: string}; escalations?: string[]} | null;
     const id = typeof detail?.escalation === 'string' ? detail.escalation : detail?.escalation?.id;
     const linked = [...new Set([...(id === undefined ? [] : [id]), ...(detail?.escalations ?? [])])];
     if (linked.length > 0 && n.mission !== null && linked.every((id) => answered(n.mission!, id))) continue;
-    const pending = linked.filter((id) => n.mission === null || !answered(n.mission, id));
+    // 4.4 (G1, review p11-2): an escalation back with the Secretary (a reopened round not sent up) waits for no PM answer
+    const pending = linked.filter((id) => n.mission === null || (!answered(n.mission, id) && !held.has(`${n.mission}/${id}`)));
+    if (linked.length > 0 && pending.length === 0) continue;
     if (pending.length > 0 && pending.every((id) => out.some((i) => i.id === `${n.mission}/${id}`))) continue;
     // A revised batch resolves a returned first review without an operational PM pass.
     if ((n.category === 'calibrator-1-returned' || n.category === 'calibrator-1-unavailable') && events.some((e) => e.mission === n.mission && e.line === 'plan' && (e.event === 'pm-batch' || e.event === 'cal1-recheck') && e.revision > n.revision)) continue;
@@ -196,30 +359,151 @@ import { markNotice } from '../memory/domain/pm.ts';
 import type { WriteTx } from '../memory/memory.ts';
 function markNoticesInTx(tx: WriteTx, id: string): void {markNotice(tx, {notice: id, state: 'acknowledged'});}
 
-export interface SecretaryNext extends NextReport {stops: ReturnType<typeof activeStops>; revision: number; unconfirmed: ReturnType<typeof unconfirmedSeats>; notes: ReturnType<typeof channel>['notes']; questions: ReturnType<typeof channel>['questions']; replies: ReturnType<typeof channel>['replies']; decisions: unknown[]}
-export async function secNext(ctx: ProcessContext): Promise<SecretaryNext> {
-  requireSecretary(ctx.memory, ctx.secretary);
-  touchSecretary(ctx.memory, ctx.secretary);
-  const r = await pmNext(ctx);
-  const decisions = allFlow(ctx).filter((e) => e.line === 'secretary' && e.event === 'applied' && (e.body.by === 'pm' || e.body.by === 'user'));
-  return {...r, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => pmInbox(ctx).some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...channel(ctx), decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: Number(ctx.memory.head())};
+/** 4.4 (F8): what a pass reduced to count lines, because the caller saw it before (`mp sec next --all` prints it). */
+export interface EarlierCounts {readonly notices: number; readonly replies: number; readonly decisions: number; readonly closedMissionSteps: number}
+export interface SecretaryNext extends NextReport {stops: ReturnType<typeof activeStops>; revision: number; unconfirmed: ReturnType<typeof unconfirmedSeats>; notes: ReturnType<typeof channel>['notes']; questions: ReturnType<typeof channel>['questions']; replies: ReturnType<typeof channel>['replies']; decisions: unknown[]; since: number | null; all: boolean; earlier: EarlierCounts}
+
+/** 4.4 (F8): the cursor of one Secretary generation: the revision its last pass that a caller saw was built from. */
+export function secCursorName(generation: string): string {return `sec-next.${generation.toLowerCase()}`;}
+
+/** The revision of each PM reply (residentRecords carries none). */
+function replyRevisions(db: Db): Map<string, number> {
+  return new Map((db.stmt("SELECT rev, record FROM log WHERE kind = 'pm.reply' ORDER BY rev").all() as {rev: number; record: string}[]).map((r) => [String((JSON.parse(r.record) as {id: string}).id), Number(r.rev)]));
 }
 
-/** Business revisions exclude our own action receipts, delivery marks and generation heartbeat. */
-export function actionableRevision(db: Db): number {
-  return Number((db.stmt("SELECT COALESCE(MAX(rev), 0) AS rev FROM log WHERE kind NOT IN ('pm.action','op.receipt','secretary.generation','cursor.set','leaf.recorded','notice.delivery')").get() as {rev: number}).rev);
+/**
+ * `mp sec next`: reconcile, then what changed since the caller's last pass (4.4, F8). Notices delivered
+ * before, PM replies and applied decisions at or before the cursor, and the steps of closed missions are
+ * counted, not printed; a delivered notice that only informs is not pending. The first pass of a
+ * generation, `all` and nothing else print everything. Only this pass, whose report reaches its caller,
+ * marks notices delivered and moves the cursor (secNextSeen); `since` replaces the cursor for one pass.
+ * `deferSeen`: the caller commits them itself once the report is written out (`mp sec next`), so an
+ * interruption before that shows an item again and never loses one to a count.
+ */
+export async function secNext(ctx: ProcessContext, o: {readonly all?: boolean; readonly since?: number | null; readonly deferSeen?: boolean} = {}): Promise<SecretaryNext> {
+  const g = requireSecretary(ctx.memory, ctx.secretary);
+  touchSecretary(ctx.memory, ctx.secretary);
+  // reconcile first; then one read: the revision the report is built from and everything it prints
+  const recon = await pmReconcile(ctx);
+  const out = ctx.memory.read((): SecretaryNext => {
+    const {report: r, revision: built} = readNextReport(ctx, recon);
+    const since = o.since ?? cursor(ctx.memory, secCursorName(g.generation))?.rev ?? null;
+    const full = o.all === true || since === null;
+    const deliveredAfter = (id: string): boolean => o.since != null && Number((ctx.memory.stmt("SELECT rev FROM notice_deliveries WHERE notice = ? AND state = 'delivered'").get(id) as {rev: number} | undefined)?.rev ?? 0) > o.since;
+    const notices = full ? r.notices : r.notices.filter((n) => n.state === 'undelivered' || deliveredAfter(n.id));
+    const ch = channel(ctx);
+    const revs = replyRevisions(ctx.memory);
+    const fresh = (rev: number): boolean => rev <= built && (full || rev > since!);
+    const replies = ch.replies.filter((x) => fresh(revs.get(x.id) ?? 0));
+    const applied = allFlow(ctx).filter((e) => e.line === 'secretary' && e.event === 'applied' && (e.body.by === 'pm' || e.body.by === 'user'));
+    const decisions = applied.filter((e) => fresh(e.revision));
+    const held = full ? r.held : r.held.filter((h) => h.closedMission !== true);
+    const earlier: EarlierCounts = full ? {notices: 0, replies: 0, decisions: 0, closedMissionSteps: 0} : {
+      notices: r.notices.filter((n) => !notices.includes(n) && !onlyInforms(n)).length,
+      replies: ch.replies.filter((x) => (revs.get(x.id) ?? 0) <= since!).length,
+      decisions: applied.filter((e) => e.revision <= since!).length,
+      closedMissionSteps: r.held.length - held.length,
+    };
+    const inbox = pmInbox(ctx);
+    return {...r, notices, held, stops: activeStops(ctx.memory), waitingOnUser: r.waitingOnUser.filter((w) => inbox.some((i) => i.id === `${w.mission}/${w.escalation}` && i.state === 'waits on the user')), ...ch, replies, decisions, unconfirmed: unconfirmedSeats(ctx.memory), revision: built, since, all: o.all === true, earlier};
+  });
+  if (o.deferSeen !== true) secNextSeen(ctx, out);
+  return out;
+}
+
+/**
+ * 4.4 (F8): a report has reached its caller: its undelivered notices are marked delivered (in bounded
+ * writes) and then the generation's cursor moves to its revision, never back (a late replay of an earlier
+ * pass). Interrupted in between: the next pass shows those items again.
+ */
+export function secNextSeen(ctx: ProcessContext, r: Pick<SecretaryNext, 'notices' | 'revision'>): void {
+  const g = requireSecretary(ctx.memory, ctx.secretary);
+  markNotices(ctx.memory, r.notices.filter((n) => n.state === 'undelivered').map((n) => n.id), 'delivered');
+  const name = secCursorName(g.generation);
+  ctx.memory.write({}, (tx) => {if (r.revision > Number(cursor(tx, name)?.rev ?? -1)) setCursor(tx, {cursor: name, rev: r.revision});});
+}
+
+/** 4.4 (F8): the largest report a `mp sec next` keeps for the replay of its operation id (a larger one leaves a receipt saying so). */
+export const NEXT_REPORT_KEEP = {maxBytes: 16 * 1024 * 1024};
+
+/** 4.4 (F8): keep a report for its replay: its data hash, or, when it is too large to keep, a receipt that says so. A pass never fails on this. */
+export function keepNextReport(ctx: ProcessContext, r: SecretaryNext): {readonly report: string} | {readonly tooLarge: true; readonly bytes: number} {
+  const json = canonicalJson(r);
+  const bytes = Buffer.byteLength(json, 'utf8');
+  if (bytes > NEXT_REPORT_KEEP.maxBytes) return {tooLarge: true, bytes};
+  try {
+    return {report: ctx.memory.write({}, (tx) => tx.data.put(json))};
+  } catch {
+    return {tooLarge: true, bytes};
+  }
+}
+
+/** 4.4 (F8): the report a `mp sec next` kept, read back by its hash (a replay prints it as it was). */
+export function storedNextReport(ctx: ProcessContext, report: string): SecretaryNext {
+  return JSON.parse(ctx.memory.data.text(report)) as SecretaryNext;
+}
+
+/** 4.4 (F8): the pass inside `mp sec wait`: it reconciles; its report reaches nobody, so it marks nothing delivered and leaves the cursor. */
+async function secReconcile(ctx: ProcessContext): Promise<void> {
+  requireSecretary(ctx.memory, ctx.secretary);
+  touchSecretary(ctx.memory, ctx.secretary);
+  await pmReconcile(ctx);
+}
+
+/**
+ * 4.4 (F8): what calls for the Secretary, the one list `mp sec wait` wakes on: a hand-back, a release,
+ * new work queued, a mission opened, git writes allowed again, a decision, an answer or its application,
+ * a note, a question or a reply of the PM, a change of constraint or stop, a notice that calls for an
+ * action, a detached run that ended (lost, stopped, or finished with its result: its seat may be gone),
+ * and an unconfirmed seat (checked apart). Not on it: a seat's own claim, read, checkout, foreground rerun
+ * or refused hand-back, and the other writes of a pass. 4.4 (G6): a change of hold (its record kinds) and a
+ * hold's time (a check: holds.ts holdTimeReached).
+ */
+export const SECRETARY_WAKE: {
+  readonly kinds: readonly string[];
+  readonly flow: ReadonlyArray<{readonly line: string; readonly prefix?: true; readonly events: readonly string[]}>;
+  /** Flow events that wake only when their body says so (the body is data, read for these rows only). */
+  readonly bodies: ReadonlyArray<{readonly line: string; readonly prefix?: true; readonly event: string; readonly when: (body: Record<string, unknown>) => boolean}>;
+  /** Checks of the state at `now` for what happened after revision `since` (a time is no record). */
+  readonly checks: ReadonlyArray<(db: Db, now: number, since: number) => boolean>;
+} = {
+  kinds: ['dispatch.handback', 'dispatch.released', 'task.queued', 'mission.state', 'memory.git-confirmed', 'pm.note', 'pm.question', 'pm.reply', 'stop.committed', 'stop.released', 'hold.placed', 'hold.released'],
+  flow: [
+    {line: 'secretary', events: ['decision', 'pm-answer', 'user-answer', 'applied']},
+    {line: 'requirements', events: ['constraint', 'constraint-scope', 'constraint-withdrawn']},
+    {line: 'dispatch:', prefix: true, events: ['detached-end']},
+  ],
+  // a detached run's worker records its result as the run event of its dispatch, with the detached run's id
+  bodies: [{line: 'dispatch:', prefix: true, event: 'run', when: (b) => typeof b['detached'] === 'string'}],
+  checks: [holdTimeReached],
+};
+
+/** Whether something on SECRETARY_WAKE was recorded after `since` (a notice calls for an action unless it says it only informs); one read. */
+export function secretaryWakes(memory: Db & {readonly data: {text(h: string): string}; read<T>(fn: (db: Db) => T): T}, since: number, now = Date.now()): boolean {
+  return memory.read((db) => {
+    const flow = SECRETARY_WAKE.flow.map((f) => `(json_extract(record, '$.line') ${f.prefix === true ? 'LIKE ?' : '= ?'} AND json_extract(record, '$.event') IN (${f.events.map(() => '?').join(', ')}))`).join(' OR ');
+    const args = [since, ...SECRETARY_WAKE.kinds, ...SECRETARY_WAKE.flow.flatMap((f) => [f.prefix === true ? `${f.line}%` : f.line, ...f.events])];
+    if (db.stmt(`SELECT 1 FROM log WHERE rev > ? AND (kind IN (${SECRETARY_WAKE.kinds.map(() => '?').join(', ')}) OR (kind = 'alert' AND json_extract(record, '$.informational') IS NULL) OR (kind = 'flow.event' AND (${flow}))) LIMIT 1`).get(...args) !== undefined) return true;
+    for (const b of SECRETARY_WAKE.bodies) {
+      const rows = db.stmt(`SELECT json_extract(record, '$.body') AS body FROM log WHERE rev > ? AND kind = 'flow.event' AND json_extract(record, '$.event') = ? AND json_extract(record, '$.line') ${b.prefix === true ? 'LIKE ?' : '= ?'}`).all(since, b.event, b.prefix === true ? `${b.line}%` : b.line) as Array<{body: string}>;
+      if (rows.some((r) => {try {return b.when(JSON.parse(memory.data.text(r.body)) as Record<string, unknown>);} catch {return false;}})) return true;
+    }
+    return SECRETARY_WAKE.checks.some((c) => c(db, now, since));
+  });
 }
 
 export async function secWait(ctx: ProcessContext, o: {since: number; timeout?: number; pollMs?: number; periodicMs?: number}): Promise<{revision: number; timedOut: boolean; unconfirmed: ReturnType<typeof unconfirmedSeats>; replies: ReturnType<typeof channel>['replies']}> {
   requireSecretary(ctx.memory, ctx.secretary);
   const deadline = Date.now() + (o.timeout ?? 300) * 1000;
   let nextCheck = 0;
+  // 4.4 (F8): the PM replies recorded after --since, not every reply again
+  const replies = () => ctx.memory.read(() => {const revs = replyRevisions(ctx.memory); return channel(ctx).replies.filter((x) => (revs.get(x.id) ?? 0) > o.since);});
   while (true) {
     requireSecretary(ctx.memory, ctx.secretary);
-    if (Date.now() >= nextCheck) {await secNext(ctx); nextCheck = Date.now() + (o.periodicMs ?? 30_000);}
+    if (Date.now() >= nextCheck) {await secReconcile(ctx); nextCheck = Date.now() + (o.periodicMs ?? 30_000);}
     const unconfirmed = unconfirmedSeats(ctx.memory);
-    if (unconfirmed.length > 0 || actionableRevision(ctx.memory) > o.since) return {revision: Number(ctx.memory.head()), timedOut: false, unconfirmed, replies: channel(ctx).replies};
-    if (Date.now() >= deadline) return {revision: Number(ctx.memory.head()), timedOut: true, unconfirmed, replies: channel(ctx).replies};
+    if (unconfirmed.length > 0 || secretaryWakes(ctx.memory, o.since, ctx.now())) return {revision: Number(ctx.memory.head()), timedOut: false, unconfirmed, replies: replies()};
+    if (Date.now() >= deadline) return {revision: Number(ctx.memory.head()), timedOut: true, unconfirmed, replies: replies()};
     await new Promise((resolve) => setTimeout(resolve, Math.min(o.pollMs ?? 100, Math.max(1, deadline - Date.now()))));
   }
 }
@@ -232,7 +516,7 @@ export function currentSecretaryRound(ctx: ProcessContext, id: string) {
   return {mission: e.mission, ...secretaryRoundInputs(e.body as EscalationBody, events.filter((r) => r.mission === e.mission))};
 }
 
-export function secCard(ctx: ProcessContext, id: string): Dispatched {
+export async function secCard(ctx: ProcessContext, id: string): Promise<Dispatched> {
   const g = requireSecretary(ctx.memory, ctx.secretary);
   const round = currentSecretaryRound(ctx, id);
   const task = round.esc.task;
@@ -241,9 +525,12 @@ export function secCard(ctx: ProcessContext, id: string): Dispatched {
     const claimed = allFlow(ctx).find((e) => e.line === `dispatch:${existing.dispatch}` && e.event === 'claimed' && e.key === 'spec');
     if (claimed?.body.generation !== g.generation) notAllowed(`${existing.dispatch} belongs to an earlier generation; release it --ended before claiming the current round`);
     const v = seatCard(ctx, existing.dispatch);
-    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: existing.cardLeaf ?? '', worktree: null, files: handBackFiles(existing.dispatch), prompt: ''};
+    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: v.leaf, cardSha256: sha256(v.text), worktree: null, files: handBackFiles(existing.dispatch), prompt: '', size: cardSizeReport(ctx, dispatchView(ctx, existing.dispatch).card, v.text)};
   }
-  return pmDispatch(ctx, task, {filledBy: g.filler});
+  // 4.4 (F5): a command-line claim takes the checked path (repair starts checked first); this one prints the card to the Secretary, so it is served
+  const d = await pmDispatchChecked(ctx, task, {filledBy: g.filler});
+  recordServed(ctx, d);
+  return d;
 }
 
 export function secDecisionDispatch(ctx: ProcessContext, id: string): string {
@@ -262,9 +549,8 @@ export async function secDecide(ctx: ProcessContext, id: string, result: Secreta
   mkdirSync(path, {recursive: true});
   writeFileSync(join(path, 'report.md'), `${result.reason}\n`);
   writeFileSync(join(path, 'result.json'), JSON.stringify(result));
-  const handback = await seatHandback(ctx, dispatch, {report: `.mission-pipeline/tmp/${dispatch}/report.md`, result: `.mission-pipeline/tmp/${dispatch}/result.json`, filler: ctx.filler});
-  if (handback.kind === 'recorded') await advance(ctx, currentSecretaryRound(ctx, id).mission);
-  return handback;
+  // 4.4 (F9): the hand-back runs the flow step itself (seat.ts advanceQuietly), as the seat way does under this identity
+  return seatHandback(ctx, dispatch, {report: `.mission-pipeline/tmp/${dispatch}/report.md`, result: `.mission-pipeline/tmp/${dispatch}/result.json`, filler: ctx.filler});
 }
 
 /** The F-3 gap default stays visible until the mission ends or the answer is rejected. */

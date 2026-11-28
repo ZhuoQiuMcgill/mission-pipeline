@@ -252,13 +252,36 @@ function planLeaves(tx: WriteTx, records: readonly BaseRecord[]): void {
   }
 }
 
+/**
+ * 4.4 (F19): a notice about what is already over when it is raised (a replay after an upgrade raises
+ * many): its mission is closed, the detailed plan it names was in effect and a later one took effect, or
+ * the escalations it asks a decision on are decided. It is born resolved: on the record, never pending.
+ */
+function bornResolved(tx: WriteTx, n: FlowNotice): string | null {
+  if ((tx.stmt('SELECT state FROM missions WHERE mission = ?').get(n.mission) as { state: string } | undefined)?.state === 'closed') return 'its mission is closed';
+  const d = (n.detail ?? null) as { dplan?: unknown; escalation?: unknown; escalations?: unknown } | null;
+  if (typeof d?.dplan === 'string') {
+    const effective = flowEvents(tx, { mission: n.mission, line: PLAN_LINE, event: 'effective', limit: 10_000 }).filter((e) => !e.key.includes('#'));
+    if (effective.some((e) => e.key === d.dplan) && effective.at(-1)!.key !== d.dplan) return `its plan ${d.dplan} is superseded`;
+  }
+  if (n.askUser === true) {
+    const one = typeof d?.escalation === 'string' ? d.escalation : typeof (d?.escalation as { id?: unknown } | undefined)?.id === 'string' ? (d!.escalation as { id: string }).id : null;
+    const ids = [...(one !== null ? [one] : []), ...(Array.isArray(d?.escalations) ? (d!.escalations as unknown[]).filter((x): x is string => typeof x === 'string') : [])];
+    const decided = (id: string): boolean => flowEventExists(tx, { mission: n.mission, line: SECRETARY_LINE, event: 'applied', key: id }) || flowEventExists(tx, { mission: n.mission, line: SECRETARY_LINE, event: 'user-answer', key: id });
+    if (ids.length > 0 && ids.every(decided)) return 'its escalation is decided';
+  }
+  return null;
+}
+
 /** Raise a notice inside a write (once per id): the alert record and its journal entry in the mission's notices.md. */
 export function raiseNotice(tx: WriteTx, n: FlowNotice): boolean {
   const alert = noticeAlertId(n);
   if (tx.stmt("SELECT 1 FROM log WHERE kind = 'alert' AND json_extract(record, '$.alert') = ? LIMIT 1").get(alert)) return false;
-  const body = tx.data.put(canonicalJson({ mission: n.mission, category: n.category, wi: n.wi, key: n.key, trigger: n.trigger, defaultAction: n.defaultAction, detail: n.detail ?? null, askUser: n.askUser ?? false }));
+  const over = bornResolved(tx, n);
+  const body = tx.data.put(canonicalJson({ mission: n.mission, category: n.category, wi: n.wi, key: n.key, trigger: n.trigger, defaultAction: n.defaultAction, detail: n.detail ?? null, askUser: n.askUser ?? false, ...(over !== null ? { bornResolved: over } : {}) }));
   raiseAlert(tx, { alert: alert as AlertId, category: n.category, ...(n.wi !== null ? { wi: n.wi } : { informational: true as const }), body });
-  tx.leaves.appendEntry(`missions/${n.mission}/notices.md`, `### ${n.category}${n.wi !== null ? ` (${n.wi})` : ''}\n\n${n.trigger}\n\nDefault action: ${n.defaultAction}${n.askUser === true ? '\n\nAsk the user.' : ''}`);
+  if (over !== null) markNotice(tx, { notice: alert, state: 'acknowledged' });
+  tx.leaves.appendEntry(`missions/${n.mission}/notices.md`, `### ${n.category}${n.wi !== null ? ` (${n.wi})` : ''}\n\n${n.trigger}\n\nDefault action: ${n.defaultAction}${n.askUser === true ? '\n\nAsk the user.' : ''}${over !== null ? `\n\nResolved when raised: ${over}.` : ''}`);
   return true;
 }
 
@@ -270,6 +293,27 @@ function requeueGrantedDispatches(tx: WriteTx, lineage: string, loop: LoopKind):
     if (t === null || t.dispatch === null || givenUp(tx, t) || dispatchInfo(tx, t.dispatch)?.state !== 'released') continue;
     queueTask(tx, {task: t.task, lineage: t.lineage, mission: t.mission, card: t.card});
   }
+}
+
+/**
+ * 4.4 (G3): the version in force of a constraint line, read inside a write: the key of its latest "constraint"
+ * event in any mission (constraints are the project's, 9.5), "withdrawn" once it is withdrawn, null when none.
+ * A version id is "<line>.v<n>.<hash>" (constraint ids hold no "."), so a key range finds the line's versions.
+ */
+/** 4.4 (G9, p12-r2-3): the latest version of a basis line in the log (null: none). */
+export function basisVersionNow(tx: Db, line: string): string | null {
+  const row = tx.stmt("SELECT record FROM log WHERE kind = 'basis.version' AND json_extract(record, '$.line') = ? ORDER BY rev DESC LIMIT 1").get(line) as { record: string } | undefined;
+  return row === undefined ? null : String((JSON.parse(row.record) as { version: string }).version);
+}
+
+export function constraintVersionNow(tx: Db, line: string): string | null {
+  let latest: { key: string; revision: number } | null = null;
+  for (const m of flowMissions(tx)) {
+    if (flowEventExists(tx, { mission: m, line: REQUIREMENTS_LINE, event: 'constraint-withdrawn', key: line })) return 'withdrawn';
+    const row = tx.stmt('SELECT key, revision FROM flow_events WHERE mission = ? AND line = ? AND event = ? AND key >= ? AND key < ? ORDER BY revision DESC LIMIT 1').get(m, REQUIREMENTS_LINE, 'constraint', `${line}.v`, `${line}.w`) as { key: string; revision: number } | undefined;
+    if (row !== undefined && (latest === null || Number(row.revision) > latest.revision)) latest = { key: row.key, revision: Number(row.revision) };
+  }
+  return latest?.key ?? null;
 }
 
 export class MemoryFlowLedger implements FlowLedgerPort {
@@ -310,6 +354,10 @@ export class MemoryFlowLedger implements FlowLedgerPort {
         return row.revision !== g.revision;
       })) throw Object.assign(new Error(guard.message), {code: guard.code});
       if (guard !== undefined && guard.absent.some((g) => flowEventExists(tx, g))) throw Object.assign(new Error(guard.message), { code: guard.code });
+      // 4.4 (G3): the constraint version its caller read is still the one in force (an edit, a scope or a withdrawal acts on it alone)
+      if (guard?.constraints?.some((g) => constraintVersionNow(tx, g.line) !== g.version)) throw Object.assign(new Error(guard.message), { code: guard.code });
+      // 4.4 (G9, p12-r2-3): the basis versions its caller read are still the latest of their lines
+      if (guard?.bases?.some((g) => basisVersionNow(tx, g.line) !== g.version)) throw Object.assign(new Error(guard.message), { code: guard.code });
       appendRecords(tx, [...events.map((e) => flowRecord(tx.data, e)), ...records.filter((r) => r.kind !== 'notice.delivery')]);
       for (const r of records) {
         if (r.kind === 'notice.delivery') markNotice(tx, r);
@@ -367,7 +415,8 @@ export class MemoryFlowLedger implements FlowLedgerPort {
   }
 
   async loop(lineage: string, loop: LoopKind): Promise<LoopStatus> {
-    return loopStatus(lineage, loop, this.memory.read((db) => loopState(db, lineage, loop)));
+    // 4.4 (F12 c): the rework cap is the project's setting (config.json `loops.rework`), read here where the flows read every loop
+    return loopStatus(lineage, loop, this.memory.read((db) => loopState(db, lineage, loop, null, loop === 'rework' ? this.ctx.reworkCap : undefined)));
   }
 
   async loopAttempt(req: { readonly op: string; readonly lineage: string; readonly loop: LoopKind; readonly signature: string; readonly failureClass?: string | null }): Promise<LoopStatus> {
@@ -384,12 +433,30 @@ export class MemoryFlowLedger implements FlowLedgerPort {
     });
   }
 
+  /** 4.4 (F14): the notices of a category raised for a mission and not acknowledged (one read). */
+  async openNotices(q: { readonly mission: MissionId; readonly category: string }): Promise<ReadonlyArray<{ readonly key: string; readonly detail: unknown }>> {
+    const data = this.memory.data;
+    return this.memory.read((db) => (db.stmt("SELECT l.record FROM log l WHERE l.kind = 'alert' AND json_extract(l.record, '$.category') = ? AND NOT EXISTS (SELECT 1 FROM notice_deliveries d WHERE d.state = 'acknowledged' AND d.notice = json_extract(l.record, '$.alert')) ORDER BY l.rev").all(q.category) as Array<{ record: string }>).flatMap((r) => {
+      try {
+        const b = JSON.parse(data.text((JSON.parse(r.record) as { body: string }).body)) as { mission?: unknown; key?: unknown; detail?: unknown };
+        return b.mission === q.mission && typeof b.key === 'string' ? [{ key: b.key, detail: b.detail ?? null }] : [];
+      } catch {
+        return [];
+      }
+    }));
+  }
+
   async missions(): Promise<readonly MissionId[]> {
     return this.memory.read((db) => flowMissions(db));
   }
 
   async missionClosed(mission: MissionId): Promise<boolean> {
     return this.memory.read((db) => (db.stmt('SELECT state FROM missions WHERE mission = ?').get(mission) as { state: string } | undefined)?.state === 'closed');
+  }
+
+  async leaf(leaf: string): Promise<string | null> {
+    const r = this.memory.readLeaf(leaf);
+    return r !== null && r.status === 'ok' ? r.text : null;
   }
 }
 
@@ -632,5 +699,5 @@ export class MemoryFlowEvaluator implements FlowEvaluatorPort {
 
 /** The three ports over one process context. */
 export function memoryFlowPorts(ctx: ProcessContext): FlowPorts {
-  return { resident: () => liveSecretary(ctx.memory) !== null, readOnly: () => ctx.pureRead || (ctx.secretary === null && liveSecretary(ctx.memory) !== null), wordsAuthority: (id, mission) => wordsAuthority(ctx.memory, ctx.memory.data, id, mission), ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite, planReviewsWaived: ctx.planReviewsWaived, startOnHandback: ctx.startOnHandback } };
+  return { resident: () => liveSecretary(ctx.memory) !== null, readOnly: () => ctx.pureRead || (ctx.secretary === null && liveSecretary(ctx.memory) !== null), wordsAuthority: (id, mission) => wordsAuthority(ctx.memory, ctx.memory.data, id, mission), ledger: new MemoryFlowLedger(ctx), scheduler: new MemoryFlowScheduler(ctx), evaluator: new MemoryFlowEvaluator(ctx), now: ctx.now, project: { localCommands: ctx.localCommands, fullSuite: ctx.fullSuite, planReviewsWaived: ctx.planReviewsWaived, startOnHandback: ctx.startOnHandback, standardsWarn: ctx.standardsWarn } };
 }

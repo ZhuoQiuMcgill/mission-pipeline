@@ -33,12 +33,13 @@ import type { GitOid, MissionId, ModuleId, ObjectVersionId, ProofUnitId } from '
 import type { ObjectVersionRecord } from '../common/records.ts';
 import { validateRecord } from '../common/validate.ts';
 import { buildCandidate, landedVersions, startHolds, versionOrigin } from '../delivery/candidate.ts';
-import { buildManifest, type DeliveryManifest } from '../delivery/manifest.ts';
+import { buildManifest, manifestVersions, type DeliveryManifest } from '../delivery/manifest.ts';
 import { deriveScope, scopeStopped } from '../delivery/scope.ts';
 import { memoryProofView } from '../delivery/memoryView.ts';
-import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
+import type { DeliveryObject, DeliveryProofView, DeliveryTarget } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
+import { keptRef, programRef } from '../git/refs.ts';
 import { MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
 import { appendRecords, factById, LedgerError } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
@@ -59,9 +60,73 @@ export class ActionError extends Error {
 
 export const productObjectId = (task: string): string => safeId(`prod.${task}`);
 
+/**
+ * 4.4 (F19, #64): a ref under refs/mission-pipeline/ holds a candidate commit from when it is recorded, so
+ * git's garbage collection cannot delete accepted work before delivery. Never a branch or a tag, never
+ * pushed. Best effort: created only when absent, nothing while git writes are held after a move; a
+ * failure refuses nothing.
+ */
+export function anchorCommit(ctx: ProcessContext, mission: string, commit: string): boolean {
+  try {
+    if (ctx.memory.gitHold() !== null) return false;
+    const r = ctx.git.runSync(['update-ref', '-m', `mission-pipeline: keep a candidate of ${mission}`, keptRef(mission as MissionId, commit), commit, ''], { cwd: ctx.projectDir });
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 4.4 (F19, #64): every product version of a mission that is not closed is held by its kept ref, also one
+ * recorded before 4.4 or accepted under 4.4 after a 4.3 hand-back, one whose earlier anchor write failed,
+ * and one of a memory folder copied to another clone of the repository: each reconciliation lists the
+ * mission's refs once (what the repository holds, not what the memory remembers) and creates the missing
+ * ones. One git call per mission with products, per pass. Never while git writes are held after a move.
+ */
+export function anchorProducts(ctx: ProcessContext, only?: string): void {
+  try {
+    if (ctx.memory.gitHold() !== null) return;
+    const work = ctx.memory.read((db) => {
+      const closed = new Set((db.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
+      const missions = only !== undefined ? [only] : (db.stmt('SELECT DISTINCT mission FROM flow_events ORDER BY mission').all() as Array<{ mission: string }>).map((r) => r.mission);
+      return missions.filter((m) => !closed.has(m)).map((mission) => {
+        const commits = (db.stmt("SELECT json_extract(record, '$.source.commit') AS c FROM log WHERE kind = 'object.version' AND json_extract(record, '$.mission') = ? AND json_extract(record, '$.objectKind') = 'product' AND json_extract(record, '$.source.commit') IS NOT NULL ORDER BY rev").all(mission) as Array<{ c: string }>).map((r) => r.c);
+        // 4.4 (F4): the parked commits of blocked hand-backs, which a resumed attempt starts on
+        const parked = (db.stmt("SELECT body FROM flow_events WHERE mission = ? AND event = 'paused' AND line LIKE 'task:%' ORDER BY revision").all(mission) as Array<{ body: string }>).flatMap((r) => {
+          const p = (JSON.parse(ctx.memory.data.text(r.body)) as { parked?: unknown }).parked;
+          return typeof p === 'string' ? [p] : [];
+        });
+        return { mission, commits: [...new Set([...commits, ...parked])] };
+      });
+    });
+    for (const w of work) {
+      if (w.commits.length === 0) continue;
+      const listed = ctx.git.runSync(['for-each-ref', '--format=%(objectname)', `${programRef('kept', w.mission)}/`], { cwd: ctx.projectDir });
+      if (listed.code !== 0) continue;
+      const held = new Set(listed.stdout.toString('utf8').split('\n').map((x) => x.trim()).filter((x) => x !== ''));
+      for (const c of w.commits) if (!held.has(c)) anchorCommit(ctx, w.mission, c);
+    }
+  } catch {
+    /* best effort: tried again on the next reconciliation */
+  }
+}
+
 interface Shared {
   repo: Promise<RepoLayout> | null;
   description: Promise<TransformDescription> | null;
+}
+
+/** 4.4 (F14): how many prerequisite closures `composition` built (the others were the same list under the same records). */
+export const COMPOSITIONS = { built: 0 };
+
+/**
+ * The last object version or proof unit recorded, what every composition rests on: its revision and its chain
+ * hash. A chain recovery (continue from the last valid event) reuses revisions; the hash, which covers every
+ * event before it, tells the history recorded after it apart from the one it replaced.
+ */
+function structureKey(db: { stmt(sql: string): { get(...a: never[]): unknown } }): string {
+  const last = db.stmt("SELECT rev, hash FROM log WHERE rev = (SELECT MAX(r) FROM (SELECT MAX(rev) AS r FROM log WHERE kind = 'object.version' UNION ALL SELECT MAX(rev) AS r FROM log WHERE kind = 'proof.unit'))").get() as { rev: number; hash: string } | undefined;
+  return last === undefined ? '' : `${last.rev}:${last.hash}`;
 }
 
 /**
@@ -82,9 +147,20 @@ export function verificationStopped(ctx: ProcessContext, mission: MissionId): bo
  * Composition labels confer no proof; delivery still applies its compatibility checks.
  */
 export function compose(view: DeliveryProofView, products: readonly string[]): DeliveryManifest {
-  const built = buildManifest(view, products.map((id) => view.unitMembers(id as ProofUnitId) !== null ? { kind: 'unit', id: id as ProofUnitId } : { kind: 'object', id: id as ObjectVersionId }), { compositionOnly: true });
+  const built = buildManifest(view, composeTargets(view, products), { compositionOnly: true });
   if (built.kind !== 'manifest') throw new ActionError('unknown-product', 'the snapshot products have an unknown or unplaced prerequisite', built);
   return built.manifest;
+}
+
+/** 4.4 (F14): the product versions of `compose(view, products)`'s entries, in their order, without building the rest of the manifest. */
+export function composedProducts(view: DeliveryProofView, products: readonly string[]): string[] {
+  const built = manifestVersions(view, composeTargets(view, products));
+  if (built.kind !== 'versions') throw new ActionError('unknown-product', 'the snapshot products have an unknown or unplaced prerequisite', built);
+  return built.versions.filter((o) => o.kind === 'product').map((o) => o.id);
+}
+
+function composeTargets(view: DeliveryProofView, products: readonly string[]): DeliveryTarget[] {
+  return products.map((id) => view.unitMembers(id as ProofUnitId) !== null ? { kind: 'unit', id: id as ProofUnitId } : { kind: 'object', id: id as ObjectVersionId });
 }
 
 export function gitActions(ctx: ProcessContext): GitActions {
@@ -92,6 +168,7 @@ export function gitActions(ctx: ProcessContext): GitActions {
   const repo = (): Promise<RepoLayout> => (shared.repo ??= discoverRepo(ctx.git, ctx.projectDir));
   const description = async (): Promise<TransformDescription> => (shared.description ??= readTransformDescription(ctx.git, await repo(), ctx.projectDir));
   const compositionView = () => memoryProofView(ctx.memory, { revision: ctx.memory.head(), recomputing: false, recomputingIn: () => false, labelOf: () => 'unaccepted', decidingRuns: () => [] });
+  const compositions: { structure: string | null; view: DeliveryProofView | null; results: Map<string, readonly string[]> } = { structure: null, view: null, results: new Map() };
 
   /** The mission's base: the target branch's head (a mission starts from where it will land). */
   function missionBase(): string {
@@ -214,7 +291,25 @@ export function gitActions(ctx: ProcessContext): GitActions {
     },
 
     async composition(products) {
-      return compose(compositionView(), products).entries.filter((e) => e.object.kind === 'product').map((e) => e.object.id);
+      // 4.4 (F14, #69): a closure rests on object versions and proof units only, which are never rewritten: while
+      // none is recorded, one view serves every call and a product list's closure is built once, for the life of
+      // the process context (every kept task of a pass, and every pass of a long `mp sec wait`). Kept by the last
+      // such record's revision and chain hash: a chain recovery that records another history up to the same
+      // revision builds them again
+      const structure = structureKey(ctx.memory);
+      if (structure !== compositions.structure || compositions.view === null) {
+        compositions.structure = structure;
+        compositions.view = compositionView();
+        compositions.results.clear();
+      }
+      const key = JSON.stringify(products);
+      let out = compositions.results.get(key);
+      if (out === undefined) {
+        COMPOSITIONS.built++;
+        out = composedProducts(compositions.view, products);
+        compositions.results.set(key, out);
+      }
+      return [...out];
     },
 
     async snapshot(req) {
@@ -290,6 +385,8 @@ export function gitActions(ctx: ProcessContext): GitActions {
       };
       validateRecord(rec);
       ctx.memory.write({ op: `flow:product-version:${req.mission}:${object}`, payload: { object, commit: req.candidate } }, (tx) => appendRecords(tx, [rec]));
+      // 4.4 (F19, #64): a hand-back recorded before 4.4 has no anchor yet
+      anchorCommit(ctx, req.mission, req.candidate);
       return pv;
     },
 

@@ -29,13 +29,21 @@ export interface PmNotice {
 
 const MAX_ID = 200;
 
+/**
+ * 4.4 (F8): a notice that only informs: no WI, no question for the user and no PM action. Once
+ * delivered it needs no acknowledgement (no flow logic reads one); `--all` still lists it.
+ */
+export function onlyInforms(n: Pick<PmNotice, 'wi' | 'askUser' | 'action'>): boolean {
+  return n.wi === null && !n.askUser && n.action === null;
+}
+
 function noticeId(kind: 'alert' | 'notice', raw: string): string {
   const id = kind === 'alert' ? raw : `notice:${raw}`;
   return id.length <= MAX_ID && !/[\u0000-\u001f\u007f]/.test(id) ? id : `${kind}:${sha256(raw).slice(0, 40)}`;
 }
 
-/** Pending notices, oldest first, paged independently of acknowledged history. */
-export function listNotices(db: Db, data: { text(h: string): string }, o: { readonly limit?: number; readonly includeAcknowledged?: boolean; readonly audience?: 'pm' | 'secretary'; readonly after?: number } = {}): PmNotice[] {
+/** Pending notices, oldest first, paged independently of acknowledged history. `informOnce` (4.4, F8): a delivered notice that only informs is not pending. */
+export function listNotices(db: Db, data: { text(h: string): string }, o: { readonly limit?: number; readonly includeAcknowledged?: boolean; readonly audience?: 'pm' | 'secretary'; readonly after?: number; readonly informOnce?: boolean } = {}): PmNotice[] {
   const pending: PmNotice[] = [];
   let after = o.after ?? 0;
   while (pending.length < (o.limit ?? Number.POSITIVE_INFINITY)) {
@@ -50,12 +58,17 @@ export function listNotices(db: Db, data: { text(h: string): string }, o: { read
       const rec = JSON.parse(r.record) as { alert?: string; notice?: string; category?: string; wi?: string; body: string; trigger?: string; defaultAction?: string };
       let body: Record<string, unknown> = {};
       try {
-        body = JSON.parse(data.text(rec.body)) as Record<string, unknown>;
+        // a body stored as null reads as an empty one
+        body = (JSON.parse(data.text(rec.body)) ?? {}) as Record<string, unknown>;
       } catch {
         /* the hash stands in */
       }
-      const detail = body['detail'] as Record<string, unknown> | undefined;
-      if (detail !== undefined && typeof detail['handoff'] === 'string' && detail['decision'] === undefined) {try {detail['decision'] = (JSON.parse(data.text(detail['handoff'])) as {decision?: unknown}).decision;} catch { /* legacy handoff unavailable */ }}
+      // 4.4: a notice stored without a detail (null) has none to complete: only an object detail is read
+      const detail = body['detail'];
+      if (detail !== null && typeof detail === 'object') {
+        const d = detail as Record<string, unknown>;
+        if (typeof d['handoff'] === 'string' && d['decision'] === undefined) {try {d['decision'] = (JSON.parse(data.text(d['handoff'])) as {decision?: unknown}).decision;} catch { /* legacy handoff unavailable */ }}
+      }
       const raw = r.kind === 'alert' ? String(rec.alert) : String(rec.notice);
       return {
         id: noticeId(r.kind, raw),
@@ -74,7 +87,7 @@ export function listNotices(db: Db, data: { text(h: string): string }, o: { read
     const states = new Map(noticeDeliveries(db, items.map((i) => i.id)).map((d) => [d.notice, d.state]));
     pending.push(...items
       .map((i): PmNotice => ({ ...i, audience: noticeAudience(i.category, i.detail, i.askUser), action: PM_NOTICE_ACTIONS[i.category]?.action ?? (i.askUser ? 'decide the routed question' : null), resolution: PM_NOTICE_ACTIONS[i.category]?.resolution ?? (i.askUser ? 'a PM or user answer is recorded' : null), state: states.get(i.id) ?? 'undelivered' }))
-      .filter((i) => (o.includeAcknowledged === true || i.state !== 'acknowledged') && (o.audience === undefined || i.audience === o.audience) && (o.after === undefined || i.revision > o.after)));
+      .filter((i) => (o.includeAcknowledged === true || i.state !== 'acknowledged') && (o.audience === undefined || i.audience === o.audience) && (o.after === undefined || i.revision > o.after) && !(o.informOnce === true && i.state === 'delivered' && onlyInforms(i))));
   }
   return pending.slice(0, o.limit ?? Number.POSITIVE_INFINITY);
 }

@@ -22,9 +22,16 @@ export {
   pmAck,
   pmAnswer,
   pmConstraint,
+  pmConstraintScope,
   pmWithdrawConstraint,
+  secInstruct,
+  secWithdrawInstruction,
+  cardSizeLine,
+  constraintReach,
+  type ConstraintReach,
   pmDeliver,
   pmDispatch,
+  pmDispatchChecked,
   pmDrain,
   pmGrant,
   pmLand,
@@ -36,6 +43,7 @@ export {
   pmRelease,
   pmRenew,
   pmRepair,
+  pmExtend,
   type RepairChange,
   type RepairChanged,
   pmRequirement,
@@ -46,6 +54,8 @@ export {
   pmWithdrawRequirement,
   purposeOf,
   readSteps,
+  UNSTARTED_RELEASE,
+  UNSTARTED_ROW_NOTICE,
   wordsText,
   type Dispatched,
   type HeldStep,
@@ -76,6 +86,7 @@ export {
   rerunTarget,
   seatFullRun,
   seatOwners,
+  SERVED_EVENT,
   type DetachedStart,
   type RerunResult,
   type RerunTarget,
@@ -93,5 +104,5 @@ export { claimExplorationStep, explorationSeat, pmResnapshotExploration, type Re
 export { pmAmendAttempts, pmRerunAttempt, type AttemptsAmended, type AttemptsRerun } from './explorationAttempts.ts';
 export { FULL_RUN_EVENT, FULL_RUNS_LINE, fullRunMarkers, fullRunStatus, passingFullRunEvidence, pmFullRun, runFullSuite, suiteHash, treeOf, type FullRunBody, type FullRunCites, type FullRunCommand, type FullRunMarker, type FullRunResult, type FullRunStatus, type PmFullRunRequest } from './fullRuns.ts';
 export { CLEANUP_TIMEOUT_MS, CWD_FIELD, normalizeCwd, runCwd, commandLine, FULL_RUN_TAIL, GROUP_KILL_GRACE_MS, groupShellRunner, LOCAL_TAIL, newRunId, RERUN_TAIL, runLeaf, runOnCommit, RunInProgress, shellRunner, signalGroup, summaryOf, tail, tapResults, type CleanupCommand, type CommandOutcome, type CommandRequest, type CommandRunner, type DeclaredCommand, type RecordedRun, type TailLimit } from './runs.ts';
-export { pmClean, sweepTmp, type CleanReport, type SweepReport, type SweptEntry } from './housekeeping.ts';
+export { dispatchOver, pmClean, sweepTmp, type CleanReport, type SweepReport, type SweptEntry } from './housekeeping.ts';
 export { DETACHED_END_EVENT, DETACHED_EVENT, detachedRunNotes, dispatchStepRuns, LOST_WHY, noticeLost, processStart, recordDetachedEnd, spawnRerunWorker, stepRuns, stopDetachedRuns, WAIT_DEFAULT_SECONDS, WAIT_MAX_SECONDS, workerAlive, workerError, type DetachedBody, type DetachedEndBody, type DetachedRunNote, type DetachSpawner, type RunEventBody, type StepRun, type WorkerMessage, type WorkerStarted } from './detached.ts';

@@ -7,7 +7,7 @@ import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { planInEffect } from '../src/flow/planning.ts';
 import { DetailedPlanDoc } from '../src/flow/plandoc.ts';
 import { carryOut, commitCarrying, decisionFor, grantForDecision, grantedAttempt, markApplied } from '../src/flow/secretary.ts';
-import { pmMission, pmPlan, pmSay } from '../src/process/index.ts';
+import { pmMission, pmPlan, pmSay, seatCard } from '../src/process/index.ts';
 import { listNotices } from '../src/process/notices.ts';
 import { channel, pmInbox, secNext } from '../src/process/secretary.ts';
 import { appendRecords } from '../src/memory/index.ts';
@@ -189,7 +189,8 @@ test('R1.2 successful resident Secretary grants requeue atomically and retain th
   try {
     await startAddMission(p.ctx, M);
     const task = await readyOf(p.ctx, 'calibrator-1');
-    for (let n = 0; n < 3; n++) {const d = pmDispatch(p.ctx, task.step); await pmRelease(p.ctx, d.dispatch, 'ended');}
+    // each seat read its card before it ended (4.4, F5: an unstarted release would cost nothing)
+    for (let n = 0; n < 3; n++) {const d = pmDispatch(p.ctx, task.step); seatCard(p.ctx, d.dispatch); await pmRelease(p.ctx, d.dispatch, 'ended');}
     const generation = await live43(p), sec = secretary43(p, generation);
     try {
       const before = await secNext(sec), choice = before.ready.find((r) => r.kind === 'secretary')!.step.slice(4);

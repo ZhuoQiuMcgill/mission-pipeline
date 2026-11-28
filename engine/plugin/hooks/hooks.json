@@ -1,5 +1,5 @@
 {
-  "description": "Optional adapter for Claude Code (Mission Pipeline 4.1 works without it): at session start, print a neutral pointer (the PM reads its handbook and runs mp pm next; a seat follows its card) and run nothing; on every prompt, record the user's words with `mp pm say` (the PM's own `mp pm say` of the same text records nothing new). It acts only in a project with .mission-pipeline/ and never blocks a prompt.",
+  "description": "Optional adapter for Claude Code (Mission Pipeline 4.4 works without it): at session start, print a neutral pointer (the PM reads the core of its handbook and runs mp pm session; a seat follows its card) and run nothing; on a prompt in the PM's session, remind the PM about message types and deferred recording; it records nothing and is silent when MP_SECRETARY is set. It acts only in a project with .mission-pipeline/ and never blocks a prompt.",
   "hooks": {
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/claude-code.mjs\" session-start", "timeout": 10 }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/claude-code.mjs\" user-prompt-submit", "timeout": 30 }] }]

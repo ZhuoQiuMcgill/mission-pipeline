@@ -45,6 +45,9 @@ import { repairsOf } from '../flow/repair.ts';
 import type { ProcessContext } from './context.ts';
 import { fullRunStatus, type FullRunStatus } from './fullRuns.ts';
 import { TASKS_LINE, type TaskSpecDoc } from './ports.ts';
+import { openItemsOf } from '../flow/openItems.ts';
+import { notRecordedByTask, riskItemsOf } from '../flow/riskItems.ts';
+import { missionEvents } from './openItems.ts';
 
 export type CloseMode = 'with-risk' | 'full' | 'post-audit';
 export const CLOSE_MODES: readonly CloseMode[] = ['with-risk', 'full', 'post-audit'];
@@ -204,6 +207,13 @@ export interface CloseSnapshot {
   readonly planReviews?: readonly PlanReviewsEntry[];
   /** 4.1.3 (E-1): outputs a decision accepted with their risks (no Reviewer passed them), with the findings taken on (absent: a close before 4.1.3). */
   readonly acceptedWithRisk?: ReadonlyArray<{ readonly task: string; readonly product: string; readonly escalation: string; readonly by: string; readonly words: string | null; readonly risks: readonly string[] }>;
+  /**
+   * 4.4 (G5, D-11; v1-4): every open item recorded by 4.4 at the close: questions left open, items left at the cap or
+   * deferred (`recorded` false only in a snapshot written before v1-4, which listed the 4.3 sentences here). Absent: none, or a close before 4.4.
+   */
+  readonly openItems?: ReadonlyArray<{ readonly id: string; readonly kind: string; readonly task: string; readonly attempt: number; readonly text: string; readonly recorded: boolean; readonly carried: number }>;
+  /** v1-4: the risk sentences of acceptances made before 4.4 that nobody acted on, counted per task (what became of them is not recorded). Absent: none. */
+  readonly notRecorded?: ReadonlyArray<{ readonly task: string; readonly count: number }>;
   /** The full-run status against the delivered tree (null: no delivery, or the delivery changed while closing). */
   readonly fullRun: { readonly tree: string | null; readonly line: string; readonly status: FullRunStatus | null } | null;
   readonly labelsRecomputing: boolean;
@@ -310,6 +320,16 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
   const deliveredNotProven = (delivered?.entries ?? []).filter((e) => e.notFullyProven != null).map((e) => `${e.object} (delivered in ${delivered!.delivery}): not fully proven on the delivered tree (${e.notFullyProven!.join(', ') || 'no reason recorded'})`);
   const same = cur !== null && inputs.delivered !== null && inputs.delivered.delivery === cur.delivery;
   const fullRun: CloseSnapshot['fullRun'] = cur === null ? null : same ? { tree: inputs.delivered!.tree, line: inputs.delivered!.fullRun !== null ? fullRunLine(inputs.delivered!.fullRun) : 'full-run status unknown: the delivered tree could not be read', status: inputs.delivered!.fullRun } : { tree: null, line: `full-run status not read: delivery ${cur.delivery} was recorded while closing`, status: null };
+  // 4.4 (G5, D-11): every open item, read in this write; the close is never refused for any of them
+  const events = missionEvents(tx, tx.data, mission);
+  const clipped = (s: string): string => (s.length > 300 ? `${s.slice(0, 299)}…` : s);
+  // v1-4: the items recorded by 4.4 in full, and the sentences before 4.4 nobody acted on as a count per task (the read lists them)
+  const riskItems = riskItemsOf(events);
+  const openItems: NonNullable<CloseSnapshot['openItems']>[number][] = [
+    ...openItemsOf(events).filter((q) => q.answer === null).map((q) => ({ id: q.id, kind: q.kind, task: q.task, attempt: q.attempt, text: clipped(q.text), recorded: true, carried: 0 })),
+    ...riskItems.filter((i) => i.state === 'open').map((i) => ({ id: i.id, kind: i.kind, task: i.task, attempt: i.attempt, text: clipped(i.text), recorded: true, carried: i.carried })),
+  ];
+  const notRecorded = notRecordedByTask(riskItems);
   const risks = [
     ...(planMoved ? ['the plan in effect changed while closing: its tasks are those read before; close again for the current plan'] : []),
     ...startRisks,
@@ -342,6 +362,9 @@ function snapshotOf(tx: WriteTx, mission: MissionId, mode: CloseMode, waitRunnin
     repairs: inputs.repairs,
     planReviews: inputs.planReviews,
     acceptedWithRisk,
+    // listed when there are any (a snapshot without the field shows no line, as one before 4.4)
+    ...(openItems.length > 0 ? { openItems } : {}),
+    ...(notRecorded.length > 0 ? { notRecorded } : {}),
     fullRun,
     labelsRecomputing: recomputing,
     risks,
@@ -383,6 +406,10 @@ export function snapshotLines(snap: CloseSnapshot): string[] {
     // 4.1.3 (absent from an older snapshot: not shown)
     ...(snap.planReviews !== undefined ? [list('Plans that took effect without their reviews', snap.planReviews.map((p) => `${p.dplan}: ${p.label}`))] : []),
     ...(snap.acceptedWithRisk !== undefined ? [list('Accepted with their risks by a decision (no Reviewer passed them)', snap.acceptedWithRisk.map((a) => `task ${a.task} (${a.product}) on ${a.escalation} by ${a.by === 'user' ? `the user${a.words !== null ? ` (${a.words})` : ''}` : a.by === 'pm' ? 'the PM' : 'the Secretary'}: ${a.risks.length} finding(s)`))] : []),
+    // 4.4 (G5; absent from an older snapshot: not shown)
+    ...(snap.openItems !== undefined ? [list('Open items', snap.openItems.map((i) => `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt})${!i.recorded ? ', what became of it is not recorded' : ''}${i.carried > 0 ? `, carried ${i.carried}` : ''}: ${i.text}`))] : []),
+    // v1-4: the sentences before 4.4 nobody acted on, per task, with the read that lists them (absent: none)
+    ...(snap.notRecorded !== undefined ? [list(`Risk sentences of acceptances made before 4.4, what became of them is not recorded (mp read open-items ${snap.mission} --all lists them)`, snap.notRecorded.map((t) => `task ${t.task}: ${t.count}`))] : []),
     `Full suite: ${d.fullRun === null ? (snap.fullRun === undefined ? 'not recorded (a close before 4.1.2)' : 'no delivered tree to compare') : d.fullRun.line}`,
     ...(d.labelsRecomputing ? ['Labels were recomputing at close: the proof states above are the last stored ones.'] : []),
   ];

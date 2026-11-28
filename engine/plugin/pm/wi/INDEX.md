@@ -14,7 +14,7 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-05: The target branch moved: the delivery candidate is rebuilt on a new base
 - WI-06: A landing did not complete, or a landing intent is left open (A / in progress / B / C)
 - WI-07: A selected output's content changed on the delivery candidate
-- WI-08: A lineage's automatic loop is exhausted, or repeats the same failure (incl. an exploration's round budget, a reopened task or dependency given up, a re-plan that waits)
+- WI-08: A lineage's automatic loop is exhausted, or repeats the same failure (incl. an exploration's round budget, a reopened task or dependency given up, a re-plan that waits, a Constructor that keeps stopping to ask)
 - WI-13: Unsupported repository format or content transform, or git objects a step needs are missing
 - WI-16: A dependency cycle (incl. explorations whose `after` wait for each other)
 - WI-19: The transform description changed after acceptance
@@ -24,7 +24,7 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-24: A Secretary decision could not complete: recover its round, or leave it in the PM inbox
 - WI-25: A legalization cannot complete: a broken link, a failed backfill, or the chain not accepted
 - WI-26: A decision-layer step cannot continue as it is (a stop covered it)
-- WI-28: A dispatch is interrupted: its seat ended without a hand-back, or nobody knows (release --ended / --abandoned); a detached run ended
+- WI-28: A dispatch is interrupted: its seat ended without a hand-back, or nobody knows (release --ended / --abandoned); a detached run ended; a step released three times unstarted
 - WI-29: The memory's event chain is broken: all writes are stopped
 - WI-30: A leaf is missing or edited by hand, or a commit the memory names is not reachable here
 - WI-31: The repository lives outside the folder, a copy shares one repository with another copy, or a copy's worktree links cannot be verified
@@ -34,8 +34,8 @@ Principles: an exception stops only the one affected action; the default action 
 
 Integration start conflict (notice `integration-start-conflict`, no WI page): only that integration task waits, tried again on every pass; a repair that reopens the dependency whose work conflicts (`mp pm repair ... --about <task>`), or a re-plan, routes it.
 
-PM actions (send choices to its inbox): constraint maintenance, `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` (project-wide by default); `mp pm constraint withdraw <id> --words W-n` keeps the record and removes its force.
+PM actions (send choices to its inbox): constraint maintenance, `mp pm constraint add <id> --kind object|instruction --text "..." [--mission <m>]` and `mp pm constraint withdraw <id> --words W-n` (the record stays).
 
 The PM records the user's decision about an exploration's method: `mp pm repair <mission> --about <exploration> ... --attempts <file> | --rerun <ids> | --resnapshot` applies it on their words, with no round and no review.
 
-No-page notices (information; the default is taken): `integration-restarted` and `integration-start-stale` (an integration starts again on its dependencies' current work), `early-start-rebuilt` (work started on a dependency's version that was sent back is carried onto its next one), `accept-risk-moot` (the attempt moved on; nothing was accepted).
+No-page notices (information; the default is taken): `integration-restarted` and `integration-start-stale` (an integration starts again on its dependencies' current work), `early-start-rebuilt` (work started on a dependency's version that was sent back is carried onto its next one), `accept-risk-moot` (the attempt moved on; nothing was accepted), `review-health` (a new Reviewer filler passes far less often).

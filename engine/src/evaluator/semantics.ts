@@ -230,6 +230,8 @@ export interface IndexView {
   readonly basisLatest: ReadMap<BasisLineId, BasisVersionId>;
   readonly basisLineOf: ReadMap<BasisVersionId, BasisLineId>;
   readonly basisKindOf: ReadMap<BasisVersionId, string>;
+  /** 4.4 (G9): the requirement-set lines some version of which listed an item (once listed, always: a later empty version does not undo it). */
+  readonly setEverListed: ReadSet<BasisLineId>;
   readonly withdrawn: ReadSet<BasisLineId>;
   readonly constraints: ReadMap<BasisLineId, ConstraintLine>;
   readonly envCurrent: ReadMap<EnvLineId, EnvSnapshotId>;
@@ -280,6 +282,7 @@ export class Index implements IndexView {
   basisLatest = new Map<BasisLineId, BasisVersionId>();
   basisLineOf = new Map<BasisVersionId, BasisLineId>();
   basisKindOf = new Map<BasisVersionId, string>();
+  setEverListed = new Set<BasisLineId>();
   versionsByLine = new Map<BasisLineId, Set<BasisVersionId>>();
   withdrawn = new Set<BasisLineId>();
   /** Object constraints only (v34: execution instructions are never proof obligations). */
@@ -344,6 +347,7 @@ export class Index implements IndexView {
         this.basisLineOf.set(r.version, r.line);
         this.basisRev.set(r.version, c.revision);
         this.basisKindOf.set(r.version, r.basisKind);
+        if (r.basisKind === 'requirement-set' && ((r.snapshot as readonly string[] | undefined)?.length ?? 0) > 0) this.setEverListed.add(r.line);
         addTo(this.versionsByLine, r.line, r.version);
         if (r.basisKind === 'constraint') {
           // A new content version keeps the current scope unless it states one.
@@ -747,9 +751,25 @@ function sampledRunsOnly(ix: IndexView, rec: Resolved<JudgmentRecord>): boolean 
   return true;
 }
 
+/**
+ * 4.4 (G9, p12-1): one rule of compatibility. A chain-acceptance object (an audit of the whole mission) whose contract
+ * was fixed before the new-requirement set `reqnew.<m>` existed (it binds `reqset.<m>` alone: made under 4.3) is read as
+ * resting on that set as well: once the set's current version lists an item in force, which that chain never covered,
+ * the audit no longer covers every item in force and its judgment is not current. Before any `mp pm extend` (no such
+ * version, or an empty one) it reads exactly as in 4.3. A chain made from 4.4 on binds the set itself.
+ */
+export function legacyChainOutdated(ix: IndexView, target: string): boolean {
+  const obj = ix.objects.get(target as ObjectVersionId);
+  if (obj === undefined || obj.objectKind !== 'chain-acceptance' || obj.mission === null) return false;
+  const contract = obj.reviews.find((c) => c.review === 'auditor-chain');
+  if (contract === undefined || contract.basisLines.some((l) => l.startsWith('reqnew.'))) return false;
+  return ix.setEverListed.has(`reqnew.${obj.mission}` as BasisLineId);
+}
+
 export function judgmentLeavesOk(ix: IndexView, info: JudgmentInfo, assumeValid: ReadonlySet<string> = EMPTY): boolean {
   const rec = info.rec;
   if (!sampledRunsOnly(ix, rec)) return false;
+  if (rec.review === 'auditor-chain' && legacyChainOutdated(ix, rec.target)) return false;
   for (const e of rec.evidence) if (!evidenceApplicable(ix, effectiveEvidence(ix, rec, e as EvidenceId))) return false;
   for (const b of rec.bases) {
     if (isConstraintKind(ix, b)) continue;

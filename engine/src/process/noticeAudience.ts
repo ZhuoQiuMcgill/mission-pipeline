@@ -19,6 +19,10 @@ export const PM_NOTICE_ACTIONS: Readonly<Record<string, {action: string; resolut
   'legalization-plan': {action: 'review the requested legalization plan', resolution: 'the plan is started or the PM acknowledges it'},
   'legalization-stamped': {action: 'report the requested legalization result', resolution: 'the PM acknowledges the result'},
   'plan-constraint-gap': {action: 'resolve the uncovered constraint on the user’s words (WI-34)', resolution: 'the gap is repaired, the constraint is changed, or the decision is recorded', resolvingCommand: true},
+  // 4.4 (F10): a warning about the plan, which is the PM's; nothing waits on it
+  'many-standards': {action: 'note the tasks with many standards (rework rises with their number); a plan revision with the user may split or tighten them', resolution: 'the PM acknowledges the notice'},
+  // 4.4 (F13): a repair's reopen that was not carried out: the repair does not read as done
+  'reopen-not-carried': {action: 'tell the user which reopen was not carried out; file the repair again on their words (mp pm repair … --again) or re-plan', resolution: 'the PM acknowledges the notice'},
 };
 
 export function noticeAudience(category: string, detail?: unknown, askUser = false): 'pm' | 'secretary' {

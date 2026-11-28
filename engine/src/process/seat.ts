@@ -28,14 +28,14 @@
 // "verified" event of that attempt in the same process (4.1.2: the flow reads it and never runs
 // them again); the first writer of that event wins, the other adopts it.
 
-import { requireSecretary } from '../memory/resident.ts';
+import { liveSecretary, requireSecretary } from '../memory/resident.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
-import type { BaseRecord, EvidenceRecord } from '../common/records.ts';
+import type { BaseRecord, EvidenceRecord, ObjectVersionRecord } from '../common/records.ts';
 import type { Collection } from '../git/workspace.ts';
 import { continuationCheck, sampleRunId, type ContinuationRequest } from '../evaluator/index.ts';
 import {
@@ -44,6 +44,7 @@ import {
   recordContinuationCheck,
   dispatchInfo,
   dispatchLeaf,
+  factById,
   flowEventExists,
   flowEvents,
   LedgerError,
@@ -63,12 +64,18 @@ import { isFullSuiteCommand } from '../common/fullSuite.ts';
 import type { ReviewerCard } from '../seat/card.ts';
 import { materialPage, unreadMustRead, type MaterialRef } from '../seat/cards/common.ts';
 import { handBackDataTexts, handBackProblems, handBackRecords, seatCardEntry } from '../seat/cards/index.ts';
-import { dataPaths, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
-import { checkDataFiles } from '../common/dataFile.ts';
+import { dataPaths, dataPointers, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
+import { checkDataFile, checkDataFiles } from '../common/dataFile.ts';
+import { OUTSIDE_DATA_EVENT, OUTSIDE_DATA_LINE, outsideDataKey } from '../evaluator/renew.ts';
+import { keepBudget, keepFile, keptFilePath, runArtifactsOf } from './keptFiles.ts';
+import type { RunArtifactT } from '../seat/card.ts';
+import { tellReviewHealth } from './reviews.ts';
 import { explorationCardAtHandBack } from './explorationSnapshot.ts';
-import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
+import { citedEvidence, constructorQuestions, findingRecords, judgmentRecord, type ConstructorResult, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE, deferredItemBodies, laterItemBodies, type OpenItemBody } from '../flow/openItems.ts';
+import type { EscalationBody } from '../flow/secretary.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
-import { productObjectId, verificationStopped } from './actions.ts';
+import { anchorCommit, productObjectId, verificationStopped } from './actions.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
@@ -79,11 +86,12 @@ import { requestExecutor } from '../flow/exploration/cards.ts';
 import { explorationLine } from '../flow/plandoc.ts';
 import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
 import { tagScope } from '../delivery/scope.ts';
-import { pathOwners } from '../flow/execution.ts';
+import { pathOwners, questionsEscalationOf } from '../flow/execution.ts';
 import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
 import { dispatchOver, holdSharedCheckout } from './housekeeping.ts';
+import { decisionOutcome, replyOutcome, type DecisionOutcome } from './decisions.ts';
 
 // ---------------------------------------------------------------- the dispatch's card and materials
 
@@ -113,6 +121,9 @@ export function materialLeaf(mission: string, ref: string): string {
   return `missions/${mission}/materials/${ref}.md`;
 }
 
+/** 4.4 (F5): the flow event (line "dispatch:<id>", key "card") that records the first time a dispatch's card was served. */
+export const SERVED_EVENT = 'served';
+
 /** `mp seat <id> card`: the card as the seat received it, hash-checked (§5.2, §3.3). */
 export function seatCard(ctx: ProcessContext, dispatch: string): { readonly dispatch: string; readonly text: string; readonly leaf: string } {
   const v = dispatchView(ctx, dispatch);
@@ -120,7 +131,22 @@ export function seatCard(ctx: ProcessContext, dispatch: string): { readonly disp
   const r = ctx.memory.readLeaf(leaf);
   if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `the card of dispatch ${dispatch} (${leaf}) is missing; the PM follows WI-30`, { wi: 'WI-30' });
   if (r.status === 'edited') throw new ProcessError('LEAF_EDITED', `the card of dispatch ${dispatch} (${leaf}) was edited after it was recorded; the PM follows WI-30`, { wi: 'WI-30' });
+  if (v.info.state === 'in-flight') recordServed(ctx, v.info);
   return { dispatch, text: r.text, leaf };
+}
+
+/** The served receipt of a dispatch in flight (4.4, F5): written once, best effort; a failure to record it never refuses the card. */
+export function recordServed(ctx: ProcessContext, d: Pick<DispatchInfo, 'mission' | 'dispatch'>): void {
+  const at = { mission: d.mission, line: DISPATCH_LINE(d.dispatch), event: SERVED_EVENT, key: 'card' };
+  try {
+    if (ctx.memory.read((db) => flowEventExists(db, at))) return;
+    ctx.memory.write({ op: `served:${d.dispatch}`, payload: { dispatch: d.dispatch } }, (tx) => {
+      if (flowEventExists(tx, at)) return;
+      appendRecords(tx, [{ kind: 'flow.event', ...at, body: tx.data.put(canonicalJson({ dispatch: d.dispatch })) as ContentHash }]);
+    });
+  } catch {
+    /* the card is served all the same; a release then judges the dispatch by its other traces */
+  }
 }
 
 function inFlight(v: DispatchView, what: string): void {
@@ -147,13 +173,16 @@ export function seatRead(ctx: ProcessContext, dispatch: string, material: string
   const r = ctx.memory.readLeaf(leaf);
   if (r === null || r.status === 'missing' || r.text === null) throw new ProcessError('LEAF_MISSING', `material ${material} (${leaf}) is missing: hand back what you can and say so; the PM follows WI-30`, { wi: 'WI-30' });
   if (r.status === 'edited' || sha256(r.text) !== m.ref) throw new ProcessError('LEAF_EDITED', `material ${material} (${leaf}) was edited after it was recorded: hand back what you can and say so; the PM follows WI-30`, { wi: 'WI-30' });
-  if (v.info.state === 'in-flight') {
+  const recorded = v.info.state === 'in-flight';
+  if (recorded) {
     const key = `${material}#${page}`;
     ctx.memory.write({ op: `read:${dispatch}:${key}`, payload: { dispatch, key } }, (tx) => {
       appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'read', key, body: tx.data.put(canonicalJson({ material, page })) as ContentHash }]);
     });
   }
-  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${m.mustRead ? ' (must read)' : ''}\n${materialPage(r.text, page)}` };
+  // 4.4 (F16): the receipt is named only where one is written; a dispatch that is over reads as history
+  const mark = !m.mustRead ? '' : recorded ? ' (must read; this fetch is recorded)' : ` (must read; dispatch ${dispatch} is over, so no fetch is recorded)`;
+  return { material, page, pages: m.pages, mustRead: m.mustRead, text: `[${m.id}] ${m.title}: page ${page} of ${m.pages}${mark}\n${materialPage(r.text, page)}` };
 }
 
 /**
@@ -184,9 +213,10 @@ const COMMIT = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
  * checkout the seats reading that commit share, `tmp/checkouts/<commit>/` (built once, atomically);
  * the path is printed. This dispatch holds it while in flight.
  */
-export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promise<{ readonly path: string; readonly commit: string | null }> {
+export async function seatCheckout(ctx: ProcessContext, dispatch: string, o: { readonly product?: string } = {}): Promise<{ readonly path: string; readonly commit: string | null; readonly product?: string }> {
   const v = dispatchView(ctx, dispatch);
   allows(ctx, v, 'checkout');
+  if (o.product !== undefined) return productCheckout(ctx, v, o.product);
   const snap = cardSnapshot(v);
   if (snap === null) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to read`);
   if (!COMMIT.test(snap)) return { path: join(ctx.projectDir, ...snap.split('/')), commit: null };
@@ -194,6 +224,25 @@ export async function seatCheckout(ctx: ProcessContext, dispatch: string): Promi
   inFlight(v, 'a checkout');
   const c = await holdSharedCheckout(ctx, v.info, snap);
   return { path: c.path, commit: c.commit };
+}
+
+/**
+ * `mp seat <id> checkout --product <task>` (4.4, F3): a repair Architect reads an accepted product it
+ * may reopen, the plan's state, at its commit: the same shared read-only checkout, held by this
+ * dispatch and removed when no dispatch in flight holds it (4.1.2).
+ */
+async function productCheckout(ctx: ProcessContext, v: DispatchView, task: string): Promise<{ readonly path: string; readonly commit: string; readonly product: string }> {
+  const accepted = (v.card['accepted'] as Array<{ task: string; product: string; commit?: string }> | undefined) ?? null;
+  // 4.4 (G1): an Architect asked a question reads the accepted product of the task it is about the same way
+  if ((v.card.seat !== 'architect-repair' && v.card.seat !== 'architect-answer') || accepted === null) throw new ProcessError('NOT_ALLOWED', `--product is for a repair Architect's card, which lists the accepted products it may reopen; this is a ${v.card.seat} card (an Architect answering a question reads its task's accepted product the same way)`);
+  const a = accepted.find((x) => x.task === task);
+  if (a === undefined) throw new ProcessError('NOT_ALLOWED', `task ${task} has no accepted product on the card (accepted: ${accepted.map((x) => x.task).join(', ') || 'none'})`);
+  // a card queued before 4.4 names no commit: the product's recorded one
+  const commit = a.commit ?? ((ctx.memory.read((db) => factById(db, 'object.version', a.product))?.record as ObjectVersionRecord | undefined)?.source?.commit ?? null);
+  if (commit === null || !COMMIT.test(commit)) throw new ProcessError('NOT_ALLOWED', `product ${a.product} of task ${task} has no recorded commit to read`);
+  inFlight(v, 'a checkout');
+  const c = await holdSharedCheckout(ctx, v.info, commit);
+  return { path: c.path, commit: c.commit, product: a.product };
 }
 
 /** What a rerun of a card's declared command runs on: the dispatch, the command, the card's commit (the checks of `mp seat <id> rerun`). */
@@ -229,6 +278,8 @@ export interface RerunResult {
   readonly leaf: string | null;
   /** The last lines of its output, passing or failing (4.1.3, #37), within RERUN_TAIL. */
   readonly tail: string;
+  /** 4.4 (F10): the files the command names as its artifacts, as mp kept them with the run. */
+  readonly artifacts?: readonly RunArtifactT[];
 }
 
 /**
@@ -268,9 +319,27 @@ function rerunRequest(t: RerunTarget, extra: { readonly detached?: string; reado
  */
 export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<RerunResult> {
   const t = rerunTarget(ctx, dispatch, commandId);
-  const r = await runOnCommit(ctx, rerunRequest(t));
+  // 4.4 (F5): its start is recorded once its checkout is made, immediately before it executes; its evidence when it ends, as before
+  const r = await runOnCommit(ctx, { ...rerunRequest(t), beforeExecute: (run) => recordRunStart(ctx, t.v, run, { run, command: t.c.id }) });
   const x = r.runs[0]!;
-  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail };
+  return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail, ...(x.artifacts !== undefined ? { artifacts: x.artifacts } : {}) };
+}
+
+/** 4.4 (F5): the flow event (line "dispatch:<id>", key: the run) a seat's foreground run records when it is admitted, before it executes. */
+export const RUN_STARTED_EVENT = 'run-started';
+
+/**
+ * A foreground run's start on its dispatch line (4.4, F5): while it executes the dispatch has started,
+ * so its release is counted. A dispatch released meanwhile runs nothing, as a detached run's worker checks.
+ */
+function recordRunStart(ctx: ProcessContext, v: DispatchView, key: string, body: Readonly<Record<string, unknown>>): void {
+  const at = { mission: v.info.mission, line: DISPATCH_LINE(v.info.dispatch), event: RUN_STARTED_EVENT, key };
+  ctx.memory.write({ op: `run-start:${v.info.dispatch}:${key}`, payload: { dispatch: v.info.dispatch, key } }, (tx) => {
+    if (ctx.secretary !== null) requireSecretary(tx, ctx.secretary);
+    if (dispatchInfo(tx, v.info.dispatch)?.state !== 'in-flight') throw new ProcessError('NOT_ALLOWED', `dispatch ${v.info.dispatch} is no longer in flight: a run is for a dispatch in flight`);
+    if (flowEventExists(tx, at)) return;
+    appendRecords(tx, [{ kind: 'flow.event', ...at, body: tx.data.put(canonicalJson(body)) as ContentHash }]);
+  });
 }
 
 /** A detached rerun as `mp seat <id> rerun --detach` answers: its run id and the evidence id its result is recorded under. */
@@ -333,7 +402,7 @@ export async function seatRerunWorker(ctx: ProcessContext, dispatch: string, com
   try {
     const r = await runOnCommit(ctx, { ...rerunRequest(t, { detached: run, check }), alreadyAdmitted: true, run, evidenceId: () => evidence, runner, cleanupRunner, recordRetries: 3 });
     const x = r.runs[0]!;
-    return { start, state: 'finished', result: { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail } };
+    return { start, state: 'finished', result: { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail, ...(x.artifacts !== undefined ? { artifacts: x.artifacts } : {}) } };
   } catch (e) {
     const stopped = e instanceof RunStopped || o.stopping?.aborted === true;
     const why = stopped ? `stopped: ${e instanceof RunStopped ? e.message : 'the worker was told to stop'}` : `its worker failed: ${(e as Error).message}`;
@@ -385,7 +454,9 @@ export async function seatWait(ctx: ProcessContext, dispatch: string, runId: str
     if (r.state === 'running' && noticeLost(ctx, r)) r = ctx.memory.read((db) => stepRuns(db, data, v.info)).find((x) => x.run === r!.run) ?? r;
     const waitedMs = Date.now() - t0;
     if (r.state !== 'running' || Date.now() >= deadline) {
-      const result = r.state === 'finished' ? { run: r.evidence, passed: r.passed === true, summary: r.summary ?? '', leaf: r.leaf, tail: r.tail } : null;
+      // 4.4 (F10): the files the run kept, from its record
+      const artifacts = r.state === 'finished' ? ctx.memory.read((db) => runArtifactsOf(db, data, v.info.mission, r!.evidence)) : null;
+      const result = r.state === 'finished' ? { run: r.evidence, passed: r.passed === true, summary: r.summary ?? '', leaf: r.leaf, tail: r.tail, ...(artifacts !== null ? { artifacts } : {}) } : null;
       return { run: r.run, evidence: r.evidence, state: r.state, result, why: r.why, since: r.detached?.startedAt ?? null, startedBy: r.dispatch, waitedMs };
     }
     await new Promise((res) => setTimeout(res, Math.max(1, Math.min(o.pollMs ?? WAIT_POLL_MS, deadline - Date.now()))));
@@ -413,7 +484,8 @@ export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promis
   allows(ctx, v, 'full-run');
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
-  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag) });
+  // 4.4 (F5): a full run is a start too, recorded under its run locks immediately before it executes (a reuse records its own marker)
+  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag), beforeExecute: (run) => recordRunStart(ctx, v, run, { run, fullRun: true }) });
 }
 
 /**
@@ -421,10 +493,19 @@ export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promis
  * cites a passing full run of its candidate (its tree, the current suite); rework and
  * needs-decision need none. Empty: nothing to refuse.
  */
-function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
+function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: ReadonlyArray<{ readonly run: string }>): string[] {
   if (!integrationReview(ctx, v.card)) return [];
-  const r = fields as { verdict?: unknown; judgments?: Array<{ evidence?: unknown }> } | null;
+  const r = fields as { verdict?: unknown; judgments?: Array<{ standard?: unknown; met?: unknown; evidence?: unknown }> } | null;
   if (r === null || typeof r !== 'object' || r.verdict !== 'pass') return [];
+  // 4.4 (F10, PM design §7; review p9-1, round 2): the pass rests on its full run, a declared run, and the hand-back
+  // becomes one judgment for every standard; the proof contract cannot admit one judgment on both a declared run and
+  // data outside the commit (a judgment of outside data cites sampling runs only). So each standard that rests on
+  // outside data goes to a decider through the fourth answer, its pointers kept; no rule is bent
+  const outside = (Array.isArray(r.judgments) ? r.judgments : []).filter((j) => {
+    const ev = Array.isArray(j?.evidence) ? j.evidence.filter((e): e is string => typeof e === 'string') : [];
+    return j?.met === 'yes' && ev.some((e) => e.startsWith('data:'));
+  });
+  if (outside.length > 0) return outside.map((j) => `judgments[${String(j.standard)}]: an integration pass rests on its full run, and the hand-back is one judgment, which cannot rest on a run and on data outside the commit together: answer this standard "cannot-verify" (keep its pointers, say in "needed" what would settle it) and hand back "needs-decision"; a decider settles it`);
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) return [];
   const cited = new Set((Array.isArray(r.judgments) ? r.judgments : []).flatMap((j) => (Array.isArray(j?.evidence) ? j.evidence : [])).filter((e): e is string => typeof e === 'string' && e.startsWith('evidence:')).map((e) => e.slice('evidence:'.length)));
@@ -437,7 +518,28 @@ function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: u
   const data = ctx.memory.data;
   const passing = ctx.memory.read((db) => passingFullRunEvidence(db, data, tree, suiteHash(ctx.fullSuite)));
   if ([...cited].some((e) => passing.has(e))) return [];
+  // 4.4 (F10; review F3-7): with no standard of its own to judge (a person checks each one, and the acceptance
+  // lists them as open items to verify), the pass rests on the passing full run this dispatch had mp make
+  if ((Array.isArray(r.judgments) ? r.judgments : []).length === 0 && runs.some((x) => passing.has(x.run))) return [];
   return [`verdict: an integration task's "pass" cites a passing full run of its candidate: when nothing visible is wrong, run \`mp seat ${v.info.dispatch} full-run\` and cite its runs as evidence:<id>; if the change or the local results already show a problem, hand back "rework" (or "needs-decision") without a full run`];
+}
+
+/**
+ * 4.4 (F10; review F3-7): the runs of this dispatch that are a passing full run of its candidate (none: not an
+ * integration review, or its tree cannot be read). An integration pass with no judgment of its own rests on them.
+ */
+function dispatchFullRun(ctx: ProcessContext, v: DispatchView, runs: ReadonlyArray<{ readonly run: string }>): string[] {
+  if (!integrationReview(ctx, v.card)) return [];
+  const snap = cardSnapshot(v);
+  if (snap === null || !COMMIT.test(snap)) return [];
+  let tree: string;
+  try {
+    tree = treeOf(ctx, snap);
+  } catch {
+    return [];
+  }
+  const passing = ctx.memory.read((db) => passingFullRunEvidence(db, ctx.memory.data, tree, suiteHash(ctx.fullSuite)));
+  return [...new Set(runs.map((x) => x.run).filter((e) => passing.has(e)))];
 }
 
 /** The plan task line and attempt of a Constructor dispatch's task: the flow's "dispatched" event keyed by it (execution.ts submitConstructor), or null. */
@@ -536,6 +638,14 @@ export type HandBackAnswer =
       readonly verification: readonly VerificationRun[] | null;
       /** A note for the seat (e.g. the verification could not run now; the flow runs it later). */
       readonly notes: readonly string[];
+      /** 4.4 (F4): a Constructor that stopped to ask: `candidate` is the parked commit of its edits, not a candidate. */
+      readonly parked?: true;
+      /** 4.4 (F9): an accepted Secretary decision: what became of it in this command. */
+      readonly decision?: DecisionOutcome;
+      /** 4.4 (G1): an accepted reply of an Architect asked a question: what became of it in this command, read from its record. */
+      readonly reply?: DecisionOutcome;
+      /** 4.4 (F10, review p9-5): a cited file in the hand-back's folder could not be copied: the folder is left to the sweep. */
+      readonly keepScratch?: true;
     };
 
 export interface HandBackInput {
@@ -545,6 +655,11 @@ export interface HandBackInput {
   readonly filler?: Filler | null;
   /** Advance the process after recording (default true; a test that drives the flows itself passes false). */
   readonly advance?: boolean;
+  /**
+   * 4.4 (F10, issue 65): leave `tmp/<dispatch>/` in place: the caller removes it once it has printed the
+   * result (`mp seat <id> handback`, with dispatchOver). Default false: removed here, once recorded.
+   */
+  readonly keepScratch?: boolean;
 }
 
 /** The flow event (line "dispatch:<id>") holding the program's check results of a refused hand-back. */
@@ -571,8 +686,8 @@ function refuse(ctx: ProcessContext, dispatch: string, command: 'handback' | 're
   return { kind: 'refused', dispatch, problems };
 }
 
-/** `mp seat <id> handback --report <file.md> --result <file.json>` (decision 7). */
-export async function seatHandback(ctx: ProcessContext, dispatch: string, files: { readonly report: string; readonly result: string; readonly filler?: Filler | null }): Promise<HandBackAnswer> {
+/** `mp seat <id> handback --report <file.md> --result <file.json>` (decision 7). `keepScratch`: see HandBackInput. */
+export async function seatHandback(ctx: ProcessContext, dispatch: string, files: { readonly report: string; readonly result: string; readonly filler?: Filler | null; readonly keepScratch?: boolean }): Promise<HandBackAnswer> {
   const report = readHandBackFile(ctx, dispatch, files.report, 'report');
   const raw = readHandBackFile(ctx, dispatch, files.result, 'result');
   let fields: unknown;
@@ -581,7 +696,7 @@ export async function seatHandback(ctx: ProcessContext, dispatch: string, files:
   } catch (e) {
     return refuse(ctx, dispatch, 'handback', [`the result file is not JSON: ${(e as Error).message}`]);
   }
-  return recordSeatHandBack(ctx, dispatch, { report, fields, ...(files.filler !== undefined ? { filler: files.filler } : {}) });
+  return recordSeatHandBack(ctx, dispatch, { report, fields, ...(files.filler !== undefined ? { filler: files.filler } : {}), ...(files.keepScratch === true ? { keepScratch: true } : {}) });
 }
 
 /** The seat's records of an accepted hand-back (the Reviewer's judgment and findings are built here). */
@@ -591,7 +706,11 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
   if (v.card.seat === 'reviewer') {
     const card = v.card as unknown as ReviewerCard;
     const r = fields as ReviewerResult;
-    return [judgmentRecord(card, r, data.putList(citedEvidence(card, r, runs))), ...findingRecords(card, r, content, v.info.dispatch)];
+    // 4.4 (F10; review F3-7): an integration pass with no judgment of its own (each standard a person's) rests on
+    // the passing full run of its dispatch: the judgment cites it, as an integration pass always does
+    const cited: string[] = citedEvidence(card, r, runs);
+    const evidence = cited.length === 0 && r.verdict === 'pass' && r.judgments.length === 0 ? dispatchFullRun(ctx, v, runs) : cited;
+    return [judgmentRecord(card, r, data.putList(evidence)), ...findingRecords(card, r, content, v.info.dispatch)];
   }
   // 4.1.3: a blind executor's report is kept with its evidence record; the leaf is the one this hand-back files
   const report = { text: more.report, leaf: dispatchLeaf(v.info.mission, v.info.dispatch, 'report'), fields };
@@ -603,11 +722,97 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
 /**
  * 4.1.3 (E-4): the data files a hand-back's data pointers name, each checked once, here, before
  * the write transaction (hashing a large file never runs inside it). Undefined when it cites none:
- * such a hand-back is checked exactly as before.
+ * such a hand-back is checked exactly as before. 4.4 (F10): a Reviewer citing a file the Constructor
+ * handed in, as its card lists it, whose path is gone (its hand-back folder was removed) is checked on
+ * the copy mp kept of it; `viaCopy` names those paths.
  */
-async function handBackDataChecks(v: DispatchView, fields: unknown): Promise<DataChecks | undefined> {
+async function handBackDataChecks(ctx: ProcessContext, v: DispatchView, fields: unknown): Promise<{ readonly checks: DataChecks; readonly viaCopy: ReadonlySet<string> } | undefined> {
   const paths = dataPaths(handBackDataTexts(v.card, fields));
-  return paths.length === 0 ? undefined : await checkDataFiles(paths);
+  if (paths.length === 0) return undefined;
+  const checks = await checkDataFiles(paths);
+  const viaCopy = new Set<string>();
+  const handedIn = (v.card.seat === 'reviewer' ? (v.card['handedIn'] as ReviewerCard['handedIn']) : undefined) ?? [];
+  for (const [path, c] of checks) {
+    if (c.state !== 'missing') continue;
+    const f = handedIn.find((x) => x.kept !== undefined && dataPointers(x.pointer)[0]?.path === path);
+    if (f === undefined) continue;
+    const copy = await checkDataFile(join(ctx.memory.paths.project, ...f.kept!.split('/')));
+    if (copy.state !== 'ok') continue;
+    checks.set(path, { ...copy, path });
+    viaCopy.add(path);
+  }
+  return { checks, viaCopy };
+}
+
+/** 4.4 (F10): the label of data cited from the copy mp kept when the Constructor handed it in. */
+const VIA_COPY_LABEL = 'outside the commit (sha256 checked at hand-back, on the copy mp kept when the Constructor handed it in)';
+
+/**
+ * 4.4 (F10, issue 65): the files a Constructor's hand-back names, each copied into the kept files before
+ * the write (its hand-back folder goes once the hand-back is printed); the record says where each copy
+ * is, or why none was kept. Never refuses the hand-back. Review p9-5: a Reviewer's cited files that a
+ * clean-up would remove (`only`: under the memory's tmp/) are kept the same way; one checked on the copy
+ * kept when the Constructor handed it in (`viaCopy`) names that copy.
+ */
+async function keepHandedIn(ctx: ProcessContext, data: readonly RecordedData[], o: { readonly only?: (d: RecordedData) => boolean; readonly viaCopy?: ReadonlySet<string> } = {}): Promise<RecordedData[]> {
+  const budget = keepBudget();
+  const out: RecordedData[] = [];
+  for (const d of data) {
+    if (o.viaCopy?.has(d.path) === true && d.check === 'full') {
+      out.push({ ...d, kept: keptFilePath(d.sha256) });
+      continue;
+    }
+    if (o.only !== undefined && !o.only(d)) {
+      out.push(d);
+      continue;
+    }
+    if (d.check !== 'full') {
+      out.push({ ...d, notKept: 'only part of it was hashed (a file over 2 GiB): no copy is kept' });
+      continue;
+    }
+    const k = await keepFile(ctx.memory.paths.root, d.path, budget, { sha256: d.sha256, size: d.size });
+    out.push('kept' in k ? { ...d, kept: k.kept } : { ...d, notKept: k.why });
+  }
+  return out;
+}
+
+/**
+ * Whether the path as cited lies in the folder `dir`, by its name or by what it is: its own folder is `dir` or
+ * inside it (both resolved through links), or the file it resolves to is. The clean-up of `dir` removes the name
+ * (review p9-r2-5: a link in `dir` to a file elsewhere) and the target (review F2-4: a link elsewhere to a file in
+ * `dir`), so either one makes the checked bytes worth copying. False for a part that cannot be resolved.
+ */
+function insideDir(dir: string, path: string): boolean {
+  const within = (root: string, p: string): boolean => {
+    const rel = relative(root, p);
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  };
+  let root: string;
+  try {
+    root = realpathSync.native(dir);
+  } catch {
+    return false;
+  }
+  const resolved = (p: string): string | null => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      return null;
+    }
+  };
+  const folder = resolved(dirname(path));
+  const target = resolved(path);
+  return (folder !== null && within(root, folder)) || (target !== null && within(root, target));
+}
+
+/**
+ * 4.4 (F10, review p9-5, p9-6): the cited files in the hand-back's own folder that could not be copied: the
+ * hand-back does not remove that folder itself (its sweep may, later). Everything else a hand-back needs from
+ * the folder was read, or copied, before its write.
+ */
+function uncopiedInScratch(ctx: ProcessContext, dispatch: string, data: readonly RecordedData[]): RecordedData[] {
+  const dir = join(ctx.memory.paths.tmp, dispatch);
+  return data.filter((d) => d.notKept !== undefined && insideDir(dir, d.path));
 }
 
 /** The flow event that records why a Secretary dispatch was taken back at its hand-back (its escalation was already decided or closed). */
@@ -615,7 +820,7 @@ export const DECISION_RELEASED = 'decision-released';
 
 /**
  * A Secretary dispatch whose escalation the flow will not carry out a decision of any more: it was
- * carried out or closed (applied), or the user answered it first. Its hand-back is recorded as
+ * carried out or closed (applied), the user answered it first, or (4.4) a newer round replaced its round. Its hand-back is recorded as
  * history, not accepted, and its records (a ruling judgment) are not appended. Null: still open.
  */
 function mootSecretary(db: Db, v: DispatchView, data: ProcessContext['memory']['data']): string | null {
@@ -636,6 +841,11 @@ function mootSecretary(db: Db, v: DispatchView, data: ProcessContext['memory']['
   const at = (event: string): boolean => flowEventExists(db, { mission: v.info.mission, line: SECRETARY_LINE, event, key: id });
   if (at('applied')) return `escalation ${id} was already carried out or closed`;
   if (at('user-answer')) return `the user already answered escalation ${id}`;
+  // 4.4 (G1, review p11-r2-3): a round a newer one replaced (an Architect's reply returned the escalation to a fresh
+  // Secretary round while this one was in flight): nothing it decides or puts off is written
+  const rounds = flowEvents(db, { mission: v.info.mission, line: SECRETARY_LINE, event: 'secretary-retry', limit: 10_000 }).map((e) => JSON.parse(data.text(e.body)) as { id?: unknown; task?: unknown }).filter((b) => b.id === id && typeof b.task === 'string');
+  const current = rounds.at(-1)?.task;
+  if (current !== undefined && current !== v.info.task) return `the Secretary round ${v.info.task} on escalation ${id} was replaced by a newer round (${String(current)})`;
   return null;
 }
 
@@ -652,7 +862,10 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   if (v.info.handbackHash !== null) {
     const prior = handbackDoc(data, v.info);
     if (prior !== null && prior.seat === seatHash) {
-      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch) };
+      const parkedBefore = v.card.seat === 'constructor' && (input.fields as { blocked?: unknown } | null)?.blocked === true && prior.candidate !== null;
+      // review p9-6: a retry finds everything it needs copied by the first run; a file it could not copy keeps the folder
+      const hold = uncopiedInScratch(ctx, dispatch, prior.data ?? []).length > 0;
+      return { kind: 'recorded', dispatch, outcome: v.info.handback!, repeated: true, report: v.info.reportLeaf, candidate: prior.candidate === null ? null : { ...prior.candidate, ignored: [], ignoredTotal: 0 }, verification: null, notes: dispatchOver(ctx, dispatch, undefined, { keepTmp: hold }), ...(parkedBefore ? { parked: true as const } : {}), ...(hold ? { keepScratch: true as const } : {}) };
     }
     throw new LedgerError('FACT_CONFLICT', `dispatch ${dispatch} already handed back other content: one hand-back per dispatch`);
   }
@@ -673,11 +886,13 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     const reads = ctx.memory.read((db) => dispatchReads(db, v.info));
     const snap = cardSnapshot(v);
     const snapFiles = snap !== null && COMMIT.test(snap) ? (ctx.snapshotFiles !== null ? ctx.snapshotFiles(snap) : commitFiles(ctx, snap)) : null;
-    dataChecks = await handBackDataChecks(v, input.fields);
+    const checked = await handBackDataChecks(ctx, v, input.fields);
+    dataChecks = checked?.checks;
     const problems = [
-      ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not read (mp seat ${dispatch} read <material> --page <n>)`),
+      // 4.4 (F16): the receipt records a fetch; mp cannot see reading, and says so
+      ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not fetched (mp seat ${dispatch} read <material> --page <n>)`),
       ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}), ...(dataChecks !== undefined ? { data: dataChecks } : {}) }),
-      ...integrationPassProblems(ctx, v, input.fields),
+      ...integrationPassProblems(ctx, v, input.fields, runs),
       ...attemptCommandProblems(ctx, v, input.fields),
     ];
     const unique = [...new Set(problems)];
@@ -691,8 +906,14 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     }
     records = recordsOf(ctx, v, input.fields, runs, { report: input.report, ...(dataChecks !== undefined ? { data: dataChecks } : {}) });
     // every seat's data pointers, with the check made, kept with the hand-back's records (one parser and renderer for all)
-    if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks);
+    if (dataChecks !== undefined) dataCited = recordedData(handBackDataTexts(v.card, input.fields), dataChecks).map((d) => (checked!.viaCopy.has(d.path) ? { ...d, label: VIA_COPY_LABEL } : d));
+    // 4.4 (F10, issue 65): the files a Constructor hands in are copied before its hand-back folder goes
+    if (v.card.seat === 'constructor' && dataCited.length > 0) dataCited = await keepHandedIn(ctx, dataCited);
+    // review p9-5: a Reviewer's cited files that a clean-up would remove (under the memory's tmp/) are kept the same way
+    else if (v.card.seat === 'reviewer' && dataCited.length > 0) dataCited = await keepHandedIn(ctx, dataCited, { only: (d) => insideDir(ctx.memory.paths.tmp, d.path), viaCopy: checked!.viaCopy });
   }
+  // 4.4 (F10): a Reviewer's judgment that cites data outside the commit is marked for renewal (a rerun does not repeat it)
+  const judgment = v.card.seat === 'reviewer' && dataCited.length > 0 ? (v.card as unknown as ReviewerCard).binding.judgment : null;
   const out = ctx.memory.write({ op: `handback:${dispatch}`, payload: { seat: seatHash } }, (tx) => {
     if (v.card.seat === 'secretary') {
       const claim = flowEvents(tx, {mission: v.info.mission, line: DISPATCH_LINE(dispatch), event: 'claimed'}).find((e) => e.key === 'spec');
@@ -727,21 +948,42 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     };
     const r = recordHandback(tx, { dispatch, report: input.report, result: doc, filler: input.filler ?? null });
     if (r.accepted && kept.length > 0) appendRecords(tx, kept);
+    // 4.4 (F4; G5): a question raised as later, or put off by an answer, is an open item from this write
+    if (r.accepted) appendRecords(tx, questionItems(tx, v, input.fields));
+    if (r.accepted && judgment !== null && kept.some((x) => x.kind === 'judgment' && x.judgment === judgment)) {
+      appendRecords(tx, [{ kind: 'flow.event', mission: v.info.mission, line: OUTSIDE_DATA_LINE, event: OUTSIDE_DATA_EVENT, key: outsideDataKey(judgment), body: tx.data.put(canonicalJson({ judgment, dispatch, data: dataCited.slice(0, 50).map((d) => d.pointer) })) as ContentHash }]);
+    }
     return { outcome: r.outcome, accepted: r.accepted, report: r.report, closed: close !== null, moot: moot ?? mootBefore };
   });
+  // 4.4 (F10, P12): a fall in the pass share after the Reviewer's filler changed is told to the Secretary's loop (best effort)
+  if (out.accepted && v.card.seat === 'reviewer') tellReviewHealth(ctx, v.info.mission);
   const notes: string[] = out.closed ? [`mission ${v.info.mission} closed before this hand-back: it is recorded, not accepted; the step waits until the mission is opened again`] : [];
   if (out.moot !== null) notes.push(`${out.moot} before this hand-back: it is recorded, not accepted, and nothing it decides is carried out`);
-  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
-  notes.push(...dispatchOver(ctx, dispatch));
+  // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held. 4.4 (F10, #65): the
+  // seat's command leaves it until it has printed its result
+  // review p9-5: a cited file of its own folder that could not be copied keeps the folder (the original stays for the sweep)
+  const uncopied = out.accepted ? uncopiedInScratch(ctx, dispatch, dataCited) : [];
+  if (input.keepScratch !== true) notes.push(...dispatchOver(ctx, dispatch, undefined, { keepTmp: uncopied.length > 0 }));
+  if (uncopied.length > 0) notes.push(`.mission-pipeline/tmp/${dispatch}/ is left in place: ${uncopied.map((d) => d.path).join(', ')} could not be copied; a later sweep (mp pm next) may still remove it`);
+  // 4.4 (F10): what became of the files handed in, from the hand-back's record
+  if (out.accepted) for (const d of dataCited.filter((x) => x.kept !== undefined || x.notKept !== undefined)) notes.push(d.kept !== undefined ? `Kept with this hand-back: ${d.path} (a copy at .mission-pipeline/${d.kept})` : `Recorded, no copy kept: ${d.path} (${d.notKept ?? 'no copy was made'})`);
   let verification: VerificationRun[] | null = null;
+  // 4.4 (F19, #64): the recorded candidate is held by a ref, so git's garbage collection keeps it (4.4, F4: a
+  // parked commit too, for as long as its attempt can be resumed: the ref is never removed)
+  if (candidate !== null) anchorCommit(ctx, v.info.mission, candidate.commit);
+  // 4.4 (F4): a Constructor that stopped to ask: what was collected is the parked commit of its edits
+  const parked = v.card.seat === 'constructor' && (input.fields as { blocked?: unknown } | null)?.blocked === true && candidate !== null;
+  if (out.accepted && parked) notes.push(`You stopped to ask: your edits are kept as commit ${candidate!.commit}. It is not a product: nothing is verified or reviewed. The decision on your questions says how this attempt goes on; an answer resumes it in a new worktree on that commit.`);
   if (out.accepted && entry.exportsProduct === true && candidate !== null) {
     // §5.3: the program's runs on a clean checkout of the candidate are the evidence
     const commands = ((v.card['verificationCommands'] as Array<{ id: string; command: string; cwd?: string }> | undefined) ?? []);
     // 4.1.2 (D-4, D-5, D-7): the project's full suite on the card is not run here (actions.ts verify)
     const suite = commands.filter((c) => isFullSuiteCommand(ctx.fullSuite, c.command, c.cwd));
-    if (suite.length > 0) notes.push(`${suite.map((c) => c.id).join(', ')} ${suite.length === 1 ? 'is' : 'are'} the project's full suite: not run at hand-back; it is left to the integration review (its Reviewer's mp seat <id> full-run)`);
+    if (suite.length > 0 && !parked) notes.push(`${suite.map((c) => c.id).join(', ')} ${suite.length === 1 ? 'is' : 'are'} the project's full suite: not run at hand-back; it is left to the integration review (its Reviewer's mp seat <id> full-run)`);
     // a stop stops (§6.6): the runs wait until it is released
-    if (verificationStopped(ctx, v.info.mission as MissionId)) {
+    if (parked) {
+      /* 4.4 (F4): a parked commit is never verified */
+    } else if (verificationStopped(ctx, v.info.mission as MissionId)) {
       notes.push('a stop covers this work: the verification runs of this candidate wait until it is released; mp pm next runs them then');
     } else try {
       const runs = await ctx.actions().verify({ mission: v.info.mission as MissionId, object: productObjectId(v.info.task), snapshot: candidate.commit, commands });
@@ -767,8 +1009,48 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       notes.push(`the worktree of ${dispatch} could not be removed now (${(e as Error).message}); mp pm next tries again`);
     }
   }
-  if (input.advance !== false) await advanceQuietly(ctx, v, notes);
-  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes };
+  let decision: DecisionOutcome | undefined;
+  let reply: DecisionOutcome | undefined;
+  if (input.advance !== false) {
+    const why = await advanceQuietly(ctx, v, notes);
+    // 4.4 (F9): a Secretary decision says what became of it, read from the record after the pass
+    const escalation = (v.card as { request?: { id?: unknown } }).request?.id;
+    if (v.card.seat === 'secretary' && out.accepted && typeof escalation === 'string') decision = ctx.memory.read((db) => decisionOutcome(db, data, { mission: v.info.mission, escalation, task: v.info.task, fields: input.fields, why }));
+    // 4.4 (G1): an Architect's reply says what became of it: carried out, back to the decider, kept as moot, or left to the next pass
+    const asked = (v.card as { escalation?: { id?: unknown } }).escalation?.id;
+    if (v.card.seat === 'architect-answer' && out.accepted && typeof asked === 'string') reply = ctx.memory.read((db) => replyOutcome(db, data, { mission: v.info.mission, escalation: asked, step: v.info.task, why }));
+  }
+  return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(parked ? { parked: true as const } : {}), ...(decision !== undefined ? { decision } : {}), ...(reply !== undefined ? { reply } : {}), ...(uncopied.length > 0 ? { keepScratch: true as const } : {}) };
+}
+
+/**
+ * 4.4 (F4; PM design G5): the open items an accepted hand-back makes, in its own write: a Constructor's
+ * questions raised as "later", and the questions a Secretary's answer puts off (`defer`). Their ids and
+ * bodies are the flow's (flow/openItems.ts): the same deterministic records, which the fact writer keeps
+ * once. A stop to ask makes none: each of its questions is needed before the work resumes (review r2).
+ */
+function questionItems(tx: WriteTx, v: DispatchView, fields: unknown): BaseRecord[] {
+  const mission = v.info.mission;
+  const parse = (h: string): unknown => JSON.parse(tx.data.text(h));
+  let bodies: OpenItemBody[] = [];
+  if (v.card.seat === 'constructor') {
+    const r = fields as ConstructorResult;
+    const qs = constructorQuestions(r);
+    if (r.blocked === true || !qs.some((q) => q.when === 'later')) return [];
+    const row = tx.stmt("SELECT line, body FROM flow_events WHERE mission = ? AND event = 'dispatched' AND key = ? AND line LIKE 'task:%' ORDER BY revision LIMIT 1").get(mission, v.info.task) as { line: string; body: string } | undefined;
+    const k = row === undefined ? undefined : (parse(row.body) as { k?: unknown }).k;
+    if (row === undefined || typeof k !== 'number') return [];
+    const task = row.line.slice('task:'.length);
+    bodies = laterItemBodies(task, k, questionsEscalationOf(mission, task, [], v.info.task, k, false), qs);
+  } else if (v.card.seat === 'secretary') {
+    const r = fields as { option?: unknown; defer?: unknown };
+    const id = (v.card as { request?: { id?: unknown } }).request?.id;
+    if (r.option !== 'answer' || !Array.isArray(r.defer) || r.defer.length === 0 || typeof id !== 'string') return [];
+    const e = tx.stmt("SELECT body FROM flow_events WHERE mission = ? AND line = ? AND event = 'escalation' AND key = ?").get(mission, SECRETARY_LINE, id) as { body: string } | undefined;
+    if (e === undefined) return [];
+    bodies = deferredItemBodies(parse(e.body) as EscalationBody, r.defer as number[]);
+  }
+  return bodies.map((b) => ({ kind: 'flow.event' as const, mission, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash }));
 }
 
 /**
@@ -954,12 +1236,38 @@ export async function recordEvidenceRequest(ctx: ProcessContext, dispatch: strin
  * the seat's. A seat-side pass (4.1.2): what the seat's sandbox could not write is left to the PM's next
  * step with a note, and raises no WI-20 notice; any other error still does.
  */
-async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<void> {
+async function advanceQuietly(ctx: ProcessContext, v: DispatchView, notes: string[]): Promise<string | null> {
+  // 4.4 (F9, issue 62): a Secretary decision handed back under the live generation's identity runs the
+  // flow step `mp sec decide` runs, so it takes effect when it is made; any other hand-back keeps the
+  // seat-side pass, which a live Secretary leaves to its own next pass
+  const live = liveSecretary(ctx.memory);
+  const decision = v.card.seat === 'secretary' && live !== null && ctx.secretary === live.generation;
+  // a generation retired since the hand-back's own write: its seat-side pass does nothing (advance.ts), and says so
+  if (v.card.seat === 'secretary' && ctx.secretary !== null && live?.generation !== ctx.secretary) return `the Secretary generation ${ctx.secretary} was retired during this command, so it applies nothing; the live Secretary's next pass does`;
+  // a seat's process skips the recovery of a moved folder while a Secretary is live (memory.ts): such a pass is the Secretary's
+  if (decision && movedSinceRecovery(ctx)) return 'the project folder moved since its last recovery; the Secretary\'s next pass recovers it';
+  // 4.4 (F9; PM/Secretary B.1): every write of that pass is fenced to the live generation, as each write of
+  // `mp sec decide` is (process/context.ts writeGuard): a generation retired meanwhile applies nothing more
+  const guard = ctx.memory.writeGuard;
+  if (decision) ctx.memory.writeGuard = (tx, req) => { guard?.(tx, req); requireSecretary(tx, live.generation); };
   try {
     // the work this hand-back hands over is recorded as handed over by it (§3.2, U-13)
-    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, { seatSide: true });
+    const reports = await advance(ctx, v.info.mission as MissionId, { dispatch: v.info.dispatch, task: v.info.task, step: `the hand-back of ${v.info.dispatch} (${v.info.seat}, ${v.info.task})` }, decision ? {} : { seatSide: true });
     for (const r of reports) for (const e of r.errors) if (e.sandbox !== undefined) notes.push(`left to the PM: this seat's sandbox could not write ${e.sandbox}`);
+    if (live !== null && !decision) return 'this command ran without the live Secretary\'s identity (MP_SECRETARY), and only the Secretary\'s commands reconcile while it is live';
+    if (decision && liveSecretary(ctx.memory)?.generation !== live.generation) return `the Secretary generation ${live.generation} was retired during this command, so its pass wrote nothing more; the live Secretary's next pass applies the decision`;
+    const error = reports.flatMap((r) => r.errors).at(0);
+    return error === undefined ? null : `the ${error.step} step stopped (${error.message})`;
   } catch (e) {
     notes.push(`the process will advance on the PM's next step (${(e as Error).message})`);
+    return `the pass failed (${(e as Error).message})`;
+  } finally {
+    ctx.memory.writeGuard = guard;
   }
+}
+
+/** The folder was moved or copied and its recovery has not run (memory/move.ts needsRecovery). */
+function movedSinceRecovery(ctx: ProcessContext): boolean {
+  const m = ctx.memory;
+  return m.getMeta('move') !== null || m.getMeta('project_path') !== m.paths.project || m.getMeta('machine') !== m.machine;
 }

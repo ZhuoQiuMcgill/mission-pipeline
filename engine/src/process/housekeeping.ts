@@ -103,12 +103,13 @@ function releaseSharedCheckout(ctx: ProcessContext, commit: string, deadline: nu
  * END_BUDGET_MS; what is left (a file held open, a big tree) is the sweep's. Returns the notes
  * for the seat or the PM. Nothing happens for a dispatch still in flight.
  */
-export function dispatchOver(ctx: ProcessContext, dispatch: string, budgetMs = END_BUDGET_MS): string[] {
+export function dispatchOver(ctx: ProcessContext, dispatch: string, budgetMs = END_BUDGET_MS, o: { readonly keepTmp?: boolean } = {}): string[] {
   const info = ctx.memory.read((db) => dispatchInfo(db, dispatch));
   if (info === null || info.state === 'in-flight') return [];
   const deadline = Date.now() + budgetMs;
   const notes: string[] = [];
-  try {
+  // 4.4 (F10, review p9-5): a hand-back whose cited file in this folder could not be copied does not remove the folder itself
+  if (o.keepTmp !== true) try {
     const trash = moveToTrash(ctx.memory.paths, dispatchTmpDir(ctx.memory.paths, dispatch));
     if (trash !== null) removeTree(trash, { deadline });
   } catch (e) {

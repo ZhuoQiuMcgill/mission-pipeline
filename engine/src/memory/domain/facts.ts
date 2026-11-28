@@ -175,10 +175,10 @@ function checkLoop(db: Db, r: Extract<BaseRecord, { kind: 'loop.attempt' } | { k
   if (st.exhausted) throw new LedgerError('LOOP_EXHAUSTED', `${r.loop} on ${r.lineage} is exhausted (${st.reason}: ${st.attempts} of ${st.allowed} attempts); WI-08: the Secretary may grant once, then only the user`);
 }
 
-/** One loop's counters and verdict (6.5). `failureClass`: the class of the next env-retry attempt. */
-export function loopState(db: Db, lineage: string, loop: LoopKind, failureClass: string | null = null): LoopState {
+/** One loop's counters and verdict (6.5). `failureClass`: the class of the next env-retry attempt; `cap`: the project's cap for it (4.4, F12 c), absent LOOP_CAPS. */
+export function loopState(db: Db, lineage: string, loop: LoopKind, failureClass: string | null = null, cap?: number): LoopState {
   if (!LOOP_KINDS.includes(loop)) throw new LedgerError('BAD_REQUEST', `unknown loop kind ${String(loop)}; the kinds are ${LOOP_KINDS.join(', ')}`);
-  return readLoopState(db, lineage, loop, failureClass);
+  return readLoopState(db, lineage, loop, failureClass, cap);
 }
 
 /**

@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask, stepsOfNotes43, noteOfHandBack, grantedReopenLine } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -21,7 +21,9 @@ import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskR
 //                to answer (5.6); its findings become issue records (the host does that)
 //   pass         accepted; rework → attempt k+1 with the issue list (rework loop: initial + 2;
 //                exhausted → WI-08 and the Secretary); needs-decision → the Secretary
-//   Constructor's "questions that need a decision" → the Secretary, without stopping the task
+//   Constructor's "questions that need a decision" → the Secretary, without stopping the task; 4.4 (F4):
+//                the review waits for the answer to the before-review ones; a Constructor that stops to ask
+//                (a blocked hand-back) pauses its attempt, and the answer resumes it on its parked edits
 //   seat failures → the Secretary (failures.ts); re-plan → the decision layer; abandon → risk list
 // A re-plan that changes a task's card restarts it at the next attempt; a task the new plan drops
 // stops (queued attempts cancelled; work in flight finishes and is kept, proposed WI-23). A task
@@ -39,7 +41,9 @@ import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskR
 
 import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVersionRecord, type ReviewContract } from '../common/records.ts';
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
-import type { ConstructorResult, ReviewerResult } from '../seat/results.ts';
+import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
+import { ITEM_BATCH, acceptanceReasons, cardItemNames, carriedBy, deferredItemBody, issueResolver, itemIssue, itemIssueLine, personItemBodies, riskItemBodies, riskItemsOf, takenItems, unverifiableLine, unverifiableOf, type IssueNote, type ItemAnswer, type RiskItem, type RiskItemBody } from './riskItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -49,6 +53,7 @@ import {
   ev,
   eventOf,
   eventsOf,
+  failureInForce,
   idPart,
   notify,
   noticeAlertId,
@@ -58,13 +63,15 @@ import {
   taskView,
   missionClosed,
   judgmentRecordOf,
+  tellOnce,
   type FlowCtx,
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
-import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { attach, constructorClaims, pausedHandBack, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
+import { ARTIFACTS_LINE, DetailedTask, KEPT_ARTIFACTS, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REQUIREMENTS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardAmendments, cardChangedBy, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type KeptArtifactsBody, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
-import type { FlowSchedulerPort, ProductVersion, VerificationRun } from './ports.ts';
+import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
 import { isAskOption } from '../seat/cards/secretary.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carryGuard, carried, carryOut, closedEscalation, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
@@ -88,6 +95,42 @@ interface ReworkBody {
   readonly issues: readonly string[];
   readonly instructions: readonly string[];
   readonly reopen?: ReopenSource;
+  /**
+   * 4.4 (F12 a): a repair's reopen is new work on the user's words: the lineage its fresh rework loop is
+   * counted on (reworkLineage), for this attempt and the reworks that follow it until one is accepted.
+   * Absent (every rework before 4.4, and any other): the task's own loop.
+   */
+  readonly loop?: string;
+  /** 4.4 (F12 b): the tasks of the same repair this reopened attempt comes after: its gate waits for them, and its start holds their work. */
+  readonly after?: readonly string[];
+}
+/**
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (plandoc.ts, beside the decision, so the
+ * cards and the read of repairs read them without this module; the states they make, and the writes that move
+ * them, are described above RequestState).
+ */
+export { REOPEN_PINNED, REOPEN_CARRIED, REOPEN_NOT_CARRIED };
+export interface ReopenCarriedBody {
+  readonly repair: string;
+  readonly task: string;
+  /** The attempt it opened. */
+  readonly attempt: number;
+  /** The attempt it waited for. */
+  readonly from: number;
+}
+export interface ReopenPinnedBody {
+  readonly repair: string;
+  readonly task: string;
+  /** The attempt it waits for now. */
+  readonly attempt: number;
+  readonly from: number;
+}
+export interface ReopenNotCarriedBody {
+  readonly repair: string;
+  readonly task: string;
+  /** The task's attempt when it was found not possible. */
+  readonly attempt: number;
+  readonly why: string;
 }
 /** An integration review's reopen (task line event "reopen", key the integration's attempt): the decision record; each named task's new attempt follows it (carryReopens). */
 interface ReopenBody {
@@ -114,6 +157,28 @@ interface ProductBody extends ProductVersion {
   readonly task: string;
   /** The Constructor's questions that need a decision (3.8), kept with the product. */
   readonly decisions?: readonly string[];
+  /** 4.4 (F4): when each question must be settled, present when one is "later" (absent: all before-review, as 4.3 read them). */
+  readonly when?: readonly QuestionWhen[];
+}
+/**
+ * 4.4 (F4): a blocked hand-back, a pause of attempt k (task line event "paused", key "<k>#<n>"): the step
+ * that stopped to ask, its dispatch, the parked commit of its edits (not a product: never verified,
+ * reviewed, re-bound or delivered) and the escalation of this pause. Written with the escalation.
+ */
+interface PausedBody {
+  readonly k: number;
+  readonly n: number;
+  readonly step: string;
+  readonly dispatch: string;
+  readonly parked: string;
+  readonly escalation: string;
+}
+/** 4.4 (F4): the answer to pause n of attempt k was carried out (event "resumed", key "<k>#<n>"): the Constructor step that continues the attempt on the parked commit. */
+interface ResumedBody {
+  readonly k: number;
+  readonly n: number;
+  readonly step: string;
+  readonly escalation: string;
 }
 interface ReviewBody {
   readonly task: string;
@@ -125,10 +190,48 @@ interface ReviewBody {
   readonly deferred?: readonly string[];
   /** An integration review's reopen (D-6): the dependencies whose work causes the failure. */
   readonly reopen?: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly evidence?: string }>;
+  /** 4.4 (G3): the Reviewer's answer to each instruction addressed to this work (it never changes the verdict). Absent: none on the card. */
+  readonly instructions?: ReadonlyArray<{ readonly instruction: string; readonly version?: string; readonly response: 'followed' | 'not-followed' | 'unclear'; readonly reason: string }>;
+  /** 4.4 (G5): the Reviewer's answers to the open items its card listed (absent: none listed, every review before 4.4). */
+  readonly items?: readonly ItemAnswer[];
+  /** 4.4 (G5): the task's deferred issues this review answered fixed (absent: none). */
+  readonly fixed?: readonly string[];
+  /** 4.4 (F10): the standards the Reviewer could not verify from what it can see, with what would be needed (absent: none, every 4.3 review). */
+  readonly unverifiable?: ReadonlyArray<{ readonly standard: string; readonly reason: string; readonly needed: string }>;
 }
+
+/**
+ * 4.4 (F10): a review whose only open standards are ones the Reviewer could not verify, with nothing else
+ * open (no standard not met or unclear, no finding, no issue not fixed, no reopen): it goes to a decider,
+ * not back to the Constructor.
+ */
+export function onlyUnverifiable(r: Pick<ReviewBody, 'verdict' | 'issues' | 'unverifiable' | 'reopen'>): boolean {
+  const n = r.unverifiable?.length ?? 0;
+  return r.verdict !== 'pass' && n > 0 && r.issues.length === n && (r.reopen ?? []).length === 0;
+}
+
+/** 4.4 (F10): the issue line of a standard the Reviewer could not verify, in the form a standard not met takes ("[S1] not met: why"); one function with the open items' reading of it (flow/riskItems.ts). */
+export { unverifiableLine };
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
 export const taskLineage = (mission: string, task: string): string => safeId(`task.${mission}.${idPart(task)}`);
+/** 4.4 (F12 a): the lineage of the fresh rework loop a repair's reopen starts at attempt k (no task lineage has a fourth part). */
+const reopenLoopLineage = (mission: string, task: string, k: number): string => safeId(`${taskLineage(mission, task)}.reopen${k}`);
+
+/**
+ * 4.4 (F12 a): the lineage attempt k's rework loop is counted on. A repair's reopen starts a fresh loop (its
+ * rework event names it): the reopened attempt and the reworks that follow it count there until one of them is
+ * accepted. Every other rework of the task (an attempt before the reopen, or work after the reopened work was
+ * accepted: a re-bind, a re-review, a review's reopen) counts on the task's lineage, whose count the repair leaves as it was.
+ */
+export function reworkLineage(mission: string, task: string, events: ReadonlyArray<{ revision: number; event: string; key: string; body: unknown }>, k: number): string {
+  const line = new Line(events);
+  const base = taskLineage(mission, task);
+  const fresh = line.all<ReworkBody>('rework').filter((r) => r.body.loop !== undefined && r.body.k <= k).at(-1);
+  if (fresh === undefined) return base;
+  for (let j = fresh.body.k; j <= k; j++) if (line.one('accepted', String(j)) !== null) return base;
+  return fresh.body.loop!;
+}
 /** A task's card identity under a plan: a spec records it, and a different one is a re-plan of the task (taskStep; plandoc.ts). */
 export { taskCardHash };
 
@@ -136,6 +239,25 @@ export { taskCardHash };
 export const noConstructor = (t: Pick<DetailedTask, 'kind' | 'writeScope'>): boolean => t.kind === 'integration' && t.writeScope.length === 0;
 const conTask = (mission: string, task: string, k: number): string => safeId(`con.${mission}.${idPart(task)}.${k}`);
 const revTask = (mission: string, task: string, k: number, m: number): string => safeId(`rev.${mission}.${idPart(task)}.${k}${m > 0 ? `.r${m}` : ''}`);
+/** 4.4 (F4): the Constructor step that continues attempt k after its n-th pause (a new step: not a rework, not a re-dispatch). */
+const resumeTask = (mission: string, task: string, k: number, n: number): string => `${conTask(mission, task, k)}.p${n}`;
+
+/** 4.4 (F4): the Constructor step of attempt k now: the continuation of its last pause answered, else the attempt's first. */
+function constructorStep(ctx: FlowCtx, task: string, line: Line, k: number): string {
+  return line.all<ResumedBody>('resumed').filter((r) => r.body.k === k).at(-1)?.body.step ?? conTask(ctx.mission, task, k);
+}
+
+/**
+ * 4.4 (F4): the escalation a Constructor step's questions go to: `cdec.<step>` with its product; for a
+ * stop to ask, `cblk.<the attempt's first step>.<n>`, its n-th pause (the pauses recorded before it, plus
+ * one). Pure, from the task line: the hand-back's write (process/seat.ts, its open items) and the flow agree.
+ */
+export function questionsEscalationOf(mission: string, task: string, events: Line['events'], step: string, k: number, blocked: boolean): string {
+  if (!blocked) return safeId(`cdec.${step}`);
+  const line = new Line(events);
+  const own = line.all<PausedBody>('paused').find((p) => p.body.step === step)?.body.n;
+  return safeId(`cblk.${conTask(mission, task, k)}.${own ?? line.all<PausedBody>('paused').filter((p) => p.body.k === k).length + 1}`);
+}
 
 /** The state of one task line, read once per pass. */
 class Line {
@@ -162,6 +284,23 @@ class Line {
     const r = this.all('spec').at(-1)?.revision ?? 0;
     return this.events.some((e) => e.event === 'abandoned' && e.revision > r);
   }
+}
+
+/**
+ * 4.4 (F13, final review F2-1): whether a task is given up under the card that is, or will be, in effect: given up
+ * under its latest spec, while execution will lay no new spec on it (taskStep's rule: the plan in effect holds that
+ * spec's card, and no drop is recorded after that spec). A task out of the plan in effect (`card` undefined) given
+ * up stays given up. The one reading wherever a giving-up ends a reopen (recorded as not carried out) or a wait (an
+ * edge of the gate, a hold of a repair's work, an edge of the circle check): a giving-up that a card about to be laid
+ * revokes ends nothing.
+ */
+export function givenUpUnderCard(events: Line['events'], card: DetailedTask | undefined): boolean {
+  const line = new Line(events);
+  if (!line.abandoned) return false;
+  if (card === undefined) return true;
+  const last = line.all<SpecBody>('spec').at(-1);
+  if (last === undefined || last.body.hash !== taskCardHash(card)) return false;
+  return !line.all('dropped').some((d) => d.revision > last.revision);
 }
 
 /** The key and op part of a giving-up under the n-th spec (the first keeps key "abandoned" and the plain op). */
@@ -216,6 +355,22 @@ export function riskAcceptance(events: Line['events']): RiskAcceptance | null {
   if (acc === null || acc.decision === undefined) return null;
   if (currentAcceptance(line, line.k)?.judgment !== acc.judgment) return null;
   return { k: line.k, product: acc.product, escalation: acc.decision.escalation, by: acc.decision.by, words: acc.decision.words ?? null, risks: acc.risks ?? [] };
+}
+
+/**
+ * 4.4 (G5): the escalation whose acceptance with risk the task's current acceptance is (the attempt's accepting
+ * record a ruling with risk: accepted, or a re-bound version accepted with its risk), or null (a Reviewer's pass
+ * accepted it, or judged it again since, or it is not accepted). Pure, from the task line's events.
+ */
+export function currentRiskEscalation(events: Line['events']): string | null {
+  const line = new Line(events);
+  if (line.abandoned) return null;
+  const cur = currentAcceptance(line, line.k);
+  if (cur === null) return null;
+  const acc = line.one<{ judgment: string; decision?: { escalation: string; option?: string } }>('accepted', String(line.k));
+  const rb = line.all<ReboundBody>('rebound').filter((r) => r.body.k === line.k && bySeat(r.body)).at(-1)?.body;
+  for (const x of [rb, acc]) if (x?.decision?.option === 'accept-risk' && x.judgment === cur.judgment) return x.decision.escalation;
+  return null;
 }
 
 /** The production start resolver, shared by execution and the closing snapshot. */
@@ -327,7 +482,9 @@ async function legacyPins(ctx: FlowCtx, line: Line, k: number): Promise<{ readon
 }
 
 export async function executionStep(ctx: FlowCtx): Promise<void> {
-  const eff = await latestEffective(ctx);
+  // 4.4 (F13): one read of the plan in effect, whose revision guards the moves of the repairs' reopens
+  const effective = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).at(-1);
+  const eff = effective?.body ?? null;
   if (eff === null) return;
   const raw = await detailedPlanOf(ctx, eff.dplan);
   if (raw === null) return internalError(ctx, `exec:${eff.dplan}`, `the effective detailed plan ${eff.dplan} is not in the ledger`);
@@ -342,17 +499,22 @@ export async function executionStep(ctx: FlowCtx): Promise<void> {
     }
     // releases after the close can requeue obsolete steps: cancelling them is not production
     await supersededStep(ctx, eff);
+    // 4.4 (F14): notices a 4.3 memory left open on a mission closed since are tracked, and closed once superseded
+    await adoptKeptNotices(ctx);
+    await keptSweep(ctx, eff);
     return;
   }
   // reopen decisions (an integration review's, a repair's) carried out before the tasks move (restartable)
-  await carryReopens(ctx, stored.plan);
+  await carryReopens(ctx, stored.plan, { plan: stored.plan, revision: effective?.revision ?? null });
   const kept: KeptReport = { review: [], successors: null, waived: await waivedPlans(ctx) };
+  await adoptKeptNotices(ctx);
   try {
     for (const t of stored.plan.tasks) await taskStep(ctx, eff, stored.plan, t, kept);
   } finally {
     // what this pass re-bound is told even when a later task's step failed
     await keptNotices(ctx, eff, kept);
   }
+  await keptSweep(ctx, eff);
   await droppedStep(ctx, eff, stored.plan);
   await supersededStep(ctx, eff);
   await withdrawnStep(ctx, stored.plan);
@@ -505,33 +667,38 @@ async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTa
     }
     review = await takeReview(ctx, t, r.k, r.rev, view);
     if (review === null) return 'pending';
-    switch (review.verdict) {
-      case 'pass':
-        await commit(ctx, `flow:reaccepted:${ctx.mission}:${r.rev}`, { events: [ev(ctx, lineName, 'reaccepted', `${r.k}:${r.n}`, { k: r.k, product: product.object, judgment: review.judgment })] });
-        break;
-      case 'rework':
-        // an integration review that names the dependencies at fault reopens them (D-6)
-        if (t.kind === 'integration' && (review.reopen ?? []).length > 0) await reopenFromReview(ctx, plan, t, r.k, r.rev, review, product);
-        // the new evidence does not hold: the Constructor redoes the task (the next attempt)
-        else await rework(ctx, t, r.k, review.issues, [], `rework:${r.k}:re${r.n}`);
-        break;
-      case 'needs-decision':
-        await raiseEscalation(ctx, {
-          id: `rnd.${r.rev}`,
-          source: 'reviewer-needs-decision',
-          lineage,
-          subject: `task:${t.id}`,
-          summary: `The Reviewer of task ${t.id} (attempt ${r.k}, re-review ${r.n} after an environment change) needs a decision: the standards are unclear or in conflict.`,
-          reasons: [...review.issues],
-          options: ['answer', 'rework', 'replan', 'ask-user'],
-          items: t.requirementItems,
-          facts: { task: t.id, attempt: r.k, product: product.object, issues: review.issues, rereview: r.n },
-          handover: { from: r.rev, objects: [product.object] },
-        });
-        break;
-    }
   }
-  return review.verdict;
+  // 4.4 (F10; review F4-3): the disposition is carried out from the stored review on every pass that finds it not
+  // carried out (as a re-bound version's review is), so an interruption between the review's write and the next
+  // write leaves the question with its decider (the escalation's id is the round's), not a wait nobody can end.
+  // While attempt k stays the accepted one this step runs; a rework's commit starts attempt k + 1 and ends it.
+  // What the Reviewer could not verify, with nothing else open, goes to a decider, not back to the Constructor.
+  const unverified = onlyUnverifiable(review);
+  if (!unverified && review.verdict === 'pass') {
+    if (line.one('reaccepted', `${r.k}:${r.n}`) === null) await commit(ctx, `flow:reaccepted:${ctx.mission}:${r.rev}`, { events: [ev(ctx, lineName, 'reaccepted', `${r.k}:${r.n}`, { k: r.k, product: product.object, judgment: review.judgment })] });
+  } else if (!unverified && review.verdict === 'rework') {
+    // an integration review that names the dependencies at fault reopens them (D-6)
+    if (t.kind === 'integration' && (review.reopen ?? []).length > 0) await reopenFromReview(ctx, plan, t, r.k, r.rev, review, product);
+    // the new evidence does not hold: the Constructor redoes the task (the next attempt)
+    else await rework(ctx, t, r.k, review.issues, [], `rework:${r.k}:re${r.n}`);
+  } else {
+    await raiseEscalation(ctx, {
+      id: `rnd.${r.rev}`,
+      source: 'reviewer-needs-decision',
+      lineage,
+      subject: `task:${t.id}`,
+      summary: `The Reviewer of task ${t.id} (attempt ${r.k}, re-review ${r.n} after an environment change) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
+      reasons: [...review.issues],
+      // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
+      options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
+      items: t.requirementItems,
+      facts: { task: t.id, attempt: r.k, product: product.object, issues: review.issues, rereview: r.n },
+      handover: { from: r.rev, objects: [product.object] },
+    });
+  }
+  // 4.4 (F10, review p9-3): the disposition taken, when recorded and when resumed: such a review waits for its
+  // decider's answer as a "needs decision" does (the hand-back keeps the verdict the Reviewer gave)
+  return onlyUnverifiable(review) ? 'needs-decision' : review.verdict;
 }
 
 /** 6.2: an accepted product whose basis was withdrawn → the Secretary judges whether to re-plan. */
@@ -567,6 +734,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const lineName = taskLine(t.id);
   const lineage = taskLineage(ctx.mission, t.id);
   let line = await readLine(ctx, t.id);
+  // 4.4 (G5): the open items of a large acceptance with risk that an interruption left out (written in batches)
+  await riskItemsLeft(ctx, t, line);
 
   // the task's card under this plan; a changed card (re-plan) restarts it at the next attempt
   const hash = taskCardHash(t);
@@ -682,15 +851,15 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   if (eff.mode === 'fast' && await contestedProduction(ctx, eff, plan, t)) return;
 
   // 4.1.3 (#41): the dependencies as execution reads them (an integration task's include the tasks repairs added)
-  const depIds = await taskDependencies(ctx, plan, t);
+  const depIds = await taskDependencies(ctx, plan, t, line);
   // an integration attempt whose start lacks its dependencies' current work starts again on a fresh start (#41)
   if (t.kind === 'integration' && (await integrationRestart(ctx, eff, t, line, k, depIds)) === 'restarted') return;
   // gate: dependencies accepted; stable mode: proven
   const deps = await dependencyGate(ctx, eff, plan, t, line, depIds, kept.waived);
   if (deps === null) return;
 
-  // the Constructor
-  const con = conTask(ctx.mission, t.id, k);
+  // the Constructor (4.4, F4: after an answered pause, the step that continues the attempt)
+  const con = constructorStep(ctx, t.id, line, k);
   let product = line.one<ProductBody>('product', String(k));
   // (a 4.1.1 read-only integration attempt whose Constructor was already dispatched keeps it)
   if (product === null && noConstructor(t) && line.one('dispatched', con) === null) {
@@ -706,6 +875,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     if (view.kind === 'pending' || view.kind === 'evidence') return;
     if (view.kind === 'failed') return failed(ctx, t, con, lineage, view);
     const hb = view.status.handBack;
+    // 4.4 (F4): a stop to ask records no product, verifies nothing and queues no review: the attempt pauses
+    if (hb !== null && (view.result as ConstructorResult).blocked === true) return pause(ctx, t, line, k, con, hb);
     const dispatched = line.one<DispatchedBody>('dispatched', con);
     if (hb === null || hb.candidate === null || dispatched === null) return internalError(ctx, con, `the accepted Constructor hand-back of ${con} has no candidate commit (or the flow lost its dispatch record)`);
     const ix = await basisIndex(ctx);
@@ -723,7 +894,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       taskType: t.kind,
       // Old dispatches lack a trustworthy pin: keep the record conservative, never substitute current dependencies.
       prerequisites: dispatched.prerequisites ?? [],
-      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, ix) as never, reliesOn: [dispatched.dplan] as never }],
+      // 4.4 (G9): with the requirement items a filing's reopen binds this attempt to
+      reviews: [{ review: 'reviewer', basisLines: await productContract(ctx, eff, t, ix, line, k) as never, reliesOn: [dispatched.dplan] as never }],
       predecessor: dispatched.predecessor !== undefined ? dispatched.predecessor : (prev?.object ?? null),
       ...(dispatched.origin !== undefined ? { origin: dispatched.origin } : {}),
       });
@@ -733,8 +905,9 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       if (code === 'product-rejected') return rework(ctx, t, k, [`The program could not record your candidate: ${(e as Error).message}`], [], `rework:${k}:export`);
       return actionRefused(ctx, con, e);
     }
-    const r = view.result as ConstructorResult;
-    product = { ...pv, k, dispatch: hb.dispatch, task: con, decisions: [...r.decisions_needed] };
+    const qs = constructorQuestions(view.result as ConstructorResult);
+    // 4.4 (F4): the questions' texts as 4.3 kept them; when each must be settled only when one is "later"
+    product = { ...pv, k, dispatch: hb.dispatch, task: con, decisions: qs.map((q) => q.text), ...(qs.some((q) => q.when === 'later') ? { when: qs.map((q) => q.when) } : {}) };
     await commit(ctx, `flow:product:${ctx.mission}:${con}`, { events: [ev(ctx, lineName, 'product', String(k), product)] });
     line = await readLine(ctx, t.id);
   }
@@ -746,19 +919,27 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   }
   if ((product.decisions ?? []).length > 0) {
     // 3.8: the Constructor's questions go to the Secretary (raised on every pass until it exists:
-    // a crash after the product cannot lose them, code review r1 #14); the task goes on to review meanwhile
-    await raiseEscalation(ctx, {
-      id: `cdec.${con}`,
+    // a crash after the product cannot lose them, code review r1 #14). 4.4 (F4): verification goes on, and
+    // the review waits while a before-review question is not answered and carried out (process/questions.ts).
+    // A "later" question is an open item from the accepted hand-back (process/seat.ts), written here again
+    // when it is missing; questions that are all "later" raise no decision: nothing waits on them (G5)
+    const qs = (product.decisions ?? []).map((text, i) => ({ text, when: product!.when?.[i] ?? 'before-review' as QuestionWhen }));
+    const id = safeId(`cdec.${con}`);
+    const later = laterItemBodies(t.id, k, id, qs);
+    if (!qs.some((q) => q.when === 'before-review')) {
+      if (await anyMissing(ctx, later)) await commit(ctx, `flow:later-items:${ctx.mission}:${id}`, { events: itemEvents(ctx, later) });
+    } else await raiseEscalation(ctx, {
+      id,
       source: 'constructor-decision',
       lineage,
       subject: `task:${t.id}`,
-      summary: `The Constructor of task ${t.id} (attempt ${k}) raised questions that need a decision.`,
-      reasons: [...(product.decisions ?? [])],
-      options: ['answer', 'replan', 'ask-user'],
+      summary: `The Constructor of task ${t.id} (attempt ${k}) raised questions that need a decision.${qs.some((q) => q.when === 'before-review') ? ' Its review waits for the answer to the before-review ones.' : ''}`,
+      reasons: questionReasons(qs),
+      options: ['answer', 'ask-architect', 'replan', 'ask-user'],
       items: t.requirementItems,
-      facts: { task: t.id, attempt: k, questions: product.decisions, product: product.object },
+      facts: { task: t.id, attempt: k, questions: product.decisions, product: product.object, ...(product.when !== undefined ? { when: product.when } : {}) },
       handover: { from: con, objects: [product.object] },
-    });
+    }, itemEvents(ctx, later));
   }
 
   // the program's verification runs (the only evidence): declared runs on a clean checkout of the candidate
@@ -786,6 +967,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     review = await takeReview(ctx, t, k, rev, view);
     if (review === null) return;
   }
+  // 4.4 (F10): what the Reviewer could not verify, with nothing else open, goes once to a decider, not back to the Constructor
+  if (onlyUnverifiable(review)) return reviewerUnverifiable(ctx, t, k, rev, review, product);
   switch (review.verdict) {
     case 'pass': {
       // 4.1.3: an integration is accepted only on the tree that is delivered (#41: its start holds its dependencies'
@@ -797,7 +980,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
         if (e === 'wait') return;
         if (e !== null) return rebuildOnAccepted(ctx, t, k, e);
       }
-      await commit(ctx, `flow:accepted:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'accepted', String(k), { k, product: product.object, judgment: review.judgment })] });
+      // 4.4 (F10): a standard a person checks starts as something to verify, in the write that accepts the task
+      await commit(ctx, `flow:accepted:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'accepted', String(k), { k, product: product.object, judgment: review.judgment }), ...await personItems(ctx, t, k)] });
       return;
     }
     case 'rework':
@@ -838,6 +1022,104 @@ async function commitVerified(ctx: FlowCtx, lineName: string, k: number, object:
   }
 }
 
+/**
+ * 4.4 (F4; G5): open-item events, every one of `bodies`: an item is recorded with the hand-back or the
+ * decision that makes it, and a write of the flow carries the same deterministic records again (review r2-2:
+ * the same payload on every run of one operation; the fact writer keeps one of identical records).
+ */
+function itemEvents(ctx: FlowCtx, bodies: readonly OpenItemBody[]): FlowEventInput[] {
+  return bodies.map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
+}
+
+/** Whether one of these items is not recorded yet (a write that exists only to record them is made only then). */
+async function anyMissing(ctx: FlowCtx, bodies: readonly OpenItemBody[]): Promise<boolean> {
+  if (bodies.length === 0) return false;
+  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  return bodies.some((b) => !existing.has(b.id));
+}
+
+/** 4.4 (F4): told when a third pause of one attempt, or a later one, is recorded; raised from the committed pause, so it never names one that is not (review r2-3). */
+async function tellPausedAgain(ctx: FlowCtx, task: string, k: number, n: number, escalation: string): Promise<void> {
+  if (n < PAUSES_TOLD) return;
+  await notify(ctx, {
+    category: 'constructor-paused-again',
+    wi: WI.loopExhausted,
+    key: `${task}:${k}:${n}`,
+    trigger: `the Constructor of task ${task} stopped to ask for the ${n === 3 ? 'third' : `${n}th`} time in attempt ${k} (escalation ${escalation})`,
+    defaultAction: `accepted: only task ${task} waits for the decision on ${escalation}; the rest of the mission goes on. When the card itself is the cause (it is contradictory, or lacks what the seat keeps asking for), say so in the answer, or choose replan`,
+    detail: { task, attempt: k, pause: n, escalation },
+  });
+}
+
+/** 4.4 (F4): the guard of a write that pauses or resumes attempt k: it is still the task's current attempt (no next attempt was started meanwhile). */
+const attemptCurrent = (ctx: FlowCtx, task: string, k: number): AppendGuard['absent'][number] => ({ mission: ctx.mission, line: taskLine(task), event: 'rework', key: String(k + 1) });
+
+/** How many pauses of one attempt are accepted before the Secretary is told (4.4, F4: a third is accepted too). */
+export const PAUSES_TOLD = 3;
+
+/**
+ * 4.4 (F4): a Constructor stopped to ask (a blocked hand-back): pause n of attempt k. Its edits are the
+ * parked commit its hand-back collected as it collects a candidate (and anchored, process/seat.ts):
+ * nothing is recorded as a product, nothing is verified, no review is queued. The pause's own escalation,
+ * keyed by the attempt and the number of the pause, blocks the task; an answer carried out resumes the
+ * attempt on the parked commit (answerQuestions). It counts on no loop. The third pause of an attempt,
+ * and every later one, is accepted, and the Secretary is told.
+ */
+async function pause(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, con: string, hb: NonNullable<FlowTaskStatus['handBack']>): Promise<void> {
+  // this step's pause is recorded (with its escalation, in one write): its decision says how the attempt goes on
+  if (line.all<PausedBody>('paused').some((p) => p.body.step === con)) return;
+  if (hb.candidate === null) return internalError(ctx, con, `the blocked hand-back of ${con} has no parked commit`);
+  const n = line.all<PausedBody>('paused').filter((p) => p.body.k === k).length + 1;
+  const id = questionsEscalationOf(ctx.mission, t.id, line.events, con, k, true);
+  // review r2 (p8-7): every question of a stop to ask is needed before the work resumes, whatever its mark: none is an open item
+  const qs = constructorQuestions(hb.result as ConstructorResult).map((q) => ({ ...q, when: 'before-review' as const }));
+  const parked = hb.candidate.commit;
+  const paused: PausedBody = { k, n, step: con, dispatch: hb.dispatch, parked, escalation: id };
+  await raiseEscalation(ctx, {
+    id,
+    source: 'constructor-decision',
+    lineage: taskLineage(ctx.mission, t.id),
+    subject: `task:${t.id}`,
+    summary: `The Constructor of task ${t.id} stopped to ask (attempt ${k}, pause ${n}): nothing is handed in yet. Its edits are parked at commit ${parked}; an answer resumes the attempt on them.`,
+    reasons: questionReasons(qs),
+    options: ['answer', 'ask-architect', 'replan', 'ask-user'],
+    items: t.requirementItems,
+    facts: { task: t.id, attempt: k, pause: n, blocked: true, parked, questions: qs.map((q) => q.text) },
+    handover: { from: con, objects: [] },
+  }, [ev(ctx, taskLine(t.id), 'paused', `${k}#${n}`, paused)],
+  // the attempt is still current inside the write: a pass that started the next attempt meanwhile wins, and nothing is paused
+  { absent: [attemptCurrent(ctx, t.id, k)], code: 'STALE_REQUEST', message: `task ${t.id} moved past attempt ${k} meanwhile; its pause is not recorded (the next pass reads it again)` });
+  // only once the pause is recorded (and again by the next pass while it waits: applyTaskDecision)
+  await tellPausedAgain(ctx, t.id, k, n, id);
+}
+
+/**
+ * 4.4 (F4): an answer to a Constructor's questions, carried out: each question it puts off (`defer`) and
+ * each one raised as "later" is an open item, and an answer to a pause resumes the attempt with a new
+ * Constructor step on the parked commit (not a rework, not a re-dispatch), all in the write that marks
+ * the escalation applied.
+ */
+async function answerQuestions(ctx: FlowCtx, t: DetailedTask, line: Line, e: EscalationBody, d: DecisionBody): Promise<void> {
+  if (await isApplied(ctx, e.id)) return;
+  const facts = (e.facts ?? {}) as { attempt?: number; pause?: number; blocked?: boolean };
+  const k = facts.attempt ?? line.k;
+  const blocked = facts.blocked === true;
+  // the items it makes are recorded with the decision and the hand-back (flow/secretary.ts, process/seat.ts), and
+  // carried here again, the same records (a pause makes none: its questions are all needed before it resumes)
+  const items = blocked ? [] : itemEvents(ctx, [...laterItemBodies(t.id, k, e.id, escalationQuestions(e)), ...deferredItemBodies(e, d.defer ?? [])]);
+  const n = blocked && typeof facts.pause === 'number' && line.k === k ? facts.pause : null;
+  const resume = n === null || line.one('resumed', `${k}#${n}`) !== null ? [] : [ev(ctx, taskLine(t.id), 'resumed', `${k}#${n}`, { k, n, step: resumeTask(ctx.mission, t.id, k, n), escalation: e.id } satisfies ResumedBody)];
+  const carry = await carryOut(ctx, e.id, { option: 'answer' });
+  const guard = carryGuard([carry])!;
+  await commit(ctx, `flow:answer:${ctx.mission}:${e.id}`, {
+    events: [...items, ...resume, ...carry.events],
+    records: carry.records,
+    // every write of a pause's life needs its attempt still current inside the write (p8-6)
+    guard: { ...guard, absent: [...guard.absent, ...(resume.length > 0 ? [{ mission: ctx.mission, line: taskLine(t.id), event: 'resumed', key: `${k}#${n}` }] : []), ...(blocked ? [attemptCurrent(ctx, t.id, k)] : [])] },
+  });
+  await carried(ctx, [carry]);
+}
+
 /** Whether a product is an integration task's start snapshot: no Constructor ran for its attempt (4.1.2). */
 function startOnly(line: Line, product: ProductBody): boolean {
   return line.one<DispatchedBody>('dispatched', product.task)?.noConstructor === true;
@@ -855,10 +1137,43 @@ async function reviewerNeedsDecision(ctx: FlowCtx, t: DetailedTask, k: number, r
     subject: `task:${t.id}`,
     summary: why === null ? `The Reviewer of task ${t.id} (attempt ${k}) needs a decision: the standards are unclear or in conflict.` : `The Reviewer of task ${t.id} (attempt ${k}) needs a decision: ${why}.`,
     reasons: [...review.issues],
-    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'replan', ...accept, 'ask-user'] : ['answer', 'rework', 'replan', ...accept, 'ask-user'],
+    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'ask-architect', 'replan', ...accept, 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', ...accept, 'ask-user'],
     ...(risk !== null ? { position: { target: risk.product, review: 'reviewer', revokes: risk.judgment } } : {}),
     items: t.requirementItems,
     facts: { task: t.id, attempt: k, product: product.object, issues: review.issues },
+    handover: { from: rev, objects: [product.object] },
+  });
+}
+
+/**
+ * 4.4 (F10): a review whose only open standards are ones the Reviewer could not verify from what it can
+ * see goes once to a decider (its escalation is keyed by the review): accept the verified product with
+ * those standards recorded as left open (accept-risk: each one is among the acceptance's risks, with what
+ * would be needed), send it back with instructions, or answer (what is missing, or where it is: the same
+ * candidate is reviewed again). It is not sent back to the Constructor by itself, and it spends no rework.
+ * The option list has the shape of a Reviewer's "needs decision".
+ */
+async function reviewerUnverifiable(ctx: FlowCtx, t: DetailedTask, k: number, rev: string, review: ReviewBody, product: ProductBody): Promise<void> {
+  const risk = await riskAcceptable(ctx, t, k);
+  // a hand-back whose program runs did not all pass is accepted with its risks by the PM or the user only
+  const runRisk = risk === null ? await failedRunsRisk(ctx, t, k) : null;
+  const offered = risk ?? runRisk;
+  const standards = (review.unverifiable ?? []).map((u) => u.standard);
+  const accept = offered !== null ? (['accept-risk'] as const) : [];
+  await raiseEscalation(ctx, {
+    id: `unv.${rev}`,
+    source: 'reviewer-needs-decision',
+    lineage: taskLineage(ctx.mission, t.id),
+    subject: `task:${t.id}`,
+    summary: `The Reviewer of task ${t.id} (attempt ${k}) could not verify ${standards.join(', ')} from what it can see, and nothing else is open: a decider settles it; it is not sent back to the Constructor by itself.`,
+    reasons: [...review.issues, ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
+    // review p9-8: `answer` (what is missing, or where it is: the same candidate is reviewed again) stays, as on every Reviewer's "needs decision";
+    // 4.4 (G1): not ask-architect: what could not be verified is a question of evidence, not of design
+    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'replan', ...accept, 'ask-user'] : ['answer', 'rework', 'replan', ...accept, 'ask-user'],
+    ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
+    ...(offered !== null ? { position: { target: offered.product, review: 'reviewer', revokes: offered.judgment } } : {}),
+    items: t.requirementItems,
+    facts: { task: t.id, attempt: k, product: product.object, issues: review.issues, unverifiable: review.unverifiable },
     handover: { from: rev, objects: [product.object] },
   });
 }
@@ -903,7 +1218,7 @@ async function integrationStart(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTas
       writeScope: [],
       taskType: t.kind,
       prerequisites: products,
-      reviews: [{ review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx)) as never, reliesOn: [eff.dplan] as never }],
+      reviews: [{ review: 'reviewer', basisLines: await productContract(ctx, eff, t, await basisIndex(ctx), await readLine(ctx, t.id), k) as never, reliesOn: [eff.dplan] as never }],
       predecessor: null,
       // its start is the snapshot itself: the dependencies' products laid over the base (not the
       // commit's parent), so its start holds them on the final tree (delivery, ruling 2)
@@ -925,13 +1240,106 @@ async function integrationStart(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTas
  * task, also every task repairs added to the plan in effect (plandoc.ts amendedTaskIds; a later re-plan
  * that carries one keeps it so), except an integration task, one that depends on it, and one given up
  * (its work is not delivered). The one resolver of an integration's dependencies: its gate and start,
- * its Reviewer's card (so the reopen check at its hand-back), and its restart read it.
+ * its Reviewer's card (so the reopen check at its hand-back), and its restart read it. 4.4 (F12 b): for any
+ * task, also the tasks a repair's reopen of it comes after (`line`: the task's line when the caller has it).
  */
-export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask): Promise<string[]> {
-  if (t.kind !== 'integration') return [...t.dependsOn];
-  const added = amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body));
-  if (added.size === 0) return [...t.dependsOn];
-  const byId = new Map(plan.tasks.map((x) => [x.id, x]));
+export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask, line?: Line): Promise<string[]> {
+  // 4.4 (F12 b): the tasks the repair's reopen of this task's current work comes after are its dependencies too
+  const l = line ?? (await readLine(ctx, t.id));
+  const added = t.kind === 'integration' ? amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)) : new Set<string>();
+  const after = afterOf(l, l.k);
+  const givenUp = new Set<string>();
+  // given up under the card in effect (F2-1): a card about to revive it keeps the edge
+  for (const x of plan.tasks) if ((added.has(x.id) || after.includes(x.id)) && givenUpUnderCard((await readLine(ctx, x.id)).events, x)) givenUp.add(x.id);
+  return effectiveDependencies(plan, t, added, (id) => givenUp.has(id), after);
+}
+
+/**
+ * 4.4 (p7-4): the one description of what a task waits for, read by the gate and by the circle check of a repair's
+ * decision: its card's dependencies; for an integration task, every task repairs added (`added`) except an
+ * integration task, one that reaches it, and one given up; and the tasks its reopen comes after (`after`), except one
+ * given up (its reopen is not carried out, so no new work of it comes: the wait ends with it).
+ */
+export function effectiveDependencies(plan: DetailedPlanDoc, t: DetailedTask, added: ReadonlySet<string>, givenUp: (task: string) => boolean, after: readonly string[]): string[] {
+  const out = [...t.dependsOn];
+  if (t.kind === 'integration' && added.size > 0) {
+    const byId = new Map(plan.tasks.map((x) => [x.id, x]));
+    const reaches = (from: string, to: string): boolean => {
+      const seen = new Set<string>();
+      const stack = [from];
+      while (stack.length > 0) {
+        const at = stack.pop()!;
+        if (at === to) return true;
+        if (seen.has(at)) continue;
+        seen.add(at);
+        stack.push(...(byId.get(at)?.dependsOn ?? []));
+      }
+      return false;
+    };
+    for (const x of plan.tasks) {
+      if (!added.has(x.id) || x.id === t.id || x.kind === 'integration' || out.includes(x.id) || reaches(x.id, t.id) || givenUp(x.id)) continue;
+      out.push(x.id);
+    }
+  }
+  for (const x of after) if (x !== t.id && !out.includes(x) && plan.tasks.some((p) => p.id === x) && !givenUp(x)) out.push(x);
+  return out;
+}
+
+/**
+ * 4.4 (F12 b, p7-4): the tasks attempt k comes after: those the repair's reopen that opened its work names, while
+ * that work is not accepted yet (attempt k itself may be the accepted one: its product's re-bind reads them). Work
+ * after that acceptance, a later reopen, or a new card waits for none of them: a wait never outlives the reopen
+ * that asked for it.
+ */
+function afterOf(line: Line, k: number): string[] {
+  const opened = line.all<ReworkBody>('rework').filter((r) => r.body.k <= k && r.body.reason === 'reopen' && r.body.reopen?.kind === 'repair').at(-1);
+  if (opened === undefined || (opened.body.after ?? []).length === 0) return [];
+  if ((line.all('spec').at(-1)?.revision ?? 0) > opened.revision) return [];
+  for (let j = opened.body.k; j < k; j++) if (line.one('accepted', String(j)) !== null) return [];
+  return [...new Set(opened.body.after)];
+}
+
+/**
+ * 4.4 (F12 b, p7-4): the circles a repair's decision would close among the waits the flow holds once it is applied.
+ * Every task that will wait (one not accepted, one this decision reopens, adds or changes, one a 4.4 reopen of
+ * another repair has still to reach) waits for what the gate reads (effectiveDependencies: its card, an integration's
+ * implicit dependencies, the tasks its reopens come after: this decision's, another repair's open or pending one). A
+ * circle through an `after` wait would hold its tasks for ever: a mechanical failure of the decision. It is the only
+ * circle check of a reopen's `after`, so the graph is described once.
+ */
+export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { readonly reopen: ReadonlyArray<{ readonly task: string; readonly after?: readonly string[] }>; readonly add: readonly DetailedTask[]; readonly change?: readonly DetailedTask[] }): Promise<string[]> {
+  // no wait comes after anything unless a reopen named `after` (this decision's, or one decided before)
+  const decided = await eventsOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided');
+  if (!d.reopen.some((x) => (x.after ?? []).length > 0) && !decided.some((e) => e.body.reopen.some((x) => (x.after ?? []).length > 0))) return [];
+  const requests = (await reopenRequests(ctx)).filter((q) => q.source.kind === 'repair' && q.by44);
+  const cards = new Map(plan.tasks.map((t) => [t.id, t]));
+  for (const t of [...(d.change ?? []), ...d.add]) cards.set(t.id, t);
+  const after: DetailedPlanDoc = { ...plan, tasks: [...cards.values()] };
+  const added = new Set([...amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)), ...d.add.map((t) => t.id)]);
+  const lines = new Map<string, Line>();
+  for (const t of after.tasks) lines.set(t.id, await readLine(ctx, t.id));
+  // 4.4 (p7-r3-2, F2-1): given up under the card it will have once this decision applies (givenUpUnderCard): one whose
+  // card this decision changes, the plan in effect changed, or a drop since its card brings back is open again under
+  // that card, both as a task that waits and as the end of a wait
+  const givenUp = (id: string): boolean => {
+    const l = lines.get(id);
+    return l !== undefined && givenUpUnderCard(l.events, cards.get(id));
+  };
+  const waits = new Map<string, string[]>();
+  const afterWaits = new Map<string, string[]>();
+  for (const t of after.tasks) {
+    const line = lines.get(t.id)!;
+    if (givenUp(t.id)) continue;
+    const here = d.reopen.find((x) => x.task === t.id);
+    // an added task has no line yet, a changed one no accepted product: both are open
+    const open = lineAcceptance(line.events).product === null;
+    const pending: ReopenRequest[] = [];
+    for (const q of requests) if (q.task === t.id && (await waitingRequest(ctx, line, q, t))) pending.push(q);
+    if (!open && here === undefined && pending.length === 0) continue;
+    const waitsAfter = [...(here?.after ?? []), ...(open ? afterOf(line, line.k) : []), ...pending.flatMap((q) => q.after)].filter((x) => x !== t.id);
+    waits.set(t.id, effectiveDependencies(after, t, added, givenUp, waitsAfter));
+    if (waitsAfter.length > 0) afterWaits.set(t.id, waitsAfter);
+  }
   const reaches = (from: string, to: string): boolean => {
     const seen = new Set<string>();
     const stack = [from];
@@ -940,15 +1348,16 @@ export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: D
       if (at === to) return true;
       if (seen.has(at)) continue;
       seen.add(at);
-      stack.push(...(byId.get(at)?.dependsOn ?? []));
+      stack.push(...(waits.get(at) ?? []));
     }
     return false;
   };
-  const out = [...t.dependsOn];
-  for (const x of plan.tasks) {
-    if (!added.has(x.id) || x.id === t.id || x.kind === 'integration' || out.includes(x.id) || reaches(x.id, t.id)) continue;
-    if ((await readLine(ctx, x.id)).abandoned) continue;
-    out.push(x.id);
+  const out: string[] = [];
+  for (const [x, after] of afterWaits) {
+    if (!after.some((a) => waits.has(a) && reaches(a, x))) continue;
+    out.push(d.reopen.some((r) => r.task === x && (r.after ?? []).length > 0)
+      ? `reopen[${x}].after: it waits for work that waits for it (a circle through after and dependsOn)`
+      : `task ${x} waits, for another repair's reopen, for work this decision makes wait for ${x} (a circle through after and dependsOn): order the work so that nothing waits in a circle`);
   }
   return out;
 }
@@ -1107,6 +1516,10 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // one is laid over it: no cascade)
   const reopened = await reopenedProducts(ctx, plan, t, line);
   if (reopened === null) return null;
+  // 4.4 (F12 b, #59): a dependency that the repair this work answers reopens, while that reopen has not reached it
+  // yet, holds this attempt: its new work comes first. Read before the dependencies' products (p7-2): a reopen carried
+  // after this read has its dependency's next attempt written already, so the products read next show it not accepted
+  if (await sameRepairReopenPending(ctx, eff, plan, t, line, depIds)) return null;
   const deps: string[] = [];
   // config `startOnHandback` (a project setting: it removes no check, E-2): a dependency still in review counts
   // with its current attempt's verified hand-back; the dependent's own acceptance still waits for the
@@ -1138,6 +1551,43 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
     for (const x of [eff.dplan, ...deps]) if (!(await usable(x))) return null;
   }
   return deps;
+}
+
+/**
+ * 4.4 (F12 b, #59): the repairs the task's current work answers: the one that added it, the one that changed its
+ * card in force, and those that reopened an attempt under that card.
+ */
+function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t: DetailedTask, line: Line): Set<string> {
+  const out = new Set<string>();
+  // the repair that added it, also once a later plan keeps the card it gave (that plan carries no amendment, p7-r3-3)
+  const added = cardAmendments(history, eff, t).find((a) => a.added)?.repair ?? null;
+  if (added !== null) out.add(added);
+  const spec = line.all<SpecBody>('spec').at(-1);
+  if (spec?.body.repair !== undefined) out.add(spec.body.repair);
+  const since = spec?.revision ?? 0;
+  for (const rw of line.all<ReworkBody>('rework')) if (rw.revision > since && rw.body.reopen?.kind === 'repair') out.add(rw.body.reopen.repair);
+  return out;
+}
+
+/**
+ * 4.4 (F12 b, #59, p7-2): whether a dependency of the task is reopened by a repair its work answers, and that 4.4
+ * reopen has not reached the dependency yet (waitingRequest). The dependency's current product, accepted or
+ * (startOnHandback) a verified hand-back in review, is the work the repair replaces: the task waits for the attempt
+ * that carries the repair, and the gate reads that one once it is accepted. A reopen of 4.3 holds nothing (p7-r2-3).
+ */
+async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
+  if (depIds.length === 0) return false;
+  // only a repair's reopen of a dependency can hold the attempt: while there is none, the plan's history (every
+  // plan in effect so far, read for the repairs the work answers) is not read, on every pass of every task
+  const requests = (await reopenRequests(ctx)).filter((r) => r.source.kind === 'repair' && depIds.includes(r.task));
+  if (requests.length === 0) return false;
+  const causing = causingRepairs((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t, line);
+  if (causing.size === 0) return false;
+  for (const r of requests) {
+    if (r.source.kind !== 'repair' || !causing.has(r.source.repair)) continue;
+    if (await waitingRequest(ctx, await readLine(ctx, r.task), r, plan.tasks.find((x) => x.id === r.task))) return true;
+  }
+  return false;
 }
 
 /**
@@ -1223,12 +1673,15 @@ async function acceptRebindWithRisk(ctx: FlowCtx, t: DetailedTask, k: number, e:
   const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
   const body: ReboundBody = { k, n: rb.n, product: rb.product, judgment: ruling, how: 'review', decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks };
+  // 4.4 (G5): one open item per risk accepted, in the same write
+  const items = await acceptanceItems(ctx, t.id, k, e.id, e.reasons, risk.review);
   await commitCarrying(
     ctx,
     `flow:rebound-risk:${ctx.mission}:task:${idPart(t.id)}:${rebind}`,
-    [ev(ctx, taskLine(t.id), 'rebound', rebind, body)],
+    [ev(ctx, taskLine(t.id), 'rebound', rebind, body), ...items.first, ...await personItems(ctx, t, k)],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
+  await writeItemBatches(ctx, items.rest);
 }
 
 /**
@@ -1277,12 +1730,113 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // the decider's ruling, written by carryOut in this write (flow/secretary.ts deciderJudgment): the same id here
   const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  // 4.4 (G5): one open item per risk accepted, in the same write
+  const items = await acceptanceItems(ctx, t.id, k, e.id, e.reasons, acceptedReview(line, k, Infinity));
   await commitCarrying(
     ctx,
     `flow:accepted-risk:${ctx.mission}:task:${idPart(t.id)}:${k}`,
-    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks })],
+    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }), ...items.first, ...await personItems(ctx, t, k)],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
+  await writeItemBatches(ctx, items.rest);
+}
+
+/**
+ * 4.4 (G5): the open items an acceptance with risk leaves, one per distinct reason (flow/riskItems.ts): the first
+ * ITEM_BATCH go in the acceptance's own write (the same deterministic records on every run of it), the rest in
+ * writes of their own right after it (writeItemBatches; riskItemsLeft writes on a later pass what an interruption
+ * left out). Nothing else in the acceptance changes.
+ */
+async function acceptanceItems(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<{ readonly first: FlowEventInput[]; readonly rest: RiskItemBody[] }> {
+  const bodies = await itemBodiesOf(ctx, task, k, escalation, reasons, review);
+  return { first: bodies.slice(0, ITEM_BATCH).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)), rest: bodies.slice(ITEM_BATCH) };
+}
+
+/**
+ * The items of an acceptance with risk resting on `review` (a review of the task's line): one per reason, the issue
+ * each finding became, and (p10-1) no new item only for an item that review answered not fixed (it is carried).
+ * The writer and the later pass that completes its batches derive them alike; riskRecord reads them the same way.
+ */
+async function itemBodiesOf(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<RiskItemBody[]> {
+  const body = review === undefined ? undefined : (await eventOf<ReviewBody>(ctx, taskLine(task), 'review', review))?.body;
+  // 4.4 (F10): a standard that could not be verified, from the structured copy (the escalation's facts, the review's)
+  const facts = (await eventOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation', escalation))?.body.facts;
+  return riskItemBodies(task, k, escalation, reasons, await findingIssues(ctx, review), carriedBy(body), unverifiableOf(facts, body));
+}
+
+/**
+ * 4.4 (F10): the open items of the standards a person checks, for the write that accepts attempt k of the task (by
+ * a pass or by a ruling): one per accepted attempt and standard, those not recorded yet (a re-bind of the attempt writes
+ * none again). Nothing waits for them; they block nothing.
+ */
+async function personItems(ctx: FlowCtx, t: DetailedTask, k: number): Promise<FlowEventInput[]> {
+  const bodies = personItemBodies(t, k);
+  if (bodies.length === 0) return [];
+  const recorded = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  return bodies.filter((b) => !recorded.has(b.id)).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
+}
+
+/**
+ * 4.4 (G5, p10-5): the issue records the findings of a review's hand-back became ("finding: <text>" → its issue id),
+ * so an item of a finding names its issue and a taking task's answer reaches the fix tracker. Empty when the
+ * hand-back cannot be read (the item then names none).
+ */
+async function findingIssues(ctx: FlowCtx, review: string | undefined): Promise<ReadonlyMap<string, string>> {
+  if (review === undefined) return new Map();
+  const hb = (await ctx.ports.scheduler.status(review))?.handBack;
+  const findings = ((hb?.result ?? null) as ReviewerResult | null)?.findings ?? [];
+  const issues = (hb?.records ?? []).flatMap((r) => (r.kind === 'issue' ? [r.issue as string] : []));
+  if (findings.length !== issues.length) return new Map();
+  return new Map(findings.map((f, i) => [`finding: ${f}`, issues[i]!]));
+}
+
+/**
+ * 4.4 (G5, p10-5): how a card finds the issue each item it lists is about: the item's own record, else (a finding of
+ * an acceptance made before 4.4) the issue record of those words on the product accepted. The issue records are read
+ * only when a listed item needs them.
+ */
+async function cardIssues(ctx: FlowCtx, events: Parameters<typeof riskItemsOf>[0], names: readonly string[]): Promise<(i: RiskItem) => string | undefined> {
+  if (!riskItemsOf(events).some((i) => names.includes(i.id) && i.kind === 'finding' && itemIssue(i) === undefined)) return itemIssue;
+  const c = ctx.ports.ledger.content;
+  const notes: IssueNote[] = (await ctx.ports.ledger.records(['issue'])).map(({ record }) => {
+    const r = record as IssueRecord;
+    let text: string | null = null;
+    try { if (r.text !== undefined) text = (JSON.parse(c.get(r.text)) as { text?: string }).text ?? null; } catch { /* the words are not readable: not this finding's */ }
+    return { issue: r.issue as string, observedOn: c.getList(r.observedOn), text };
+  });
+  return issueResolver(events, notes);
+}
+
+/** The review an acceptance of attempt k rests on: the one it names as adopted, else the attempt's last review before it. */
+function acceptedReview(line: Line, k: number, before: number, adopted?: string): string | undefined {
+  return adopted ?? line.all<ReviewBody>('review').filter((r) => r.body.k === k && r.revision < before).at(-1)?.key;
+}
+
+/** 4.4 (G5): open items not recorded yet, in bounded writes (an append takes at most 1,000 records), each under the operation id of its own items. */
+async function writeItemBatches(ctx: FlowCtx, bodies: readonly RiskItemBody[], requires?: string): Promise<void> {
+  if (bodies.length === 0) return;
+  const recorded = new Map((await eventsOf<RiskItemBody>(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => [x.key, x.body] as const));
+  const existing = new Set(recorded.keys());
+  // an acceptance made under 4.3 wrote no first batch: nothing is written for it (its sentences are listed as not
+  // recorded). F3-4: its first item must be one the acceptance wrote itself; a record made later for a sentence of an
+  // acceptance made before 4.4 (`before44`, when someone acted on it) never makes it one of 4.4
+  const first = requires === undefined ? undefined : recorded.get(requires);
+  if (requires !== undefined && (first === undefined || first.before44 === true)) return;
+  const missing = bodies.filter((b) => !existing.has(b.id));
+  for (let i = 0; i < missing.length; i += ITEM_BATCH) {
+    const batch = missing.slice(i, i + ITEM_BATCH);
+    await commit(ctx, `flow:risk-items:${ctx.mission}:${shortHash(batch.map((b) => b.id))}`, { events: batch.map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)) });
+  }
+}
+
+/** 4.4 (G5): the items past the first batch of each acceptance with risk on the task's line, written when an interruption left them out (only such an acceptance is read again). */
+async function riskItemsLeft(ctx: FlowCtx, t: DetailedTask, line: Line): Promise<void> {
+  for (const e of [...line.all<{ k: number; decision?: { escalation: string; option?: string }; risks?: string[]; review?: string }>('accepted'), ...line.all<ReboundBody & { review?: string }>('rebound')]) {
+    const d = e.body.decision;
+    if (d?.option !== 'accept-risk' || (e.body.risks ?? []).length <= ITEM_BATCH) continue;
+    const bodies = await itemBodiesOf(ctx, t.id, e.body.k, d.escalation, acceptanceReasons(e.body, d.escalation), acceptedReview(line, e.body.k, e.revision, e.body.review));
+    if (bodies.length > ITEM_BATCH) await writeItemBatches(ctx, bodies.slice(ITEM_BATCH), bodies[0]!.id);
+  }
 }
 
 /** The latest review reopen whose integration still waits at its undispatched rebuild. */
@@ -1342,15 +1896,23 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
     return;
   }
   const words = by === 'pm' ? (d.words ?? []).map((w) => w.id).join(',') : by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
-  const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  // 4.4 (G5, p10-1): the ruling accepts every reason of the escalation it decides (the dependency's reopen among them),
+  // as the other acceptances with risk quote theirs; one open item per risk, on the integration task that is accepted,
+  // in the same write. The acceptance names the review it adopts, whose attempt and answers its outcome reads.
+  const risks = e.reasons.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  const items = await acceptanceItems(ctx, integration, line.k, e.id, e.reasons, review.task);
   await commitCarrying(ctx, `flow:accepted-risk:${ctx.mission}:task:${idPart(integration)}:${line.k}`,
     [
       // Adopt the reviewed product at this attempt, preserving its actual source dispatch.
       // Renewal and kept-product rebinds then read the same body as any accepted attempt.
       ev(ctx, taskLine(integration), 'product', String(line.k), { ...product, k: line.k } satisfies ProductBody),
-      ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }),
+      ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks, review: review.task }),
+      ...items.first,
+      ...(task === undefined ? [] : await personItems(ctx, task, line.k)),
     ],
-    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);
+    // p10-1 (round 2): the decision's receipt names every reason it accepted, as the acceptance does
+    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })]);
+  await writeItemBatches(ctx, items.rest);
 }
 
 /**
@@ -1440,34 +2002,203 @@ async function reopenFromReview(ctx: FlowCtx, plan: DetailedPlanDoc, t: Detailed
 
 /** Reopens represented by this escalation, from the kept verdicts of this task attempt. */
 function coveredReopens(ctx: FlowCtx, task: string, line: Line, e: { readonly body: EscalationBody; readonly revision: number }): string[] {
-  const esc = e.body;
-  const facts = esc.facts as { task?: string; attempt?: number; loop?: string } | undefined;
-  if (esc.source !== 'loop-exhausted' || esc.subject !== `task:${task}` || facts?.task !== task ||
-      facts.loop !== 'rework' || facts.attempt === undefined || facts.attempt > line.k || esc.lineage !== taskLineage(ctx.mission, task)) return [];
-  const attempt = facts.attempt;
-  const prefix = `exh.${esc.lineage}.${attempt}`;
-  const start = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt)?.revision ?? 0;
-  const end = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt + 1)?.revision ?? Infinity;
-  return line.all<{ proceed: boolean }>('loop-verdict')
-    .filter((v) => !v.body.proceed && v.key.startsWith('reopen:') && v.revision > start && v.revision < end &&
-      (esc.id === safeId(prefix) ? v.revision < e.revision : esc.id === safeId(`${prefix}.${idPart(v.key)}`)))
-    .map((v) => v.key);
+  // 4.4 (G3, F2): one pure mapping, which the cards and `mp read repairs` read too (seat/cards/dynamic.ts)
+  return coveredReopenKeys(ctx.mission, task, line.events, e);
 }
 
-/** One reopened task's new attempt (D-6, D-10), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. */
-async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, attempt: number, issue: string, instruction: string, key: string, source: ReopenSource): Promise<void> {
-  const t = plan.tasks.find((x) => x.id === taskId);
+/** One reopened task's new attempt (D-6), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. A repair's: repairReopen. */
+async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, r: ReopenRequest): Promise<void> {
+  const t = plan.tasks.find((x) => x.id === r.task);
   // the plan in effect no longer has it (a re-plan dropped it): the reopen is moot
   if (t === undefined) return;
-  const line = await readLine(ctx, taskId);
+  const line = await readLine(ctx, r.task);
   // it moved on (its new attempt is this one, or a re-plan restarted it), or it was given up: nothing to do
-  if (line.abandoned || line.k !== attempt || line.one('accepted', String(attempt)) === null) return;
-  if (line.one<{ proceed: boolean }>('loop-verdict', key)?.proceed === false) {
-    const escalations = await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation');
-    if (escalations.some((e) => coveredReopens(ctx, taskId, line, e).includes(key))) return;
-  }
+  if (line.abandoned || line.k !== r.attempt || line.one('accepted', String(r.attempt)) === null) return;
+  if (await coveredVerdict(ctx, line, r)) return;
   // No escalation covers this request: retry after a collision or an interrupted write.
-  await rework(ctx, t, attempt, [issue], [instruction], key, { reason: 'reopen', reopen: source });
+  await rework(ctx, t, r.attempt, [r.issue], [r.instruction], r.key, { reason: 'reopen', reopen: r.source });
+}
+
+/** A request whose kept verdict found its loop used up, and whose escalation exists (it waits for that decision). */
+async function coveredVerdict(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise<boolean> {
+  if (line.one<{ proceed: boolean }>('loop-verdict', r.key)?.proceed !== false) return false;
+  const escalations = await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation');
+  return escalations.some((e) => coveredReopens(ctx, r.task, line, e).includes(r.key));
+}
+
+/*
+ * 4.4 (F13): a repair's reopen request (repair R, task T) is in one of three states, read from the repairs line.
+ * A reopen always waits for T's open attempt and opens the next one; it never joins an open attempt.
+ *   requested(a)  R's decision, or the request's latest `reopen-pinned` (a): it waits for T's attempt a to be accepted
+ *   carried(c)    its latest `reopen-carried` (c): T's attempt c was opened with R's issue on its card. Final once a
+ *                 seat took c (its Constructor or Reviewer was claimed, or it was reviewed); until then it is read as
+ *                 requested(c), so an issue is never settled before a seat saw it (p7-3)
+ *   not carried   `reopen-not-carried`: final; the notice goes to the PM's inbox
+ * Each move is one append whose record is keyed by the request and its sequence number (`<R>:<T>#<n>`): its guard
+ * checks inside the write that no record #n of any kind exists (two passes make a move at most once, and a pass that
+ * read an older state writes nothing, p7-r2-1), that the plan in effect is still the revision the pass read, and:
+ *   requested(a) → carried(k+1)  T accepted at its current attempt k ≥ a: T's rework k+1 with R's issue and
+ *                                `reopen-carried` (k+1), one write. Checks: no rework k+1 on T's line
+ *   requested(a) → requested(k)  T's current attempt k > a is open: `reopen-pinned` (k). Checks: no rework k+1
+ *   → not carried                T given up, or not in the plan in effect: `reopen-not-carried`. Checks: T's card is
+ *                                the one read (its latest spec, so a giving-up still holds); the PM's notice is sent
+ *                                from the committed record, once (p7-r2-2)
+ * A request of a 4.3 decision (no `tracked`) that 4.4 never wrote to keeps 4.3's ways: 4.3's counted return, and when
+ * its task was accepted past it, it was left out (told as not carried out). No reopen of a 4.3 decision, and none 4.3
+ * counted, holds a dependent (p7-r2-3).
+ */
+type RequestState =
+  | { readonly kind: 'requested'; readonly at: number }
+  | { readonly kind: 'carried'; readonly at: number; readonly taken: boolean }
+  | { readonly kind: 'not-carried' };
+
+/** Where a repair's reopen request stands (the states above); `taken`: a seat took the carried attempt. */
+async function requestState(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise<RequestState> {
+  if (r.source.kind !== 'repair') return { kind: 'requested', at: r.attempt };
+  if (r.state === 'not-carried') return { kind: 'not-carried' };
+  if (r.state === 'carried') return { kind: 'carried', at: r.attempt, taken: await attemptTaken(ctx, r.task, line, r.attempt) };
+  // a request 4.3 carried out: its task's attempt opened by its reopen (counted by 4.3; the issue on its card)
+  if (!r.tracked) {
+    const repair = r.source.repair;
+    const opened = line.all<ReworkBody>('rework').find((x) => x.body.reopen?.kind === 'repair' && x.body.reopen.repair === repair && x.body.k > r.attempt);
+    if (opened !== undefined) return { kind: 'carried', at: opened.body.k, taken: true };
+  }
+  return { kind: 'requested', at: r.attempt };
+}
+
+/**
+ * Whether a reopen request a 4.4 decision made has still to reach its task: requested, or carried on an attempt no
+ * seat took that the task moved past or that was accepted as it was (the next pass moves it on). A reopen of a 4.3
+ * decision, or one 4.3 counted, holds nothing (p7-r2-3): no wait comes of it that 4.3 would not have had. A task
+ * given up under the card in effect (`card`, givenUpUnderCard) ends it; one a card about to be laid revives does not.
+ */
+async function waitingRequest(ctx: FlowCtx, line: Line, r: ReopenRequest, card: DetailedTask | undefined): Promise<boolean> {
+  if (r.source.kind !== 'repair' || !r.by44 || givenUpUnderCard(line.events, card) || countedBy43(line, r)) return false;
+  const s = await requestState(ctx, line, r);
+  return s.kind === 'requested' || (s.kind === 'carried' && !s.taken && (line.k > s.at || line.one('accepted', String(s.at)) !== null));
+}
+
+/** A repair's reopen 4.3 counted on the task's loop: its marker or its verdict (two writes; either one, p7-7). 4.4 never counts one. */
+function countedBy43(line: Line, r: ReopenRequest): boolean {
+  return line.one('loop-verdict', r.key) !== null || line.one('loop-return', r.key) !== null;
+}
+
+/** Whether a seat took attempt k of the task: its Constructor or its Reviewer was claimed, or it was reviewed. */
+async function attemptTaken(ctx: FlowCtx, task: string, line: Line, k: number): Promise<boolean> {
+  if (line.all<ReviewBody>('review').some((v) => v.body.k === k)) return true;
+  for (const step of [conTask(ctx.mission, task, k), revTask(ctx.mission, task, k, 0)]) if (((await ctx.ports.scheduler.status(step))?.dispatches ?? []).length > 0) return true;
+  return false;
+}
+
+/** The guard code of a move another writer made first (the request or the task moved on): nothing is written, the next pass reads it again. */
+const MOVED_ON = 'REOPEN_MOVED_ON';
+
+/** The plan in effect a pass of execution read: its revision guards every move of a request. */
+interface PlanRead {
+  readonly plan: DetailedPlanDoc;
+  readonly revision: number | null;
+}
+
+/**
+ * 4.4 (F12 a, F13): a repair's reopen of one task (the states above). It is new work on the user's words, so it is
+ * not counted on the task's rework loop: the attempt it opens starts a fresh loop (reworkLineage). A reopen 4.3
+ * already counted (its marker or its verdict) goes on as 4.3 ran it.
+ */
+async function repairReopen(ctx: FlowCtx, read: PlanRead, r: ReopenRequest): Promise<void> {
+  if (r.source.kind !== 'repair') return;
+  const t = read.plan.tasks.find((x) => x.id === r.task);
+  const line = await readLine(ctx, r.task);
+  const s = await requestState(ctx, line, r);
+  // carried out (a seat took the attempt that carries it), or not carried out: final
+  if (s.kind === 'not-carried' || (s.kind === 'carried' && s.taken)) return;
+  // 4.3 counted it (p7-7: the marker and the verdict are two writes; either one means 4.3's counted return)
+  if (countedBy43(line, r)) {
+    if (t === undefined || line.abandoned || line.k !== r.attempt || line.one('accepted', String(r.attempt)) === null || (await coveredVerdict(ctx, line, r))) return;
+    await rework(ctx, t, r.attempt, [r.issue], [r.instruction], r.key, { reason: 'reopen', reopen: r.source });
+    return;
+  }
+  if (t === undefined) return reopenNotCarried(ctx, read, r, line, 'the plan in effect no longer has the task');
+  // given up under the card in effect: not carried out; given up under a card the plan in effect replaces (or a drop
+  // since brings back), it waits: execution lays that card first and the task goes on (F2-1)
+  if (line.abandoned) return givenUpUnderCard(line.events, t) ? reopenNotCarried(ctx, read, r, line, 'the task was given up') : undefined;
+  const k = line.k;
+  const from = s.at;
+  if (k < from) return;
+  // a decision of 4.3 that 4.4 never wrote to, whose task was accepted again past it, was left out by 4.3: told, not revived (p7-1)
+  if (!r.tracked && line.all<{ k: number }>('accepted').some((a) => a.body.k > from)) return reopenNotCarried(ctx, read, r, line, 'the task was accepted again at a later attempt before this reopen was carried out (a version before 4.4 left it out)');
+  // the attempt it waits for is accepted (or, carried on an attempt no seat took, that attempt was accepted as it was,
+  // or the task moved past it to an accepted one): the next attempt opens with its issue
+  if (line.one('accepted', String(k)) !== null) return carryReopen(ctx, read, t, line, r, k);
+  // the attempt it waits for is open, or the attempt that carries it is: it waits
+  if (k === from) return;
+  // its task moved past that attempt to an open one (queued, claimed or in review): someone else's work, the reopen
+  // waits for it to be accepted (p7-3: an issue carried on an attempt no seat took goes on to the next one)
+  await requestMove(ctx, read, r, line, { event: REOPEN_PINNED, body: { repair: r.source.repair, task: t.id, attempt: k, from } satisfies ReopenPinnedBody }, [{ mission: ctx.mission, line: taskLine(t.id), event: 'rework', key: String(k + 1) }]);
+}
+
+/**
+ * One move of a request (the states above): its record keyed `<R>:<T>#<n+1>`, with `extra` events in the same write.
+ * The guard: no record #n+1 of any kind yet (another pass moved it first), the plan in effect as read, the task
+ * state `absent` names. A move another writer made first is not an error: the next pass reads where things are.
+ * The operation names the move itself, so the same move made twice is one write, and another move of the same
+ * record is refused by the guard (never taken for a replay).
+ */
+async function requestMove<B extends { readonly attempt: number }>(ctx: FlowCtx, read: PlanRead, r: ReopenRequest, line: Line, record: { readonly event: string; readonly body: B }, absent: AppendGuard['absent'], extra: readonly FlowEventInput[] = [], latestSpec = false): Promise<boolean> {
+  if (r.source.kind !== 'repair') return false;
+  const key = `${r.source.repair}:${r.task}#${r.seq + 1}`;
+  try {
+    await commit(ctx, `flow:reopen:${ctx.mission}:${idPart(r.source.repair)}:${idPart(r.task)}:${r.seq + 1}:${record.event}:${record.body.attempt}`, {
+      events: [...extra, ev(ctx, REPAIRS_LINE, record.event, key, record.body)],
+      guard: {
+        absent: [...absent, ...[REOPEN_PINNED, REOPEN_CARRIED, REOPEN_NOT_CARRIED].map((event) => ({ mission: ctx.mission, line: REPAIRS_LINE, event, key }))],
+        latest: [
+          { mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.revision },
+          ...(latestSpec ? [{ mission: ctx.mission, line: taskLine(r.task), event: 'spec', revision: line.all('spec').at(-1)?.revision ?? null }] : []),
+        ],
+        code: MOVED_ON,
+        message: `repair ${r.source.repair}'s reopen of task ${r.task}, or the task or the plan in effect, moved on meanwhile; nothing was written (the next pass reads it again)`,
+      },
+    });
+    return true;
+  } catch (e) {
+    if ((e as { code?: string }).code !== MOVED_ON) throw e;
+    return false;
+  }
+}
+
+/** requested → carried: attempt k+1 of T opened with R's issue on its card, on a fresh loop (F12 a), after the tasks it names (F12 b). */
+async function carryReopen(ctx: FlowCtx, read: PlanRead, t: DetailedTask, line: Line, r: ReopenRequest, k: number): Promise<void> {
+  if (r.source.kind !== 'repair') return;
+  const product = currentAcceptance(line, k)?.product ?? r.product;
+  const after = r.after.filter((x) => x !== t.id);
+  const instructions = [
+    `Reopened by repair ${r.source.repair}${r.repairText !== '' ? ` (${r.repairText})` : ''}: fix this in your task's work (your accepted product ${product} stays recorded until this attempt is accepted).`,
+    ...(after.length > 0 ? [`This attempt starts once ${after.join(', ')} ${after.length === 1 ? 'is' : 'are'} accepted for the same repair, on ${after.length === 1 ? 'its' : 'their'} new work.`] : []),
+    ...(await deferredInstructions(ctx, line, k)),
+  ];
+  const body: ReworkBody = { k: k + 1, reason: 'reopen', issues: [r.issue], instructions, reopen: r.source, loop: reopenLoopLineage(ctx.mission, t.id, k + 1), ...(after.length > 0 ? { after } : {}) };
+  await requestMove(ctx, read, r, line, { event: REOPEN_CARRIED, body: { repair: r.source.repair, task: t.id, attempt: k + 1, from: r.attempt } satisfies ReopenCarriedBody }, [{ mission: ctx.mission, line: taskLine(t.id), event: 'rework', key: String(k + 1) }], [ev(ctx, taskLine(t.id), 'rework', String(k + 1), body)]);
+}
+
+/** → not carried: recorded under the guards of a move (the plan in effect and the task's card as read); the PM is told from the record (reopenNotices). */
+async function reopenNotCarried(ctx: FlowCtx, read: PlanRead, r: ReopenRequest, line: Line, why: string): Promise<void> {
+  if (r.source.kind !== 'repair') return;
+  await requestMove(ctx, read, r, line, { event: REOPEN_NOT_CARRIED, body: { repair: r.source.repair, task: r.task, attempt: line.k, why } satisfies ReopenNotCarriedBody }, [], [], true);
+}
+
+/** The PM is told of every reopen recorded as not carried out, once, from its record (a lost notice is sent again). */
+async function reopenNotices(ctx: FlowCtx): Promise<void> {
+  for (const e of await eventsOf<ReopenNotCarriedBody>(ctx, REPAIRS_LINE, REOPEN_NOT_CARRIED)) {
+    const b = e.body;
+    await tellOnce(ctx, REPAIRS_LINE, {
+      category: 'reopen-not-carried',
+      wi: null,
+      key: e.key,
+      trigger: `repair ${b.repair}'s reopen of task ${b.task} was not carried out: ${b.why}`,
+      defaultAction: `nothing is reopened for it and repair ${b.repair} does not read as done; the rest goes on. Tell the user what was not done; a new repair on their words (mp pm repair … --again) or a re-plan routes the work`,
+      detail: { repair: b.repair, task: b.task, attempt: b.attempt, why: b.why },
+    });
+  }
 }
 
 /**
@@ -1476,43 +2207,114 @@ async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, a
  * loses nothing. The reopened task's other dependents keep their products and their proof (no
  * cascade): the integration's full run checks the combination.
  */
-async function carryReopens(ctx: FlowCtx, plan: DetailedPlanDoc): Promise<void> {
-  for (const r of await reopenRequests(ctx)) await reopenTask(ctx, plan, r.task, r.attempt, r.issue, r.instruction, r.key, r.source);
+async function carryReopens(ctx: FlowCtx, plan: DetailedPlanDoc, read?: PlanRead): Promise<void> {
+  // a repair's reopen moves only under the plan the pass read with its revision (the review's own reopen carries its at once)
+  for (const r of await reopenRequests(ctx)) {
+    if (r.source.kind === 'repair') {
+      if (read !== undefined) await repairReopen(ctx, read, r);
+    } else await reopenTask(ctx, plan, r);
+  }
+  if (read !== undefined) await reopenNotices(ctx);
 }
 
-/** The recorded findings and requests, shared by reopening and a grant covering several reopens. */
-async function reopenRequests(ctx: FlowCtx): Promise<Array<{ task: string; attempt: number; issue: string; instruction: string; key: string; source: ReopenSource }>> {
-  const requests: Array<{ task: string; attempt: number; issue: string; instruction: string; key: string; source: ReopenSource }> = [];
+/** One recorded reopen request (an integration review's or a repair's). */
+interface ReopenRequest {
+  readonly task: string;
+  /** The attempt of its state: the one it waits for (requested: as decided, or as pinned again), or the one it opened (carried). */
+  readonly attempt: number;
+  /** A repair's (F13): its state as its latest record says (a review's: requested). */
+  readonly state: 'requested' | 'carried' | 'not-carried';
+  /** A repair's: the number of its 4.4 records (its next one is #seq+1). */
+  readonly seq: number;
+  /** A repair's: decided by 4.4, or written to by 4.4 since: none of 4.3's ways apply to it (p7-1). */
+  readonly tracked: boolean;
+  /** A repair's: its decision is 4.4's (`tracked` on it): only such a reopen holds the work of its repair (p7-r2-3). */
+  readonly by44: boolean;
+  readonly issue: string;
+  readonly instruction: string;
+  readonly key: string;
+  readonly source: ReopenSource;
+  /** The accepted product it was decided on. */
+  readonly product: string;
+  /** A repair's: the tasks of the same repair it comes after (F12 b; none before 4.4). */
+  readonly after: readonly string[];
+  /** A repair's: its kind and the user's words, for the instructions. */
+  readonly repairText: string;
+}
+
+/** The recorded findings and requests, shared by reopening and a grant covering several reopens (one read of the repairs line). */
+async function reopenRequests(ctx: FlowCtx): Promise<ReopenRequest[]> {
+  const requests: ReopenRequest[] = [];
   for (const e of await ctx.ports.ledger.events<ReopenBody>({ mission: ctx.mission, event: 'reopen' })) {
     if (!e.line.startsWith('task:')) continue;
     const integration = e.line.slice('task:'.length);
     for (const x of e.body.tasks) {
       const issue = `${x.issue}${x.evidence !== undefined ? ` (evidence: ${x.evidence})` : ''}`;
       const instruction = `Reopened by the review ${e.body.review} of integration task ${integration} (attempt ${e.body.k}): fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted); the integration task builds again on your new work.`;
-      requests.push({ task: x.task, attempt: x.attempt, issue, instruction, key: `reopen:${integration}:${e.body.k}`, source: { kind: 'review', integration, review: e.body.review, attempt: e.body.k } });
+      requests.push({ task: x.task, attempt: x.attempt, state: 'requested', seq: 0, tracked: true, by44: false, issue, instruction, key: `reopen:${integration}:${e.body.k}`, source: { kind: 'review', integration, review: e.body.review, attempt: e.body.k }, product: x.product, after: [], repairText: '' });
     }
   }
-  const repairs = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((r) => [r.key, r.body]));
-  for (const e of await eventsOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided')) {
-    const r = repairs.get(e.body.repair);
-    for (const x of e.body.reopen) {
-      const instruction = `Reopened by repair ${e.body.repair}${r !== undefined ? ` (${r.kind}; the user's words ${r.words}: "${r.text}")` : ''}: fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted).`;
-      requests.push({ task: x.task, attempt: x.attempt, issue: x.issue, instruction, key: `reopen:repair:${e.body.repair}`, source: { kind: 'repair', repair: e.body.repair } });
+  const line = await eventsOf(ctx, REPAIRS_LINE);
+  const repairs = new Map(line.filter((e) => e.event === 'repair').map((e) => [e.key, e.body as RepairBody]));
+  // each request's 4.4 records, in order: the latest is its state
+  const records = new Map<string, Array<{ readonly event: string; readonly attempt: number }>>();
+  for (const e of line) {
+    if (e.event !== REOPEN_PINNED && e.event !== REOPEN_CARRIED && e.event !== REOPEN_NOT_CARRIED) continue;
+    const b = e.body as { repair: string; task: string; attempt: number };
+    const id = `${b.repair}:${b.task}`;
+    records.set(id, [...(records.get(id) ?? []), { event: e.event, attempt: b.attempt }]);
+  }
+  for (const e of line) {
+    if (e.event !== 'decided') continue;
+    const d = e.body as RepairDecidedBody;
+    const r = repairs.get(d.repair);
+    const repairText = r !== undefined ? `${r.kind}; the user's words ${r.words}: "${r.text}"` : '';
+    for (const x of d.reopen) {
+      const mine = records.get(`${d.repair}:${x.task}`) ?? [];
+      const last = mine.at(-1);
+      const state = last === undefined || last.event === REOPEN_PINNED ? 'requested' : last.event === REOPEN_CARRIED ? 'carried' : 'not-carried';
+      const instruction = `Reopened by repair ${d.repair}${repairText !== '' ? ` (${repairText})` : ''}: fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted).`;
+      requests.push({ task: x.task, attempt: last?.attempt ?? x.attempt, state, seq: mine.length, tracked: d.tracked === true || mine.length > 0, by44: d.tracked === true, issue: x.issue, instruction, key: `reopen:repair:${d.repair}`, source: { kind: 'repair', repair: d.repair }, product: x.product, after: x.after ?? [], repairText });
     }
   }
   return requests;
 }
 
-/** The repairs a task's work answers (D-10): the repair that added the task, and the one that reopened this attempt. */
-async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<RepairRef[]> {
-  const ids = new Set<string>();
-  const added = repairOfTask(eff.amendments, t.id);
-  if (added !== null) ids.add(added);
-  const rw = line.one<ReworkBody>('rework', String(k));
-  if (rw?.reopen?.kind === 'repair') ids.add(rw.reopen.repair);
-  if (ids.size === 0) return [];
-  const all = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
-  return all.filter((r) => ids.has(r.key)).map((r) => repairRef(r.body));
+/**
+ * The repairs a task's work answers (D-10) and what was written for it: 4.4 (G3, F2) the repair that added the
+ * task, those that changed its card, and those that reopened it at this attempt or before (seat/cards/dynamic.ts
+ * repairsOfTaskWork); the instructions addressed to it or to those repairs, the Architect's notes and the answers
+ * given under its earlier cards (writtenForTask).
+ */
+async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<{ readonly repairs: RepairRef[]; readonly written: ReturnType<typeof writtenForTask> }> {
+  const repairsLine = await eventsOf(ctx, REPAIRS_LINE);
+  // the amendments that gave its card, also of an earlier plan whose card the plan in effect keeps (F3-6)
+  const card = cardAmendments((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t);
+  const ids = repairsOfTaskWork(ctx.mission, card, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
+  const all = repairsLine.filter((e) => e.event === 'repair') as Array<{ readonly key: string; readonly body: RepairBody }>;
+  const events = await ctx.ports.ledger.events({ mission: ctx.mission });
+  // 4.4 (G3, G4): a 4.3 decision has no note; its Architect's accepted hand-back has one (one not readable is left out)
+  const notes43 = new Map<string, string | null>();
+  for (const step of stepsOfNotes43(events, ids)) {
+    try {
+      notes43.set(step, noteOfHandBack((await ctx.ports.scheduler.status(step))?.handBack));
+    } catch {
+      notes43.set(step, null);
+    }
+  }
+  const written = writtenForTask(await currentConstraints(ctx), events, ctx.mission, t.id, ids, (step) => notes43.get(step) ?? null);
+  return { repairs: all.filter((r) => ids.includes(r.key)).map((r) => repairRef(r.body)), written };
+}
+
+/** 4.4 (G3): a Reviewer's answers to the instructions addressed to its work, each with the version its claimed card showed. */
+async function instructionAnswers(ctx: FlowCtx, dispatch: string | undefined, responses: NonNullable<ReviewerResult['instruction_responses']>): Promise<NonNullable<ReviewBody['instructions']>> {
+  if (responses.length === 0) return [];
+  const claimed = dispatch === undefined ? null : await eventOf<{ spec: string }>(ctx, `dispatch:${dispatch}`, 'claimed', 'spec');
+  const card = claimed === null ? null : (JSON.parse(ctx.ports.ledger.content.get(claimed.body.spec)) as { card?: { addressed?: Array<{ id: string; version: string }> } }).card;
+  return responses.map((i) => {
+    const version = card?.addressed?.find((a) => a.id === i.instruction)?.version;
+    return { instruction: i.instruction, ...(version !== undefined ? { version } : {}), response: i.response, reason: i.reason };
+  });
 }
 
 /** A Reviewer's accepted hand-back as the task line's "review" event (null: it carries no judgment, a defect told to the PM). */
@@ -1523,25 +2325,40 @@ async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string,
     await internalError(ctx, rev, `the accepted Reviewer hand-back of ${rev} has no judgment j.${rev}`);
     return null;
   }
+  // 4.4 (G5): an open item the task took and its Reviewer did not answer fixed goes back with the issues
+  const items: ItemAnswer[] = (r.item_responses ?? []).map((i) => ({ item: i.item, response: i.response, reason: i.reason }));
+  // 4.4 (F10): a standard the Reviewer could not verify, with what would be needed, in the form of a standard not met
+  const unverifiable = r.judgments.filter((j) => j.met === 'cannot-verify').map((j) => ({ standard: j.standard, reason: j.reason, needed: j.needed ?? '' }));
   const issues = [
-    ...r.judgments.filter((j) => j.met !== 'yes').map((j) => `[${j.standard}] ${j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}`),
+    ...r.judgments.filter((j) => j.met !== 'yes').map((j) => (j.met === 'cannot-verify' ? unverifiableLine({ standard: j.standard, reason: j.reason, needed: j.needed ?? '' }) : `[${j.standard}] ${j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}`)),
     ...r.findings.map((f) => `finding: ${f}`),
     ...r.issue_responses.filter((i) => i.response === 'not-fixed').map((i) => `issue ${i.issue} not fixed: ${i.reason}`),
+    ...items.filter((i) => i.response !== 'fixed').map(itemIssueLine),
   ];
   const deferred = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`);
   const reopen = (r.reopen ?? []).map((x) => ({ task: x.task, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) }));
-  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}) };
-  for (const answer of r.issue_responses.filter((i) => i.response === 'deferred')) {
+  // 4.4 (G3, p6-5): each answer is of the version its claimed card showed, so a later text is never credited with it
+  const answers = await instructionAnswers(ctx, view.status.handBack?.dispatch, r.instruction_responses ?? []);
+  // 4.4 (G5; the plan's F11 "Deferred findings"): a deferral is an open item of the task, one per issue, recorded with
+  // this review; its notice is raised once, when the item is new, not again at each re-review that defers it again
+  const recorded = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  const deferrals = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => ({ answer: i, body: deferredItemBody(t.id, k, rev, i.issue, `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`) }));
+  // the task's deferred issues this review answered fixed: they close those items once the attempt is accepted
+  const fixed = r.issue_responses.filter((i) => i.response === 'fixed' && recorded.has(deferredItemBody(t.id, k, rev, i.issue, '').id)).map((i) => i.issue);
+  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}), ...(answers.length > 0 ? { instructions: answers } : {}), ...(items.length > 0 ? { items } : {}), ...(fixed.length > 0 ? { fixed } : {}), ...(unverifiable.length > 0 ? { unverifiable } : {}) };
+  for (const { answer, body } of deferrals) {
+    if (recorded.has(body.id)) continue;
     await notify(ctx, {
       category: 'reviewer-issue-deferred',
       wi: null,
       key: `${rev}:${answer.issue}`,
       trigger: `task ${t.id}, version ${judgment.target}: issue ${answer.issue} deferred to ${answer.owner}: ${answer.reason}`,
-      defaultAction: 'the issue stays unfixed and is listed at close; a re-plan or the user routes the work',
+      defaultAction: `the issue stays unfixed and is listed at close, as open item ${body.id} (mp read open-items ${ctx.mission}); a re-plan or the user routes the work: a re-plan or a repair takes the item, or the user's words close it`,
       detail: { task: t.id, version: judgment.target, judgment: review.judgment, issue: answer.issue, owner: answer.owner, reason: answer.reason },
     });
   }
-  await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, taskLine(t.id), 'review', rev, review)] });
+  const fresh = deferrals.filter((x) => !recorded.has(x.body.id)).map((x) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.body.id, x.body));
+  await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, taskLine(t.id), 'review', rev, review), ...fresh] });
   return review;
 }
 
@@ -1747,7 +2564,8 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   if (labels[eff.dplan] !== 'proven' && !kept.waived.has(eff.dplan)) return 'held';
   // the prerequisites: each must be its dependency's accepted version now, re-bound or proven itself first
   const deps = new Set<string>();
-  for (const d of t.dependsOn) {
+  // 4.4 (F12 b): a reopened attempt's start held the work of the tasks it came after, so its re-bind compares against them too
+  for (const d of [...new Set([...t.dependsOn, ...afterOf(line, k)])]) {
     const p = await acceptedProduct(ctx, d);
     if (p !== null) deps.add(p);
     // A dependency's accepted closure still describes the old plan while its new version is
@@ -1767,31 +2585,39 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   }
   const have = await ctx.ports.scheduler.composition(mapped);
   const want = await ctx.ports.scheduler.composition([...deps]);
-  const stale = have.filter((x) => !want.includes(x)).sort();
-  const missing = want.filter((x) => !have.includes(x)).sort();
+  // 4.4 (F14, #66): both closures are read through the re-bound successors, so a prerequisite re-bound
+  // to a successor of the same content is not stale (the dependencies' closures record older versions)
+  const succ = prerequisites.length === 0 && deps.size > 0 ? (kept.successors ??= await reboundSuccessors(ctx)) : successor;
+  const through = (xs: readonly string[]): string[] => [...new Set(xs.map((x) => latestOf(succ, x)))];
+  const haveNow = through(have);
+  const wantNow = through(want);
+  const stale = haveNow.filter((x) => !wantNow.includes(x)).sort();
+  const missing = wantNow.filter((x) => !haveNow.includes(x)).sort();
   if (stale.length > 0 || missing.length > 0) {
-    await notify(ctx, {
-      category: 'kept-product-not-rebound',
-      wi: null,
+    await keptNotice(ctx, t, line, {
       key: `${t.id}:${cur.product}:${eff.dplan}:prerequisites:${shortHash({ stale, missing })}`,
+      product: cur.product,
+      dplan: eff.dplan,
       trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} has stale prerequisites [${stale.join(', ')}] and missing prerequisites [${missing.join(', ')}] compared with its dependencies' accepted closure: it cannot be re-bound to the plan`,
-      defaultAction: `task ${t.id} stays accepted with a product that is not fully proven (stable mode holds the work that depends on it); a re-plan that changes its card rebuilds it on its dependencies' current work`,
+      defaultAction: `task ${t.id} stays accepted with a product that is not fully proven${eff.mode === 'stable' ? ' (stable mode holds the work that depends on it)' : ''}; a re-plan that changes its card rebuilds it on its dependencies' current work`,
       detail: { task: t.id, product: cur.product, dplan: eff.dplan, stale, missing },
     });
     return 'none';
   }
   // fast mode: told once, then the re-review paths run (an environment re-review is still answered)
   if (eff.mode !== 'stable') {
-    await notify(ctx, {
-      category: 'kept-product-not-rebound',
-      wi: null,
+    await keptNotice(ctx, t, line, {
       key: `${t.id}:${cur.product}:${eff.dplan}:fast`,
+      product: cur.product,
+      dplan: eff.dplan,
       trigger: `the plan in effect (${eff.dplan}) keeps task ${t.id}'s card, but its accepted product ${cur.product} lost its proof with the plan it was recorded under`,
       defaultAction: 'fast mode: the task stays accepted and the work that depends on it goes on; the product is "not fully proven" until a Reviewer judges it under the plan in effect (stable mode, or a re-plan that changes its card)',
       detail: { task: t.id, product: cur.product, dplan: eff.dplan },
     });
     return 'none';
   }
+  // 4.4 (F14): the product is re-bound now; an open notice about it closes
+  await closeKeptNotices(ctx, t.id, line, () => true);
   // every prerequisite is re-bound to the plan in effect, or proven, before this version is (stable mode only)
   for (const x of mapped) if (await awaitsPlan(ctx, eff, labels, x)) return 'held';
   // a re-review of this version that a Reviewer is judging now ends first (its hand-back is preserved)
@@ -1800,7 +2626,7 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const n = rebinds.length + 1;
   const key = `${k}:b${n}`;
   const object = safeId(`${cur.original}.b${n}`);
-  const contract: ReviewContract = { review: 'reviewer', basisLines: contractLines(ctx, t, await basisIndex(ctx)) as never, reliesOn: [eff.dplan] as never };
+  const contract: ReviewContract = { review: 'reviewer', basisLines: await productContract(ctx, eff, t, await basisIndex(ctx), line, k) as never, reliesOn: [eff.dplan] as never };
   try {
     await ctx.ports.scheduler.rebind({ mission: ctx.mission, of: cur.product, object, prerequisites: have, reviews: [contract] });
   } catch (e) {
@@ -1885,9 +2711,11 @@ async function rebindReview(
     review = await takeReview(ctx, t, k, rev, view);
     if (review === null) return 'held';
   }
-  switch (review.verdict) {
+  // 4.4 (F10): what the Reviewer could not verify, with nothing else open, goes to a decider, not back to the Constructor
+  const unverified = onlyUnverifiable(review);
+  switch (unverified ? 'needs-decision' : review.verdict) {
     case 'pass':
-      await commit(ctx, `flow:rebound:${ctx.mission}:task:${idPart(t.id)}:${rb.key}`, { events: [ev(ctx, taskLine(t.id), 'rebound', rb.key, { k, n: b.n, product: b.product, judgment: review.judgment, how: 'review' } satisfies ReboundBody)] });
+      await commit(ctx, `flow:rebound:${ctx.mission}:task:${idPart(t.id)}:${rb.key}`, { events: [ev(ctx, taskLine(t.id), 'rebound', rb.key, { k, n: b.n, product: b.product, judgment: review.judgment, how: 'review' } satisfies ReboundBody), ...await personItems(ctx, t, k)] });
       kept.successors = null;
       break;
     case 'rework':
@@ -1900,9 +2728,10 @@ async function rebindReview(
         source: 'reviewer-needs-decision',
         lineage,
         subject: `task:${t.id}`,
-        summary: `The Reviewer of task ${t.id} (attempt ${k}, its product re-bound to ${b.dplan}) needs a decision: the standards are unclear or in conflict.`,
+        summary: `The Reviewer of task ${t.id} (attempt ${k}, its product re-bound to ${b.dplan}) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
         reasons: [...review.issues],
-        options: ['answer', 'rework', 'replan', 'ask-user'],
+        // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
+        options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
         items: t.requirementItems,
         facts: { task: t.id, attempt: k, product: b.product, issues: review.issues, rebind: b.n },
         handover: { from: rev, objects: [b.product] },
@@ -1910,6 +2739,97 @@ async function rebindReview(
       break;
   }
   return 'held';
+}
+
+/**
+ * 4.4 (F14): a `kept-product-not-rebound` notice the flow keeps track of, on the task's line. The event's
+ * key is a bounded hash of the notice's key (task, product and plan ids can be long); the body carries the
+ * notice's key and its form without a recurrence suffix.
+ */
+interface KeptNoticeBody {
+  readonly product: string;
+  readonly dplan: string;
+  readonly notice: string;
+  readonly base: string;
+}
+const KEPT_NOTICE = 'kept-notice';
+const KEPT_NOTICE_CLOSED = 'kept-notice-closed';
+const KEPT_CATEGORY = 'kept-product-not-rebound';
+const keptEventKey = (notice: string): string => `k.${shortHash(notice)}`;
+
+function openKeptNotices(line: Line): Array<{ readonly key: string; readonly body: KeptNoticeBody }> {
+  return line.all<KeptNoticeBody>(KEPT_NOTICE).filter((e) => line.one(KEPT_NOTICE_CLOSED, e.key) === null);
+}
+
+/** Close the open notices of a task that `which` selects: the lifecycle event and the notice's acknowledgement in one write. */
+async function closeKeptNotices(ctx: FlowCtx, task: string, line: Line, which: (e: { readonly key: string; readonly body: KeptNoticeBody }) => boolean): Promise<void> {
+  for (const e of openKeptNotices(line).filter(which)) {
+    // the same body whoever closes it (re-bound, replaced, superseded), so two passes that close it at once agree
+    await commit(ctx, `flow:${KEPT_NOTICE_CLOSED}:${ctx.mission}:task:${idPart(task)}:${e.key}`, {
+      events: [ev(ctx, taskLine(task), KEPT_NOTICE_CLOSED, e.key, e.body)],
+      records: [{ kind: 'notice.delivery', notice: noticeAlertId({ mission: ctx.mission, category: KEPT_CATEGORY, key: e.body.notice }), state: 'acknowledged' }],
+    });
+  }
+}
+
+/**
+ * 4.4 (F14): one open `kept-product-not-rebound` notice per product and plan. A new stale set replaces
+ * the open one (closed, and a notice with the new set raised); it closes when the product is re-bound
+ * or superseded (keptSweep). Remembered before it is raised, so an interrupted notice is raised again.
+ */
+async function keptNotice(ctx: FlowCtx, t: DetailedTask, line: Line, n: { readonly key: string; readonly product: string; readonly dplan: string; readonly trigger: string; readonly defaultAction: string; readonly detail: unknown }): Promise<void> {
+  // the same set again after its notice closed is a notice of its own (a closed notice stays acknowledged)
+  const same = line.all<KeptNoticeBody>(KEPT_NOTICE).filter((e) => e.body.base === n.key);
+  const open = same.find((e) => line.one(KEPT_NOTICE_CLOSED, e.key) === null);
+  const notice = open?.body.notice ?? (same.length === 0 ? n.key : `${n.key}:${same.length + 1}`);
+  const key = open?.key ?? keptEventKey(notice);
+  const replaced = openKeptNotices(line).some((e) => e.key !== key && e.body.product === n.product && e.body.dplan === n.dplan);
+  await closeKeptNotices(ctx, t.id, line, (e) => e.key !== key);
+  if (line.one(KEPT_NOTICE, key) === null) {
+    await commit(ctx, `flow:${KEPT_NOTICE}:${ctx.mission}:task:${idPart(t.id)}:${key}`, { events: [ev(ctx, taskLine(t.id), KEPT_NOTICE, key, { product: n.product, dplan: n.dplan, notice, base: n.key } satisfies KeptNoticeBody)] });
+  }
+  await notify(ctx, { category: KEPT_CATEGORY, wi: null, key: notice, trigger: `${n.trigger}${replaced ? ' (updated: it replaces the notice of the earlier set)' : ''}`, defaultAction: n.defaultAction, detail: n.detail });
+}
+
+/**
+ * 4.4 (F14): the `kept-product-not-rebound` notices still open that the flow does not track are those 4.3
+ * raised (4.4 records the lifecycle event before it raises one). Each pass takes them into the lifecycle
+ * by their product and plan (one read of the open notices; nothing is written once all are tracked): the
+ * pass then keeps the one of the current set and closes the others, and the sweep closes those of a
+ * superseded plan or product.
+ */
+async function adoptKeptNotices(ctx: FlowCtx): Promise<void> {
+  if (ctx.ports.ledger.openNotices === undefined) return;
+  const open = await ctx.ports.ledger.openNotices({ mission: ctx.mission, category: KEPT_CATEGORY });
+  if (open.length === 0) return;
+  const tracked = new Set((await ctx.ports.ledger.events<KeptNoticeBody>({ mission: ctx.mission, event: KEPT_NOTICE })).map((e) => e.body.notice));
+  const events: FlowEventInput[] = [];
+  for (const n of open) {
+    const d = n.detail as { task?: unknown; product?: unknown; dplan?: unknown } | null;
+    if (tracked.has(n.key) || typeof d?.task !== 'string' || typeof d.product !== 'string' || typeof d.dplan !== 'string') continue;
+    events.push(ev(ctx, taskLine(d.task), KEPT_NOTICE, keptEventKey(n.key), { product: d.product, dplan: d.dplan, notice: n.key, base: n.key } satisfies KeptNoticeBody));
+  }
+  // in bounded batches (an append takes at most 1,000 records), each under the operation id of its own
+  // notices: a retry goes on with what is still untracked and never resubmits an oversized batch
+  for (let i = 0; i < events.length; i += KEPT_ADOPT_BATCH) {
+    const batch = events.slice(i, i + KEPT_ADOPT_BATCH);
+    await commit(ctx, `flow:kept-adopted:${ctx.mission}:${shortHash(batch.map((e) => `${e.line}\n${e.key}`))}`, { events: batch });
+  }
+}
+const KEPT_ADOPT_BATCH = 200;
+
+/** 4.4 (F14): after a pass, a tracked notice closes once its plan is no longer in effect or its product is no longer the task's accepted one. */
+async function keptSweep(ctx: FlowCtx, eff: EffectiveBody): Promise<void> {
+  const raised = await ctx.ports.ledger.events<KeptNoticeBody>({ mission: ctx.mission, event: KEPT_NOTICE });
+  if (raised.length === 0) return;
+  const closed = new Set((await ctx.ports.ledger.events({ mission: ctx.mission, event: KEPT_NOTICE_CLOSED })).map((e) => `${e.line}\n${e.key}`));
+  // superseded: a plan that was in effect before the one in effect now
+  const effective = new Set((await eventsOf(ctx, PLAN_LINE, 'effective')).map((e) => e.key));
+  for (const task of new Set(raised.filter((e) => !closed.has(`${e.line}\n${e.key}`)).map((e) => e.line.slice('task:'.length)))) {
+    const line = await readLine(ctx, task);
+    const product = line.abandoned ? null : currentAcceptance(line, line.k)?.product ?? null;
+    await closeKeptNotices(ctx, task, line, (e) => (e.body.dplan !== eff.dplan && effective.has(e.body.dplan)) || e.body.product !== product);
+  }
 }
 
 /** The PM's notices of one pass's re-binds (3.9; normal branch: nothing for the PM to decide). */
@@ -1945,15 +2865,93 @@ async function actionRefused(ctx: FlowCtx, key: string, e: unknown): Promise<voi
   });
 }
 
-/** The contract's basis lines of a product (10.1): the task's standards and the items that exist. */
-function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typeof basisIndex>>): string[] {
-  return reviewContractLines(ctx.mission, t, ix);
+/**
+ * The contract's basis lines of a product (10.1): the task's standards and the items that exist. 4.4 (G9): with the
+ * items a filing's reopen binds the attempt to (`attempt`, attemptItems), after the card's own. 4.4 (G9, p12-2): an item
+ * a task carries through a filing (`keep`, filingCarried) keeps its line also once it is withdrawn, so a product made
+ * after the withdrawal reads "basis withdrawn" and a decider is asked; an item of the plan keeps 4.3's rule (left out once
+ * withdrawn), because its withdrawal takes the plan's own proof off, while a filing exists for its item.
+ */
+function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typeof basisIndex>>, attempt: readonly string[] = [], keep: ReadonlySet<string> = new Set()): string[] {
+  const own = reviewContractLines(ctx.mission, t, ix, undefined, keep);
+  return [...own, ...attempt.filter((l) => !own.includes(l) && ix.current.has(l))];
 }
 
-/** A Reviewer rework: counted (initial + 2); exhausted → WI-08 and the Secretary. */
+/**
+ * 4.4 (G9, p12-2): a product's contract lines: its card's, with the items the reopens of filings give attempt k, and an
+ * item the task carries through a filing kept also once it is withdrawn.
+ */
+async function productContract(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, ix: Awaited<ReturnType<typeof basisIndex>>, line: Line, k: number): Promise<string[]> {
+  const attempt = await attemptItems(ctx, t.id, line, k);
+  return contractLines(ctx, t, ix, attempt, await filingCarried(ctx, eff, t, attempt));
+}
+
+/**
+ * 4.4 (G9, p12-2, p12-r2-1): the item lines task t carries through a filing: on each amendment that added or changed its
+ * card, the items of that amendment's filing (a new requirement, a repair naming an item) the card in fact names (the
+ * Architect named them, or the one-item rule put them there); and those a filing's reopen gives the attempt. The
+ * amendments are those of the plan in effect, and, of an earlier plan, one whose card the later plans keep (plandoc.ts
+ * cardAmendments, the one resolution, as causingRepairs and the cards: a plan that carries a card over carries no amendment).
+ */
+export async function filingCarried(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, attempt: readonly string[]): Promise<Set<string>> {
+  const out = new Set<string>(attempt);
+  // the one resolution of the amendments that gave the card (plandoc.ts cardAmendments)
+  const touching = cardAmendments((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t);
+  if (touching.length === 0) return out;
+  const items = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((e) => [e.key, (e.body.items ?? []).map((i) => `item.${ctx.mission}.${i}`)] as const));
+  for (const { repair, card } of touching) for (const l of card.requirementItems) if ((items.get(repair) ?? []).includes(l)) out.add(l);
+  return out;
+}
+
+/**
+ * 4.4 (G9): the requirement items the reopens of filings bind attempt k of a task to: those each decision gave its reopen
+ * (a filing with one item in force: that item), for every attempt from the one the reopen opened on, the accepted ones
+ * and the reworks after them included (p12-3: an accepted product's items go with its later attempts), until a new card
+ * of the task. None for a reopen decided before 4.4.
+ */
+export async function attemptItems(ctx: FlowCtx, task: string, line: Line, k: number): Promise<string[]> {
+  const repairs = attemptReopenRepairs(line.events, k);
+  if (repairs.length === 0) return [];
+  const out: string[] = [];
+  for (const repair of repairs) {
+    const decided = await eventOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided', repair);
+    for (const l of decided?.body.reopen.find((x) => x.task === task)?.items ?? []) if (!out.includes(l)) out.push(l);
+  }
+  return out;
+}
+
+/** 4.4 (G9): a task's card with the items an attempt also carries (the card's own first). */
+export function withAttemptItems<T extends Pick<DetailedTask, 'requirementItems'>>(t: T, items: readonly string[]): T {
+  const extra = items.filter((l) => !t.requirementItems.includes(l));
+  return extra.length === 0 ? t : { ...t, requirementItems: [...t.requirementItems, ...extra] };
+}
+
+/**
+ * 4.4 (G9): the filings whose reopens opened an attempt at or before attempt k of a task, under the card attempt k is on (a
+ * reopen before a new card of the task does not count). Pure: the claim refresh reads it too.
+ */
+export function attemptReopenRepairs(events: Line['events'], k: number): string[] {
+  const line = new Line(events);
+  const reworks = line.all<ReworkBody>('rework');
+  // where attempt k starts (its rework; the first attempt: after everything before it)
+  const start = reworks.find((r) => r.body.k === k)?.revision ?? Infinity;
+  const specs = line.all('spec').map((s) => s.revision);
+  const out: string[] = [];
+  for (const r of reworks) {
+    if (r.body.k > k || r.body.reopen?.kind !== 'repair' || r.body.loop === undefined) continue;
+    if (specs.some((s) => s > r.revision && s <= start)) continue;
+    if (!out.includes(r.body.reopen.repair)) out.push(r.body.reopen.repair);
+  }
+  return out;
+}
+
+/** A Reviewer rework: counted (initial + the cap, config `loops.rework`); exhausted → WI-08 and the Secretary. */
 async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly string[], instructions: readonly string[], key: string, o: { readonly reason?: ReworkBody['reason']; readonly reopen?: ReopenSource } = {}): Promise<void> {
   const lineName = taskLine(t.id);
-  const lineage = taskLineage(ctx.mission, t.id);
+  // 4.4 (F12 a): counted on the loop attempt k belongs to (a repair's reopened work has a fresh one)
+  const before = await readLine(ctx, t.id);
+  const lineage = reworkLineage(ctx.mission, t.id, before.events, k);
+  const freshOf = lineage === taskLineage(ctx.mission, t.id) ? null : before.all<ReworkBody>('rework').filter((x) => x.body.loop === lineage).at(-1)?.body.reopen ?? null;
   const r = await countedReturn(ctx, { line: lineName, key, lineage, loop: 'rework', signature: shortHash([...issues].sort()) });
   if (r.proceed) {
     const line = await readLine(ctx, t.id);
@@ -1991,9 +2989,9 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
     source: 'loop-exhausted',
     lineage,
     subject: `task:${t.id}`,
-    summary: `Task ${t.id}: the reworks are used up (${v.attempts}/${v.allowed}${v.reason === 'no-progress' ? ', the same issues twice in a row' : ''}).`,
+    summary: `Task ${t.id}: the reworks${freshOf?.kind === 'repair' ? ` of repair ${freshOf.repair}'s reopen` : ''} are used up (${v.attempts}/${v.allowed}${v.reason === 'no-progress' ? ', the same issues twice in a row' : ''}).`,
     reasons: [...issues, ...(reopenRisk?.review.issues ?? []), ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
-    options: ['grant', 'replan', ...(offered !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
+    options: ['grant', 'ask-architect', 'replan', ...(offered !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
     ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
     ...(offered !== null ? { position: { target: offered.product, review: 'reviewer', revokes: offered.judgment } } : {}),
     items: t.requirementItems,
@@ -2029,7 +3027,18 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const facts = (e.facts ?? {}) as { attempt?: number; loop?: string; issues?: string[] };
   // seat failures are carried out where the failed task is seen (failures.ts)
   if (e.source === 'needs-disposition' || (e.source === 'loop-exhausted' && facts.loop !== undefined && facts.loop !== 'rework')) return false;
-  const blocking = e.source !== 'constructor-decision';
+  // 4.4 (F4): a Constructor's questions with its product do not hold the task (its review waits: process/questions.ts); a pause does
+  const blocking = e.source !== 'constructor-decision' || (e.facts as { blocked?: unknown } | undefined)?.blocked === true;
+  // 4.4 (F4, p8-6): a pause of an attempt the task has moved past (a pass started the next attempt while another
+  // wrote the pause) blocks nothing and takes no decision: it is closed. Attempts only grow, so the read is safe.
+  const pausedAt = (e.facts ?? {}) as { blocked?: unknown; attempt?: unknown; pause?: unknown };
+  const isPause = e.source === 'constructor-decision' && pausedAt.blocked === true && typeof pausedAt.attempt === 'number';
+  if (isPause && (pausedAt.attempt as number) < line.k) {
+    await commitCarrying(ctx, `flow:pause-superseded:${ctx.mission}:${e.id}`, [], [closing(ctx, [e.id], `task ${t.id} moved past attempt ${pausedAt.attempt}: the pause of that attempt is moot`)], [e.id]);
+    return false;
+  }
+  // review r2-3: the notice of a third pause comes from the committed pause, while it waits (raised once by its key)
+  if (isPause && typeof pausedAt.pause === 'number') await tellPausedAgain(ctx, t.id, pausedAt.attempt as number, pausedAt.pause, e.id);
   const d = await decisionFor(ctx, e.id);
   // #57: an open loop-exhausted escalation that a failed re-bind review raised before accept-risk was offered there
   // (undecided, or waiting for the PM or the user) is closed as superseded; this pass's re-bind step raises a fresh
@@ -2054,13 +3063,17 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const reopen = raised !== undefined && coveredReopens(ctx, t.id, line, raised).length > 0;
   switch (d.option) {
     case 'grant': {
-      const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${e.id}:${d.by}`, lineage, loop: 'rework', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
+      // 4.4 (F12 a): the grant goes to the loop that is used up (a repair's reopened work has its own; 4.3 escalations name the task's)
+      const loopLineage = e.lineage;
+      const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${e.id}:${d.by}`, lineage: loopLineage, loop: 'rework', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
       if (!g.granted) {
-        await escalateToUser(ctx, e.id, `the Secretary's grant on lineage ${lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
+        await escalateToUser(ctx, e.id, `the Secretary's grant on lineage ${loopLineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
         return true;
       }
       const next = line.one<ReworkBody>('rework', String(k + 1));
-      if (next === null) await grantedAttempt(ctx, g, { op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage, loop: 'rework', signature: `granted:${e.id}` });
+      if (next === null) await grantedAttempt(ctx, g, { op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage: loopLineage, loop: 'rework', signature: `granted:${e.id}` });
+      // 4.4 (G1, review p11-3): an Architect's answer on this loop reaches the granted attempt's cards as a decision of the
+      // task (seat/cards/dynamic.ts carriedAnswer: both roles, at queue time and at the claim), not through this rework body
       const body: ReworkBody = { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...await deferredInstructions(ctx, line, k)] };
       const carry = await carryOut(ctx, e.id, { option: 'grant' }, g.records);
       await commit(ctx, `flow:rework:${ctx.mission}:${e.id}:apply-grant`, {
@@ -2075,7 +3088,12 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       if (e.source === 'reviewer-needs-decision') {
         // the re-review's number and the applied mark are one append (code review r1 #13)
         const m = line.all('reanswer').filter((x) => x.key.startsWith(`${k}:`)).length;
-        await commitCarrying(ctx, `flow:reanswer:${ctx.mission}:${e.id}`, [ev(ctx, lineName, 'reanswer', `${k}:${m + 1}`, { escalation: e.id, decision: d.instructions })], [await carryOut(ctx, e.id, { option: 'answer' })]);
+        await commitCarrying(ctx, `flow:reanswer:${ctx.mission}:${e.id}`, [ev(ctx, lineName, 'reanswer', `${k}:${m + 1}`, { escalation: e.id, decision: answerText(d) })], [await carryOut(ctx, e.id, { option: 'answer' })]);
+        return false;
+      }
+      // 4.4 (F4): what the answer puts off stays open; a pause's answer resumes the attempt
+      if (e.source === 'constructor-decision') {
+        await answerQuestions(ctx, t, line, e, d);
         return false;
       }
       await markApplied(ctx, e.id, { option: 'answer' });
@@ -2086,8 +3104,13 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       await markApplied(ctx, e.id, { option: 'rework' });
       return false;
     case 'replan':
-      await requestReplan(ctx, eff, t, e.id, d, !reopen || line.k === k);
+      // 4.4 (p8-6): a pause's re-plan (its waiting-replan above all) is written only while its attempt is current
+      await requestReplan(ctx, eff, t, e.id, d, !reopen || line.k === k, isPause ? [attemptCurrent(ctx, t.id, k)] : []);
       return !reopen || line.k === k;
+    case 'ask-architect':
+      // 4.4 (G1): the Architect's step answers it (flow/architectAsk.ts); meanwhile the task waits as for any decision, and
+      // its answer, once recorded, is read here as an answer (decisionFor)
+      return blocking;
     case 'accept-risk':
       if ((e.facts as { rebind?: string } | undefined)?.rebind !== undefined) await acceptRebindWithRisk(ctx, t, k, e, d);
       else if (line.one('accepted', String(k)) !== null) await acceptReopenWithRisk(ctx, plan, t, k, e, d);
@@ -2099,6 +3122,17 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
           trigger: `the reopen request on ${e.id} for task ${t.id} attempt ${k} was given up`,
           defaultAction: 'only this reopen is dropped; other grants and work stay. A waiting integration needs new accepted dependency work, a re-plan or a repair',
           detail: { task: t.id, attempt: k, escalation: e.id, reason: d.reason } });
+        // 4.4 (F13): a repair's reopen given up here (counted by 4.3) is recorded as not carried out: its repair does not read as done
+        const given = coveredReopens(ctx, t.id, line, raised!).filter((key) => key.startsWith('reopen:repair:')).map((key) => key.slice('reopen:repair:'.length));
+        // keyed as a move of its request (its next record), so no other move of it can be written beside this one
+        const requests = (await reopenRequests(ctx)).filter((q) => q.source.kind === 'repair' && q.task === t.id && given.includes(q.source.repair) && q.state !== 'not-carried');
+        const keys = requests.map((q) => ({ repair: (q.source as { repair: string }).repair, key: `${(q.source as { repair: string }).repair}:${t.id}#${q.seq + 1}` }));
+        if (keys.length > 0) {
+          await commit(ctx, `flow:reopen-given-up:${ctx.mission}:${e.id}`, {
+            events: keys.map((x) => ev(ctx, REPAIRS_LINE, REOPEN_NOT_CARRIED, x.key, { repair: x.repair, task: t.id, attempt: k, why: `its reopen was given up on ${e.id}` } satisfies ReopenNotCarriedBody)),
+            guard: { absent: keys.flatMap((x) => [REOPEN_PINNED, REOPEN_CARRIED, REOPEN_NOT_CARRIED].map((event) => ({ mission: ctx.mission, line: REPAIRS_LINE, event, key: x.key }))), code: 'STALE_REQUEST', message: `a reopen given up on ${e.id} moved meanwhile; nothing was written (the next pass reads it again)` },
+          });
+        }
         await markApplied(ctx, e.id, { option: 'abandon' });
         return false;
       }
@@ -2116,12 +3150,13 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
  * answers it is written in the same write (planning.ts replanRoute); otherwise the waiting task tells the
  * PM what the routing waits on (tellReplanWait).
  */
-async function requestReplan(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, escalationId: string, d: DecisionBody, wait = true): Promise<void> {
+async function requestReplan(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, escalationId: string, d: DecisionBody, wait = true, also: AppendGuard['absent'] = []): Promise<void> {
   const req = { escalation: escalationId, task: t.id, instructions: d.instructions };
   const route = await replanRoute(ctx, req);
   const carry = await carryOut(ctx, escalationId, { option: 'replan' });
   const guard = carryGuard([carry]);
-  const absent = [...(guard?.absent ?? []), ...(route.kind === 'now' ? route.absent : [])];
+  // 4.4 (F4, p8-6): `also`, what must still be absent for this write (a pause's: its attempt is still current)
+  const absent = [...(guard?.absent ?? []), ...(route.kind === 'now' ? route.absent : []), ...also];
   await commit(ctx, `flow:replan-request:${ctx.mission}:${escalationId}`, {
     events: [ev(ctx, PLAN_LINE, 'replan-request', escalationId, req), ...(wait ? [ev(ctx, taskLine(t.id), 'waiting-replan', escalationId, { dplan: eff.dplan, escalation: escalationId })] : []), ...(route.kind === 'now' ? route.events : []), ...carry.events],
     records: carry.records,
@@ -2171,6 +3206,8 @@ function attemptSteps(ctx: FlowCtx, taskId: string, line: Line, j: number): stri
   const answers = line.all('reanswer').filter((x) => x.key.startsWith(`${j}:`)).length;
   return [...new Set([
     conTask(ctx.mission, taskId, j),
+    // 4.4 (F4): the steps that continued the attempt after its pauses
+    ...line.all<ResumedBody>('resumed').filter((r) => r.body.k === j).map((r) => r.body.step),
     ...Array.from({ length: answers + 1 }, (_, m) => revTask(ctx.mission, taskId, j, m)),
     ...line.all<RereviewBody>('rereview').filter((r) => r.body.k === j).map((r) => r.body.rev),
     ...line.all<RebindBody>('rebind').filter((r) => r.body.k === j).flatMap((r) => rebindReviewers(ctx, taskId, line, j, r)),
@@ -2281,6 +3318,11 @@ async function droppedStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanD
 
 // ---------------------------------------------------------------- cards
 
+/** A task's standards on its cards; 4.4 (F10): with how each is checked, when the plan names it (a 4.3 plan's card is as 4.3 built it). */
+export function cardStandards(t: Pick<DetailedTask, 'standards'>): Array<{ id: string; text: string; check?: NonNullable<DetailedTask['standards'][number]['check']> }> {
+  return t.standards.map((s) => ({ id: s.id, text: s.text, ...(s.check !== undefined ? { check: s.check } : {}) }));
+}
+
 function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{ name: string; definition: string }> {
   return names.map((n) => {
     const nw = plan.newInterfaces.find((i) => i.name === n);
@@ -2288,6 +3330,47 @@ function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{
     const re = plan.reusedInterfaces.find((i) => i.name === n);
     return { name: n, definition: re !== undefined ? `existing, at ${re.file}:${re.location}` : '(see the snapshot)' };
   });
+}
+
+/**
+ * 4.4 (F3): the plan's data formats and storage lists, for the Constructor and Reviewer cards of its
+ * tasks (absent when empty): a Constructor's from the plan in effect (again at its claim, refresh.ts), a
+ * Reviewer's from the plan its target's review contract relies on.
+ */
+export function planData(plan: Pick<DetailedPlanDoc, 'dataFormats' | 'storage'> | null | undefined): { dataFormats?: string[]; storage?: string[] } {
+  if (plan === null || plan === undefined) return {};
+  return { ...((plan.dataFormats ?? []).length > 0 ? { dataFormats: [...plan.dataFormats!] } : {}), ...((plan.storage ?? []).length > 0 ? { storage: [...plan.storage!] } : {}) };
+}
+
+/**
+ * 4.4 (F3): the past a later attempt k carries on, from its task line: the Constructor task and attempt
+ * of the lineage's latest product under the current work (latestRecordedProduct), and the review that
+ * judged it. Null on a first attempt or a fresh start. Pure: the queue-time builder and the claim use it.
+ */
+export function attemptPast(events: Line['events'], k: number): { readonly constructor: string; readonly attempt: number; readonly review: string | null } | null {
+  const line = new Line(events);
+  const spec = workSpecRevision(line);
+  const p = line.all<ProductBody>('product').filter((e) => e.revision > spec && e.body.k < k).at(-1);
+  if (p === undefined) return null;
+  return { constructor: p.body.task, attempt: p.body.k, review: line.all<ReviewBody>('review').filter((r) => r.body.k === p.body.k).at(-1)?.body.task ?? null };
+}
+
+/**
+ * 4.4 (F3): the Constructor dispatch task and attempt whose candidate a Reviewer's target is (a re-bound
+ * version through the version it was re-bound from); null for an integration start with no Constructor.
+ */
+export function targetConstructor(events: Line['events'], target: string): { readonly constructor: string; readonly attempt: number } | null {
+  const line = new Line(events);
+  const seen = new Set<string>();
+  for (let at = target; !seen.has(at); ) {
+    seen.add(at);
+    const p = line.all<ProductBody>('product').find((e) => e.body.object === at);
+    if (p !== undefined) return startOnly(line, p.body) ? null : { constructor: p.body.task, attempt: p.body.k };
+    const rb = line.all<RebindBody>('rebind').find((r) => r.body.product === at);
+    if (rb === undefined) return null;
+    at = rb.body.from;
+  }
+  return null;
 }
 
 /**
@@ -2307,13 +3390,15 @@ async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet
 }
 
 /** One next attempt, with the context of every grant that ensured it (the rework event stays immutable). */
-async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): Promise<ReworkBody | null> {
+async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): Promise<(ReworkBody & { readonly covered: ReadonlyArray<{ readonly issue: string; readonly source: ReopenSource }> }) | null> {
   const body = line.one<ReworkBody>('rework', String(k));
   if (body === null) return null;
   const applied = new Set((await eventsOf<{ what?: { option?: string } }>(ctx, SECRETARY_LINE, 'applied')).filter((e) => e.body.what?.option === 'grant').map((e) => e.key));
   const requests = await reopenRequests(ctx);
   const issues = [...body.issues];
   const instructions = [...body.instructions];
+  // 4.4 (p6-r2-1): the reopen requests a grant covered, so the Reviewer of the attempt sees them too
+  const reopens: Array<{ issue: string; source: ReopenSource }> = [];
   for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
     const facts = e.body.facts as { attempt?: number; loop?: string; issues?: string[] } | undefined;
     if (!applied.has(e.key) || e.body.source !== 'loop-exhausted' || e.body.subject !== `task:${t.id}` || facts?.loop !== 'rework' || facts.attempt !== k - 1) continue;
@@ -2322,8 +3407,14 @@ async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): P
     const covered = requests.filter((r) => r.task === t.id && r.attempt === k - 1 && keys.includes(r.key));
     issues.push(...(facts.issues ?? []), ...covered.map((r) => r.issue));
     instructions.push(...(d?.instructions ? [d.instructions] : []), ...covered.map((r) => r.instruction));
+    for (const r of covered) if (!reopens.some((x) => x.issue === r.issue)) reopens.push({ issue: r.issue, source: r.source });
   }
-  return { ...body, issues: [...new Set(issues)], instructions: [...new Set(instructions)] };
+  return { ...body, issues: [...new Set(issues)], instructions: [...new Set(instructions)], covered: reopens };
+}
+
+/** Who reopened an attempt, in words (a Reviewer's card). */
+function reopenedBy(s: ReopenSource | undefined): string {
+  return s?.kind === 'repair' ? `repair ${s.repair}` : s?.kind === 'review' ? `the review ${s.review} of integration task ${s.integration}` : 'reopened';
 }
 
 async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number, task: string, deps: readonly string[]): Promise<void> {
@@ -2339,7 +3430,14 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // readable at its commit for the Constructor to carry over by hand (Appendix M).
   let snap: Awaited<ReturnType<typeof ctx.ports.scheduler.snapshot>>;
   let carryDropped = false;
-  const recorded = line.one<DispatchedBody>('dispatched', task);
+  // 4.4 (F4): a step that continues attempt k after a pause keeps the attempt's start (its first dispatch:
+  // the base its candidate is collected against, its pin) and opens its worktree on the parked commit
+  const resumed = line.all<ResumedBody>('resumed').find((r) => r.body.step === task) ?? null;
+  const paused = resumed === null ? null : line.one<PausedBody>('paused', resumed.key);
+  const start = resumed === null ? null : line.one<DispatchedBody>('dispatched', conTask(ctx.mission, t.id, k));
+  if (resumed !== null && (paused === null || start === null)) return internalError(ctx, task, `the step ${task} continues attempt ${k} of task ${t.id}, and its pause or its start is not recorded`);
+  const startStep = resumed === null ? task : conTask(ctx.mission, t.id, k);
+  const recorded = line.one<DispatchedBody>('dispatched', task) ?? start;
   try {
     snap = recorded !== null ? { path: recorded.snapshot, commit: recorded.commit, products: recorded.prerequisites ?? [], ...(recorded.origin !== undefined ? { origin: recorded.origin } : {}) } : await ctx.ports.scheduler.snapshot(
       prev !== null
@@ -2369,33 +3467,58 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // A crash after the dispatch event must rebuild the same card. Read the existing
   // notice rather than infer a dropped carry from an empty, non-conflicting change.
   if (recorded !== null && prev !== null && snap.origin === snap.commit) {
-    const alert = noticeAlertId({ mission: ctx.mission, category: 'rework-carry-dropped', key: `${task}:carry` });
+    const alert = noticeAlertId({ mission: ctx.mission, category: 'rework-carry-dropped', key: `${startStep}:carry` });
     carryDropped = (await ctx.ports.ledger.records(['alert'])).some(({ record }) => record.alert === alert);
   }
   const items = await currentItems(ctx);
   const rw = await reworkAt(ctx, t, line, k);
+  // 4.4 (F4): an earlier attempt that stopped to ask and did not go on (re-planned): its edits stay readable
+  const left = line.all<PausedBody>('paused').filter((p) => p.body.k === k - 1 && line.one('resumed', p.key) === null).at(-1)?.body;
   const duties = [
+    ...(paused !== null ? [`This attempt stopped to ask (pause ${paused.n}) and goes on now: your worktree starts on its edits (commit ${paused.parked}), and the answers are under "Questions on this task". Hand back your finished work, or stop to ask again (blocked).`] : []),
+    ...(left !== undefined ? [`Attempt ${left.k} stopped to ask and did not go on; its edits stay readable at commit ${left.parked}.`] : []),
     ...(prev !== null && carryDropped ? [`The earlier attempt's change is not in the tree; it stays readable at commit ${prev.commit}. Carry over by hand what still applies to the current dependencies.`] : []),
     `Implement task ${t.id} (${t.kind}${t.module !== null ? ` of module ${t.module}` : ''}) inside its writable paths, so that every acceptance standard is met.`,
     ...(rw !== null && rw.issues.length > 0 ? ['This is a rework. Fix exactly these issues from the review:', ...rw.issues.map((i) => `- ${i}`)] : []),
     ...(rw !== null && rw.instructions.length > 0 ? ['Instructions:', ...rw.instructions.map((i) => `- ${i}`)] : []),
   ].join('\n');
-  // the Constructor's worktree is created at this commit when it is dispatched (§5.3); the write paths are the task's write scope
-  const workspace = { snapshot: snap.commit, writablePaths: [...t.writeScope] };
-  const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  // the Constructor's worktree is created at this commit when it is dispatched (§5.3); the write paths are the task's write scope.
+  // 4.4 (F4): a continuation's worktree opens on the parked commit (`start`); its candidate is still taken against the attempt's start
+  const workspace = { snapshot: snap.commit, ...(paused !== null ? { start: paused.parked } : {}), writablePaths: [...t.writeScope] };
+  const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
+  // 4.4 (F3): a later attempt gets its past: the review of the attempt it carries on, and that attempt's own hand-back (optional)
+  const was = attemptPast(line.events, k);
+  const past: Array<Awaited<ReturnType<typeof previousHandBack>>> = was === null ? [] : [
+    was.review === null ? null : await previousReviewReport(ctx, { review: was.review, attempt: was.attempt }),
+    await previousHandBack(ctx, { constructor: was.constructor, attempt: was.attempt }),
+  ];
+  // 4.4 (F4): a continuation reads the hand-back that stopped to ask (optional)
+  if (paused !== null) past.push(await pausedHandBack(ctx, { constructor: paused.step, attempt: k, pause: paused.n, parked: paused.parked }));
+  // 4.4 (F4; G5): the attempt's questions with their answers, and every question of the task left open
+  const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
+  const questions = taskQuestions(missionEvents, t.id, k);
+  // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open
+  const names = cardItemNames(missionEvents, t, k);
+  const openItems = takenItems(missionEvents, names, await cardIssues(ctx, missionEvents, names));
   const card: ConstructorCard = {
-    ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: await decisionQuotes(ctx, t), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
+    ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: withoutAnswers(await decisionQuotes(ctx, t), questions), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
+    ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
+    ...(openItems.length > 0 ? { openItems } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...written,
     seat: 'constructor',
     workspace,
     goal: t.goal,
-    standards: t.standards.map((s) => ({ id: s.id, text: s.text })),
-    requirementItems: taskRequirementItems(items, t),
+    standards: cardStandards(t),
+    // 4.4 (G9): with the items a filing's reopen binds this attempt to
+    requirementItems: taskRequirementItems(items, withAttemptItems(t, await attemptItems(ctx, t.id, line, k))),
     readableFiles: [...t.readableFiles],
     interpreter: t.interpreter,
     verificationCommands: t.verificationCommands.map((c) => ({ ...c })),
     interfaces: { implements: interfaceDefs(plan, t.implements), calls: interfaceDefs(plan, t.calls) },
     ...(t.exclusive.length > 0 ? { exclusive: [...t.exclusive] } : {}),
+    ...planData(plan),
+    ...attach(past),
   };
   await commit(ctx, `flow:dispatched:${ctx.mission}:${task}`, {
     events: [ev(ctx, taskLine(t.id), 'dispatched', task, recorded ?? { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, prerequisites: [...(snap.products ?? deps)], predecessor: prev?.object ?? null, ...(snap.origin !== undefined ? { origin: snap.origin } : {}) } satisfies DispatchedBody)],
@@ -2412,8 +3535,9 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     writeScope: t.writeScope,
     snapshot: { repo: 'project', commit: snap.commit },
     ...(t.exclusive.length > 0 ? { exclusive: [...t.exclusive] } : {}),
-    // who hands it over (§3.2, U-13): the Architect that decomposed the plan, or the Reviewer that asked for the rework
-    handover: handoverOfConstructor(ctx, eff, line, k, t),
+    // who hands it over (§3.2, U-13): the Architect that decomposed the plan, or the Reviewer that asked for the rework;
+    // 4.4 (F4): a continuation, the answer to the pause it continues
+    handover: resumed !== null ? { objects: [eff.dplan], step: `attempt ${k} of task ${t.id}, resumed after pause ${resumed.body.n} by the answer to ${resumed.body.escalation}` } : handoverOfConstructor(ctx, eff, line, k, t),
   });
 }
 
@@ -2512,37 +3636,75 @@ async function submitReviewer(
   const startOnlyAttempt = startOnly(line, product);
   const integration = t.kind === 'integration' ? { hasConstructor: !startOnlyAttempt, dependencies: await dependencyProducts(ctx, plan, t) } : undefined;
   const rw = await reworkAt(ctx, t, line, k);
-  const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
-  const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  // 4.4 (p6-r2-1): an attempt a grant gave a covered reopen tells its Reviewer the reopen's issue too (with no Constructor, no other card shows it)
+  const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${reopenedBy(rw.reopen)}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.`
+    : rw !== null ? grantedReopenLine(rw.covered.map((c) => ({ by: reopenedBy(c.source), issue: c.issue })), 'reviewer') : '';
+  // 4.4 (F13): the repairs this attempt carries (each reopen opens its own attempt), judged the same way
+  const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
+  // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
+  const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });
+  // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
+  const contractPlan = taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'));
+  const formats = contractPlan === undefined ? null : (await detailedPlanOf(ctx, contractPlan))?.plan;
+  // 4.4 (F4): the questions of the attempt under review with their answers, and those left open on the task
+  const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
+  const questions = taskQuestions(missionEvents, t.id, product.k);
+  // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open: the Reviewer answers each
+  const names = cardItemNames(missionEvents, t, product.k);
+  const openItems = takenItems(missionEvents, names, await cardIssues(ctx, missionEvents, names));
+  // 4.4 (F10, E-4): the files the runs kept, and the files outside the commit the Constructor handed in, with its attempt
+  const kept = new Map((await ctx.ports.ledger.events<KeptArtifactsBody>({ mission: ctx.mission, line: ARTIFACTS_LINE, event: KEPT_ARTIFACTS })).map((e) => [e.key, e.body.artifacts] as const));
+  const handedIn = startOnlyAttempt ? [] : (conView?.handBack?.data ?? []).map((d) => ({ pointer: d.pointer, attempt: product.k, dispatch: conView!.handBack!.dispatch, label: d.label, ...(d.kept !== undefined ? { kept: `.mission-pipeline/${d.kept}` } : { notKept: d.notKept ?? 'no copy was made' }) }));
+  // 4.4 (G9, E-4): the text of the requirement items the judgment is bound to, and the text the previous judgment was bound to where it changed
+  // (p12-2): an item of a filing the contract keeps once withdrawn is bound at its last version, so "basis withdrawn" follows
+  const contract = reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer'));
+  const filed = new Set((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).flatMap((e) => (e.body.items ?? []).map((i) => `item.${ctx.mission}.${i}`)));
+  const bases = [...new Set([...currentVersions(ix, contract), ...contract.filter((l) => filed.has(l) && ix.withdrawn.has(l)).flatMap((l) => ix.current.get(l) ?? [])])].sort();
+  const before = line.all<ReviewBody>('review').filter((r) => r.body.task !== task).at(-1);
+  const beforeJ = before === undefined ? null : await judgmentRecordOf(ctx, before.body.judgment);
+  const items = reviewerItems(await ctx.ports.ledger.events({ mission: ctx.mission, line: REQUIREMENTS_LINE }), bases, beforeJ === null ? null : c.getList(beforeJ.bases));
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
       duties: o.duties ?? `Judge the candidate of task ${t.id} (attempt ${k}${m > 0 ? `, review ${m + 1} after a decision` : ''}) against each standard, independently.${reopened}`,
-      decisionQuotes: reviewerDecisionQuotes(ctx.mission, await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, await currentConstraints(ctx), k, taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'))),
+      decisionQuotes: withoutAnswers(reviewerDecisionQuotes(ctx.mission, await currentItems(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), t, await currentConstraints(ctx), k, taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'))), questions),
       constraints: [...cardConstraintsList, ...await cardConstraints(ctx, t, new Set(['instruction']))],
     }),
+    ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
+    ...(openItems.length > 0 ? { openItems } : {}),
+    ...(items.length > 0 ? { requirementItems: items } : {}),
     seat: 'reviewer',
     workspace: { snapshot: product.snapshot, writablePaths: [] },
     target: product.object,
     review: 'reviewer',
-    standards: t.standards.map((s) => ({ id: s.id, text: s.text })),
+    standards: cardStandards(t),
     interfaces: [...interfaceDefs(plan, t.implements), ...interfaceDefs(plan, t.calls)],
     candidate: { changedPaths: [...changedPaths] },
-    verificationRuns: runs.map((r) => ({ evidence: r.evidence, command: r.command, summary: r.summary })),
+    // 4.4 (F10): with the files each run kept, read from its record (a run reused from one recorded before its command named them kept none: said so)
+    verificationRuns: runs.map((r) => {
+      const named = t.verificationCommands.find((c) => c.command === r.command)?.artifacts ?? [];
+      const artifacts = kept.get(r.evidence) ?? named.map((path) => ({ path, why: 'this run kept no files: it was recorded before its command named them' }));
+      return { evidence: r.evidence, command: r.command, summary: r.summary, ...(artifacts.length > 0 ? { artifacts: [...artifacts] } : {}) };
+    }),
+    ...(handedIn.length > 0 ? { handedIn } : {}),
     declaredCommands: t.verificationCommands.map((x) => ({ ...x })),
     selfReportedGaps: gaps,
     openIssues,
     ...(previousReview !== null ? { previousReview } : {}),
     ...(integration !== undefined ? { integration } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...written,
+    ...planData(formats),
+    ...attach([claims]),
     binding: {
       judgment: `j.${task}`,
-      bases: c.putList(currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')))),
+      bases: c.putList(bases),
       constraints: c.putList([...new Set(checks)].sort()),
       // the objects the version's contract relies on (v51 §5.2: a judgment conforms to the contract fixed with
       // its target), which for a version recorded under an earlier plan is that plan, not the one in effect
       reliesOn: c.putList(reliedPlans(obj, eff)),
-      revokes: null,
+      // 4.4 (F10, review p9-r2-1, F2-2): the failure in force on this version's position (a decider's answer sent it to this review)
+      revokes: await failureInForce(ctx, product.object, 'reviewer'),
       extends: null,
       evidenceUse: { fields: ['exit'], statisticalOrExternal: false },
       superseded: [],
@@ -2572,15 +3734,17 @@ async function submitReviewer(
   ctx.progressed = true;
 }
 
+
 /** The previous Reviewer of the task (any attempt, before this review task): its verdict, each standard it did not find met, with the reason, and its findings. */
 async function previousReviewOf(ctx: FlowCtx, line: Line, current: string): Promise<NonNullable<ReviewerCard['previousReview']> | null> {
   const prev = line.all<ReviewBody>('review').filter((r) => r.body.task !== current).at(-1);
   if (prev === undefined) return null;
   const result = ((await ctx.ports.scheduler.status(prev.body.task))?.handBack?.result ?? null) as ReviewerResult | null;
   const unmet = result !== null
-    ? result.judgments.filter((j) => j.met !== 'yes').map((j) => ({ standard: j.standard, met: j.met as 'no' | 'unclear', reason: j.reason }))
+    // 4.4 (F10): a standard it could not verify, with what would be needed
+    ? result.judgments.filter((j) => j.met !== 'yes').map((j) => ({ standard: j.standard, met: j.met as 'no' | 'unclear' | 'cannot-verify', reason: j.met === 'cannot-verify' ? `${j.reason}; needed: ${j.needed ?? ''}` : j.reason }))
     // a result not readable any more: the recorded issue lines stand in ("[S1] not met: why")
-    : prev.body.issues.flatMap((i) => { const m = /^\[([^\]]+)\] (not met|unclear): (.*)$/s.exec(i); return m === null ? [] : [{ standard: m[1]!, met: (m[2] === 'not met' ? 'no' : 'unclear') as 'no' | 'unclear', reason: m[3]! }]; });
+    : prev.body.issues.flatMap((i) => { const m = /^\[([^\]]+)\] (not met|unclear|cannot be verified): (.*)$/s.exec(i); return m === null ? [] : [{ standard: m[1]!, met: (m[2] === 'not met' ? 'no' : m[2] === 'unclear' ? 'unclear' : 'cannot-verify') as 'no' | 'unclear' | 'cannot-verify', reason: m[3]! }]; });
   const findings = result !== null ? [...result.findings] : prev.body.issues.filter((i) => i.startsWith('finding: ')).map((i) => i.slice('finding: '.length));
   return { review: prev.body.task, attempt: prev.body.k, verdict: prev.body.verdict, unmet, findings };
 }
@@ -2623,12 +3787,21 @@ async function dependencyProducts(ctx: FlowCtx, plan: DetailedPlanDoc, t: Detail
  * review's and the repair's tracing aid): from the paths recorded with each product, through the
  * task lines' acceptances (current or earlier). A path ending in "/" or "/**" names a directory.
  */
-export async function pathOwners(ctx: FlowCtx, paths: readonly string[]): Promise<Array<{ readonly path: string; readonly owners: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly current: boolean; readonly paths: readonly string[] }> }>> {
+export async function pathOwners(ctx: FlowCtx, paths: readonly string[]): Promise<PathOwners> {
   const tasks = new Set<string>();
   for (const e of await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')) for (const t of e.body.tasks) tasks.add(t);
+  const lines = new Map<string, Line['events']>();
+  for (const id of tasks) lines.set(id, (await readLine(ctx, id)).events);
+  return ownersOfPaths(lines, paths);
+}
+
+type PathOwners = Array<{ readonly path: string; readonly owners: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly current: boolean; readonly paths: readonly string[] }> }>;
+
+/** pathOwners over task lines already read (4.4, F5: the repair card's claim-time rebuild reads them from the memory). */
+export function ownersOfPaths(lines: ReadonlyMap<string, Line['events']>, paths: readonly string[]): PathOwners {
   const accepted: Array<{ task: string; attempt: number; product: string; current: boolean; changed: readonly string[] }> = [];
-  for (const id of tasks) {
-    const line = await readLine(ctx, id);
+  for (const [id, events] of lines) {
+    const line = new Line(events);
     const now = lineAcceptance(line.events).product;
     for (const a of line.all<{ k: number; product: string }>('accepted')) accepted.push({ task: id, attempt: a.body.k, product: a.body.product, current: a.body.product === now, changed: changedPathsOf(line, a.body.product) });
     for (const r of line.all<ReboundBody>('rebound')) accepted.push({ task: id, attempt: r.body.k, product: r.body.product, current: r.body.product === now, changed: changedPathsOf(line, r.body.product) });

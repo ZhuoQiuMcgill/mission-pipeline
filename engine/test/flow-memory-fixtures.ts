@@ -31,6 +31,7 @@ import {
   productObjectId,
   recordEvidenceRequest,
   recordSeatHandBack,
+  seatCard,
   seatRead,
   taskStatus,
   type GitActions,
@@ -41,6 +42,7 @@ import {
 import type { MaterialRef } from '../src/seat/cards/common.ts';
 import type { SnapshotFiles } from '../src/seat/results.ts';
 import { dispatchView } from '../src/process/seat.ts';
+import { heldForQuestions } from '../src/process/questions.ts';
 
 export const FAKE_BASE = 'b'.repeat(40);
 const ENV: EnvironmentParts = { os: 'flowtest', osVersion: '1', arch: 'x64', versions: {} };
@@ -308,9 +310,25 @@ export class HarnessScheduler extends MemoryFlowScheduler implements ScriptedSch
     });
   }
 
-  /** Queued tasks (optionally of one card kind), in the order they were first queued; a task whose hand-back was refused stays runnable. */
+  /**
+   * Queued tasks (optionally of one card kind), in the order they were first queued; a task whose hand-back
+   * was refused stays runnable. 4.4 (F4): a review that waits for its Constructor's questions is held, as
+   * `mp pm next` holds it (heldQueued lists those).
+   */
   queued(kind?: string): FlowTask[] {
-    return [...this.tasks.values()].filter((t) => (t.state === 'queued' || this.refusedInFlight(t)) && (kind === undefined || t.spec.card.seat === kind)).map((t) => t.spec);
+    return [...this.tasks.values()].filter((t) => (t.state === 'queued' || this.refusedInFlight(t)) && (kind === undefined || t.spec.card.seat === kind) && this.heldWhy(t.spec) === null).map((t) => t.spec);
+  }
+
+  /** 4.4 (F4): the queued reviews that wait for their Constructor's questions, with why. */
+  heldQueued(): Array<{ readonly task: string; readonly why: string }> {
+    return [...this.tasks.values()].filter((t) => t.state === 'queued').flatMap((t) => {
+      const why = this.heldWhy(t.spec);
+      return why === null ? [] : [{ task: t.spec.task, why }];
+    });
+  }
+
+  private heldWhy(spec: FlowTask): string | null {
+    return this.hctx.memory.read((db) => heldForQuestions(db, this.hctx.memory.data, spec as never));
   }
 
   private refusedInFlight(t: HarnessTask): boolean {
@@ -356,6 +374,8 @@ export class HarnessScheduler extends MemoryFlowScheduler implements ScriptedSch
     const dispatch = this.dispatchOf(task);
     outcome.before?.(dispatch);
     if ('release' in outcome) {
+      // a seat that ended without a hand-back had started: it read its card (4.4, F5: an unstarted release costs nothing)
+      seatCard(this.hctx, dispatch);
       await pmRelease(this.hctx, dispatch, outcome.release);
       return [];
     }
@@ -396,7 +416,7 @@ process.on('exit', () => {
 });
 
 /** The flows' ports on a fresh project memory (no repository): the 4.1 counterpart of the 4.0 fakePorts(). */
-export function memoryPorts(o: { readonly now?: () => number } = {}): MemoryWorld {
+export function memoryPorts(o: { readonly now?: () => number; readonly reworkCap?: number } = {}): MemoryWorld {
   const base = mkdtempSync(join(tmpdir(), 'mp-flow-'));
   const dir = join(base, 'project');
   mkdirSync(dir, { recursive: true });
@@ -413,11 +433,24 @@ export function memoryPorts(o: { readonly now?: () => number } = {}): MemoryWorl
     collect: null,
     files: null,
   };
-  const ctx = processContext(memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null, ...(o.now !== undefined ? { now: o.now } : {}) });
+  const ctx = processContext(memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null, ...(o.now !== undefined ? { now: o.now } : {}), ...(o.reworkCap !== undefined ? { reworkCap: o.reworkCap } : {}) });
   const ledger = new HarnessLedger(ctx);
   const scheduler = new HarnessScheduler(ctx, knobs);
   const evaluator = new MemoryFlowEvaluator(ctx);
   return { ledger, scheduler, evaluator, now: ctx.now, ctx, memory, dir };
+}
+
+/** Another process on the same memory (its own ports: nothing a flow pass of the world memoized), with these fake actions. */
+export function anotherProcess(w: MemoryWorld, actions: FakeKnobs['actions']): ProcessContext {
+  const knobs: FakeKnobs = { ...w.scheduler.knobs, actions };
+  return processContext(w.memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null });
+}
+
+/** 4.4 (F12 c): the same memory read by an `mp` process whose config.json sets `loops.rework` to `cap` (its ledger reads that cap). */
+export function withReworkCap(w: MemoryWorld, cap: number): MemoryWorld {
+  const knobs = w.scheduler.knobs;
+  const ctx = processContext(w.memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null, reworkCap: cap });
+  return { ...w, ledger: new HarnessLedger(ctx) };
 }
 
 /** The user's words recorded as `mp pm say` does: their entry (W-<n>). */

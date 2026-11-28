@@ -4,7 +4,7 @@
 // runs: actions.ts). A context lives for one `mp` process; nothing here runs in the background.
 
 import { requireSecretary, liveSecretary, requireDriver } from '../memory/resident.ts';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statfsSync } from 'node:fs';
 import type { Filler, Memory } from '../memory/index.ts';
 import { openMemory, type OpenOptions } from '../memory/index.ts';
 import { currentEnvironment, type CurrentEnvironment, type EnvironmentParts } from '../evaluator/index.ts';
@@ -12,6 +12,7 @@ import type { Ident } from '../git/objects.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import type { SnapshotFiles } from '../seat/results.ts';
 import type { SuiteCommand } from '../common/fullSuite.ts';
+import { LOOP_CAPS } from '../common/records.ts';
 import { collectCandidate, ensureWorkspace, releaseWorkspace, removeWorkspace, type Collection, type CollectRequest, type GitContext } from '../git/workspace.ts';
 import type { FlowPorts, FlowSchedulerPort } from '../flow/ports.ts';
 import { gitActions } from './actions.ts';
@@ -84,6 +85,26 @@ export interface ProcessOptions {
   readonly planReviewsWaived?: readonly string[];
   /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). Default: none. */
   readonly startOnHandback?: readonly string[];
+  /** 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (config.json `mustReadWarnPages`). Default 6. */
+  readonly mustReadWarnPages?: number;
+  /** 4.4 (G3): above this many bytes a dispatch's card warns whoever dispatches it (config.json `cardWarnBytes`). Default 64 KiB. */
+  readonly cardWarnBytes?: number;
+  /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`). Default LOOP_CAPS.rework (2). */
+  readonly reworkCap?: number;
+  /** 4.4 (F6, H-3): config.json `limits`; while one is passed, new Constructor steps are held. Default none. */
+  readonly limits?: DiskLimits;
+  /** 4.4 (F10): above this many standards on a task the feasibility reviewer and the PM are told (config.json `standardsWarn`). Default 7. */
+  readonly standardsWarn?: number;
+  /** Tests: the free bytes of the project's disk, instead of the file system's (statfs). */
+  readonly diskFree?: () => number | null;
+}
+
+/** 4.4 (F6, H-3): the disk limits a project may set; none by default. */
+export interface DiskLimits {
+  /** New Constructor steps wait while this many worktrees (or more) are on disk. */
+  readonly worktrees?: number;
+  /** New Constructor steps wait while the project's disk has fewer free bytes. */
+  readonly freeBytes?: number;
 }
 
 export interface ProcessContext {
@@ -124,6 +145,18 @@ export interface ProcessContext {
   readonly planReviewsWaived: readonly string[];
   /** Missions whose tasks start on their dependencies' verified hand-backs (config.json `startOnHandback`). */
   readonly startOnHandback: readonly string[];
+  /** 4.4 (F16): the must-read pages above which a dispatch warns (config.json `mustReadWarnPages`, default 6). */
+  readonly mustReadWarnPages: number;
+  /** 4.4 (G3): the card bytes above which a dispatch warns (config.json `cardWarnBytes`, default 64 KiB). */
+  readonly cardWarnBytes: number;
+  /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`, default 2), read wherever the loop's state is. */
+  readonly reworkCap: number;
+  /** 4.4 (F6, H-3): the disk limits of config.json (empty: none). */
+  readonly limits: DiskLimits;
+  /** 4.4 (F10): the standards on a task above which the feasibility reviewer and the PM are told (config.json `standardsWarn`, default 7). */
+  readonly standardsWarn: number;
+  /** 4.4 (F6): the free bytes of the project's disk, or null when they cannot be read. */
+  diskFree(): number | null;
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -139,6 +172,13 @@ export interface ProcessContext {
 }
 
 const DEFAULT_IDENT: Ident = { name: 'Mission Pipeline', email: 'mp@localhost' };
+
+/** 4.4 (F16): the default of config.json `mustReadWarnPages`. */
+export const MUST_READ_WARN_PAGES = 6;
+/** 4.4 (F10): the default of config.json `standardsWarn`. */
+export const STANDARDS_WARN = 7;
+/** 4.4 (G3, the plan's F1 `cardWarnBytes`): the default of config.json `cardWarnBytes`. */
+export const CARD_WARN_BYTES = 64 * 1024;
 
 /** A context over an open memory (the caller closes the memory). */
 export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessContext {
@@ -174,6 +214,20 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     localCommands: o.localCommands ?? [],
     planReviewsWaived: o.planReviewsWaived ?? [],
     startOnHandback: o.startOnHandback ?? [],
+    mustReadWarnPages: o.mustReadWarnPages ?? MUST_READ_WARN_PAGES,
+    cardWarnBytes: o.cardWarnBytes ?? CARD_WARN_BYTES,
+    reworkCap: o.reworkCap ?? LOOP_CAPS.rework,
+    limits: o.limits ?? {},
+    standardsWarn: o.standardsWarn ?? STANDARDS_WARN,
+    diskFree(): number | null {
+      if (o.diskFree !== undefined) return o.diskFree();
+      try {
+        const s = statfsSync(memory.paths.root);
+        return Number(s.bavail) * Number(s.bsize);
+      } catch {
+        return null;
+      }
+    },
     cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);
