@@ -20,6 +20,8 @@ import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/
 import '../src/seat/cards/index.ts';
 import { renderArchitectRepair, type ArchitectRepairCard } from '../src/seat/cards/architect.ts';
 import { buildGraph } from '../src/cli/tree.ts';
+import { itemStateLines, readItems } from '../src/cli/itemsRead.ts';
+import { listAllItems, recordVerified } from '../src/process/openItems.ts';
 import { repairsRead, repairsText } from '../src/cli/workReads.ts';
 import { memoryPorts, say } from './flow-memory-fixtures.ts';
 
@@ -270,6 +272,50 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'empty')?.requirementItems, ['item.m1.g1']);
     // a repair that names an item not in force is refused (a new flag), nothing filed
     await assert.rejects(pmRepair(ports.ctx, { mission: M, words: w, kind: 'defect', text: 'fails on an empty file', item: 'nope' }), /no requirement item nope in force/);
+  });
+});
+
+describe('4.4 G9 with G5 (p10): mp read items, mp pm verified, --open-items on a new requirement', () => {
+  const linesOf = (ports: World) => readItems(ports.ctx, 'm1').flatMap(itemStateLines);
+
+  it('one item: its line has its state, how its work came in and the plan\'s check; its task says it was added by the filing; the filing is named a new requirement; the user\'s statement on it is recorded', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'The parser exports rows as JSON', quote: 'export the rows as JSON' }], 'Could it also export the rows as JSON?');
+    let read = linesOf(ports).join('\n');
+    assert.ok(read.includes('[g2] goal, W-2: not planned') && read.includes('came with new requirement R-1: its work passes its Architect and the mechanical checks, no plan review; outside the set PM plan pmplan.m1.1 was checked against'), read);
+    assert.ok(read.includes('[R-1] new requirement, the user\'s words W-2: not planned'), read);
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'a new task exports JSON' } } : happyScript(M)(t, s)));
+    read = linesOf(ports).join('\n');
+    assert.match(read, /\[g2\] goal, W-2: accepted after a passing review; proof: proven; tasks: json accepted \[added by new requirement R-1\]/);
+    assert.match(read, /\[g1\] goal, W-1: accepted after a passing review; proof: proven; tasks: iface accepted, impl accepted\n/, 'a task of the plan says nothing of the kind');
+    const v = recordVerified(ports.ctx, { op: 'v1', mission: 'm1', subject: 'item:g2', words: say(ports, 'I tried the JSON export, it works.'), items: [] });
+    assert.equal(v.subject, 'item:g2');
+    assert.match(linesOf(ports).join('\n'), /\[g2\][^\n]*\n[^\n]*\n[^\n]*\n {2}the user's statement on W-3: checked in the field and holds/);
+  });
+
+  it('several items: an item bound by a reopen lists the reopened task as the repair read credits it; the filing\'s line lists its tasks that name no item', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }, { item: 'g3', text: 'Rows keep their order', quote: 'keep the order' }], 'Please export JSON and keep the order.');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [{ task: 'impl', issue: 'keep the order', items: ['item.m1.g3'] }], add: [{ ...JSON_TASK, requirementItems: ['item.m1.g2'] }, { ...JSON_TASK, id: 'docs2', goal: 'Document it', writeScope: ['docs/json.md'] }], note: 'n' } } : happyScript(M)(t, s)));
+    const read = linesOf(ports).join('\n');
+    assert.match(read, /\[g3\] goal, W-2: accepted after a passing review; proof: proven; tasks: impl \(reopened at attempt 2; accepted at attempt 2 \(prod\.con\.m1\.impl\.2\)\) \[reopened by new requirement R-1\]/);
+    assert.ok(read.includes('tasks on which its Architect named none of its items (bound to none): docs2'), read);
+  });
+
+  it('mp pm extend --open-items: the filing names items left at the cap as a repair does; its Architect card lists them; an unknown one is refused, nothing recorded', async () => {
+    const { ports, engine } = await setup('fast');
+    // an item left at the cap: the task's open items written at an acceptance with risk (p10), here as its record
+    await ports.ledger.append('test:open-item', { events: [{ mission: M, line: 'open-items', event: 'open-item', key: 'exh.x.r1', body: { id: 'exh.x.r1', kind: 'fix', text: '[S1] not met: slow on big files', task: 'impl', attempt: 1, escalation: 'exh.x', why: 'risk', ref: { standard: 'S1' } } }] });
+    const w = say(ports, 'Make it fast on big files too.');
+    await assert.rejects(pmExtend(ports.ctx, { mission: M, items: [{ item: 'g2', type: 'goal', text: 'Fast on big files', quote: 'fast on big files', words: w }], openItems: ['nope'] }), /nope is not an item left at the cap/);
+    assert.equal((await ports.ledger.events({ mission: M, line: 'repairs', event: 'repair' })).length, 0, 'nothing recorded');
+    const known = listAllItems(ports.ctx, M).items.map((i) => i.id);
+    assert.ok(known.includes('exh.x.r1'), JSON.stringify(known));
+    const r = await pmExtend(ports.ctx, { mission: M, items: [{ item: 'g2', type: 'goal', text: 'Fast on big files', quote: 'fast on big files', words: w }], openItems: ['exh.x.r1'] });
+    await engine.reconcile(M);
+    const card = ports.scheduler.queued('architect-repair').map((t) => t.card as unknown as ArchitectRepairCard).find((c) => c.repair.id === r.repair)!;
+    assert.deepEqual(card.openItems?.map((i) => i.id), ['exh.x.r1']);
+    assert.equal(card.entry, 'extend');
   });
 });
 

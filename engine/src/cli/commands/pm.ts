@@ -645,8 +645,9 @@ const extend: Command = {
     "a new requirement of the user, recorded as one (H-9): requirement items for what the user now wants, quoting their words, outside the set the plan was checked against (its proof, and that of every product not bound to them, stay as they are); its work starts in the same write on a repair's light path: one Architect step under the mechanical checks, no Calibrator, no feasibility review. For work whose acceptance can be written in advance; a new exploration goes into the plan",
   usage:
     'mp pm extend <mission> --words W-<n> --item <id> --text "<the item>" --quote "<verbatim from W-n>" [--type goal|acceptance|limit] [--item-words W-<m>]\n' +
-    '       several items in one filing (one Architect step): repeat --item, --text and --quote in order, one each per item; --type and --item-words, when given, once per item (--item-words: the words entry of that item, where it differs from --words)',
-  flags: { words: 'string', item: 'repeat', text: 'repeat', quote: 'repeat', type: 'repeat', 'item-words': 'repeat' },
+    '       several items in one filing (one Architect step): repeat --item, --text and --quote in order, one each per item; --type and --item-words, when given, once per item (--item-words: the words entry of that item, where it differs from --words)\n' +
+    '       --open-items <id>[,<id>...]: items left at the cap the new work is for, as on mp pm repair (its Architect gives each to a task)',
+  flags: { words: 'string', item: 'repeat', text: 'repeat', quote: 'repeat', type: 'repeat', 'item-words': 'repeat', 'open-items': 'list' },
   decides: true,
   async run(c, args) {
     const p = P(c);
@@ -668,7 +669,9 @@ const extend: Command = {
       if (own[i] !== undefined && (!WORDS.test(w) || p.ctx.memory.read((db) => wordsEntry(db, w)) === null)) throw usage(`--item-words of ${item}: there is no words entry ${w}`);
       return { item, type: (types[i] ?? 'goal') as 'goal' | 'acceptance' | 'limit', text: texts[i]!, quote: quotes[i]!, words: w };
     });
-    const r = await pmExtend(p.ctx, { mission: m, items });
+    // 4.4 (G5 with G9): open items left at the cap, named as on a repair
+    const openItems = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+    const r = await pmExtend(p.ctx, { mission: m, items, ...(openItems.length > 0 ? { openItems } : {}) });
     const named = `item${r.items.length === 1 ? '' : 's'} ${r.items.join(', ')}`;
     const lines = r.repeated
       ? [`New requirement already recorded: ${r.repair} of ${m} (${named}): nothing new was recorded.`]
@@ -676,6 +679,7 @@ const extend: Command = {
           `New requirement recorded: ${r.repair} of ${m}, ${named} (from ${[...new Set(items.map((i) => i.words))].join(', ')}).`,
           `The items are outside the set ${r.outsideOf !== null ? `PM plan ${r.outsideOf}` : 'the plan'} was checked against: its proof, and that of every product not bound to them, stay as they are; a changed plan submitted later is checked against them.`,
           'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it. Withdrawing every item before its amendment is applied ends the filing.',
+          ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
         ];
     // 4.4 (G9, P-4): an audit made before 4.4 does not bind the new items: said, with what to do
     for (const l of r.olderAudits) lines.push(`Legalization ${l} was judged before 4.4 against the items the plan was checked against alone: these items do not take its stamp off; request it again to cover them.`);

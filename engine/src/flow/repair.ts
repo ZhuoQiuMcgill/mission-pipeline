@@ -274,7 +274,7 @@ export interface NewItem {
  * same filing again (the same items, each recorded with the same text and words) returns the one recorded. The write is
  * checked against the PM plan version it read as the latest (the items' term): a plan submitted in between refuses it.
  */
-export async function recordExtension(ports: FlowPorts, req: { readonly mission: MissionId; readonly items: readonly NewItem[] }): Promise<{ readonly id: string; readonly repeated: boolean; readonly term: number; readonly versions: readonly string[] }> {
+export async function recordExtension(ports: FlowPorts, req: { readonly mission: MissionId; readonly items: readonly NewItem[]; readonly openItems?: readonly string[] }): Promise<{ readonly id: string; readonly repeated: boolean; readonly term: number; readonly versions: readonly string[] }> {
   const ctx = flowCtx(ports, req.mission);
   if (req.items.length === 0) throw new Error('a new requirement records at least one requirement item');
   if (req.items.length > EXTEND_ITEMS_MAX) throw new Error(`one filing records at most ${EXTEND_ITEMS_MAX} items (${req.items.length} given): file the rest in another one`);
@@ -299,9 +299,12 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   const pie = await planInEffect(ctx);
   if (pie === null) throw new Error(`mission ${req.mission} has no detailed plan in effect: a new requirement amends the plan in effect (plan the work with mp pm plan submit first)`);
   const recs = await newItemRecords(ctx, term, req.items.map((i) => ({ item: i.item, type: i.type, text: i.text, source: { kind: 'words' as const, words: i.words, quote: i.quote } })));
+  // 4.4 (G4, G5 with G9): a new requirement's filing may name open items left at the cap as a repair does (the same field and checks)
+  const open = [...new Set(req.openItems ?? [])].sort();
+  if (open.length > 0) await openItemsProblem(ctx, open);
   const id = `R-${existing.length + 1}`;
   const first = req.items[0]!;
-  const body: RepairBody = { id, words: first.words, kind: 'missing', text: first.quote, about: null, items: ids, entry: 'extend' };
+  const body: RepairBody = { id, words: first.words, kind: 'missing', text: first.quote, about: null, ...(open.length > 0 ? { openItems: open } : {}), items: ids, entry: 'extend' };
   await commit(ctx, `flow:extend:${req.mission}:${id}`, {
     events: [...recs.events, ev(ctx, REPAIRS_LINE, 'repair', id, body)],
     records: recs.records,
