@@ -170,8 +170,32 @@ function stacked(ids: readonly ObjectVersionId[], closure: ReadonlyMap<ObjectVer
   return true;
 }
 
+type Collected = {
+  readonly kind: 'collected';
+  readonly entries: Map<ObjectVersionId, { object: DeliveryObject; unit: ProofUnitId | null; requiredBy: Map<string, DeliveryTarget>; chain: DeliveryTarget[] }>;
+  readonly units: Map<ProofUnitId, readonly ObjectVersionId[]>;
+  readonly superseded: Map<ObjectVersionId, { by: ObjectVersionId; requiredBy: DeliveryTarget[] }>;
+};
+
+/**
+ * 4.4 (F14): the object versions the manifest of `selected` holds, sorted by id (its entries' objects), or why it
+ * has none; without the labels, the consistency check and the laying order, which a composition does not read.
+ */
+export function manifestVersions(view: DeliveryProofView, selected: readonly DeliveryTarget[]): { readonly kind: 'versions'; readonly versions: readonly DeliveryObject[] } | Extract<ManifestResult, { kind: 'unknown' | 'unplaced' }> {
+  const c = collectManifest(view, selected);
+  if (c.kind !== 'collected') return c;
+  return { kind: 'versions', versions: [...c.entries.entries()].sort(([a], [b]) => byId(a, b)).map(([, e]) => e.object) };
+}
+
 export function buildManifest(view: DeliveryProofView, selected: readonly DeliveryTarget[], options: { readonly compositionOnly?: boolean } = {}): ManifestResult {
-  const entries = new Map<ObjectVersionId, { object: DeliveryObject; unit: ProofUnitId | null; requiredBy: Map<string, DeliveryTarget>; chain: DeliveryTarget[] }>();
+  const c = collectManifest(view, selected);
+  if (c.kind !== 'collected') return c;
+  return assembleManifest(view, selected, c, options);
+}
+
+/** The versions `selected` reaches with their units, a superseded version replaced by the one laid in its place (4.1.2). */
+function collectManifest(view: DeliveryProofView, selected: readonly DeliveryTarget[]): Collected | Extract<ManifestResult, { kind: 'unknown' | 'unplaced' }> {
+  const entries: Collected['entries'] = new Map();
   const units = new Map<ProofUnitId, readonly ObjectVersionId[]>();
   const missing = new Map<string, DeliveryTarget>();
 
@@ -240,7 +264,10 @@ export function buildManifest(view: DeliveryProofView, selected: readonly Delive
     superseded.set(p, { by: top, requiredBy: [...entries.get(p)!.requiredBy.values()] });
   }
   for (const p of superseded.keys()) entries.delete(p);
+  return { kind: 'collected', entries, units, superseded };
+}
 
+function assembleManifest(view: DeliveryProofView, selected: readonly DeliveryTarget[], { entries, units, superseded }: Collected, options: { readonly compositionOnly?: boolean }): ManifestResult {
   const unitLabels = new Map<ProofUnitId, Label>();
   for (const u of units.keys()) unitLabels.set(u, view.label({ kind: 'unit', id: u }));
   const list: ManifestEntry[] = [...entries.entries()]
