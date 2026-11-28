@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
-import { flowCtx } from '../src/flow/context.ts';
+import { basisIndex, flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import type { DetailedTask } from '../src/flow/plandoc.ts';
@@ -338,5 +338,46 @@ describe('4.4 G9 compatibility: Reviewer cards queued before the block, and clai
     await pmRequirement(ports.ctx, { mission: M, item: 'g2', type: 'goal', text: 'JSON lines export', quote: 'As JSON lines', words: w });
     await drive(engine, ports.scheduler, (t, s) => (t.task === 'rev.m1.json.1' ? { handBack: reviewer(t.card as never, 'pass') } : happyScript(M)(t, s)));
     assert.deepEqual(claimed<ReviewerCard>(ports, 'rev.m1.json.1').requirementItems?.map((i) => i.text), ['JSON lines export']);
+  });
+});
+
+describe('4.4 G9 review round 1: the item a filing gives its work stays with it', () => {
+  it('p12-2: an item withdrawn after a task took it through a filing and before its product: the product keeps it in its contract and the Reviewer\'s binding keeps its last version; the product reads basis withdrawn and a decider is asked', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }], 'Please export JSON.');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'a new task' } } : t.task.startsWith('con.m1.json.') ? null : happyScript(M)(t, s)));
+    assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g2'], 'the task took it');
+    assert.equal(await acceptedOf(ports, 'json'), undefined, 'no product yet');
+    const g2 = (await basisIndex(flowCtx(ports, M))).current.get('item.m1.g2')!;
+    await withdrawItem(ports, { mission: M, item: 'g2', reason: 'taken back after the amendment' });
+    await drive(engine, ports.scheduler, happyScript(M));
+    const product = (await acceptedOf(ports, 'json'))!;
+    assert.ok((await contractOf(ports, product)).includes('item.m1.g2'), 'kept in the product\'s contract');
+    assert.ok(ports.ledger.content.getList(ports.scheduler.card<ReviewerCard>('rev.m1.json.1').binding.bases as never).includes(g2), 'the queued Reviewer binding keeps its last version');
+    const j = (await ports.ledger.records(['judgment'])).map((c) => c.record).find((r) => r.judgment === 'j.rev.m1.json.1')!;
+    assert.ok(ports.ledger.content.getList(j.bases).includes(g2), 'the judgment is bound to it');
+    assert.equal((await labels(ports, [product]))[product], 'basis-withdrawn');
+    assert.equal((await labels(ports, ['pmplan.m1.1']))['pmplan.m1.1'], 'proven', 'the plan keeps its proof');
+    await engine.reconcile(M);
+    const esc = (await ports.ledger.events<{ subject: string }>({ mission: M, line: 'secretary', event: 'escalation' })).find((e) => e.key === `withdrawn.${product}`);
+    assert.equal(esc?.body.subject, 'task:json', 'the existing withdrawn-basis escalation runs');
+  });
+
+  it('p12-3: a reopen\'s item goes with the accepted product\'s later attempts: a revision sends it back to review, the Reviewer asks for rework, and attempt 3 is still bound to it', async () => {
+    const { ports, engine } = await setup('stable');
+    await extend(ports, [{ item: 'g2', text: 'Rows keep their order', quote: 'keep the rows in order' }], 'Please keep the rows in order.');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [{ task: 'impl', issue: 'keep the rows in order' }], add: [], note: 'impl writes the rows' } } : happyScript(M)(t, s)));
+    assert.equal(await acceptedOf(ports, 'impl'), 'prod.con.m1.impl.2');
+    assert.ok((await contractOf(ports, 'prod.con.m1.impl.2')).includes('item.m1.g2'));
+    const w = say(ports, 'Keep them in the order of the file.');
+    await pmRequirement(ports.ctx, { mission: M, item: 'g2', type: 'goal', text: 'Rows keep the file order', quote: 'in the order of the file', words: w });
+    let failed = false;
+    const ran = await drive(engine, ports.scheduler, (t, s) => {
+      if (t.card.seat === 'reviewer' && t.task.startsWith('rev.m1.impl.') && !failed) { failed = true; return { handBack: reviewer(t.card as never, 'rework') }; }
+      return happyScript(M)(t, s);
+    });
+    assert.ok(failed && ran.includes('con.m1.impl.3'), `a rework after the acceptance: ${ran.join(', ')}`);
+    assert.ok((await contractOf(ports, 'prod.con.m1.impl.3')).includes('item.m1.g2'), 'attempt 3 is bound to the item');
+    assert.ok(claimed<ConstructorCard>(ports, 'con.m1.impl.3').requirementItems.some((i) => i.id === 'item.m1.g2' && i.text === 'Rows keep the file order'), 'and its Constructor card shows it at the claim');
   });
 });

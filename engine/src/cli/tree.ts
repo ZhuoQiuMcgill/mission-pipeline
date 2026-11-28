@@ -43,7 +43,7 @@ import { judgmentStates, labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof, 
 import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
-import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
+import { attemptReopenRepairs, builtOnOlder, lineAcceptance } from '../flow/execution.ts';
 import { acceptanceSummary, riskRecord, withRiskText, type RiskRecord } from '../flow/riskItems.ts';
 import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverBy, waiverEnds, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
@@ -238,8 +238,10 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
     // 4.4 (G9): the filings (repairs, new requirements), the tasks their amendments added, and what each was
     const filings = new Map<string, { readonly entry: string | null }>();
     const addedBy = new Map<string, { readonly repair: string; readonly dplan: string }>();
+    const taskEvents = new Map<string, Array<{ revision: number; event: string; key: string; body: unknown }>>();
     for (const f of flows) {
       byKey.set(flowKey(f.mission, f.line, f.event, f.key), f);
+      if (f.line.startsWith('task:')) taskEvents.set(`${f.mission}/${f.line}`, [...(taskEvents.get(`${f.mission}/${f.line}`) ?? []), { revision: f.rev, event: f.event, key: f.key, body: f.body }]);
       if (f.line === SECRETARY_LINE && f.event === 'escalation' && typeof f.body['task'] === 'string') escalationsOfTask.set(f.body['task'], [...(escalationsOfTask.get(f.body['task']) ?? []), f]);
       if (f.line === PLAN_LINE && f.event === 'pm-plan-effective') effectivePlans.push(f);
       if (f.line === REPAIRS_LINE && f.event === 'repair') filings.set(`${f.mission}/${f.key}`, { entry: typeof f.body['entry'] === 'string' ? f.body['entry'] : null });
@@ -248,14 +250,9 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
     // a product made under a later plan that carried the task over was reviewed with that plan: only one made under
     // the plan the filing amended came with the filing alone
     const cameWith = (mission: string, task: string, k: number, product: string): string | null => {
-      // the reopen whose loop attempt k is on (execution.ts attemptReopenRepair: until one of its attempts is accepted)
-      let reopened: string | null = null;
-      for (let j = k; j >= 1; j--) {
-        if (j < k && byKey.has(flowKey(mission, `task:${task}`, 'accepted', String(j)))) break;
-        const rw = byKey.get(flowKey(mission, `task:${task}`, 'rework', String(j)))?.body;
-        const by = (rw?.['reopen'] as Json | undefined)?.['kind'] === 'repair' && rw?.['loop'] !== undefined ? String((rw['reopen'] as Json)['repair']) : null;
-        if (by !== null) { reopened = by; break; }
-      }
+      // the latest reopen of a filing attempt k came under (execution.ts attemptReopenRepairs: its later attempts too,
+      // the accepted ones and the reworks after them, until a new card of the task)
+      const reopened = attemptReopenRepairs(taskEvents.get(`${mission}/task:${task}`) ?? [], k).at(-1) ?? null;
       const added = addedBy.get(`${mission}/${task}`);
       const relies = ((objects.get(product)?.['reviews'] ?? []) as Json[]).flatMap((r) => (r['review'] === 'reviewer' ? ((r['reliesOn'] ?? []) as string[]) : []));
       const by = reopened ?? (added !== undefined && relies.includes(added.dplan) ? added.repair : undefined);

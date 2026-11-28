@@ -8,7 +8,7 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { attemptPast, attemptReopenRepair, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage, withAttemptItems } from '../../flow/execution.ts';
+import { attemptPast, attemptReopenRepairs, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage, withAttemptItems } from '../../flow/execution.ts';
 import { acceptedEntry } from '../../flow/repair.ts';
 import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
 import { repairItemsBlock, repairPlanMaterial } from './architect.ts';
@@ -128,9 +128,12 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
   const lineOf = (id: string): FlowEvent[] => lines.get(`task:${id}`) ?? [];
   // 4.4 (G9): the requirement items a filing's reopen binds attempt k of a task to (flow/execution.ts attemptItems, from the same records)
   const reopenItemsOf = (id: string, k: number): string[] => {
-    const repair = attemptReopenRepair(lineOf(id), k);
-    const d = repair === null ? undefined : events.find((e) => e.line === 'repairs' && e.event === 'decided' && e.key === repair)?.body as { reopen?: ReadonlyArray<{ task: string; items?: readonly string[] }> } | undefined;
-    return [...(d?.reopen?.find((x) => x.task === id)?.items ?? [])];
+    const out: string[] = [];
+    for (const repair of attemptReopenRepairs(lineOf(id), k)) {
+      const d = events.find((e) => e.line === 'repairs' && e.event === 'decided' && e.key === repair)?.body as { reopen?: ReadonlyArray<{ task: string; items?: readonly string[] }> } | undefined;
+      for (const l of d?.reopen?.find((x) => x.task === id)?.items ?? []) if (!out.includes(l)) out.push(l);
+    }
+    return out;
   };
   // 4.4 (G5, p10-5): the items a card lists, each with the issue it is about (a finding of a 4.3 acceptance: its issue record)
   const cardItems = (names: readonly string[]) => {
