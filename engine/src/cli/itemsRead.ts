@@ -45,6 +45,8 @@ export interface ItemStateView {
   /** Its acceptances with risk: the distinct items they created or carried that are still open, and the risk sentences of 4.3 acceptances (not recorded). */
   readonly open: number;
   readonly notRecorded: number;
+  /** 4.4 (F10): of the open ones, those to verify (kind verify: a standard that could not be verified, or one a person checks). */
+  readonly toVerify: number;
   readonly tasks: readonly TaskStateView[];
   /** The proof of its accepted outputs (null: none accepted). */
   readonly proof: string | null;
@@ -100,12 +102,20 @@ function landedOf(db: Db, mission: string, delivery: string): boolean {
   return false;
 }
 
-/** p10-4: the items the tasks' current acceptances with risk created or carried, still open (distinct), and the 4.3 sentences. */
-function openOn(record: RiskRecord, tasks: readonly TaskStateView[], lines: ReadonlyMap<string, readonly Ev[]>): { open: number; notRecorded: number } {
+/**
+ * p10-4: the items the tasks' current acceptances with risk created or carried, still open (distinct), and the 4.3
+ * sentences; 4.4 (F10): with the open items of the standards a person checks that the tasks' current acceptances
+ * wrote (those of their accepted attempts), counted with the others, and how many of those open are to verify.
+ */
+function openOn(record: RiskRecord, tasks: readonly TaskStateView[], lines: ReadonlyMap<string, readonly Ev[]>): { open: number; notRecorded: number; toVerify: number } {
   const byId = new Map(record.items.map((i) => [i.id, i]));
   const open = new Set<string>();
   let notRecorded = 0;
   for (const t of tasks) {
+    if (t.state === 'accepted' || t.state === 'accepted with risk') {
+      const k = lineAcceptance(lines.get(`task:${t.task}`) ?? []).k;
+      for (const i of record.items) if (i.why === 'person' && i.task === t.task && i.attempt === k && i.closed === null) open.add(i.id);
+    }
     if (t.state !== 'accepted with risk') continue;
     const esc = currentRiskEscalation(lines.get(`task:${t.task}`) ?? []);
     const a = esc === null ? undefined : acceptanceOf(record, t.task, esc);
@@ -115,7 +125,7 @@ function openOn(record: RiskRecord, tasks: readonly TaskStateView[], lines: Read
     if (s.legacy) notRecorded += s.open.length;
     else for (const id of s.open) open.add(id);
   }
-  return { open: open.size, notRecorded };
+  return { open: open.size, notRecorded, toVerify: [...open].filter((id) => byId.get(id)?.kind === 'verify').length };
 }
 
 /** `mp read items <mission>`: one line per requirement item and one per repair, with its state (one snapshot). */
@@ -190,8 +200,9 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
 
 /** One line of `mp read items` (and its statements). */
 export function itemStateLines(v: ItemStateView): string[] {
-  const risk = v.state === 'accepted with risk' || v.tasks.some((t) => t.state === 'accepted with risk')
-    ? ` (${v.open} open${v.notRecorded > 0 ? `, ${v.notRecorded} risk sentence(s) of acceptances made before 4.4: what became of them is not recorded` : ''})`
+  // 4.4 (F10): an accepted item with a standard a person checks still open says so too
+  const risk = v.state === 'accepted with risk' || v.tasks.some((t) => t.state === 'accepted with risk') || v.open > 0
+    ? ` (${v.open} open${v.toVerify > 0 ? `, ${v.toVerify} of them to verify` : ''}${v.notRecorded > 0 ? `, ${v.notRecorded} risk sentence(s) of acceptances made before 4.4: what became of them is not recorded` : ''})`
     : '';
   const head = v.kind === 'requirement' ? `[${v.id}] ${v.type}${v.words !== null ? `, ${v.words}` : ''}` : `[${v.id}] repair (${v.type}), the user's words ${v.words}`;
   const tasks = v.tasks.length === 0 ? '' : `; tasks: ${v.tasks.map((t) => `${t.task} ${t.detail !== undefined ? `(${t.detail})` : t.state}`).join(', ')}`;

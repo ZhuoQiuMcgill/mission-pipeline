@@ -2,6 +2,9 @@
 // At an acceptance with risk the flow writes one open item for each risk accepted, from the sentences the
 // acceptance stores (a standard not met or unclear, an issue not fixed, a finding, a failed run, and any
 // other reason it stores, which keeps the kind `fix`). A Reviewer's deferral of an issue is an open item too.
+// 4.4 (F10): a standard the Reviewer could not verify, accepted with risk, is an item of kind `verify` with its
+// standard and what is needed, from the structured copy; a standard a person checks is one too, written in the
+// write that accepts its task (key vfy.<task>.<attempt>.<hash>, one per accepted attempt and standard).
 // An item is taken when a task's card names it (`openItems`, written by an Architect's re-plan or repair);
 // that task's cards list it and its Reviewer answers it (fixed, not fixed or unclear, on the review event).
 // It is closed when that task is accepted and the review of the accepted attempt answered it fixed, whether
@@ -9,7 +12,7 @@
 // verified`). Accepted again without it fixed, it stays open and its carry count rises. Nothing happens by
 // itself and nobody is prompted: no owner, no assignment, no count in an inbox, no block.
 //
-//   line "open-items", event "open-item", key <escalation>.r<n> | dfr.<task>.<hash>: RiskItemBody
+//   line "open-items", event "open-item", key <escalation>.r<n> | dfr.<task>.<hash> | vfy.<task>.<attempt>.<hash>: RiskItemBody
 //   line "open-items", event "open-item-closed", key <id>: ItemClosedBody
 //   line "verified", event "verified", key <subject>@<W-n>: VerifiedBody
 //
@@ -18,14 +21,18 @@
 
 import { shortHash, safeId } from './context.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE } from './openItems.ts';
-import { cardChangedBy, repairOfTask, type AmendmentEntry, type DetailedPlanDoc } from './plandoc.ts';
+import { SECRETARY_LINE, cardChangedBy, repairOfTask, type AmendmentEntry, type DetailedPlanDoc } from './plandoc.ts';
 
 export const OPEN_ITEM_CLOSED = 'open-item-closed';
 export const VERIFIED_LINE = 'verified';
 export const VERIFIED = 'verified';
 
-/** fix: a standard not met or unclear, an issue not fixed, or a reason of another form; finding; run: a failed program run; deferred: a Reviewer deferred the issue. */
-export type RiskKind = 'fix' | 'finding' | 'run' | 'deferred';
+/**
+ * fix: a standard not met or unclear, an issue not fixed, or a reason of another form; finding; run: a failed program
+ * run; deferred: a Reviewer deferred the issue; verify (4.4, F10): a standard its Reviewer could not verify, accepted
+ * with what would be needed, or a standard a person checks, written when its task is accepted.
+ */
+export type RiskKind = 'fix' | 'finding' | 'run' | 'deferred' | 'verify';
 
 export interface RiskItemBody {
   readonly id: string;
@@ -34,13 +41,61 @@ export interface RiskItemBody {
   /** The task and attempt it came from. */
   readonly task: string;
   readonly attempt: number;
-  /** The escalation whose acceptance with risk left it (absent: a deferral, left by a review). */
+  /** The escalation whose acceptance with risk left it (absent: a deferral, left by a review; a standard a person checks). */
   readonly escalation?: string;
-  readonly why: 'risk' | 'deferred';
+  /** risk: an acceptance with risk left it; deferred: a review deferred it; person: a standard a person checks, its task accepted. */
+  readonly why: 'risk' | 'deferred' | 'person';
   /** The reference into the Reviewer's structured hand-back: the standard or the issue it names (absent: none). */
   readonly ref?: { readonly standard: string } | { readonly issue: string };
   /** A deferral: the review that deferred it. */
   readonly review?: string;
+  /** 4.4 (F10): a standard that could not be verified: what would be needed to verify it (from the structured copy). */
+  readonly needed?: string;
+}
+
+/** 4.4 (F10): a standard its Reviewer could not verify from what it can see, with what would be needed (the review event's and the escalation's structured copy). */
+export interface Unverifiable {
+  readonly standard: string;
+  readonly reason: string;
+  readonly needed: string;
+}
+
+/** 4.4 (F10): the sentence of such a standard among a review's issues and an acceptance's risks, in the form a standard not met takes ("[S1] not met: why"). */
+export function unverifiableLine(u: Unverifiable): string {
+  return `[${u.standard}] cannot be verified: ${u.reason}; needed: ${u.needed}`;
+}
+
+/** The structured copies a record carries (`unverifiable` of an escalation's facts or of a review event), kept when well formed. */
+function unverifiableList(x: unknown): Unverifiable[] {
+  if (!Array.isArray(x)) return [];
+  return x.filter((u): u is Unverifiable => typeof u === 'object' && u !== null && typeof (u as Unverifiable).standard === 'string' && typeof (u as Unverifiable).reason === 'string' && typeof (u as Unverifiable).needed === 'string');
+}
+
+/**
+ * 4.4 (F10, the seam with p9): the standards an acceptance with risk took on as not verifiable, from the structured
+ * copies where they exist: its escalation's `facts.unverifiable`, then the accepted review's `unverifiable`. The writer
+ * and the read derive them alike; an acceptance of 4.3 has neither, and its sentences keep the kind they had.
+ */
+export function unverifiableOf(facts: unknown, review: { readonly unverifiable?: unknown } | undefined): Unverifiable[] {
+  const out = new Map<string, Unverifiable>();
+  const f = typeof facts === 'object' && facts !== null ? (facts as { unverifiable?: unknown }).unverifiable : undefined;
+  for (const u of [...unverifiableList(f), ...unverifiableList(review?.unverifiable)]) if (!out.has(unverifiableLine(u))) out.set(unverifiableLine(u), u);
+  return [...out.values()];
+}
+
+/**
+ * 4.4 (F10): the id of the open item of a standard a person checks: one per task, accepted attempt and standard (the
+ * person checks the work accepted; a re-bind of the same attempt accepts the same work and writes none again).
+ */
+export const personItemId = (task: string, attempt: number, standard: string): string => safeId(`vfy.${task}.${attempt}.${shortHash(standard)}`);
+
+/**
+ * 4.4 (F10; the plan's F10: a standard a person checks starts as something to verify): the open items of a task's
+ * standards whose check is `person`, written in the write that accepts attempt `attempt` (by a pass or by a ruling).
+ * Nothing waits for them and they block nothing; a plan of 4.3 has no such standard, so none is written for it.
+ */
+export function personItemBodies(task: { readonly id: string; readonly standards: ReadonlyArray<{ readonly id: string; readonly text: string; readonly check?: string | undefined }> }, attempt: number): RiskItemBody[] {
+  return task.standards.filter((s) => s.check === 'person').map((s) => ({ id: personItemId(task.id, attempt, s.id), kind: 'verify', text: `[${s.id}] is checked by a person: ${s.text}`, task: task.id, attempt, why: 'person', ref: { standard: s.id } }));
 }
 
 /** Closed on the user's words (`mp pm open-item close`, or `mp pm verified` naming it: `statement`). */
@@ -90,13 +145,21 @@ export function riskOf(reason: string): { readonly kind: RiskKind; readonly ref?
  * reason that is an open item the accepted review answered not fixed (`carried`) is that item carried, not a new
  * one; any other reason, whatever its form (p10-1: a sentence that only looks like one), is an item.
  */
-export function riskItemBodies(task: string, attempt: number, escalation: string, reasons: readonly string[], findings: ReadonlyMap<string, string> = new Map(), carried: ReadonlySet<string> = new Set()): RiskItemBody[] {
+export function riskItemBodies(task: string, attempt: number, escalation: string, reasons: readonly string[], findings: ReadonlyMap<string, string> = new Map(), carried: ReadonlySet<string> = new Set(), unverifiable: readonly Unverifiable[] = []): RiskItemBody[] {
   const seen = new Set<string>();
   const out: RiskItemBody[] = [];
+  const structured = new Map(unverifiable.map((u) => [unverifiableLine(u), u]));
   for (const r of reasons) {
     const c = CARRIED.exec(r);
     if ((c !== null && carried.has(c[1]!)) || seen.has(r)) continue;
     seen.add(r);
+    // 4.4 (F10): a standard that could not be verified is something to verify, its standard and what is needed taken
+    // from the structured copy (never parsed from the sentence)
+    const u = structured.get(r);
+    if (u !== undefined) {
+      out.push({ id: `${escalation}.r${out.length + 1}`, kind: 'verify', ref: { standard: u.standard }, needed: u.needed, text: r, task, attempt, escalation, why: 'risk' });
+      continue;
+    }
     const kind = riskOf(r);
     // 4.4 (p10-5): a finding names the issue record it became, when the accepted review's hand-back says which
     const issue = kind.kind === 'finding' ? findings.get(r) : undefined;
@@ -142,7 +205,7 @@ export interface RiskItem extends RiskItemBody {
 }
 
 /** A review as the outcome of an item reads it: its attempt, its answers to open items, the deferred issues it answered fixed. */
-type ReviewLike = { readonly k?: unknown; readonly judgment?: string; readonly items?: readonly ItemAnswer[]; readonly fixed?: readonly string[] };
+type ReviewLike = { readonly k?: unknown; readonly judgment?: string; readonly items?: readonly ItemAnswer[]; readonly fixed?: readonly string[]; readonly unverifiable?: unknown };
 
 /** The items a review answered not fixed or unclear: an acceptance resting on it carries them (p10-1: only those). */
 export function carriedBy(review: { readonly items?: readonly ItemAnswer[] } | undefined): Set<string> {
@@ -216,7 +279,10 @@ export interface RiskRecord {
 export function riskRecord(events: readonly Ev[]): RiskRecord {
   const recorded = new Map<string, { body: RiskItemBody; revision: number }>();
   const closures: Array<{ revision: number; id: string; closure: ItemClosure }> = [];
+  // 4.4 (F10): each escalation's facts, for the structured copy of the standards that could not be verified
+  const facts = new Map<string, unknown>();
   for (const e of events) {
+    if (e.line === SECRETARY_LINE && e.event === 'escalation') facts.set(e.key, (e.body as { facts?: unknown }).facts);
     if (e.line !== OPEN_ITEMS_LINE) continue;
     if (e.event === OPEN_ITEM && (e.body as { kind?: unknown }).kind !== 'question' && !recorded.has(e.key)) recorded.set(e.key, { body: e.body as RiskItemBody, revision: e.revision });
     if (e.event === OPEN_ITEM_CLOSED) {
@@ -232,11 +298,13 @@ export function riskRecord(events: readonly Ev[]): RiskRecord {
   const created = new Map<Acceptance, string[]>();
   for (const a of withRisk) {
     const esc = a.body.decision!.escalation!;
-    const bodies = riskItemBodies(a.task, a.k, esc, acceptanceReasons(a.body, esc), new Map(), carriedBy(a.review));
+    const bodies = riskItemBodies(a.task, a.k, esc, acceptanceReasons(a.body, esc), new Map(), carriedBy(a.review), unverifiableOf(facts.get(esc), a.review));
     for (const b of bodies) if (!all.has(b.id)) all.set(b.id, { body: b, revision: a.revision, recorded: false });
     // what it created: its recorded items (its escalation's) and the ones its sentences give (p10-r2-2: a batch an
     // interruption left out is still among them)
-    const mine = [...recorded.values()].filter((r) => r.body.escalation === esc && r.body.task === a.task).map((r) => r.body.id);
+    // 4.4 (F10): and the standards a person checks its write left to verify (its task and attempt), so status, the
+    // tree and `mp read items` count the same items
+    const mine = [...recorded.values()].filter((r) => (r.body.escalation === esc || r.body.why === 'person') && r.body.task === a.task && (r.body.why !== 'person' || r.body.attempt === a.k)).map((r) => r.body.id);
     created.set(a, [...new Set([...mine, ...bodies.map((b) => b.id)])]);
   }
   // the timeline: acceptances and closures on the user's words, in revision order

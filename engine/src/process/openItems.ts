@@ -193,7 +193,10 @@ export function answerOpenItem(ctx: ProcessContext, req: { readonly op: string; 
     const item = questionViews(tx, tx.data, at.mission, events).find((i) => i.id === at.id);
     if (item === undefined) {
       // 4.4 (G5): an item left at the cap is not answered: the record closes it, or the user's words do
-      if (riskItemsOf(events).some((i) => i.id === at.id)) throw new ProcessError('NOT_ALLOWED', `open item ${at.id} was left at an acceptance with risk: it is not answered but closed, when a task that takes it (a re-plan or a repair names it) is accepted with it answered fixed, or on the user's words: mp pm open-item close ${at.mission}/${at.id} --words W-<n> --reason "…"`);
+      const risk = riskItemsOf(events).find((i) => i.id === at.id);
+      // 4.4 (F10): a standard a person checks is closed on the user's statement, as any item left at the cap is
+      const how = risk?.why === 'person' ? 'is a standard a person checks' : risk?.why === 'deferred' ? 'was deferred by its Reviewer' : 'was left at an acceptance with risk';
+      if (risk !== undefined) throw new ProcessError('NOT_ALLOWED', `open item ${at.id} ${how}: it is not answered but closed, when a task that takes it (a re-plan or a repair names it) is accepted with it answered fixed, or on the user's words: mp pm open-item close ${at.mission}/${at.id} --words W-<n> --reason "…"${risk.kind === 'verify' ? `, or the user's statement that it was checked: mp pm verified ${at.mission} <item|repair> --words W-<n> --open-items ${at.id}` : ''}`);
       throw new ProcessError('NOT_READY', `no open item ${at.id} in mission ${at.mission} (mp read open-items ${at.mission} lists them)`);
     }
     if (item.answer !== null) {

@@ -43,7 +43,7 @@ import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVers
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
-import { ITEM_BATCH, acceptanceReasons, cardItemNames, carriedBy, deferredItemBody, issueResolver, itemIssue, itemIssueLine, riskItemBodies, riskItemsOf, takenItems, type IssueNote, type ItemAnswer, type RiskItem, type RiskItemBody } from './riskItems.ts';
+import { ITEM_BATCH, acceptanceReasons, cardItemNames, carriedBy, deferredItemBody, issueResolver, itemIssue, itemIssueLine, personItemBodies, riskItemBodies, riskItemsOf, takenItems, unverifiableLine, unverifiableOf, type IssueNote, type ItemAnswer, type RiskItem, type RiskItemBody } from './riskItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -209,10 +209,8 @@ export function onlyUnverifiable(r: Pick<ReviewBody, 'verdict' | 'issues' | 'unv
   return r.verdict !== 'pass' && n > 0 && r.issues.length === n && (r.reopen ?? []).length === 0;
 }
 
-/** 4.4 (F10): the issue line of a standard the Reviewer could not verify, in the form a standard not met takes ("[S1] not met: why"). */
-export function unverifiableLine(u: { readonly standard: string; readonly reason: string; readonly needed: string }): string {
-  return `[${u.standard}] cannot be verified: ${u.reason}; needed: ${u.needed}`;
-}
+/** 4.4 (F10): the issue line of a standard the Reviewer could not verify, in the form a standard not met takes ("[S1] not met: why"); one function with the open items' reading of it (flow/riskItems.ts). */
+export { unverifiableLine };
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
 export const taskLineage = (mission: string, task: string): string => safeId(`task.${mission}.${idPart(task)}`);
@@ -962,7 +960,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
         if (e === 'wait') return;
         if (e !== null) return rebuildOnAccepted(ctx, t, k, e);
       }
-      await commit(ctx, `flow:accepted:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'accepted', String(k), { k, product: product.object, judgment: review.judgment })] });
+      // 4.4 (F10): a standard a person checks starts as something to verify, in the write that accepts the task
+      await commit(ctx, `flow:accepted:${ctx.mission}:task:${idPart(t.id)}:${k}`, { events: [ev(ctx, lineName, 'accepted', String(k), { k, product: product.object, judgment: review.judgment }), ...await personItems(ctx, t, k)] });
       return;
     }
     case 'rework':
@@ -1654,7 +1653,7 @@ async function acceptRebindWithRisk(ctx: FlowCtx, t: DetailedTask, k: number, e:
   await commitCarrying(
     ctx,
     `flow:rebound-risk:${ctx.mission}:task:${idPart(t.id)}:${rebind}`,
-    [ev(ctx, taskLine(t.id), 'rebound', rebind, body), ...items.first],
+    [ev(ctx, taskLine(t.id), 'rebound', rebind, body), ...items.first, ...await personItems(ctx, t, k)],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
   await writeItemBatches(ctx, items.rest);
@@ -1711,7 +1710,7 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   await commitCarrying(
     ctx,
     `flow:accepted-risk:${ctx.mission}:task:${idPart(t.id)}:${k}`,
-    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }), ...items.first],
+    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }), ...items.first, ...await personItems(ctx, t, k)],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
   await writeItemBatches(ctx, items.rest);
@@ -1735,7 +1734,21 @@ async function acceptanceItems(ctx: FlowCtx, task: string, k: number, escalation
  */
 async function itemBodiesOf(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<RiskItemBody[]> {
   const body = review === undefined ? undefined : (await eventOf<ReviewBody>(ctx, taskLine(task), 'review', review))?.body;
-  return riskItemBodies(task, k, escalation, reasons, await findingIssues(ctx, review), carriedBy(body));
+  // 4.4 (F10): a standard that could not be verified, from the structured copy (the escalation's facts, the review's)
+  const facts = (await eventOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation', escalation))?.body.facts;
+  return riskItemBodies(task, k, escalation, reasons, await findingIssues(ctx, review), carriedBy(body), unverifiableOf(facts, body));
+}
+
+/**
+ * 4.4 (F10): the open items of the standards a person checks, for the write that accepts attempt k of the task (by
+ * a pass or by a ruling): one per accepted attempt and standard, those not recorded yet (a re-bind of the attempt writes
+ * none again). Nothing waits for them; they block nothing.
+ */
+async function personItems(ctx: FlowCtx, t: DetailedTask, k: number): Promise<FlowEventInput[]> {
+  const bodies = personItemBodies(t, k);
+  if (bodies.length === 0) return [];
+  const recorded = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  return bodies.filter((b) => !recorded.has(b.id)).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
 }
 
 /**
@@ -1866,6 +1879,7 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
       ev(ctx, taskLine(integration), 'product', String(line.k), { ...product, k: line.k } satisfies ProductBody),
       ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks, review: review.task }),
       ...items.first,
+      ...(task === undefined ? [] : await personItems(ctx, task, line.k)),
     ],
     // p10-1 (round 2): the decision's receipt names every reason it accepted, as the acceptance does
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })]);
@@ -2657,7 +2671,7 @@ async function rebindReview(
   const unverified = onlyUnverifiable(review);
   switch (unverified ? 'needs-decision' : review.verdict) {
     case 'pass':
-      await commit(ctx, `flow:rebound:${ctx.mission}:task:${idPart(t.id)}:${rb.key}`, { events: [ev(ctx, taskLine(t.id), 'rebound', rb.key, { k, n: b.n, product: b.product, judgment: review.judgment, how: 'review' } satisfies ReboundBody)] });
+      await commit(ctx, `flow:rebound:${ctx.mission}:task:${idPart(t.id)}:${rb.key}`, { events: [ev(ctx, taskLine(t.id), 'rebound', rb.key, { k, n: b.n, product: b.product, judgment: review.judgment, how: 'review' } satisfies ReboundBody), ...await personItems(ctx, t, k)] });
       kept.successors = null;
       break;
     case 'rework':

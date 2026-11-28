@@ -222,7 +222,7 @@ const repairsReadCmd: Command = {
 // 4.4 (F4; G5): what is left open and what became of it, from the record: the questions put off, and what
 // was left at the cap (an acceptance with risk's items, a Reviewer's deferrals, the risk sentences of 4.3)
 const openItemsRead: Command = {
-  group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later (who answers each, its answer), and what was left at the cap (each risk an acceptance with risk took on, each deferred issue), with its age, how often it was carried, what took it and what became of it', usage: 'mp read open-items <mission> [--open]   (--open: only those still open)', flags: { open: 'boolean' },
+  group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later (who answers each, its answer), and what was left at the cap (each risk an acceptance with risk took on, each deferred issue; kind verify: a standard that could not be verified, with what is needed, or one a person checks), with its age, how often it was carried, what took it and what became of it', usage: 'mp read open-items <mission> [--open]   (--open: only those still open)', flags: { open: 'boolean' },
   async run(c, a) {
     const m = positional(a, 0, 'mission');
     const p = P(c);
@@ -245,7 +245,8 @@ const openItemsRead: Command = {
 
 /** 4.4 (G5): one item left at the cap, from its record: where it was left, its state, and what took it. */
 function riskItemLine(i: RiskItemView, old: string): string {
-  const left = i.why === 'deferred' ? `deferred by its Reviewer ${i.review ?? ''}`.trimEnd() : `accepted with risk on ${i.escalation}`;
+  // 4.4 (F10): a standard a person checks is written when its task is accepted (one that could not be verified says in its text what is needed)
+  const left = i.why === 'deferred' ? `deferred by its Reviewer ${i.review ?? ''}`.trimEnd() : i.why === 'person' ? 'a standard a person checks, written when the task was accepted' : `accepted with risk on ${i.escalation}`;
   // p10-5: a fix that did not reach the fix tracker is said so (the issue of a 4.3 finding could not be recovered)
   const tracker = i.trackerTold === false ? ' (the fix tracker was not told: the issue this item is about could not be found)' : '';
   const state = i.closed !== null ? `closed, ${closureText(i.closed)}${tracker}` : !i.recorded ? 'not recorded as an item (an acceptance with risk made before 4.4): what became of it is not recorded' : 'open';
