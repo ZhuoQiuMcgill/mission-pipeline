@@ -316,7 +316,7 @@ const clean: Command = {
 const renew: Command = {
   group: 'pm',
   name: ['renew'],
-  summary: 'the PM\'s explicit tool after an environment change: rerun the declared commands of runs from older environments under this one, for the missions that are not closed or the one --mission names; equal outputs renew the evidence without a seat (§6.5; never a ready step)',
+  summary: 'the explicit tool after an environment change (the Secretary\'s; the PM\'s in 4.2 mode): rerun the declared commands of runs from older environments under this one, for the missions that are not closed or the one --mission names; equal outputs renew the evidence without a seat (§6.5; never a ready step)',
   usage: 'mp pm renew [--mission <m>]   (default: the open missions)',
   flags: { mission: 'string' },
   decides: true,
@@ -904,7 +904,7 @@ const answer: Command = {
   group: 'pm',
   name: ['answer'],
   summary: 'the PM\'s or the user\'s decision on an escalation in the PM inbox; carried out like a Secretary decision, by the Secretary\'s next pass while one is live (WI-24)',
-  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>"\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]] [--defer <n>[,<n>...]]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)\n       (an answer to a Constructor's questions: --defer names the questions it puts off by number; each stays an open item, answered later with mp pm open-item answer)\n       (--option ask-architect --by pm --instructions "<what you ask>": one Architect step answers a question of design; its answer is carried out, any other reply returns to the Secretary's next round; you may answer over a pending ask; not the user's own answer)`,
+  usage: `mp pm answer <mission> <escalation> --option ${OPTIONS.join('|')} --by pm (--words W-a[,W-b] | --no-words) --reason "<reason>" [--instructions "<text>"] [--extra <n>] [--findings <id>[,<id>...]] [--defer <n>[,<n>...]]\n       mp pm answer <mission> <escalation> --by user --option <option> --words W-<n> [the same --instructions, --extra, --findings, --defer]\n       (a grant on an exploration: --instructions go to the next round's cards; --findings names the findings the round is for, general ones too, and the author gets a turn on them)\n       (an answer to a Constructor's questions: --defer names the questions it puts off by number; each stays an open item, answered later with mp pm open-item answer)\n       (--option ask-architect --by pm --instructions "<what you ask>": one Architect step answers a question of design; its answer is carried out, any other reply returns to the Secretary's next round; you may answer over a pending ask; not the user's own answer)`,
   flags: { option: 'string', words: 'string', by: 'string', 'no-words': 'boolean', reason: 'string', instructions: 'string', extra: 'string', findings: 'string', defer: 'list' },
   async run(c, args) {
     const p = P(c);

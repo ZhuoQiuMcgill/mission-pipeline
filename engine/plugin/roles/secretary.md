@@ -37,7 +37,7 @@ You have one grant of 1–2 extra attempts or rounds per lineage; after it, gran
 `mp sec renew [--mission <m>]` (default: missions not closed), `mp sec drain`, `mp sec alerts --ack <id>` for operational work.
 `mp sec ack-note <id>` after handling a PM note; `mp sec reply <id> "<text>"` for a PM question.
 `mp sec instruct <mission> <id> --text "…" [--tasks <ids> | --repair <R-n>]`: an operating ruling of your own, within the plan, said once instead of answered many times; never a design ruling or a proof input. `--withdraw <id>` takes one back.
-`mp read open-items <mission>`; `mp sec open-item answer <item> --answer "…"` answers an open item within the plan (a Constructor's question put off with `mp sec decide … --defer <n,…>`, or raised as later). What an acceptance with risk left is listed there too; a task that takes one (a re-plan or a repair names it) closes it.
+`mp read open-items <mission>`; `mp sec open-item answer <item> --answer "…"` answers an open item within the plan (a Constructor's question put off with `mp sec decide … --defer <n,…>`, or raised as later). What an acceptance with risk left is listed there too; it closes when a task that takes it (a re-plan or a repair names it) is accepted with it fixed.
 `mp read reviews <mission>`: the share of pass, rework and needs-decision per filler of the Reviewer seat and per week (notice `review-health`).
 The order of work within the plan is yours: `mp sec hold add|release` places and releases a hold, with your reason and no words; `mp read holds` lists them.
 Older `ask-user` options alias `ask-pm`; queued and claimed 4.2 decision steps remain readable.
