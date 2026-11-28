@@ -539,17 +539,23 @@ async function repairStarts(ctx: ProcessContext, step: string): Promise<Readonly
   return out;
 }
 
+/** 4.4 (F5): how many times one `mp pm dispatch` checks a repair step's starts again when its claim finds the accepted work changed. */
+export const STARTS_CHECKS = 3;
+
 /**
- * `mp pm dispatch` as the CLI runs it (4.4, F5): for a repair step, the unpinned starts are checked
- * before the claim, and checked again when the claim finds the accepted work changed meanwhile.
+ * Every command-line claim of a step (4.4, F5): `mp pm dispatch`, `mp sec dispatch` and `mp sec card`.
+ * For a repair step, the unpinned starts are checked by the flow's resolver before the claim, and checked
+ * again when the claim finds the accepted work changed meanwhile, a bounded number of times; past it,
+ * nothing was claimed and the dispatch is run again. Only in-process callers (tests) use pmDispatch.
  */
 export async function pmDispatchChecked(ctx: ProcessContext, step: string, o: { readonly filledBy?: string | Filler | null } = {}): Promise<Dispatched> {
-  for (let tries = 0; ; tries++) {
+  for (let tries = 1; ; tries++) {
     const starts = await repairStarts(ctx, step);
     try {
       return pmDispatch(ctx, step, { ...o, ...(starts !== undefined ? { starts } : {}) });
     } catch (e) {
-      if (tries >= 2 || !(e instanceof ProcessError) || (e.detail as Record<string, unknown> | null)?.[STARTS_CHANGED] !== true) throw e;
+      if (!(e instanceof ProcessError) || (e.detail as Record<string, unknown> | null)?.[STARTS_CHANGED] !== true) throw e;
+      if (tries >= STARTS_CHECKS) throw new ProcessError('NOT_READY', `nothing was claimed: the accepted work of repair step ${step} changed during each of ${STARTS_CHECKS} checks of its starts; run the dispatch again`, { detail: { [STARTS_CHANGED]: true } });
     }
   }
 }

@@ -8,7 +8,7 @@ import { residentRecords, wordsAuthority } from '../memory/words.ts';
 import { stopCovers } from '../memory/stopTypes.ts';
 import type { ProcessContext } from './context.ts';
 import { advance } from './advance.ts';
-import { pmDispatch, pmNext, type Dispatched, type NextReport } from './pm.ts';
+import { pmDispatchChecked, pmNext, type Dispatched, type NextReport } from './pm.ts';
 import { dispatchView, recordServed, seatCard, seatHandback } from './seat.ts';
 import { listNotices, markNotices } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
@@ -232,7 +232,7 @@ export function currentSecretaryRound(ctx: ProcessContext, id: string) {
   return {mission: e.mission, ...secretaryRoundInputs(e.body as EscalationBody, events.filter((r) => r.mission === e.mission))};
 }
 
-export function secCard(ctx: ProcessContext, id: string): Dispatched {
+export async function secCard(ctx: ProcessContext, id: string): Promise<Dispatched> {
   const g = requireSecretary(ctx.memory, ctx.secretary);
   const round = currentSecretaryRound(ctx, id);
   const task = round.esc.task;
@@ -243,8 +243,8 @@ export function secCard(ctx: ProcessContext, id: string): Dispatched {
     const v = seatCard(ctx, existing.dispatch);
     return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: existing.cardLeaf ?? '', worktree: null, files: handBackFiles(existing.dispatch), prompt: ''};
   }
-  // 4.4 (F5): this claim prints the card to the Secretary, so it is served
-  const d = pmDispatch(ctx, task, {filledBy: g.filler});
+  // 4.4 (F5): a command-line claim takes the checked path (repair starts checked first); this one prints the card to the Secretary, so it is served
+  const d = await pmDispatchChecked(ctx, task, {filledBy: g.filler});
   recordServed(ctx, d);
   return d;
 }

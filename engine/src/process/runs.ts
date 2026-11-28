@@ -540,6 +540,8 @@ export async function runOnCommit(
     readonly cleanupRunner?: CommandRunner;
     /** Retry the recording write this many times when the memory is busy or the write ran over its budget (a detached run's worker: its result must not be lost to a moment of load). */
     readonly recordRetries?: number;
+    /** 4.4 (F5): called once the run locks are held and the checkout is made, immediately before the first command executes (a seat's run records its start); a throw runs nothing. */
+    readonly beforeExecute?: (run: string) => void;
   },
 ): Promise<{ readonly run: string; readonly runs: readonly RecordedRun[]; readonly reused: boolean; readonly leaf: string | null; readonly result: unknown }> {
   if (ctx.secretary !== null && req.alreadyAdmitted !== true) ctx.memory.write({}, (tx) => {requireSecretary(tx, ctx.secretary);});
@@ -587,6 +589,13 @@ async function executeRuns(
   const shell = commandShellFor(ctx, req.declaration);
   // a git repository at the candidate, borrowing the project's objects (checkoutRepository.ts)
   await checkoutCommit(ctx.gitCtx, { commit: req.commit, dir, repository: true });
+  // 4.4 (F5): the caller's last word before anything executes; a refusal there runs nothing (no command, no cleanup)
+  try {
+    req.beforeExecute?.(run);
+  } catch (e) {
+    removeCheckout(ctx.gitCtx, dir);
+    throw e;
+  }
   try {
     for (const [i, c] of req.commands.entries()) {
       const rel = normalizeCwd(c.cwd);

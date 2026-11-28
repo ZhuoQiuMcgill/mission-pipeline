@@ -136,7 +136,7 @@ export function renderCard(c: SeatCard): string {
       list('Interfaces to call', c.interfaces.calls.map((i) => `${i.name}: ${i.definition}`)) +
       renderPlanData(c) +
       list('Exclusive resources leased to you', c.exclusive ?? []) +
-      renderMaterials(c.materials ?? [])
+      renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
     );
   }
   return (
@@ -153,7 +153,7 @@ export function renderCard(c: SeatCard): string {
     list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`)) +
     renderPreviousReview(c) +
     renderIntegration(c) +
-    renderMaterials(c.materials ?? [])
+    renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
   );
 }
 

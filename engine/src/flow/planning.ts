@@ -46,8 +46,7 @@ import { PREVIOUS_PLAN_MATERIAL, previousPlanText, type ArchitectDecomposeCard, 
 import { normalizeCommand } from '../common/fullSuite.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
-import type { MaterialRef } from '../seat/cards/common.ts';
-import { feasibilityReport, returnedFeasibilityOf } from './handbackMaterials.ts';
+import { attach, feasibilityReport, returnedFeasibilityOf, type Attached } from './handbackMaterials.ts';
 import {
   basisIndex,
   binding,
@@ -1498,7 +1497,7 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
     revision: !revision ? null : { previous: a.previous, previousPlan: previous?.plan ?? null, mechanicalFailures: [...a.mechanicalFailures], feasibilityFindings: [...a.feasibilityFindings], instructions: [...a.instructions] },
     // the previous plan in full, read page by page (a long plan would not fit in the card's body);
     // 4.4 (F3): after a feasibility return, that review's report too (optional)
-    ...(revision && (previous !== null || feasReport !== null) ? { materials: [...(previous !== null ? [material(ctx, PREVIOUS_PLAN_MATERIAL, `Detailed plan ${a.previous} (the plan this revision revises, in full)`, previousPlanText(a.previous, previous.plan), true, 'plan')] : []), ...(feasReport !== null ? [feasReport] : [])] } : {}),
+    ...(revision ? attach([feasReport], { materials: previous !== null ? [material(ctx, PREVIOUS_PLAN_MATERIAL, `Detailed plan ${a.previous} (the plan this revision revises, in full)`, previousPlanText(a.previous, previous.plan), true, 'plan')] : [] }) : {}),
     output: {
       object: dplan,
       predecessor: a.previous,
@@ -1521,7 +1520,7 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
  * 4.4 (F3): the report of the last feasibility return a revision answers, carried through the mechanical
  * returns after it (one read of the plan line), as a material (null: no such return).
  */
-async function returnedFeasibility(ctx: FlowCtx, a: AttemptBody): Promise<MaterialRef | null> {
+async function returnedFeasibility(ctx: FlowCtx, a: AttemptBody): Promise<Attached | null> {
   if (a.previous === null) return null;
   const r = returnedFeasibilityOf(await eventsOf(ctx, PLAN_LINE), a);
   return r === null ? null : feasibilityReport(ctx, r);
@@ -1546,7 +1545,7 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
     history: { gitLog: history.gitLog, runs: [...history.runs] },
     earlierFindings: [...a.feasibilityFindings],
     binding: binding(ctx, { judgment: `j.${task}`, constraints: constraints.checks, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'feasibility', b.plan) }),
-    ...(report !== null ? { materials: [report] } : {}),
+    ...attach([report]),
   };
   await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });

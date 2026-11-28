@@ -10,7 +10,7 @@ import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db }
 import type { DataStore } from '../../memory/data.ts';
 import { attemptPast, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage } from '../../flow/execution.ts';
 import { acceptedEntry } from '../../flow/repair.ts';
-import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attemptOfPlan, claimsMaterial, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
+import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
 import { repairPlanMaterial } from './architect.ts';
 import type { MaterialRef } from './common.ts';
 import { DetailedPlanDoc, PmPlanDoc, amendedPlan, latestEffectiveOf, type DetailedTask, type StoredDetailedPlan } from '../../flow/plandoc.ts';
@@ -122,11 +122,25 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
   // 4.4 (F3): a material the card lacks (it was queued by 4.3, or its hand-back was not readable then), from the recorded hand-backs
   const put = (d: string): string => data.put(d);
   const readers = o.handBack !== undefined && o.leaf !== undefined ? { handBack: o.handBack, leaf: o.leaf } : null;
-  const lacks = (materials: readonly MaterialRef[] | undefined, id: string): boolean => readers !== null && !(materials ?? []).some((m) => m.id === id);
-  const plus = (materials: MaterialRef[] | undefined, m: MaterialRef | null): MaterialRef[] | undefined => (m === null ? materials : [...(materials ?? []), m]);
-  const feasibility = (dplan: string): MaterialRef | null => {
+  type WithMaterials = { materials?: MaterialRef[] | undefined; materialsNotAttached?: string[] | undefined };
+  const lacks = (c: WithMaterials, id: string): boolean => readers !== null && !(c.materials ?? []).some((m) => m.id === id) && !(c.materialsNotAttached ?? []).some((l) => l.startsWith(`[${id}] `));
+  // a material that cannot be built or stored never refuses the claim: the card carries one line in its place
+  const plus = (c: WithMaterials, id: string, task: string, build: () => Attached | null): void => {
+    let m: Attached | null;
+    try {
+      m = build();
+    } catch (e) {
+      const why = (e as { code?: unknown }).code;
+      m = { notAttached: `[${id}] could not be attached${typeof why === 'string' ? ` (${why})` : ''}; read the hand-back of step ${task}` };
+    }
+    if (m === null) return;
+    const a = attach([m], c);
+    if (a.materials !== undefined) c.materials = a.materials;
+    if (a.materialsNotAttached !== undefined) c.materialsNotAttached = a.materialsNotAttached;
+  };
+  const feasibility = (c: WithMaterials, dplan: string): void => {
     const r = readers === null ? null : returnedFeasibilityOf(events, attemptOfPlan(events, dplan));
-    return r === null ? null : feasibilityReportMaterial(put, sourceAt(readers!, r.review), r);
+    if (r !== null) plus(c, FEASIBILITY_REPORT_MATERIAL, r.review, () => feasibilityReportMaterial(put, sourceAt(readers!, r.review), r));
   };
   switch (card.seat) {
     case 'architect-repair': {
@@ -153,7 +167,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
         if (!sel.pinned) {
           const checked = o.starts?.get(sel.product);
           const holds = checked ?? (queued.has(sel.product) ? true : o.starts !== undefined ? undefined : noRecordedPrerequisites(sel.product));
-          if (holds === undefined) throw new ProcessError('NOT_READY', `the accepted work of ${t.id} changed while the claim of ${spec.task} checked it; claim it again`, { detail: { [STARTS_CHANGED]: true } });
+          if (holds === undefined) throw new ProcessError('NOT_READY', `nothing was claimed: the accepted work of ${t.id} changed while the claim of ${spec.task} checked it; run the dispatch again`, { detail: { [STARTS_CHANGED]: true } });
           if (!holds) return [];
         }
         return [acceptedEntry(t.id, lineOf(t.id), sel.product, object(sel.product)?.source?.commit)];
@@ -216,8 +230,9 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       // 4.4 (F3): a later attempt's past, when the card lacks it
       const k = (lineOf(task.id).find((e) => e.event === 'dispatched' && e.key === spec.task)?.body as { k?: number } | undefined)?.k;
       const was = k === undefined ? null : attemptPast(lineOf(task.id), k);
-      if (was !== null && was.review !== null && lacks(card.materials, PREVIOUS_REVIEW_MATERIAL)) card.materials = plus(card.materials, previousReviewMaterial(put, sourceAt(readers!, was.review), { review: was.review, attempt: was.attempt }));
-      if (was !== null && lacks(card.materials, PREVIOUS_HANDBACK_MATERIAL)) card.materials = plus(card.materials, previousHandBackMaterial(put, sourceAt(readers!, was.constructor), { attempt: was.attempt }));
+      const review = was?.review ?? null;
+      if (was !== null && review !== null && lacks(card, PREVIOUS_REVIEW_MATERIAL)) plus(card, PREVIOUS_REVIEW_MATERIAL, review, () => previousReviewMaterial(put, sourceAt(readers!, review), { review, attempt: was.attempt }));
+      if (was !== null && lacks(card, PREVIOUS_HANDBACK_MATERIAL)) plus(card, PREVIOUS_HANDBACK_MATERIAL, was.constructor, () => previousHandBackMaterial(put, sourceAt(readers!, was.constructor), { attempt: was.attempt }));
       break;
     }
     case 'reviewer': {
@@ -243,7 +258,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       Object.assign(card, planData(contract === undefined ? null : (JSON.parse(data.text(contract.content)) as StoredDetailedPlan).plan));
       // 4.4 (F3, E-4): the Constructor's claims, when the card lacks them
       const made = task === undefined ? null : targetConstructor(lineOf(task.id), card.target);
-      if (made !== null && lacks(card.materials, CONSTRUCTOR_CLAIMS_MATERIAL)) card.materials = plus(card.materials, claimsMaterial(put, sourceAt(readers!, made.constructor), { task: task!.id, attempt: made.attempt }));
+      if (made !== null && lacks(card, CONSTRUCTOR_CLAIMS_MATERIAL)) plus(card, CONSTRUCTOR_CLAIMS_MATERIAL, made.constructor, () => claimsMaterial(put, sourceAt(readers!, made.constructor), { task: task!.id, attempt: made.attempt }));
       break;
     }
     case 'secretary': {
@@ -268,8 +283,8 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const boundChanged = 'binding' in card && changedBoundLines(ix, reviewInputVersions(data.getList(card.binding.bases as ListRef), data.getList(card.binding.constraints as ListRef))).length > 0;
       if (inputs === undefined || boundChanged || changedPlanningInputs(inputs, ix, items, constraints, obj).length > 0) throw new ProcessError('NOT_READY', `Review inputs changed for ${spec.task}; run mp pm next to rebuild the step.`);
       // 4.4 (F3): a revision's and a re-review's previous feasibility report, when the card lacks it
-      if (card.seat === 'architect-feasibility' && lacks(card.materials, FEASIBILITY_REPORT_MATERIAL)) card.materials = plus(card.materials, feasibility(card.target));
-      if (card.seat === 'architect-decompose' && card.revision !== null && lacks(card.materials, FEASIBILITY_REPORT_MATERIAL)) card.materials = plus(card.materials, feasibility(card.output.object));
+      if (card.seat === 'architect-feasibility' && lacks(card, FEASIBILITY_REPORT_MATERIAL)) feasibility(card, card.target);
+      if (card.seat === 'architect-decompose' && card.revision !== null && lacks(card, FEASIBILITY_REPORT_MATERIAL)) feasibility(card, card.output.object);
       break;
     }
     case 'auditor-node': {

@@ -306,10 +306,8 @@ function rerunRequest(t: RerunTarget, extra: { readonly detached?: string; reado
  */
 export async function seatRerun(ctx: ProcessContext, dispatch: string, commandId: string): Promise<RerunResult> {
   const t = rerunTarget(ctx, dispatch, commandId);
-  // 4.4 (F5): its start is recorded before it executes; its evidence when it ends, as before
-  const run = newRunId('rerun');
-  recordRunStart(ctx, t.v, run, { run, command: t.c.id });
-  const r = await runOnCommit(ctx, { ...rerunRequest(t), run });
+  // 4.4 (F5): its start is recorded once its checkout is made, immediately before it executes; its evidence when it ends, as before
+  const r = await runOnCommit(ctx, { ...rerunRequest(t), beforeExecute: (run) => recordRunStart(ctx, t.v, run, { run, command: t.c.id }) });
   const x = r.runs[0]!;
   return { run: x.evidence, passed: x.passed, summary: x.summary, leaf: r.leaf, tail: x.tail };
 }
@@ -471,9 +469,8 @@ export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promis
   allows(ctx, v, 'full-run');
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) throw new ProcessError('NOT_ALLOWED', `the card of dispatch ${dispatch} names no commit to run on`);
-  // 4.4 (F5): a full run is a start too, recorded before it executes
-  recordRunStart(ctx, v, 'full-run', { fullRun: true });
-  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag) });
+  // 4.4 (F5): a full run is a start too, recorded under its run locks immediately before it executes (a reuse records its own marker)
+  return runFullSuite(ctx, { mission: v.info.mission, commit: snap, suite: ctx.fullSuite, by: 'reviewer', cites: { words: null, authority: null, reason: null, dispatch }, scope: tagScope(v.info.tag), beforeExecute: (run) => recordRunStart(ctx, v, run, { run, fullRun: true }) });
 }
 
 /**

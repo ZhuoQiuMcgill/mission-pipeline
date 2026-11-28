@@ -275,7 +275,7 @@ export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
     renderPlanningRules(c.projectCommands) +
     renderPlanReviews(c) +
     renderRevision(c) +
-    renderMaterials(c.materials ?? []) +
+    renderMaterials(c.materials ?? [], c.materialsNotAttached ?? []) +
     inline
   );
 }
@@ -301,7 +301,7 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
     list('Risks the Architect listed', p.risks) +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms`)) +
     list('Findings of the earlier review this revision answers', c.earlierFindings) +
-    renderMaterials(c.materials ?? [])
+    renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
   );
 }
 

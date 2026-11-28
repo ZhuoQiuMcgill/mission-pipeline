@@ -257,6 +257,13 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
     await commit(ctx, `flow:repair-mechanical:${ctx.mission}:${task}`, { events: [ev(ctx, REPAIRS_LINE, 'mechanical-check', task, mc)] });
   }
   if (!mc.ok) return repairReturn(ctx, r, a, task, mc.failures);
+  // 4.4 (F5, p3-3): a changed card of a task that has an accepted product by now (the Architect's card was
+  // stale, however it became so) is a mechanical failure of the hand-back, never an edit skipped while the
+  // repair is recorded as decided: it goes back to the Architect through the mechanical-return loop, whose
+  // next attempt's card is built on the work accepted now
+  const accepted: string[] = [];
+  for (const c of change) if (plan.tasks.some((t) => t.id === c.id) && (await acceptedProduct(ctx, c.id)) !== null) accepted.push(c.id);
+  if (accepted.length > 0) return repairReturn(ctx, r, a, task, accepted.map((id) => `change[${id}]: task ${id} now has an accepted product: reopen it instead (the card it was changed on predates its acceptance)`));
   await decide(ctx, r, task, eff, plan, result, mc);
 }
 
@@ -318,7 +325,8 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     else reopen.push({ task: x.task, issue: x.issue, attempt: sel.k, product: sel.product });
   }
   const added: readonly DetailedTask[] = result.add;
-  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now (one accepted meanwhile keeps its card, said)
+  // 4.1.3 (#35): a changed card is taken only for a task with no accepted product now; 4.4: one accepted
+  // meanwhile went back to the Architect first (oneRepair), so what is left out here is said, never an accepted task's edit
   const changed: DetailedTask[] = [];
   for (const c of result.change ?? []) {
     if ((await acceptedProduct(ctx, c.id)) !== null || !plan.tasks.some((t) => t.id === c.id)) skipped.push(c.id);

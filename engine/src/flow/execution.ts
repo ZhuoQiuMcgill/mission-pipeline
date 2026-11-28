@@ -61,7 +61,7 @@ import {
   type FlowCtx,
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
-import { constructorClaims, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
+import { attach, constructorClaims, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
 import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
@@ -2430,7 +2430,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const past = was === null ? [] : [
     was.review === null ? null : await previousReviewReport(ctx, { review: was.review, attempt: was.attempt }),
     await previousHandBack(ctx, { constructor: was.constructor, attempt: was.attempt }),
-  ].filter((x) => x !== null);
+  ];
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: await decisionQuotes(ctx, t), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(repairs.length > 0 ? { repairs } : {}),
@@ -2445,7 +2445,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     interfaces: { implements: interfaceDefs(plan, t.implements), calls: interfaceDefs(plan, t.calls) },
     ...(t.exclusive.length > 0 ? { exclusive: [...t.exclusive] } : {}),
     ...planData(plan),
-    ...(past.length > 0 ? { materials: past } : {}),
+    ...attach(past),
   };
   await commit(ctx, `flow:dispatched:${ctx.mission}:${task}`, {
     events: [ev(ctx, taskLine(t.id), 'dispatched', task, recorded ?? { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, prerequisites: [...(snap.products ?? deps)], predecessor: prev?.object ?? null, ...(snap.origin !== undefined ? { origin: snap.origin } : {}) } satisfies DispatchedBody)],
@@ -2591,7 +2591,7 @@ async function submitReviewer(
     ...(integration !== undefined ? { integration } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
     ...planData(formats),
-    ...(claims !== null ? { materials: [claims] } : {}),
+    ...attach([claims]),
     binding: {
       judgment: `j.${task}`,
       bases: c.putList(currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')))),

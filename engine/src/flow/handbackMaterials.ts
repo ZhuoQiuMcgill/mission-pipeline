@@ -65,16 +65,39 @@ export function sourceAt(r: HandBackReaders, task: string): HandBackSource | nul
   return { hb, report };
 }
 
-/** A material as flow/context.ts `material` makes one (optional, the program's record), from any data store. */
-function optional(put: (doc: string) => string, id: string, title: string, doc: string): MaterialRef {
-  return { id, title, ref: put(doc), pages: materialPageCount(doc), mustRead: false, role: 'record' };
+/** A material, or the line a card carries in its place when it could not be stored (`notAttached`). */
+export type Attached = MaterialRef | { readonly notAttached: string };
+
+/**
+ * A material as flow/context.ts `material` makes one (optional, the program's record), from any data
+ * store. One that cannot be stored (a report past the data value's limit) never refuses the card that
+ * would carry it: the card gets one line instead, naming where the hand-back's report is.
+ */
+function optional(put: (doc: string) => string, id: string, title: string, doc: string, s: HandBackSource): Attached {
+  try {
+    return { id, title, ref: put(doc), pages: materialPageCount(doc), mustRead: false, role: 'record' };
+  } catch (e) {
+    const why = (e as { code?: unknown }).code;
+    const where = s.hb.report !== null ? `.mission-pipeline/${s.hb.report}` : `the hand-back of dispatch ${s.hb.dispatch}`;
+    return { notAttached: `[${id}] ${title}: could not be attached${typeof why === 'string' ? ` (${why})` : ''}; read the report at ${where}` };
+  }
+}
+
+/** The id an attached material, or the line in its place, stands for. */
+export const attachedId = (x: Attached): string => ('notAttached' in x ? /^\[([^\]]+)\]/.exec(x.notAttached)?.[1] ?? '' : x.id);
+
+/** A card's fields for its optional materials: those stored after `o`'s, and a line for each one that could not be. */
+export function attach(xs: ReadonlyArray<Attached | null>, o: { readonly materials?: readonly MaterialRef[] | undefined; readonly materialsNotAttached?: readonly string[] | undefined } = {}): { materials?: MaterialRef[]; materialsNotAttached?: string[] } {
+  const materials = [...(o.materials ?? []), ...xs.filter((x): x is MaterialRef => x !== null && !('notAttached' in x))];
+  const lines = [...(o.materialsNotAttached ?? []), ...xs.flatMap((x) => (x !== null && 'notAttached' in x ? [x.notAttached] : []))];
+  return { ...(materials.length > 0 ? { materials } : {}), ...(lines.length > 0 ? { materialsNotAttached: lines } : {}) };
 }
 
 const reportText = (s: HandBackSource): string => (s.report === null ? '(the report could not be read)' : s.report.trim() === '' ? '(empty)' : s.report.trim());
 const items = (xs: readonly string[]): string => (xs.length === 0 ? 'None.' : xs.map((x) => `- ${x}`).join('\n'));
 
 /** The Reviewer's material: the Constructor's hand-back of the attempt under review (its report, `done`, `decisions_needed`). */
-export function claimsMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly task: string; readonly attempt: number }): MaterialRef | null {
+export function claimsMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly task: string; readonly attempt: number }): Attached | null {
   const r = (s?.hb.result ?? null) as Partial<ConstructorResult> | null;
   if (s === null || r === null || typeof r.done !== 'string') return null;
   const doc = [
@@ -91,11 +114,11 @@ export function claimsMaterial(put: (doc: string) => string, s: HandBackSource |
     reportText(s),
     '',
   ].join('\n');
-  return optional(put, CONSTRUCTOR_CLAIMS_MATERIAL, `The Constructor's claims: to check, not proof (attempt ${o.attempt})`, doc);
+  return optional(put, CONSTRUCTOR_CLAIMS_MATERIAL, `The Constructor's claims: to check, not proof (attempt ${o.attempt})`, doc, s);
 }
 
 /** A rework's material: the review that judged the attempt it carries on (its judgments, findings and report). */
-export function previousReviewMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly review: string; readonly attempt: number }): MaterialRef | null {
+export function previousReviewMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly review: string; readonly attempt: number }): Attached | null {
   const r = (s?.hb.result ?? null) as Partial<ReviewerResult> | null;
   if (s === null || r === null || !Array.isArray(r.judgments)) return null;
   const doc = [
@@ -112,11 +135,11 @@ export function previousReviewMaterial(put: (doc: string) => string, s: HandBack
     reportText(s),
     '',
   ].join('\n');
-  return optional(put, PREVIOUS_REVIEW_MATERIAL, `The previous review's report (attempt ${o.attempt})`, doc);
+  return optional(put, PREVIOUS_REVIEW_MATERIAL, `The previous review's report (attempt ${o.attempt})`, doc, s);
 }
 
 /** A rework's material: the earlier attempt's own Constructor hand-back. */
-export function previousHandBackMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly attempt: number }): MaterialRef | null {
+export function previousHandBackMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly attempt: number }): Attached | null {
   const r = (s?.hb.result ?? null) as Partial<ConstructorResult> | null;
   if (s === null || r === null || typeof r.done !== 'string') return null;
   const doc = [
@@ -139,11 +162,11 @@ export function previousHandBackMaterial(put: (doc: string) => string, s: HandBa
     reportText(s),
     '',
   ].join('\n');
-  return optional(put, PREVIOUS_HANDBACK_MATERIAL, `Your earlier hand-back (attempt ${o.attempt})`, doc);
+  return optional(put, PREVIOUS_HANDBACK_MATERIAL, `Your earlier hand-back (attempt ${o.attempt})`, doc, s);
 }
 
 /** A revision's material: the feasibility review that returned the plan (its findings, critical path and report). */
-export function feasibilityReportMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly review: string; readonly dplan: string }): MaterialRef | null {
+export function feasibilityReportMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly review: string; readonly dplan: string }): Attached | null {
   const r = (s?.hb.result ?? null) as Partial<ArchitectFeasibilityResult> | null;
   if (s === null || r === null || !Array.isArray(r.findings)) return null;
   const doc = [
@@ -160,7 +183,7 @@ export function feasibilityReportMaterial(put: (doc: string) => string, s: HandB
     reportText(s),
     '',
   ].join('\n');
-  return optional(put, FEASIBILITY_REPORT_MATERIAL, `The previous feasibility report (${o.dplan})`, doc);
+  return optional(put, FEASIBILITY_REPORT_MATERIAL, `The previous feasibility report (${o.dplan})`, doc, s);
 }
 
 /** The fields of a decomposition attempt the walk reads (flow/planning.ts AttemptBody). */
@@ -203,18 +226,18 @@ export function attemptOfPlan(events: ReadonlyArray<{ readonly line: string; rea
 
 const putOf = (ctx: FlowCtx) => (doc: string): string => ctx.ports.ledger.content.put(doc);
 
-export async function constructorClaims(ctx: FlowCtx, o: { readonly constructor: string; readonly task: string; readonly attempt: number }): Promise<MaterialRef | null> {
+export async function constructorClaims(ctx: FlowCtx, o: { readonly constructor: string; readonly task: string; readonly attempt: number }): Promise<Attached | null> {
   return claimsMaterial(putOf(ctx), await sourceOf(ctx, o.constructor), o);
 }
 
-export async function previousReviewReport(ctx: FlowCtx, o: { readonly review: string; readonly attempt: number }): Promise<MaterialRef | null> {
+export async function previousReviewReport(ctx: FlowCtx, o: { readonly review: string; readonly attempt: number }): Promise<Attached | null> {
   return previousReviewMaterial(putOf(ctx), await sourceOf(ctx, o.review), o);
 }
 
-export async function previousHandBack(ctx: FlowCtx, o: { readonly constructor: string; readonly attempt: number }): Promise<MaterialRef | null> {
+export async function previousHandBack(ctx: FlowCtx, o: { readonly constructor: string; readonly attempt: number }): Promise<Attached | null> {
   return previousHandBackMaterial(putOf(ctx), await sourceOf(ctx, o.constructor), o);
 }
 
-export async function feasibilityReport(ctx: FlowCtx, o: { readonly review: string; readonly dplan: string }): Promise<MaterialRef | null> {
+export async function feasibilityReport(ctx: FlowCtx, o: { readonly review: string; readonly dplan: string }): Promise<Attached | null> {
   return feasibilityReportMaterial(putOf(ctx), await sourceOf(ctx, o.review), o);
 }
