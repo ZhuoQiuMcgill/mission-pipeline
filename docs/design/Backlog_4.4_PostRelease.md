@@ -275,6 +275,28 @@ What 4.4.1 documents and does not change (`engine/README.md`, "Windows and Power
 - A hand-back on stdin that holds a NUL with no mark gives two warning lines (the standard input, and
   the hand-back file written from it).
 
+Seen while the test suite was first run on Windows, and not changed:
+
+- **A journal entry costs about ten times more on Windows** (about 2.8 ms against 0.3 ms on Linux:
+  per entry the pending note is rewritten whole and the append is synced). No product write holds
+  more than a handful of entries, and none came near its 2 s budget on Windows; a write with
+  hundreds of entries would. Candidate: write the pending note once per write.
+- **A declared artifact path is refused for a `.git` component by its exact name.** On Windows
+  `.Git/…` names the same folder, so a plan that declared such a path could have a run checkout's
+  git files copied into the kept files. Rare (a plan would have to name it). Candidate: fold case
+  on Windows when a file is kept.
+- **With `core.symlinks=false` a link in the commit is a plain file in a run checkout**: a declared
+  artifact that is such a link is kept as its link text on Windows, and recorded "it is a link" on
+  Linux. Harmless.
+- **`snapshotFiles` (`src/seat/results.ts`) reads through `/proc/self/fd`**, which only Linux has. It
+  is on no product path today (hand-back pointers are checked against the commit's blobs).
+- **An owner's lock file stays open** for a checkout until the checkout is removed, also after the
+  memory is closed in the same process (by design). On Windows an open file cannot be deleted; in a
+  command-line process this ends with the process.
+- Landing attempt data keep an occupant's folder as git printed it (forward slashes on Windows),
+  for the stability of receipts; everything else uses the program's path form.
+- Four tests that run a POSIX shell script in place of git are skipped on Windows.
+
 ## Defects of 4.3 found and not fixed
 
 - **`restart` never restarts a step.** `src/flow/failures.ts` offers `restart` for a failed seat only
