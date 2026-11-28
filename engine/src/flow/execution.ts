@@ -43,7 +43,6 @@ import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVers
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
-import { ARCHITECT_ANSWER, type ArchitectAnswerBody } from './architectAnswers.ts';
 import {
   basisIndex,
   cardBase,
@@ -2753,9 +2752,9 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       }
       const next = line.one<ReworkBody>('rework', String(k + 1));
       if (next === null) await grantedAttempt(ctx, g, { op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage: loopLineage, loop: 'rework', signature: `granted:${e.id}` });
-      // 4.4 (G1): an Architect's answer recorded on this used-up loop reaches the granted attempt's cards (a moot one never does)
-      const architect = (await eventsOf<ArchitectAnswerBody>(ctx, SECRETARY_LINE, ARCHITECT_ANSWER)).filter((x) => x.body.escalation === e.id && x.body.reply === 'answer' && x.body.moot === undefined).map((x) => `The Architect's answer (${x.body.step}): ${x.body.text}`);
-      const body: ReworkBody = { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...architect, ...await deferredInstructions(ctx, line, k)] };
+      // 4.4 (G1, review p11-3): an Architect's answer on this loop reaches the granted attempt's cards as a decision of the
+      // task (seat/cards/dynamic.ts carriedAnswer: both roles, at queue time and at the claim), not through this rework body
+      const body: ReworkBody = { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...await deferredInstructions(ctx, line, k)] };
       const carry = await carryOut(ctx, e.id, { option: 'grant' }, g.records);
       await commit(ctx, `flow:rework:${ctx.mission}:${e.id}:apply-grant`, {
         events: [...(next === null ? [ev(ctx, lineName, 'rework', String(k + 1), body)] : []), ...carry.events], records: carry.records,

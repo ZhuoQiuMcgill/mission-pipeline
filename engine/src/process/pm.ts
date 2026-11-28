@@ -115,6 +115,7 @@ import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts'
 import { heldByPredecessors } from './explorationAfter.ts';
 import { heldForQuestions, openQuestionHolds } from './questions.ts';
 import { materialLeaf } from './seat.ts';
+import { pmRoundOf, reopenedAt } from '../flow/architectAnswers.ts';
 import { carriedRunLines, detachedRunNotes, stopDetachedRuns, type DetachedRunNote } from './detached.ts';
 import { checkAfters, diskLimitPassed, heldByHolds, heldWhy, holdRef, holdsInForce, holdsOn, isConstructorStep, type AfterChecks, type HoldRef } from './holds.ts';
 
@@ -377,11 +378,18 @@ export function readSteps(ctx: ProcessContext, o: { readonly afters?: AfterCheck
       const applied = ev('applied');
       const toUser = ev('to-user');
       const decisions = ev('decision');
+      // 4.4 (G1, review p11-8): the consultation in effect first: the PM's current round asking the Architect, or a
+      // Secretary round an Architect's reply reopened (an earlier hand-up then is history), waits on no user
+      const sec = [...ev('pm-answer').values(), ...ev('pm-answer-rejected').values(), ...ev('secretary-retry').values()].map((x) => ({ event: x.event, key: x.key, revision: Number(x.revision), body: JSON.parse(ctx.memory.data.text(x.body)) as unknown }));
       for (const e of flowEvents(db, { mission: m, line: SECRETARY_LINE, event: 'escalation', limit: 10_000 })) {
         if (answered.has(e.key) || applied.has(e.key)) continue;
-        const d = decisions.get(e.key);
+        const pmNow = sec.find((x) => x.event === 'pm-answer' && x.key === `${e.key}#${pmRoundOf(sec, e.key)}`)?.body as DecisionBody | undefined;
+        if (pmNow?.option === 'ask-architect') continue;
+        const reopened = reopenedAt(sec, e.key);
+        const roundKey = reopened === null ? e.key : sec.filter((x) => x.event === 'secretary-retry' && (x.body as { id?: unknown }).id === e.key).at(-1)?.key ?? e.key;
+        const d = decisions.get(roundKey);
         const dBody = d === undefined ? null : (JSON.parse(ctx.memory.data.text(d.body)) as DecisionBody);
-        const t = toUser.get(e.key);
+        const t = reopened === null ? toUser.get(e.key) : undefined;
         const why = t !== undefined ? (JSON.parse(ctx.memory.data.text(t.body)) as { why: string }).why : dBody !== null && (dBody.classification === 'needs-user' || dBody.classification === 'needs-pm') ? dBody.notice || dBody.reason : null;
         if (why === null) continue;
         const esc = JSON.parse(ctx.memory.data.text(e.body)) as EscalationBody;

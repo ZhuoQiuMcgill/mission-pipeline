@@ -9,12 +9,14 @@
 //                     "needs a decision", decisionFor reads the ask and this reply as an answer, and the
 //                     owning flow carries it out as any answer (flow/secretary.ts architectAnswered): the
 //                     review's wait, a paused attempt's resume and the re-review behave as for any answer.
-//                     A used-up loop has no answer that continues it: the reply goes back, as below, and a
-//                     grant carries the answer to the next attempt (execution.ts).
+//                     A used-up loop has no answer that continues it: the reply goes back, as below, and the
+//                     cards of the attempt a grant starts carry it (seat/cards/dynamic.ts carriedAnswer).
 //   plan-must-change, need-to-know, and a step that ended without a reply
-//                     the escalation goes back to the decider that asked, in the write that records the
-//                     reply: a new Secretary round with the reply among its reasons, or the PM's answer
-//                     round closed with the reply, so the PM's inbox lists the escalation again.
+//                     the escalation returns to the Secretary, in the write that records the reply: a fresh
+//                     Secretary round with the reply among its reasons, also when the PM asked (review p11-2:
+//                     the PM is not drawn into what the Secretary can settle; the PM's round is closed and does
+//                     not shut the Secretary out of that round). The Secretary settles it, asks again, or
+//                     sends it to the PM with its brief.
 //
 // The step changes no card, standard or structure (its hand-back has no field for one), so no plan review
 // follows (E-2). It counts on no loop of the task: its re-dispatches count on its own lineage. The task waits
@@ -23,22 +25,24 @@
 // Another writer in between: the ask stops being current when the escalation is answered by the PM or the
 // user, carried out, closed as superseded (a new card, a giving-up), or its round closed. A queued step is then
 // cancelled; a claim of it is refused (seat/cards/refresh.ts); a reply that arrives anyway is recorded with
-// `moot` and changes nothing. The write that records a current reply checks, inside the write, that the ask is
-// still current; otherwise nothing is written and the next pass reads it again.
+// `moot` and changes nothing. A reply is also moot when the asking authority or the asking task's card is out of
+// date (review p11-4: the PM's cited words superseded, a new card in the plan in effect before its escalation
+// is closed). The write that records a current reply checks all of it inside the write; otherwise nothing is
+// written and the next pass reads it again.
 
 import type { MissionId } from '../common/ids.ts';
 import type { AppendGuard, FlowEvent, FlowEventInput } from './ports.ts';
 import { attach, constructorClaims, previousReviewReport, type Attached } from './handbackMaterials.ts';
-import { cardBase, commit, ev, eventOf, eventsOf, idPart, material, missionClosed, objectRecord, safeId, taskView, type FlowCtx, type TaskView } from './context.ts';
-import { SECRETARY_LINE, taskLine, type DetailedPlanDoc } from './plandoc.ts';
+import { cardBase, commit, ev, eventOf, eventsOf, idPart, missionClosed, objectRecord, safeId, taskView, type FlowCtx, type TaskView } from './context.ts';
+import { PLAN_LINE, SECRETARY_LINE, taskCardHash, taskLine } from './plandoc.ts';
 import { planInEffect } from './planning.ts';
 import { acceptedProduct } from './execution.ts';
 import { acceptedEntry } from './repair.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
 import { decisionFor, escalation, escalationTask, isApplied, type DecisionBody, type EscalationBody } from './secretary.ts';
 import { addressedForPlanning, addressedIndexOf, constraintsForTask, planningConstraints, secretaryRoundInputs, taskDecisionQuotes, taskRequirementItems } from '../seat/cards/dynamic.ts';
-import type { ArchitectAnswerCard, ArchitectAnswerResult } from '../seat/cards/architectAnswer.ts';
-import { ARCHITECT_ANSWER, answerKey, answersInPlace, askOf, askStanding, askTag, repliesOn, replyText, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
+import { answerPlanMaterial, type ArchitectAnswerCard, type ArchitectAnswerResult } from '../seat/cards/architectAnswer.ts';
+import { ARCHITECT_ANSWER, answerKey, answersInPlace, askOf, askStanding, askTag, earlierReplies, pmRoundOf, replyText, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
 
 /** The Architect step of an ask (its own lineage too: it counts on no loop or re-dispatch allowance of the task). */
 export const askTask = (mission: string, a: Ask): string => safeId(`arch-ask.${mission}.${idPart(a.escalation)}.${askTag(a)}`);
@@ -49,7 +53,7 @@ type Ev = FlowEvent;
 async function standingEvents(ctx: FlowCtx): Promise<Ev[]> {
   const out: Ev[] = [];
   for (const event of ['applied', 'user-answer', 'to-user', 'pm-answer', 'pm-answer-rejected', 'secretary-retry', ARCHITECT_ANSWER]) out.push(...(await eventsOf(ctx, SECRETARY_LINE, event)));
-  return out;
+  return out.sort((a, b) => a.revision - b.revision);
 }
 
 /** The flow step: every ask of the Architect is queued, cancelled when moot, and its reply recorded. */
@@ -78,11 +82,11 @@ async function oneAsk(ctx: FlowCtx, a: Ask, standing: string | null, sec: readon
       if (standing !== null && (await ctx.ports.scheduler.status(task))?.state === 'queued' && (await ctx.ports.scheduler.cancel(task))) ctx.progressed = true;
       return;
     case 'failed':
-      // a step that ended without a usable reply while its ask is current: the decider gets the question back (P-4: a safe default)
-      if (standing === null) await recordReply(ctx, a, task, { reply: 'failed', text: `${view.why}${view.status.note !== null ? `: ${view.status.note}` : ''}`, dispatch: null }, null);
+      // a step that ended without a usable reply while its ask is current: the Secretary gets the question back (P-4: a safe default)
+      if (standing === null) await recordReply(ctx, a, task, { reply: 'failed', text: `${view.why}${view.status.note !== null ? `: ${view.status.note}` : ''}`, dispatch: null }, null, sec);
       return;
     case 'done':
-      await recordReply(ctx, a, task, replyOf(view), standing);
+      await recordReply(ctx, a, task, replyOf(view), standing, sec);
   }
 }
 
@@ -93,7 +97,7 @@ function replyOf(view: Extract<TaskView, { kind: 'done' }>): Pick<ArchitectAnswe
 }
 
 /** What must still be absent for an ask to be current inside a write (askStanding, as a guard). */
-function standingGuard(ctx: FlowCtx, a: Ask): AppendGuard['absent'] {
+function standingGuard(ctx: FlowCtx, a: Ask, sec: readonly Ev[]): AppendGuard['absent'] {
   const at = (event: string, key: string) => ({ mission: ctx.mission, line: SECRETARY_LINE, event, key });
   const id = a.escalation;
   return [
@@ -101,62 +105,114 @@ function standingGuard(ctx: FlowCtx, a: Ask): AppendGuard['absent'] {
     at('user-answer', id),
     ...(a.by === 'pm'
       ? [at('pm-answer-rejected', `${id}#${a.round}`)]
-      : [at('pm-answer', `${id}#1`), at('to-user', id), at('secretary-retry', `${id}#${a.round + 1}`)]),
+      : [
+          // the PM's next answer round (a round an Architect's reply reopened follows closed PM rounds)
+          at('pm-answer', `${id}#${pmRoundOf(sec, id)}`),
+          // a hand-up is written once: one from before a reopened round stays and is not guarded
+          ...(sec.some((e) => e.event === 'to-user' && e.key === id) ? [] : [at('to-user', id)]),
+          at('secretary-retry', `${id}#${a.round + 1}`),
+        ]),
   ];
 }
 
 /**
- * The reply recorded on the escalation, one write. A current ask's reply that is not carried out as an answer
- * sends the escalation back to its decider in the same write; the guard checks the ask is still current. A
- * reply of an ask no longer current is recorded with why (`moot`) and nothing else.
+ * 4.4 (review p11-4): why a reply would act on an out-of-date ask, or null: the words a PM's ask rested on are no
+ * longer in force (ruling A.6: checked at application), or the asking task's card in the plan in effect is not the
+ * one its escalation was raised under (a repair or a re-plan replaced it before the escalation is closed). With the
+ * revisions read, which the reply's write is checked against.
  */
-async function recordReply(ctx: FlowCtx, a: Ask, task: string, r: Pick<ArchitectAnswerBody, 'reply' | 'text' | 'why' | 'tasks' | 'dispatch'>, standing: string | null): Promise<void> {
+async function outOfDate(ctx: FlowCtx, a: Ask, esc: EscalationBody, d: DecisionBody | null): Promise<{ readonly why: string | null; readonly latest: NonNullable<AppendGuard['latest']> }> {
+  if (a.by === 'pm') for (const w of d?.words ?? []) if (ctx.ports.wordsAuthority?.(w.id, ctx.mission) !== w.fingerprint) return { why: `the words ${w.id} the PM's ask rested on changed`, latest: [] };
+  const taskId = esc.subject.slice('task:'.length);
+  const effective = (await eventsOf(ctx, PLAN_LINE, 'effective')).at(-1);
+  const spec = (await eventsOf<{ hash: string }>(ctx, taskLine(taskId), 'spec')).at(-1);
+  const latest = [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: effective?.revision ?? null }, { mission: ctx.mission, line: taskLine(taskId), event: 'spec', revision: spec?.revision ?? null }];
+  const pie = await planInEffect(ctx);
+  const card = pie?.plan.tasks.find((t) => t.id === taskId);
+  if (card === undefined) return { why: `task ${taskId} is no longer in the plan in effect`, latest };
+  if (spec === undefined || spec.body.hash !== taskCardHash(card)) return { why: `task ${taskId} has a new card in the plan in effect: the question was about its earlier card`, latest };
+  return { why: null, latest };
+}
+
+/**
+ * The reply recorded on the escalation, one write. A current ask's reply that is not carried out as an answer
+ * returns the escalation to a fresh Secretary round in the same write; the guard checks that the ask is still
+ * current, its authority in force and its task's card unchanged. A reply of an ask no longer current, or out of
+ * date, is recorded with why (`moot`) and nothing else.
+ */
+async function recordReply(ctx: FlowCtx, a: Ask, task: string, r: Pick<ArchitectAnswerBody, 'reply' | 'text' | 'why' | 'tasks' | 'dispatch'>, standing: string | null, sec: readonly Ev[]): Promise<void> {
   const esc = await escalation(ctx, a.escalation);
   if (esc === null) return;
   const key = answerKey(a);
+  const d = await askingDecision(ctx, a);
+  const dated = standing === null ? await outOfDate(ctx, a, esc, d) : { why: null, latest: [] };
+  const moot = standing ?? dated.why;
   // the asking task gets the answer as its escalation's; `tasks` names only the others
   const others = (r.tasks ?? []).filter((x) => `task:${x}` !== esc.subject);
   const { tasks: _named, ...rest } = r;
-  const body: ArchitectAnswerBody = { escalation: esc.id, ask: a, step: task, ...rest, ...(others.length > 0 ? { tasks: others } : {}), ...(standing !== null ? { moot: standing } : {}) };
+  const body: ArchitectAnswerBody = { escalation: esc.id, ask: a, step: task, ...rest, ...(others.length > 0 ? { tasks: others } : {}), ...(moot !== null ? { moot } : {}) };
   const events: FlowEventInput[] = [ev(ctx, SECRETARY_LINE, ARCHITECT_ANSWER, key, body)];
   const absent: Array<AppendGuard['absent'][number]> = [{ mission: ctx.mission, line: SECRETARY_LINE, event: ARCHITECT_ANSWER, key }];
-  if (standing === null) {
-    absent.push(...standingGuard(ctx, a));
-    if (!(r.reply === 'answer' && answersInPlace(esc.source))) events.push(backTo(ctx, esc, a, key, replyText(body, answersInPlace(esc.source))));
+  const extra: { -readonly [K in 'latest' | 'words']?: AppendGuard[K] } & { previous?: string } = {};
+  if (moot === null) {
+    absent.push(...standingGuard(ctx, a, sec));
+    // the asking authority, inside the write: the PM's cited words; the requirement items the Secretary's decision relied on
+    if (a.by === 'pm') extra.words = (d?.words ?? []).map((w) => ({ ...w, mission: ctx.mission }));
+    else absent.push(...(d?.inputs ?? []).filter((i) => i.type === 'decision' || i.type === 'decision-authority' || i.line === d?.authorization).flatMap((i) => [{ mission: ctx.mission, line: 'requirements', event: 'withdrawn', key: i.line }, { mission: ctx.mission, line: 'requirements', event: 'item', key: i.version.replace(/\.v(\d+)$/, (_, n: string) => `.v${Number(n) + 1}`) }]));
+    extra.latest = dated.latest;
+    if (!(r.reply === 'answer' && answersInPlace(esc.source))) {
+      const back = backToSecretary(ctx, esc, a, key, replyText(body, answersInPlace(esc.source)), sec);
+      events.push(...back.events);
+      absent.push(...back.absent);
+      extra.previous = back.previous;
+    }
   }
-  await commit(ctx, `flow:architect-answer:${ctx.mission}:${key}:${standing === null ? 'current' : 'moot'}`, {
+  const { previous, ...guarded } = extra;
+  await commit(ctx, `flow:architect-answer:${ctx.mission}:${key}:${moot === null ? 'current' : 'moot'}`, {
     events,
-    guard: { absent, code: 'STALE_REQUEST', message: `escalation ${esc.id} was answered, carried out, closed or returned by another writer while the Architect's reply was being recorded; nothing was written (the next pass reads it again)` },
+    guard: { absent, ...guarded, code: 'STALE_REQUEST', message: `escalation ${esc.id} was answered, carried out, closed or returned by another writer, or its authority or its task's card changed, while the Architect's reply was being recorded; nothing was written (the next pass reads it again)` },
   });
+  // the Secretary round the fresh one replaces, when it never decided (the PM had asked first): its queued step is cancelled
+  if (previous !== undefined && (await ctx.ports.scheduler.status(previous))?.state === 'queued') await ctx.ports.scheduler.cancel(previous);
 }
 
-/** The escalation goes back to the decider that asked: the Secretary's next round, or the PM's answer round closed. */
-function backTo(ctx: FlowCtx, esc: EscalationBody, a: Ask, key: string, why: string): FlowEventInput {
-  if (a.by === 'pm') return ev(ctx, SECRETARY_LINE, 'pm-answer-rejected', `${esc.id}#${a.round}`, { id: esc.id, round: a.round, why, architect: key });
-  // the shape of flow/secretary.ts rejectDecision's retry: the next round's task, and the reply among its reasons
-  const n = a.round + 1;
-  return ev(ctx, SECRETARY_LINE, 'secretary-retry', `${esc.id}#${n}`, { id: esc.id, task: `${escalationTask(esc.id)}.retry${n}`, why });
+/**
+ * The escalation returns to the Secretary (review p11-2, G1): a fresh Secretary round with the reply as its reason,
+ * marked with the reply (`architect`), in the shape of flow/secretary.ts rejectDecision's retry. When the PM asked,
+ * the PM's round is closed with the reply in the same write, and the marked round is the Secretary's again.
+ */
+function backToSecretary(ctx: FlowCtx, esc: EscalationBody, a: Ask, key: string, why: string, sec: readonly Ev[]): { readonly events: FlowEventInput[]; readonly absent: AppendGuard['absent']; readonly previous: string } {
+  const n = sec.filter((e) => e.event === 'secretary-retry' && (e.body as { id?: unknown }).id === esc.id).length + 1;
+  const retry = ev(ctx, SECRETARY_LINE, 'secretary-retry', `${esc.id}#${n}`, { id: esc.id, task: `${escalationTask(esc.id)}.retry${n}`, why, architect: key });
+  const absent = [{ mission: ctx.mission, line: SECRETARY_LINE, event: 'secretary-retry', key: `${esc.id}#${n}` }];
+  const previous = n === 1 ? escalationTask(esc.id) : `${escalationTask(esc.id)}.retry${n - 1}`;
+  if (a.by !== 'pm') return { events: [retry], absent, previous };
+  return { events: [ev(ctx, SECRETARY_LINE, 'pm-answer-rejected', `${esc.id}#${a.round}`, { id: esc.id, round: a.round, why, architect: key }), retry], absent, previous };
 }
 
-/** The decision that asked (its instructions and reason go on the card). */
+/** The decision that asked (its instructions and reason go on the card; its authority is checked at the reply). */
 async function askingDecision(ctx: FlowCtx, a: Ask): Promise<DecisionBody | null> {
   const key = a.by === 'pm' ? `${a.escalation}#${a.round}` : a.round === 0 ? a.escalation : `${a.escalation}#${a.round}`;
   return (await eventOf<DecisionBody>(ctx, SECRETARY_LINE, a.by === 'pm' ? 'pm-answer' : 'decision', key))?.body ?? null;
 }
 
-/** The plan in effect as the card's optional material: its fields, one task (interface, module, risk) per line. */
-function planText(dplan: string, plan: DetailedPlanDoc): string {
-  const fields = Object.entries(plan).map(([k, xs]) => `  ${JSON.stringify(k)}: [${(xs as unknown[]).length === 0 ? ']' : `\n${(xs as unknown[]).map((x) => `    ${JSON.stringify(x)}`).join(',\n')}\n  ]`}`);
-  return `# Detailed plan ${dplan}, as it is in effect (with earlier repairs)\n\n${plan.tasks.length} task${plan.tasks.length === 1 ? '' : 's'}: ${plan.tasks.map((t) => t.id).join(', ')}.\n\n\`\`\`json\n{\n${fields.join(',\n')}\n}\n\`\`\`\n`;
-}
-
-/** The attempt's hand-back (its product's Constructor, else the step that paused it) and its last review, from the task line. */
-function attemptSteps(line: readonly Ev[], k: number | null): { readonly constructor: string | null; readonly review: string | null } {
-  if (k === null) return { constructor: null, review: null };
-  const of = <B extends { k?: unknown }>(event: string): B[] => line.filter((e) => e.event === event && (e.body as B).k === k).map((e) => e.body as B);
-  const product = of<{ k: number; task: string }>('product').at(-1)?.task ?? null;
-  const paused = of<{ k: number; step: string }>('paused').at(-1)?.step ?? null;
-  return { constructor: product ?? paused, review: of<{ k: number; task: string }>('review').at(-1)?.task ?? null };
+/**
+ * 4.4 (F3, review p11-6): what the Architect reads of the task's work: the Constructor's hand-back of the attempt
+ * (its product's step, the step that paused it, else a Constructor step of the attempt whose hand-back was accepted
+ * though no product was recorded, as when its export used the loop up), and the task's last review (of the
+ * attempt, else the latest of the work, with its own attempt number).
+ */
+function workSteps(line: readonly Ev[], k: number | null): { readonly constructors: Array<{ readonly step: string; readonly attempt: number }>; readonly review: { readonly step: string; readonly attempt: number } | null } {
+  const of = <B extends { k?: unknown }>(event: string, attempt: number | null): Array<{ readonly key: string; readonly body: B }> => line.filter((e) => e.event === event && (attempt === null || (e.body as B).k === attempt)).map((e) => ({ key: e.key, body: e.body as B }));
+  const constructors: Array<{ step: string; attempt: number }> = [];
+  if (k !== null) {
+    for (const p of of<{ k: number; task: string }>('product', k).reverse()) constructors.push({ step: p.body.task, attempt: k });
+    for (const p of of<{ k: number; step: string }>('paused', k).reverse()) constructors.push({ step: p.body.step, attempt: k });
+    for (const d of of<{ k: number }>('dispatched', k).reverse()) constructors.push({ step: d.key, attempt: k });
+  }
+  const reviews = of<{ k: number; task: string }>('review', k);
+  const review = (reviews.at(-1) ?? of<{ k: number; task: string }>('review', null).at(-1))?.body;
+  return { constructors: constructors.filter((c, i) => constructors.findIndex((x) => x.step === c.step) === i), review: review === undefined ? null : { step: review.task, attempt: review.k } };
 }
 
 async function submitAsk(ctx: FlowCtx, a: Ask, task: string, sec: readonly Ev[]): Promise<void> {
@@ -172,7 +228,7 @@ async function submitAsk(ctx: FlowCtx, a: Ask, task: string, sec: readonly Ev[])
   if (pie === null || t === undefined) return;
   const k = typeof (esc.facts as { attempt?: unknown } | undefined)?.attempt === 'number' ? ((esc.facts as { attempt: number }).attempt) : null;
   const line = await eventsOf(ctx, taskLine(taskId));
-  const steps = attemptSteps(line, k);
+  const work = workSteps(line, k);
   const accepted: ArchitectAnswerCard['accepted'] = [];
   const p = await acceptedProduct(ctx, taskId);
   if (p !== null) accepted.push(acceptedEntry(taskId, line, p, (await objectRecord(ctx, p))?.source?.commit));
@@ -183,15 +239,13 @@ async function submitAsk(ctx: FlowCtx, a: Ask, task: string, sec: readonly Ev[])
   // F3: what the Architect may read, all optional; one that cannot be stored never holds the step back
   let plan: Attached;
   try {
-    plan = material(ctx, 'plan', `Detailed plan ${pie.eff.dplan} as it is in effect, in full`, planText(pie.eff.dplan, pie.plan), false, 'plan');
+    plan = answerPlanMaterial((doc) => ctx.ports.ledger.content.put(doc), pie.eff.dplan, pie.plan);
   } catch (e) {
     plan = { notAttached: `[plan] the detailed plan in effect could not be attached${typeof (e as { code?: unknown }).code === 'string' ? ` (${(e as { code: string }).code})` : ''}; its task card is above` };
   }
-  const materials = attach([
-    plan,
-    steps.constructor === null ? null : await constructorClaims(ctx, { constructor: steps.constructor, task: taskId, attempt: k ?? 1 }),
-    steps.review === null ? null : await previousReviewReport(ctx, { review: steps.review, attempt: k ?? 1 }),
-  ]);
+  let claims: Attached | null = null;
+  for (const c of work.constructors) if (claims === null) claims = await constructorClaims(ctx, { constructor: c.step, task: taskId, attempt: c.attempt });
+  const materials = attach([plan, claims, work.review === null ? null : await previousReviewReport(ctx, { review: work.review.step, attempt: work.review.attempt })]);
   const card: ArchitectAnswerCard = {
     ...cardBase(ctx, task, {
       duties: `Answer one question of design on task ${taskId}: what the plan leaves open, decided as the plan's Architect would. You change nothing: no card, no standard, no write path, no structure. A change of the plan is your reply "plan-must-change", with what and why.`,
@@ -209,7 +263,7 @@ async function submitAsk(ctx: FlowCtx, a: Ask, task: string, sec: readonly Ev[])
     dplan: pie.eff.dplan,
     requirementItems: taskRequirementItems(items, t),
     accepted,
-    earlier: repliesOn(sec, esc.id).map((x) => ({ step: x.step, reply: x.reply, text: x.reply === 'plan-must-change' ? `${x.text} (why: ${x.why ?? ''})` : x.text })),
+    earlier: earlierReplies(sec, esc.id),
     tasks: pie.plan.tasks.map((x) => x.id).filter((x) => x !== taskId),
     ...materials,
   };

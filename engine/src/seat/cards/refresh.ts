@@ -25,8 +25,8 @@ import { repairRef, type RepairBody } from '../../flow/plandoc.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
 import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectRepairCard } from './architect.ts';
-import type { ArchitectAnswerCard } from './architectAnswer.ts';
-import { askStanding } from '../../flow/architectAnswers.ts';
+import { answerPlanMaterial, type ArchitectAnswerCard } from './architectAnswer.ts';
+import { askStanding, earlierReplies } from '../../flow/architectAnswers.ts';
 import type { SecretaryCard } from './secretary.ts';
 import type { AuditNodeCard, AuditChainCard } from './auditor.ts';
 import type { AuthorCard, ReaderCard, InterpreterCard } from './researcher.ts';
@@ -209,9 +209,28 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       // claimed: the flow's next pass cancels the step; a reply of it would change nothing (flow/architectAsk.ts)
       const moot = askStanding(events.filter((e) => e.line === 'secretary'), { escalation: card.escalation.id, by: card.asked.by, round: card.asked.round });
       if (moot !== null) throw new ProcessError('NOT_READY', `Architect step ${spec.task} was superseded: ${moot}; run mp pm next.`);
-      // the constraints in force at the claim, by the queue-time builder's selection: those addressed to its task in full (G3)
+      // review p11-7 (F5): the card is current when it is claimed: rebuilt from the records in force now, by the
+      // queue-time builder's selections. A new card of its task makes the question moot: not claimed
+      const eff = planInEffect(events);
+      const stored = eff === undefined ? undefined : object(eff.dplan);
+      const plan = stored === undefined || eff === undefined ? undefined : amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
+      const now = plan?.tasks.find((t) => t.id === card.taskCard.id);
+      if (eff === undefined || plan === undefined || now === undefined || taskCardHash(now) !== taskCardHash(card.taskCard)) throw new ProcessError('NOT_READY', `Architect step ${spec.task} was superseded: task ${card.taskCard.id} has a new card, or is not in the plan in effect; run mp pm next.`);
+      // the constraints in force at the claim, those addressed to its task in full (G3), the decisions, the requirement texts
       card.constraints = planningConstraints(constraints, mission);
-      planningAddressed(card, { about: card.taskCard.id });
+      planningAddressed(card, { about: now.id });
+      card.decisionQuotes = taskDecisionQuotes(items, events, now, constraintsForTask(constraints, now, mission), eff.dplan);
+      card.requirementItems = taskRequirementItems(items, now);
+      // the plan in effect, the tasks an answer may name, the earlier replies
+      card.dplan = eff.dplan;
+      card.tasks = plan.tasks.map((t) => t.id).filter((t) => t !== now.id);
+      card.earlier = earlierReplies(events.filter((e) => e.line === 'secretary'), card.escalation.id);
+      // a material that cannot be stored never refuses the claim: the queued one stays
+      try { card.materials = [answerPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')]; } catch { /* the queued plan material stays */ }
+      // the task's accepted product as it stands (an unpinned start the queue-time builder took stays; another by the resolver's rule with no recorded prerequisite)
+      const sel = lineAcceptance(lineOf(now.id));
+      const queuedProducts = new Set(card.accepted.map((a) => a.product));
+      card.accepted = sel.product === null || (!sel.pinned && !queuedProducts.has(sel.product) && !noRecordedPrerequisites(sel.product)) ? [] : [acceptedEntry(now.id, lineOf(now.id), sel.product, object(sel.product)?.source?.commit)];
       break;
     }
     case 'researcher-author':

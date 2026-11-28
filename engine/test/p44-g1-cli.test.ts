@@ -83,23 +83,44 @@ test('the PM asks the Architect with mp pm answer; a question back reopens the i
     const d = await done43(p, ['pm', 'dispatch', step, '--filled-by', 'h/architect']);
     const h = await handBackFiles(p, d.dispatch, { reply: 'need-to-know', text: 'Is the result shown to a person or stored?' });
     assert.equal(h.code, 0, h.out);
-    assert.match(h.out, /Your reply on m1\/cdec\.con\.m1\.impl\.1: recorded on escalation cdec\.con\.m1\.impl\.1; it went back to the PM's inbox with your reply/);
-    const inbox = await done43(p, ['pm', 'inbox']);
-    const item = inbox.items.find((i: { id: string }) => i.id === `m1/${esc}`);
-    assert.equal(item?.round, 2);
-    assert.match(item?.text ?? '', /your ask came back: The Architect \(step arch-ask[^)]*\) needs to know this first: Is the result shown to a person or stored\?/);
-    // the PM asks again, then answers itself before the second step runs: the late reply is kept and changes nothing
+    // review p11-2: the question returns to the Secretary, not to the PM's inbox
+    assert.match(h.out, /Your reply on m1\/cdec\.con\.m1\.impl\.1: recorded on escalation cdec\.con\.m1\.impl\.1; it went back to the Secretary with your reply/);
+    assert.ok(!(await done43(p, ['pm', 'inbox'])).items.some((i: { id: string }) => i.id === `m1/${esc}`), 'not in the PM\'s inbox');
+    assert.ok((await done43(p, ['pm', 'next'])).ready.some((r: { step: string }) => r.step === `sec.${esc}.retry1`), 'a fresh Secretary round is ready');
+    // the PM asks again, then settles it itself (--by pm) before the second step runs: no conflict (p11-1); the late reply is kept and changes nothing
     const again = await text43(p, ['pm', 'answer', 'm1', esc, '--option', 'ask-architect', '--by', 'pm', '--words', w.words, '--reason', 'it is stored', '--instructions', 'The result is stored. Round it?']);
     assert.equal(again.code, 0, again.out);
     const step2 = /step (arch-ask\.m1\.[^ ]+\.p2)/.exec(again.out)![1]!;
     const d2 = await done43(p, ['pm', 'dispatch', step2, '--filled-by', 'h/architect']);
-    const pm = await text43(p, ['pm', 'answer', 'm1', esc, '--option', 'answer', '--by', 'user', '--words', w.words, '--instructions', 'Never round.']);
+    const pm = await text43(p, ['pm', 'answer', 'm1', esc, '--option', 'answer', '--by', 'pm', '--words', w.words, '--reason', 'the user said never', '--instructions', 'Never round.']);
     assert.equal(pm.code, 0, pm.out);
+    assert.match(pm.out, /answer to cdec\.con\.m1\.impl\.1 recorded \(answer, W-\d+\); applied\./);
     await done43(p, ['pm', 'next']);
     const late = await handBackFiles(p, d2.dispatch, { reply: 'answer', text: 'Round half to even.' });
     assert.equal(late.code, 0, late.out);
     assert.match(late.out, /Your reply on m1\/cdec\.con\.m1\.impl\.1: recorded on escalation cdec\.con\.m1\.impl\.1 as moot \(.*\): it changes nothing/);
     const shown = await done43(p, ['read', 'show', 'escalation', `m1/${esc}`]);
     assert.deepEqual(shown.architect.map((x: { reply: string; moot?: string }) => [x.reply, x.moot !== undefined]), [['need-to-know', false], ['answer', true]]);
+  } finally { p.cleanup(); }
+});
+
+test('review p11-4: the words a PM\'s ask rested on are superseded before the Architect replies: the reply is kept as moot and carries nothing out', async () => {
+  const p = project43();
+  try {
+    await constructorAsks(p, ['Should add round its result?']);
+    const esc = 'cdec.con.m1.impl.1';
+    const w = await done43(p, ['pm', 'say', 'Let the architect settle rounding.', '--tag', 'decision@m1']);
+    const a = await text43(p, ['pm', 'answer', 'm1', esc, '--option', 'ask-architect', '--by', 'pm', '--words', w.words, '--reason', 'design', '--instructions', 'Round it?']);
+    assert.equal(a.code, 0, a.out);
+    const step = /step (arch-ask\.m1\.[^ ]+\.p1)/.exec(a.out)![1]!;
+    const d = await done43(p, ['pm', 'dispatch', step, '--filled-by', 'h/architect']);
+    await done43(p, ['pm', 'say', 'Never round anything.', '--tag', 'decision@m1', '--supersedes', `${w.words}#1`]);
+    const h = await handBackFiles(p, d.dispatch, { reply: 'answer', text: 'Round half to even.' });
+    assert.equal(h.code, 0, h.out);
+    assert.match(h.out, /as moot \(.*\): it changes nothing/);
+    const shown = await done43(p, ['read', 'show', 'escalation', `m1/${esc}`]);
+    assert.ok(shown.architect.every((x: { moot?: string }) => x.moot !== undefined), JSON.stringify(shown.architect));
+    const applied = p.ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as never, line: 'secretary', event: 'applied', limit: 100 })).find((e) => e.key === esc);
+    assert.equal(applied, undefined, 'nothing carried out');
   } finally { p.cleanup(); }
 });

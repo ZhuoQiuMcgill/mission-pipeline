@@ -418,16 +418,18 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     const id = String(e.body['id'] ?? e.key);
     // the user's own answer: 4.4 (G1) the user does not ask the Architect (the PM does, --by pm)
     const options = ((e.body['options'] ?? []) as string[]).filter((o) => o !== 'ask-user' && o !== 'ask-architect');
-    const onUser = waiting.has(`${e.mission}\n${id}`);
     const deciding = steps.inFlight.find((d) => d.step === e.body['task']);
-    const decided = onUser ? null : await decisionFor(flowCtx(ports, e.mission as MissionId), id);
-    // 4.4 (G1): an ask of the Architect waits for its step, named with where it stands
-    const ask = decided?.option === 'ask-architect' ? askStep(e.mission, id, decided) : null;
+    // 4.4 (G1, review p11-8): the consultation in effect first: an ask of the Architect waits for its step, named with
+    // where it stands, also after an earlier hand-up to the PM (readSteps lists no pending ask as waiting on the user)
+    const current = waiting.has(`${e.mission}\n${id}`) ? null : await decisionFor(flowCtx(ports, e.mission as MissionId), id);
+    const ask = current?.option === 'ask-architect' ? askStep(e.mission, id, current) : null;
+    const onUser = ask === null && waiting.has(`${e.mission}\n${id}`);
+    const decided = onUser ? null : current;
     const answering = ask === null ? undefined : steps.inFlight.find((d) => d.step === ask);
-    const next = onUser
-      ? `ask the user; then mp pm answer ${e.mission} ${id} --option <${options.join('|')}> --words W-<n>`
-      : ask !== null
-        ? `the Architect answers it: step ${ask} ${answering !== undefined ? `(${answering.dispatch} in flight): wait for its hand-back` : steps.ready.some((r) => r.step === ask) ? 'is ready: dispatch it (mp pm next)' : 'is queued by the next pass (mp pm next)'}`
+    const next = ask !== null
+      ? `the Architect answers it: step ${ask} ${answering !== undefined ? `(${answering.dispatch} in flight): wait for its hand-back` : steps.ready.some((r) => r.step === ask) ? 'is ready: dispatch it (mp pm next)' : 'is queued by the next pass (mp pm next)'}`
+      : onUser
+        ? `ask the user; then mp pm answer ${e.mission} ${id} --option <${options.join('|')}> --words W-<n>`
         : decided !== null
           ? 'the decision is carried out on the next mp pm next'
           : deciding !== undefined

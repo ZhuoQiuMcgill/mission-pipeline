@@ -3,7 +3,7 @@
 // Architect step (card "architect-answer") gets the task, the question and the decider's instructions; the task
 // waits as for any decision; the step changes nothing and hands back one of three replies. An answer is
 // carried out as the escalation's answer; "the plan has to change" and "I need to know this first" send the
-// escalation back to the decider that asked. The flows run on a real memory with scripted seats.
+// escalation back to the Secretary. The flows run on a real memory with scripted seats.
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -18,7 +18,8 @@ import { askTask } from '../src/flow/architectAsk.ts';
 import { ARCHITECT_ANSWER, type ArchitectAnswerBody } from '../src/flow/architectAnswers.ts';
 import { pmDispatch, readSteps } from '../src/process/pm.ts';
 import { resolveSubtasks } from '../src/cli/layers.ts';
-import { architectNotesFor } from '../src/seat/cards/dynamic.ts';
+import { architectNotesFor, taskDecisionQuotes } from '../src/seat/cards/dynamic.ts';
+import { currentItems, recordItem } from '../src/flow/requirements.ts';
 import { REDISPATCH_LOOP } from '../src/process/index.ts';
 import { pmInbox } from '../src/process/secretary.ts';
 import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
@@ -243,11 +244,11 @@ describe('4.4 G1: ask the Architect on a Reviewer\'s "needs a decision" and on a
     assert.ok(ports.scheduler.card<ReviewerCard>('rev.m1.impl.1.r1').decisionQuotes.includes('S1 means quoting as RFC 4180 has it.'), 'the next review of the work quotes it');
   });
 
-  it('a used-up rework loop: the answer is recorded and comes back to the Secretary; its grant carries the answer to the next attempt', async () => {
+  it('a used-up rework loop asked twice: each answer comes back to the Secretary; the grant\'s attempt carries the latest answer on both roles\' cards, the corrected one nowhere (p11-3, p11-5)', async () => {
     const { ports, engine } = await setup();
     let reworks = 0;
     let granted = false;
-    let back = null as SecretaryCard | null;
+    const backs: SecretaryCard[] = [];
     await drive(engine, ports.scheduler, withKinds({
       reviewer: (t) => {
         const c = t.card as unknown as ReviewerCard;
@@ -258,26 +259,51 @@ describe('4.4 G1: ask the Architect on a Reviewer\'s "needs a decision" and on a
       secretary: (t) => {
         const c = t.card as unknown as SecretaryCard;
         if (c.request.source !== 'loop-exhausted') return null;
-        if (!c.request.reasons.some((r) => r.startsWith('The Architect'))) return { handBack: secretary(c, 'ask-architect', { instructions: ASK }) };
-        back = c;
+        const answers = c.request.reasons.filter((r) => r.startsWith('The Architect')).length + backs.length;
+        if (backs.length === 0 && answers === 0) return { handBack: secretary(c, 'ask-architect', { instructions: ASK }) };
+        backs.push(c);
+        if (backs.length === 1) return { handBack: secretary(c, 'ask-architect', { instructions: 'The files come from Windows: ask again.' }) };
         granted = true;
-        return { handBack: secretary(c, 'grant', { instructions: 'One more attempt with the Architect\'s answer.', grantExtra: 1 }) };
+        return { handBack: secretary(c, 'grant', { instructions: 'One more attempt.', grantExtra: 1 }) };
       },
-      'architect-answer': reply({ reply: 'answer', text: 'S1 and S2 are both met by RFC 4180 quoting.' }),
+      'architect-answer': (t) => ({ handBack: (t.card as unknown as ArchitectAnswerCard).asked.round === 0 ? { reply: 'answer', text: 'Use commas.', tasks: ['iface'] } : { reply: 'answer', text: 'Use tabs instead of commas.', tasks: ['iface'] } }),
     }));
     const esc = (await events(ports, { line: 'secretary', event: 'escalation' })).map((e) => e.body as { id: string; source: string; options: string[] }).find((e) => e.source === 'loop-exhausted')!;
     assert.ok(esc.options.includes('ask-architect'), 'offered on a used-up loop');
     const r = await replies(ports);
-    assert.deepEqual(r.map((x) => [x.key, x.body.reply, x.body.moot ?? null]), [[`${esc.id}:s0`, 'answer', null]], 'recorded on the escalation that asked');
-    assert.ok(back !== null, 'the escalation came back to the Secretary');
-    assert.ok(back!.request.reasons.some((x) => x.includes('answered: S1 and S2 are both met by RFC 4180 quoting. A grant carries this answer to the next attempt')));
+    assert.deepEqual(r.map((x) => [x.key, x.body.reply, x.body.text, x.body.moot ?? null]), [[`${esc.id}:s0`, 'answer', 'Use commas.', null], [`${esc.id}:s1`, 'answer', 'Use tabs instead of commas.', null]], 'both recorded on the escalation: its history');
+    assert.equal(backs.length, 2, 'each answer came back to the Secretary');
+    assert.ok(backs[0]!.request.reasons.some((x) => x.includes('answered: Use commas. A grant carries this answer to the next attempt')));
     assert.equal(((await applied(ports, esc.id))?.['what'] as { option: string }).option, 'grant', 'the decider\'s grant is what was carried out');
     const rw = (await events(ports, { line: 'task:impl', event: 'rework' })).at(-1)?.body as { instructions: string[] };
-    assert.ok(rw.instructions.some((i) => i.includes('The Architect\'s answer') && i.includes('S1 and S2 are both met by RFC 4180 quoting.')), JSON.stringify(rw));
+    assert.deepEqual(rw.instructions, ['One more attempt.'], 'the rework body is the grant\'s, as in 4.3');
     const con = [...ports.scheduler.tasks.keys()].filter((t) => t.startsWith('con.m1.impl.')).at(-1)!;
-    assert.ok(ports.scheduler.card<ConstructorCard>(con).duties.includes('S1 and S2 are both met by RFC 4180 quoting.'), 'the next attempt\'s card carries it');
-    // the Architect's step counted on no loop of the task: the grant's attempt only
+    const rev = [...ports.scheduler.tasks.keys()].filter((t) => t.startsWith('rev.m1.impl.')).at(-1)!;
+    for (const [role, quotes] of [['Constructor (queued)', ports.scheduler.card<ConstructorCard>(con).decisionQuotes], ['Constructor (claimed)', claimedCard<ConstructorCard>(ports, con).decisionQuotes], ['Reviewer (claimed)', claimedCard<ReviewerCard>(ports, rev).decisionQuotes]] as const) {
+      assert.ok(quotes.includes('Use tabs instead of commas.'), `${role} carries the latest answer: ${JSON.stringify(quotes)}`);
+      assert.ok(!quotes.includes('Use commas.'), `${role} does not carry the corrected one`);
+    }
+    assert.deepEqual(architectNotesFor(await events(ports), 'iface', []).map((n) => n.text), ['Use tabs instead of commas.'], 'a named task gets the latest answer only');
+    // the Architect's steps counted on no loop of the task: the grant's attempt only
     assert.equal((await ports.ledger.loop('task.m1.impl', REDISPATCH_LOOP)).attempts, 0);
+  });
+
+  it('two grants that cover one attempt each carry their escalation\'s Architect answer onto the task\'s cards (p11-3)', async () => {
+    const { ports } = await setup();
+    const ctx = flowCtx(ports, M);
+    // two used-up loops of the task under its card, both carried out with a grant, each with an Architect answer
+    for (const n of [1, 2]) {
+      const id = `exh.shared.${n}`;
+      await raiseEscalation(ctx, { id, source: 'loop-exhausted', lineage: 'task.m1.impl', subject: 'task:impl', summary: 'used up', reasons: ['r'], options: ['grant', 'ask-architect', 'replan', 'abandon', 'ask-user'], facts: { task: 'impl', attempt: 1, loop: 'rework', issues: [] } });
+      await ports.ledger.append(`test:shared:${n}`, { events: [
+        { mission: M, line: 'secretary', event: 'architect-answer', key: `${id}:s0`, body: { escalation: id, ask: { escalation: id, by: 'secretary', round: 0 }, step: `arch-ask.${n}`, dispatch: null, reply: 'answer', text: `Answer ${n}.` } },
+        { mission: M, line: 'secretary', event: 'applied', key: id, body: { what: { option: 'grant' }, by: 'secretary' } },
+      ] });
+    }
+    const evs = await events(ports);
+    const task = detailedPlan(M).tasks.find((t) => t.id === 'impl')!;
+    const quotes = taskDecisionQuotes(await currentItems(ctx), evs, task, [], undefined);
+    assert.ok(quotes.includes('Answer 1.') && quotes.includes('Answer 2.'), JSON.stringify(quotes));
   });
 });
 
@@ -358,7 +384,7 @@ describe('4.4 G1: the step as a step like any other', () => {
 });
 
 describe('4.4 G1: who asks, and who answers in between', () => {
-  it('the PM asks on the user\'s words; a reply that comes back reopens the PM\'s inbox item with it; the user does not ask', async () => {
+  it('the PM asks on the user\'s words; "I need to know this first" returns to a fresh Secretary round, which the earlier PM round does not shut out; the user does not ask (p11-2)', async () => {
     const { ports, engine } = await constructorAsks(['Which line ending?']);
     const id = 'cdec.con.m1.impl.1';
     await assert.rejects(answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'the user wants the Architect to say' }), /ask-architect requires --instructions/);
@@ -370,14 +396,54 @@ describe('4.4 G1: who asks, and who answers in between', () => {
     const step = askTask(M, { escalation: id, by: 'pm', round: 1 });
     assert.equal(ports.scheduler.card<ArchitectAnswerCard>(step).asked.by, 'pm');
     const rejected = (await events(ports, { line: 'secretary', event: 'pm-answer-rejected' })).find((e) => e.key === `${id}#1`)?.body as { architect?: string; why: string } | undefined;
-    assert.equal(rejected?.architect, `${id}:p1`);
+    assert.equal(rejected?.architect, `${id}:p1`, 'the PM\'s round is closed by the reply');
+    const retry = (await events(ports, { line: 'secretary', event: 'secretary-retry' })).find((e) => e.key === `${id}#1`)?.body as { architect?: string; why: string; task: string } | undefined;
+    assert.equal(retry?.architect, `${id}:p1`, 'and the escalation returns to a fresh Secretary round with the reply');
+    assert.match(retry?.why ?? '', /needs to know this first: Does the user run it on Windows\?/);
+    assert.ok(!pmInbox(ports.ctx).some((i) => i.id === `${M}/${id}`), 'not drawn into the PM\'s inbox');
+    const card = ports.scheduler.card<SecretaryCard>(`sec.${id}.retry1`);
+    assert.ok(card.request.reasons.some((x) => x.includes('Does the user run it on Windows?')), 'the Secretary\'s card carries the Architect\'s question');
+    // the Secretary settles the detail itself: carried out as its answer, though the PM had answered round 1
+    await drive(engine, ports.scheduler, withKinds({ secretary: (t) => ((t.card as unknown as SecretaryCard).request.id === id ? { handBack: secretary(t.card as unknown as SecretaryCard, 'answer', { instructions: 'Use LF: the user runs Linux only.' }) } : null) }));
+    const a = await applied(ports, id);
+    assert.deepEqual([(a?.['what'] as { option: string }).option, a?.['by']], ['answer', 'secretary']);
+  });
+
+  it('the reopened Secretary round may send it to the PM: the PM gets it with the Secretary\'s brief, and answers it (p11-2)', async () => {
+    const { ports, engine } = await constructorAsks(['Which line ending?']);
+    const id = 'cdec.con.m1.impl.1';
+    await answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'design', instructions: ASK });
+    await drive(engine, ports.scheduler, withKinds({
+      secretary: (t) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'ask-pm', { notice: 'The question: CRLF or LF? The options: answer. The words: none. I would ask the user.' }) }),
+      'architect-answer': reply({ reply: 'plan-must-change', text: 'The output format is undecided.', why: 'It changes what the user gets.' }),
+    }));
     const item = pmInbox(ports.ctx).find((i) => i.id === `${M}/${id}`);
-    assert.equal(item?.round, 2);
-    assert.match(item?.text ?? '', /your ask came back: The Architect \(step .*\) needs to know this first: Does the user run it on Windows\?/);
-    assert.equal(await decisionFor(flowCtx(ports, M), id), null, 'the work waits for the PM again');
-    await answerByPm(ports, { mission: M, escalation: id, option: 'answer', words: [], noWords: true, reason: 'the user said so', instructions: 'Use LF.' });
+    assert.ok(item !== undefined, 'listed once the Secretary\'s round sends it up');
+    assert.equal(item!.brief?.by, 'secretary');
+    assert.match(item!.brief?.notice ?? '', /CRLF or LF\?/);
+    await answerByPm(ports, { mission: M, escalation: id, option: 'answer', words: [], noWords: true, reason: 'the user said', instructions: 'CRLF.' });
     await drive(engine, ports.scheduler, withKinds({ secretary: () => null }));
-    assert.equal((await applied(ports, id))?.['by'], 'pm');
+    assert.deepEqual([((await applied(ports, id))?.['what'] as { option: string }).option, (await applied(ports, id))?.['by']], ['answer', 'pm']);
+  });
+
+  it('the PM settles the escalation while its own ask is pending: one write closes the ask and records its answer as the next round; the step is cancelled; an identical ask again stays idempotent (p11-1)', async () => {
+    const { ports, engine } = await constructorAsks(['Which quote character?']);
+    const id = 'cdec.con.m1.impl.1';
+    const ask = { mission: M, escalation: id, option: 'ask-architect' as const, words: [], noWords: true, reason: 'design', instructions: ASK };
+    await answerByPm(ports, ask);
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': () => null }));
+    const step = askTask(M, { escalation: id, by: 'pm', round: 1 });
+    assert.equal(ports.scheduler.tasks.get(step)?.state, 'queued');
+    assert.equal((await answerByPm(ports, ask)).round, 1, 'the same ask again: nothing new');
+    const settled = await answerByPm(ports, { mission: M, escalation: id, option: 'answer', words: [], noWords: true, reason: 'the user said', instructions: 'Double quotes.' });
+    assert.equal(settled.round, 2, 'the PM\'s choice is the next round');
+    const closed = (await events(ports, { line: 'secretary', event: 'pm-answer-rejected' })).find((e) => e.key === `${id}#1`)?.body as { closedBy?: string } | undefined;
+    assert.equal(closed?.closedBy, 'pm', 'the pending ask is closed in the same write');
+    assert.equal((await answerByPm(ports, { mission: M, escalation: id, option: 'answer', words: [], noWords: true, reason: 'the user said', instructions: 'Double quotes.' })).round, 2, 'that answer run again: nothing new');
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': () => null }));
+    assert.notEqual(ports.scheduler.tasks.get(step)?.state, 'queued', 'the Architect\'s step is cancelled');
+    const a = await applied(ports, id);
+    assert.deepEqual([(a?.['what'] as { option: string }).option, a?.['by'], a?.['answerRound']], ['answer', 'pm', 2]);
   });
 
   it('a queued step is cancelled when another decider answers first, and its claim is refused before that pass', async () => {
@@ -489,6 +555,92 @@ describe('4.4 G1: the hand-back, the option and compatibility', () => {
     const lines = (c: never) => renderSeatCard({ ...(c as object), ...baseCard() } as never, { dispatch: 'D-9' });
     assert.ok(lines(accepted).includes('`mp seat D-9 checkout --product <task>`'));
     assert.ok(!lines(none).includes('`mp seat D-9 checkout --product <task>`'));
+  });
+});
+
+/** A new effective event of the plan in effect with one amendment (a repair's change of a card, or an added task). */
+async function amend(w: World, entry: Record<string, unknown>, tasks: string[] = []): Promise<void> {
+  const eff = (await events(w, { line: 'plan', event: 'effective' })).at(-1)!;
+  const body = eff.body as { dplan: string; tasks: string[]; amendments?: unknown[] };
+  const amendments = [...(body.amendments ?? []), { repair: 'R-9', tasks: [], reopen: [], arch: 'arch-repair.test', ...entry }];
+  await w.ledger.append(`test:amend:${amendments.length}`, { events: [{ mission: M, line: 'plan', event: 'effective', key: `${body.dplan}#a${amendments.length}`, body: { ...body, tasks: [...body.tasks, ...tasks], amendments } }] });
+}
+
+describe('4.4 G1, review round 1', () => {
+  it('p11-4: the asking task\'s card replaced before its escalation is closed: a reply recorded in that window is moot, and no named task gets it', async () => {
+    const { ports, engine } = await constructorAsks(['Which delimiter?']);
+    const id = 'cdec.con.m1.impl.1';
+    await drive(engine, ports.scheduler, withKinds({ secretary: asksArchitect((c) => c.request.id === id), 'architect-answer': () => null }));
+    const step = askTask(M, { escalation: id, by: 'secretary', round: 0 });
+    ports.scheduler.dispatchOf(step);
+    const impl = detailedPlan(M).tasks.find((t) => t.id === 'impl')!;
+    await amend(ports, { changed: [{ ...impl, goal: 'Implement the parser, streaming' }] });
+    await ports.scheduler.run(step, { handBack: { reply: 'answer', text: 'A comma, and iface documents it.', tasks: ['iface'] } });
+    await engine.reconcile(M);
+    const r = await replies(ports);
+    assert.equal(r.length, 1);
+    assert.match(r[0]!.body.moot ?? '', /task impl has a new card in the plan in effect: the question was about its earlier card/);
+    assert.deepEqual(architectNotesFor(await events(ports), 'iface', []), [], 'not printed on the task it names');
+    assert.notEqual(((await applied(ports, id))?.['what'] as { option?: string } | undefined)?.option, 'answer', 'not carried out as the answer');
+  });
+
+  it('p11-6: the Architect reads the review of the attempt before when the asking attempt has none, and the hand-back of a Constructor whose export used the loop up', async () => {
+    const { ports, engine } = await setup();
+    let reviewed = false;
+    await drive(engine, ports.scheduler, withKinds({
+      reviewer: (t) => { const c = t.card as unknown as ReviewerCard; if (c.target.includes('impl') && !reviewed) { reviewed = true; return { handBack: reviewer(c, 'rework') }; } return { handBack: reviewer(c, 'pass') }; },
+      constructor: (t: FlowTask) => ({ handBack: t.task === 'con.m1.impl.2' ? { ...constructorDone({ decisions_needed: ['Which escape?'] }), blocked: true } : constructorDone({ done: `finished ${t.task}` }) }),
+      secretary: asksArchitect((c) => c.request.id === 'cblk.con.m1.impl.2.1'),
+      'architect-answer': () => null,
+    }));
+    const card = ports.scheduler.card<ArchitectAnswerCard>(askTask(M, { escalation: 'cblk.con.m1.impl.2.1', by: 'secretary', round: 0 }));
+    assert.deepEqual((card.materials ?? []).map((m) => m.id).sort(), ['constructor-claims', 'plan', 'previous-review']);
+    assert.match(card.materials!.find((m) => m.id === 'previous-review')!.title, /attempt 1/, 'the latest review of the work, with its attempt');
+    assert.match(card.materials!.find((m) => m.id === 'constructor-claims')!.title, /attempt 2/, 'the hand-back that paused attempt 2');
+
+    // the export case: no product is recorded, and the loop is used up by the rejected candidates
+    const w = await setup();
+    await drive(w.engine, w.ports.scheduler, withKinds({ constructor: (t: FlowTask) => (t.task.startsWith('con.m1.impl.') ? null : { handBack: constructorDone() }) }));
+    w.ports.scheduler.actions = { product: async () => { throw Object.assign(new Error('the candidate cannot be recorded'), { code: 'product-rejected' }); } };
+    await drive(w.engine, w.ports.scheduler, withKinds({ secretary: asksArchitect((c) => c.request.source === 'loop-exhausted'), 'architect-answer': () => null }));
+    const ask = [...w.ports.scheduler.tasks.keys()].find((t) => t.startsWith('arch-ask.'));
+    assert.ok(ask !== undefined, JSON.stringify([...w.ports.scheduler.tasks.keys()]));
+    const export_ = w.ports.scheduler.card<ArchitectAnswerCard>(ask!);
+    assert.ok((export_.materials ?? []).some((m) => m.id === 'constructor-claims'), `the completed hand-back is readable: ${JSON.stringify(export_.materials?.map((m) => m.id))}`);
+  });
+
+  it('p11-7: a queued answer card is current when claimed: a decision recorded since and a task added since are on it', async () => {
+    const { ports, engine } = await constructorAsks(['Which encoding?']);
+    const id = 'cdec.con.m1.impl.1';
+    await drive(engine, ports.scheduler, withKinds({ secretary: asksArchitect((c) => c.request.id === id), 'architect-answer': () => null }));
+    const step = askTask(M, { escalation: id, by: 'secretary', round: 0 });
+    const queued = ports.scheduler.card<ArchitectAnswerCard>(step);
+    assert.ok(!queued.tasks.includes('extra'));
+    await recordItem(ports, { mission: M, item: 'd9', type: 'decision', text: 'Fields are UTF-8.', source: { kind: 'words', words: 'W-1', quote: 'The details are yours to decide' } });
+    const impl = detailedPlan(M).tasks.find((t) => t.id === 'impl')!;
+    await amend(ports, { tasks: [{ ...impl, id: 'extra', goal: 'An added task', dependsOn: ['impl'], writeScope: ['src/extra/**'] }] }, ['extra']);
+    pmDispatch(ports.ctx, step, { filledBy: 'test/scripted' });
+    const claimed = claimedCard<ArchitectAnswerCard>(ports, step);
+    assert.ok(claimed.tasks.includes('extra'), 'a task added since can be named');
+    assert.ok(claimed.decisionQuotes.some((q) => q.startsWith('Fields are UTF-8.')), JSON.stringify(claimed.decisionQuotes));
+    assert.deepEqual(handBackProblems(claimed, { reply: 'answer', text: 'UTF-8.', tasks: ['extra'] }, {}), []);
+  });
+
+  it('p11-8: mp read blocked names the Architect\'s step when the PM passed an escalation the Secretary sent up to the Architect', async () => {
+    const { ports, engine } = await setup();
+    let first = true;
+    await drive(engine, ports.scheduler, withKinds({
+      reviewer: (t) => { const c = t.card as unknown as ReviewerCard; if (c.target.includes('impl') && first) { first = false; return { handBack: reviewer(c, 'needs-decision') }; } return { handBack: reviewer(c, 'pass') }; },
+      secretary: (t) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'ask-pm') }),
+    }));
+    const id = 'rnd.rev.m1.impl.1';
+    assert.ok(readSteps(ports.ctx).waitingOnUser.some((w) => w.escalation === id), 'sent up: waits on the user');
+    await answerByPm(ports, { mission: M, escalation: id, option: 'ask-architect', words: [], noWords: true, reason: 'design', instructions: ASK });
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': () => null }));
+    assert.ok(!readSteps(ports.ctx).waitingOnUser.some((w) => w.escalation === id), 'the consultation in effect: no longer waiting on the user');
+    const step = askTask(M, { escalation: id, by: 'pm', round: 1 });
+    const line = (await resolveSubtasks(ports.ctx)).blocked.flatMap((e) => (e.blocked !== null ? [e.blocked] : [])).find((b) => b.because.includes(id))!;
+    assert.equal(line.next, `the Architect answers it: step ${step} is ready: dispatch it (mp pm next)`);
   });
 });
 

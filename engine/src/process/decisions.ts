@@ -17,7 +17,7 @@ export interface DecisionOutcome {
   /**
    * applied: carried out; to-pm: waits for the PM's answer; closed: the escalation closed without it; overridden: another
    * decider's answer was carried out; pending: a later pass applies it. 4.4 (G1): asked: the Architect is asked, and the
-   * work waits for its reply; returned: an Architect's reply sent the escalation back to the decider that asked.
+   * work waits for its reply; returned: an Architect's reply sent the escalation back to a fresh Secretary round.
    */
   readonly state: 'applied' | 'to-pm' | 'closed' | 'overridden' | 'pending' | 'asked' | 'returned';
   readonly text: string;
@@ -33,7 +33,7 @@ function askLine(db: Db, data: Texts, mission: string, a: Ask, pass: string): st
 
 /**
  * 4.4 (G1): what became of an Architect's reply, read from its record after the hand-back's pass: carried out as the
- * escalation's answer, sent back to the decider that asked, kept as moot, or left to the next pass (`why`).
+ * escalation's answer, sent back to a fresh Secretary round, kept as moot, or left to the next pass (`why`).
  */
 export function replyOutcome(db: Db, data: Texts, o: { readonly mission: string; readonly escalation: string; readonly step: string; readonly why: string | null }): DecisionOutcome {
   const base = { escalation: o.escalation, mission: o.mission };
@@ -43,8 +43,9 @@ export function replyOutcome(db: Db, data: Texts, o: { readonly mission: string;
   if (b.moot !== undefined) return { ...base, state: 'closed', text: `recorded on escalation ${o.escalation} as moot (${b.moot}): it changes nothing` };
   const applied = secretaryEvent(db, data, o.mission, 'applied', o.escalation);
   if (applied !== null && applied['architect'] === row.key) return { ...base, state: 'applied', text: `carried out as the answer of escalation ${o.escalation}` };
-  const back = b.ask.by === 'pm' ? secretaryEvent(db, data, o.mission, 'pm-answer-rejected', `${o.escalation}#${b.ask.round}`)?.['architect'] === row.key : secretaryEvent(db, data, o.mission, 'secretary-retry', `${o.escalation}#${b.ask.round + 1}`) !== null;
-  if (back) return { ...base, state: 'returned', text: `recorded on escalation ${o.escalation}; it went back to ${b.ask.by === 'pm' ? 'the PM\'s inbox' : 'the Secretary'} with your reply` };
+  // 4.4 (review p11-2): every reply that is not carried out returns to a fresh Secretary round, whoever asked; the round names it
+  const back = flowEvents(db, { mission: o.mission as MissionId, line: SECRETARY_LINE, event: 'secretary-retry', limit: 10_000 }).some((e) => (JSON.parse(data.text(e.body)) as { architect?: unknown }).architect === row.key);
+  if (back) return { ...base, state: 'returned', text: `recorded on escalation ${o.escalation}; it went back to the Secretary with your reply` };
   if (applied !== null) return { ...base, state: 'closed', text: `recorded on escalation ${o.escalation}, which was carried out otherwise (${String((applied['what'] as { option?: unknown } | undefined)?.option ?? '')})` };
   return { ...base, state: 'pending', text: `recorded on escalation ${o.escalation}; the next pass carries it out as its answer${o.why !== null ? ` (${o.why})` : ''}` };
 }
@@ -67,7 +68,7 @@ export function answerOutcome(db: Db, data: Texts, o: { readonly mission: string
   const closedRound = o.by === 'pm' && o.round !== null ? secretaryEvent(db, data, o.mission, 'pm-answer-rejected', `${o.escalation}#${o.round}`) : null;
   const rejected = closedRound !== null;
   // 4.4 (G1): a round an Architect's reply sent back is closed by that reply, not by changed words
-  const ours = rejected ? (typeof closedRound['architect'] === 'string' ? `round ${String(o.round)} came back with the Architect's reply; ` : `round ${String(o.round)} was rejected, the words it rested on changed; `) : '';
+  const ours = rejected ? (typeof closedRound['architect'] === 'string' ? `round ${String(o.round)} came back with the Architect's reply, to the Secretary's next round; ` : `round ${String(o.round)} was rejected, the words it rested on changed; `) : '';
   const applied = secretaryEvent(db, data, o.mission, 'applied', o.escalation);
   if (applied !== null) {
     const what = (applied['what'] ?? {}) as { option?: unknown; why?: unknown; moot?: unknown; restarted?: unknown };
@@ -84,7 +85,7 @@ export function answerOutcome(db: Db, data: Texts, o: { readonly mission: string
     const who = by === 'user' ? 'the user\'s answer' : by === 'pm' ? `the PM's answer of round ${String(applied['answerRound'])}` : 'the Secretary\'s decision';
     return { applied: false, text: `not carried out: ${ours}${who} (${effect ?? 'its option'}${what.moot === true ? ', moot' : ''}) was carried out instead; ${read}` };
   }
-  if (rejected) return { applied: false, text: `not carried out: ${ours}the inbox asks again in round ${String((o.round ?? 0) + 1)}; ${read}` };
+  if (rejected) return { applied: false, text: `not carried out: ${ours}${typeof closedRound['architect'] === 'string' ? 'the Secretary decides it, and sends it to your inbox if it is of your class' : `the inbox asks again in round ${String((o.round ?? 0) + 1)}`}; ${read}` };
   const userFirst = o.by === 'pm' && secretaryEvent(db, data, o.mission, 'user-answer', o.escalation) !== null ? '; the user\'s answer, recorded too, takes precedence' : '';
   // 4.4 (G1): an ask of the Architect waits for its step, which the flow queues
   if (o.option === 'ask-architect' && o.by === 'pm' && o.round !== null) return { applied: false, text: `${askLine(db, data, o.mission, { escalation: o.escalation, by: 'pm', round: o.round }, o.resident ? 'the Secretary’s next pass' : 'the next pass (mp pm next)')}${userFirst}` };

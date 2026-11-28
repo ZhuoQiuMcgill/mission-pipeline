@@ -6,13 +6,13 @@
 // no structure, so no plan review follows: its hand-back is exactly one of three replies, and the program
 // refuses anything else.
 //   answer            recorded on the escalation that asked, as its answer (flow/architectAsk.ts)
-//   plan-must-change  what must change and why: the escalation goes back to the decider that asked
-//   need-to-know      the Architect's question: the escalation goes back to the decider that asked
+//   plan-must-change  what must change and why: the escalation returns to the Secretary
+//   need-to-know      the Architect's question: the escalation returns to the Secretary
 
 import { z } from 'zod';
-import { DetailedTask } from '../../flow/plandoc.ts';
+import { DetailedTask, type DetailedPlanDoc } from '../../flow/plandoc.ts';
 import { ESCALATION_SOURCES } from './secretary.ts';
-import { Item, Material, ReadOnlyWorkspace, commonCardFields, list, renderCommon, renderMaterials } from './common.ts';
+import { Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, type MaterialRef } from './common.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
 export const ARCHITECT_ANSWER_CARD = 'architect-answer';
@@ -42,6 +42,13 @@ export const ArchitectAnswerCardSchema = z.object({
   materials: z.array(Material).optional(),
 });
 export type ArchitectAnswerCard = z.infer<typeof ArchitectAnswerCardSchema>;
+
+/** The plan in effect as the card's optional material (its fields, one task, interface, module or risk per line), built alike when queued and when claimed. */
+export function answerPlanMaterial(put: (doc: string) => string, dplan: string, plan: DetailedPlanDoc): MaterialRef {
+  const fields = Object.entries(plan).map(([k, xs]) => `  ${JSON.stringify(k)}: [${(xs as unknown[]).length === 0 ? ']' : `\n${(xs as unknown[]).map((x) => `    ${JSON.stringify(x)}`).join(',\n')}\n  ]`}`);
+  const text = `# Detailed plan ${dplan}, as it is in effect (with earlier repairs)\n\n${plan.tasks.length} task${plan.tasks.length === 1 ? '' : 's'}: ${plan.tasks.map((t) => t.id).join(', ')}.\n\n\`\`\`json\n{\n${fields.join(',\n')}\n}\n\`\`\`\n`;
+  return { id: 'plan', title: `Detailed plan ${dplan} as it is in effect, in full`, ref: put(text), pages: materialPageCount(text), mustRead: false, role: 'plan' };
+}
 
 export const ArchitectAnswerResultShape = {
   reply: z.enum(['answer', 'plan-must-change', 'need-to-know']).describe('answer: you answer the question; plan-must-change: the answer would change the plan (a card, a standard, a write path, a task or an interface); need-to-know: you must know something first.'),
@@ -73,8 +80,8 @@ export function renderArchitectAnswer(c: ArchitectAnswerCard): string {
     list('The other tasks of the plan (an answer may name them)', c.tasks) +
     '## What to hand back\nAnswer what the plan leaves open, as the plan\'s Architect would decide it. You change nothing: no card text, no standard, no write path, no structure. Hand back exactly one reply:\n' +
     '- `answer`: the answer in `text`. It is recorded on this escalation as its answer and reaches the task\'s next cards. Name other tasks it concerns in `tasks`.\n' +
-    '- `plan-must-change`: the answer would change the plan (a card, a standard, a write path, a task or an interface): what must change in `text`, why in `why`. The escalation goes back to who asked you: a change of the plan is a re-plan with its reviews, or the PM\'s.\n' +
-    '- `need-to-know`: what you must know first, as a question in `text`. The escalation goes back to who asked you.\n\n' +
+    '- `plan-must-change`: the answer would change the plan (a card, a standard, a write path, a task or an interface): what must change in `text`, why in `why`. The escalation returns to the Secretary: a change of the plan is a re-plan with its reviews, or the PM\'s.\n' +
+    '- `need-to-know`: what you must know first, as a question in `text`. The escalation returns to the Secretary, who may supply it and ask you again.\n\n' +
     renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
   );
 }

@@ -11,7 +11,7 @@ import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
 import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
-import { ARCHITECT_ANSWER, answersInPlace, carriedArchitectAnswer, type ArchitectAnswerBody } from '../../flow/architectAnswers.ts';
+import { ARCHITECT_ANSWER, carriedArchitectAnswer, effectiveAnswer, type ArchitectAnswerBody } from '../../flow/architectAnswers.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -280,7 +280,8 @@ export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
       if (a.reply !== 'answer' || a.moot !== undefined || (a.tasks ?? []).length === 0) continue;
       sec ??= events.filter((x) => x.line === 'secretary');
       const esc = sec.find((x) => x.event === 'escalation' && x.key === a.escalation)?.body as EscalationBody | undefined;
-      if (esc === undefined || (answersInPlace(esc.source) && carriedArchitectAnswer(sec, a.escalation)?.key !== e.key)) continue;
+      // review p11-5: only the escalation's effective answer (the one carried out, or a loop's latest); earlier ones stay its history
+      if (esc === undefined || effectiveAnswer(sec, a.escalation, esc.source)?.key !== e.key) continue;
       out.push({ from: `escalation ${a.escalation} (${esc.subject}), the Architect's answer`, repair: null, tasks: [...(a.tasks ?? [])], text: a.text, since: e.revision });
       continue;
     }
@@ -321,6 +322,12 @@ export function writtenForTask(constraints: readonly ConstraintBody[], events: r
 function carriedAnswer(events: readonly FlowEvent[], esc: EscalationBody): DecisionBody | null {
   const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id);
   const what = applied?.body as { what?: { option?: string }; by?: string } | undefined;
+  // 4.4 (G1, review p11-3, p11-5): a used-up loop carried out with a grant: the Architect's latest answer on it reaches
+  // the task's next cards as an answer does (the granted attempt's Constructor and Reviewer, at queue time and at the claim)
+  if (what?.what?.option === 'grant' && esc.source === 'loop-exhausted') {
+    const ruling = effectiveAnswer(events.filter((a) => a.line === 'secretary'), esc.id, esc.source);
+    return ruling === null ? null : { escalation: esc.id, by: (what.by ?? 'secretary') as DecisionBody['by'], option: 'answer', classification: 'detail', authorization: null, reason: '', instructions: ruling.text, grantExtra: 0, notice: '', mayMatter: false, architect: ruling.key };
+  }
   if (what?.what?.option !== 'answer') return null;
   const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
   const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;

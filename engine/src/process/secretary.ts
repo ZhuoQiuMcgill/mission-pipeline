@@ -18,6 +18,7 @@ import { listNotices, markNotices, onlyInforms } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
 import type { DecisionBody, EscalationBody } from '../flow/secretary.ts';
 import { secretaryRoundInputs } from '../seat/cards/dynamic.ts';
+import { reopenedAt } from '../flow/architectAnswers.ts';
 import { handBackFiles } from '../seat/card.ts';
 import type { SecretaryResult } from '../seat/cards/secretary.ts';
 import { holdTimeReached } from './holds.ts';
@@ -278,13 +279,15 @@ function inboxItems(ctx: ProcessContext): InboxItem[] {
     // 4.4 (F9, issue 62): listed from the moment the hand-back is recorded, before a pass writes the decision
     const handed = d === undefined ? handedBackDecision(ctx, round.esc.task) : undefined;
     const decided = d ?? handed;
-    const routed = is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || DIRECT_TO_PM.has(esc.source);
+    // 4.4 (G1, review p11-2): a Secretary round an Architect's reply reopened is the Secretary's: listed only once that round sends it up
+    const reopened = reopenedAt(mine.filter((r) => r.line === 'secretary'), esc.id) !== null;
+    const routed = reopened ? decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined : is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || DIRECT_TO_PM.has(esc.source);
     if (!routed) continue;
     const id = `${e.mission}/${esc.id}`;
     const asked = is(e.mission, 'asked-user', esc.id);
-    // 4.4 (G1): a round the Architect's reply sent back says so, with the reply (in full: mp read show escalation)
-    const closed = pmRound > 1 ? events.find((r) => r.mission === e.mission && r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === `${esc.id}#${pmRound - 1}`)?.body as {why?: string; architect?: string} | undefined : undefined;
-    const back = pmRound <= 1 ? '' : typeof closed?.architect === 'string' ? `; your ask came back: ${clip(closed.why ?? '', 600)}` : '; the words it rested on changed';
+    // 4.4 (G1): a round the PM itself closed (an ask it answered over), or one the Architect's reply closed, says so
+    const closed = pmRound > 1 ? events.find((r) => r.mission === e.mission && r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === `${esc.id}#${pmRound - 1}`)?.body as {why?: string; architect?: string; closedBy?: string} | undefined : undefined;
+    const back = pmRound <= 1 ? '' : typeof closed?.architect === 'string' ? `; your earlier ask of the Architect came back to the Secretary: ${clip(closed.why ?? '', 600)}` : closed?.closedBy === 'pm' ? '' : '; the words it rested on changed';
     out.push({id, kind: 'decision', mission: e.mission, text: `${esc.summary}${esc.source === 'plan-structure-change' && esc.changed ? `\n${esc.changed}` : ''}${back}`, state: asked ? 'waits on the user' : 'open', action: `mp pm answer ${e.mission} ${esc.id} --option <option> --by pm|user`, options: esc.options.filter((o) => o !== 'ask-user' && o !== 'ask-pm'), facts: esc.facts, resolution: 'a PM or user answer is recorded', round: pmRound,
       brief: inboxBrief(ctx, e.mission, mine, {...round.esc, id: esc.id}, decided, d?.by ?? (handed !== undefined ? 'secretary' : null), plans, mine.find((t) => t.line === 'secretary' && t.event === 'to-user' && t.key === esc.id)?.body.why ?? null)});
   }

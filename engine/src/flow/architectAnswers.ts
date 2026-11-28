@@ -23,7 +23,7 @@ export const ASK_ARCHITECT_SOURCES: readonly EscalationSource[] = ['constructor-
 /**
  * The kinds whose escalation is carried out as an answer: an Architect's answer is carried out as their
  * `answer`. A used-up loop has no answer that continues it (a grant, a re-plan, an acceptance or a giving-up
- * is the decider's): its Architect's answer is recorded and the escalation goes back to the decider.
+ * is the decider's): its Architect's answer is recorded and the escalation returns to the Secretary.
  */
 export function answersInPlace(source: string): boolean {
   return source === 'constructor-decision' || source === 'reviewer-needs-decision';
@@ -59,8 +59,25 @@ export interface ArchitectAnswerBody {
   readonly moot?: string;
 }
 
-/** An event as the flow and the claim read them. */
-type Ev = { readonly event: string; readonly key: string; readonly body: unknown };
+/** An event as the flow and the claim read them (the secretary line's; `revision` orders them). */
+type Ev = { readonly event: string; readonly key: string; readonly body: unknown; readonly revision?: number };
+
+/**
+ * 4.4 (G1, review p11-2): the revision of the Secretary round an Architect's reply reopened (its retry names the
+ * reply: `architect`), when no PM answer came after it; null otherwise. From that round on the escalation is the
+ * Secretary's again: the PM's earlier rounds and an earlier hand-up do not shut it out (a later PM answer does).
+ */
+export function reopenedAt(sec: readonly Ev[], escalation: string): number | null {
+  const mark = sec.filter((e) => e.event === 'secretary-retry' && (e.body as { id?: unknown; architect?: unknown }).id === escalation && typeof (e.body as { architect?: unknown }).architect === 'string').at(-1);
+  if (mark === undefined) return null;
+  const at = mark.revision ?? 0;
+  return sec.some((e) => e.event === 'pm-answer' && e.key.startsWith(`${escalation}#`) && (e.revision ?? 0) > at) ? null : at;
+}
+
+/** The PM's current answer round on an escalation: its rounds closed so far, plus one (flow/secretary.ts pmAnswerRound). */
+export function pmRoundOf(sec: readonly Ev[], escalation: string): number {
+  return sec.filter((e) => e.event === 'pm-answer-rejected' && e.key.startsWith(`${escalation}#`)).length + 1;
+}
 
 /** The ask a decision event makes, or null (not an ask). */
 export function askOf(e: Ev): Ask | null {
@@ -90,10 +107,24 @@ export function askStanding(sec: readonly Ev[], a: Ask): string | null {
     const rejected = at('pm-answer-rejected', `${id}#${a.round}`)?.body as { why?: unknown } | undefined;
     return rejected === undefined ? null : `the PM's answer round ${a.round} on ${id} was closed (${typeof rejected.why === 'string' ? rejected.why.slice(0, 200) : 'rejected'})`;
   }
-  if (sec.some((e) => e.event === 'pm-answer' && e.key.startsWith(`${id}#`))) return `the PM answered escalation ${id}`;
-  if (at('to-user', id) !== undefined) return `escalation ${id} was handed to the PM`;
+  // a Secretary round an Architect's reply reopened after the PM's round is the Secretary's: only what came after it counts
+  const since = reopenedAt(sec, id) ?? -1;
+  if (sec.some((e) => e.event === 'pm-answer' && e.key.startsWith(`${id}#`) && (e.revision ?? 0) > since)) return `the PM answered escalation ${id}`;
+  const handed = at('to-user', id);
+  if (handed !== undefined && (handed.revision ?? 0) > since) return `escalation ${id} was handed to the PM`;
   if (at('secretary-retry', `${id}#${a.round + 1}`) !== undefined) return `the Secretary's round ${a.round} on ${id} was closed by a newer round`;
   return null;
+}
+
+/**
+ * 4.4 (G1, review p11-5): the effective Architect answer of an escalation: on a kind carried out as an answer, the
+ * one carried out; on a used-up loop, the latest answer recorded and not moot (a later answer corrects an earlier
+ * one; the earlier replies stay in the escalation's history). Null: none.
+ */
+export function effectiveAnswer(sec: readonly Ev[], escalation: string, source: string): (ArchitectAnswerBody & { readonly key: string }) | null {
+  if (answersInPlace(source)) return carriedArchitectAnswer(sec, escalation);
+  const last = sec.filter((e) => e.event === ARCHITECT_ANSWER && (e.body as ArchitectAnswerBody).escalation === escalation && (e.body as ArchitectAnswerBody).reply === 'answer' && (e.body as ArchitectAnswerBody).moot === undefined).at(-1);
+  return last === undefined ? null : { ...(last.body as ArchitectAnswerBody), key: last.key };
 }
 
 /** The Architect's reply carried out as an escalation's answer (its applied record names it), or null. */
@@ -108,6 +139,11 @@ export function carriedArchitectAnswer(sec: readonly Ev[], escalation: string): 
 /** The replies recorded on one escalation, oldest first. */
 export function repliesOn(sec: readonly Ev[], escalation: string): Array<ArchitectAnswerBody & { readonly key: string }> {
   return sec.filter((e) => e.event === ARCHITECT_ANSWER && (e.body as ArchitectAnswerBody).escalation === escalation).map((e) => ({ ...(e.body as ArchitectAnswerBody), key: e.key }));
+}
+
+/** The earlier replies on an escalation as the answer card lists them (built alike at queue time and at the claim). */
+export function earlierReplies(sec: readonly Ev[], escalation: string): Array<{ step: string; reply: string; text: string }> {
+  return repliesOn(sec, escalation).map((x) => ({ step: x.step, reply: x.reply, text: x.reply === 'plan-must-change' ? `${x.text} (why: ${x.why ?? ''})` : x.text }));
 }
 
 /** One reply as a decider reads it on the escalation's next round (the round's reasons) or in the PM's inbox. */

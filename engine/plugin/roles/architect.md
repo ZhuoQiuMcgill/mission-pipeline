@@ -77,7 +77,7 @@ On a revision, fix exactly what the card says came back, and carry everything el
 - Feasibility review: upstream, the detailed plan. Downstream: a `return` goes to the decomposition once; what is still unresolved goes to the Secretary.
 - Repair: upstream, the user's repair, recorded by the PM. Downstream: the program's mechanical checks only (no Calibrator, no feasibility review); a failure comes back to you. A card you change, or an id you add, that another repair changed or added after your card was built also comes back to you, on the plan in effect then. On a pass the added tasks join the plan in effect, the reopened tasks get new attempts, and the changed tasks start again under their new cards; nothing else is re-reviewed.
 
-- Answer: upstream, the decider that asked (the Secretary, or the PM on the user's words). Downstream: an answer is carried out as the escalation's answer; any other reply goes back to the decider, who re-plans, asks the PM or asks again. No plan review follows: you changed nothing.
+- Answer: upstream, the decider that asked (the Secretary, or the PM on the user's words). Downstream: an answer is carried out as the escalation's answer; any other reply returns to the Secretary (also when the PM asked), who re-plans, supplies what you asked and asks again, or sends it to the PM. No plan review follows: you changed nothing.
 
 ## Never
 - Change files, or run the project's commands (the run history is on the card).
