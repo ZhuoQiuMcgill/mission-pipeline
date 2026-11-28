@@ -96,6 +96,19 @@ export function planReviewsWaiverIn(events: readonly PlanEvent[], mission: strin
     const skipped = [...((reviews ?? ['feasibility']).includes('feasibility') && !hadFeasibility ? ['feasibility'] : []), 'calibrator-2'];
     return { by: 'config', ref: CONFIG_KEY, reason: null, skipped };
   }
+  const { waiver: inForce, withdrawn } = selectedWaiver(events, dplan);
+  if (inForce !== null) return { by: inForce.by, ref: inForce.ref, reason: inForce.reason };
+  if (!withdrawn && (config.includes(mission) || config.includes(dplan))) return { by: 'config', ref: CONFIG_KEY, reason: null };
+  return null;
+}
+
+/**
+ * The waiver on the record the planner applies to one plan not in effect yet: the latest that covers
+ * it, unless a withdrawal that covers it came after. A withdrawal for the whole mission (dplan null)
+ * covers every plan, also when it was written for the mission-wide waiver alone (scope-only). 4.4 (G7):
+ * the reads use this same choice, so a read never calls in force a waiver the planner does not apply.
+ */
+export function selectedWaiver(events: readonly PlanEvent[], dplan: string): { readonly waiver: ReviewsWaiverBody | null; readonly withdrawn: boolean } {
   let inForce: ReviewsWaiverBody | null = null;
   let withdrawn = false;
   for (const e of events) {
@@ -106,21 +119,36 @@ export function planReviewsWaiverIn(events: readonly PlanEvent[], mission: strin
       if (b.scopeOnly !== true || b.dplan === null || b.dplan === dplan) {inForce = null; withdrawn = true;}
     } else if (b.dplan === null || b.dplan === dplan) inForce = b;
   }
-  if (inForce !== null) return { by: inForce.by, ref: inForce.ref, reason: inForce.reason };
-  if (!withdrawn && (config.includes(mission) || config.includes(dplan))) return { by: 'config', ref: CONFIG_KEY, reason: null };
-  return null;
+  return { waiver: inForce, withdrawn };
+}
+
+/** The plan line's events the planner reads: a waiver on words that lost force is left out (4.3, Appendix B.3). */
+export function eventsWithWaiversInForce<E extends PlanEvent>(events: readonly E[], mission: string, wordsAuthority: ((words: string, mission?: string) => string | null) | undefined): E[] {
+  return events.filter((e) => {if (e.event !== REVIEWS_WAIVER) return true; const w = e.body as ReviewsWaiverBody; return w.action === 'withdraw' || w.by !== 'words' || wordsAuthority === undefined || wordsAuthority(w.ref, mission) !== null;});
+}
+
+/** The waivers of the record by their own scope: those still open, and for each ended one the event that ended it (a withdrawal, or a later waiver of the same scope). */
+function waiverRecord(events: readonly PlanEvent[]): { readonly open: ReviewsWaiverBody[]; readonly ended: Map<number, ReviewsWaiverBody> } {
+  let open: ReviewsWaiverBody[] = [];
+  const ended = new Map<number, ReviewsWaiverBody>();
+  for (const e of events) {
+    if (e.event !== REVIEWS_WAIVER) continue;
+    const b = e.body as ReviewsWaiverBody;
+    const gone = b.action === 'withdraw' ? (b.scopeOnly === true ? open.filter((w) => w.dplan === b.dplan) : open) : open.filter((w) => w.dplan === b.dplan);
+    for (const w of gone) ended.set(w.n, b);
+    open = [...open.filter((w) => !gone.includes(w)), ...(b.action === 'withdraw' ? [] : [b])];
+  }
+  return { open, ended };
 }
 
 /** The waivers on the record still in force (for `mp pm waive --withdraw`): the latest of each scope since the last withdrawal. */
 export function waiversInForce(events: readonly PlanEvent[]): ReviewsWaiverBody[] {
-  let out: ReviewsWaiverBody[] = [];
-  for (const e of events) {
-    if (e.event !== REVIEWS_WAIVER) continue;
-    const b = e.body as ReviewsWaiverBody;
-    if (b.action === 'withdraw') out = b.scopeOnly === true ? out.filter((w) => w.dplan !== b.dplan) : [];
-    else out = [...out.filter((x) => x.dplan !== b.dplan), b];
-  }
-  return out;
+  return waiverRecord(events).open;
+}
+
+/** 4.4 (G7): the event that ended each waiver by its own scope (a withdrawal or a later waiver of that scope). */
+export function waiverEnds(events: readonly PlanEvent[]): ReadonlyMap<number, ReviewsWaiverBody> {
+  return waiverRecord(events).ended;
 }
 
 /**
@@ -130,7 +158,7 @@ export function waiversInForce(events: readonly PlanEvent[]): ReviewsWaiverBody[
  */
 export async function planReviewsWaiver(ctx: FlowCtx, dplan: string): Promise<PlanReviewsWaiver | null> {
   const raw = await eventsOf(ctx, PLAN_LINE);
-  const events = raw.filter((e) => {if (e.event !== REVIEWS_WAIVER) return true; const w = e.body as ReviewsWaiverBody; return w.action === 'withdraw' || w.by !== 'words' || ctx.ports.wordsAuthority === undefined || ctx.ports.wordsAuthority(w.ref, ctx.mission) !== null;});
+  const events = eventsWithWaiversInForce(raw, ctx.mission, ctx.ports.wordsAuthority);
   const reviews = (await objectRecord(ctx, dplan))?.reviews.map((r) => r.review) ?? null;
   return planReviewsWaiverIn(events, ctx.mission, dplan, ctx.ports.project?.planReviewsWaived ?? [], reviews);
 }

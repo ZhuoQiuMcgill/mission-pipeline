@@ -1,6 +1,16 @@
-import { taggedWords, residentRecords } from '../memory/words.ts';
+import { taggedWords, residentRecords, keptOnChangedWords, keptMark } from '../memory/words.ts';
 import { pmInbox, unconfirmedSeats } from '../process/secretary.ts';
 import type { ProcessContext } from '../process/context.ts';
+
+/**
+ * 4.4 (G7): whether a constraint takes a line in layer 1. Today one case takes none: every mission
+ * its scope names is closed (a constraint with no mission applies to every mission, open or to come).
+ * The author and the address of a constraint arrive later; their cases are added here.
+ */
+export function constraintTakesLayer1Line(c: {readonly scope?: {readonly mission?: string | null} | null}, closed: ReadonlySet<string>): boolean {
+  const missions = c.scope?.mission == null ? [] : [c.scope.mission];
+  return missions.length === 0 || !missions.every((m) => closed.has(m));
+}
 
 /** The PM's bounded first load. Summaries are PM prose, never words provenance. */
 export function pmLayer1(ctx: ProcessContext): string {
@@ -18,6 +28,9 @@ export function pmLayer1(ctx: ProcessContext): string {
     }
   }
   const short = (s: string) => [...s.replace(/\s+/g, ' ')].slice(0, 160).join('');
+  // 4.4 (G7): an item or a constraint a supersession kept says so
+  const kept = keptOnChangedWords(ctx.memory, ctx.memory.data);
+  const mark = (line: string) => {const k = kept.get(line); return k === undefined ? '' : ` — ${keptMark(k)}`;};
   const principles = active.filter((t) => t.type === 'principle').map((t) => `[${t.id}] principle: ${short(t.text)}`);
   const tagged = active.filter((t) => t.type !== 'principle' && !covered.has(t.id));
   const tagLine = (t: typeof tagged[number]) => `[${t.id}] ${t.type}${t.mission === null ? ' project' : ` @${t.mission}`}: ${short(t.text)}`;
@@ -25,6 +38,7 @@ export function pmLayer1(ctx: ProcessContext): string {
   const missionLines: {text: string; rev: number}[] = tagged.filter((t) => t.mission !== null).map((t) => ({text: tagLine(t), rev: all.find((w) => w.words === t.words)!.revision}));
   for (const s of summaryLines.filter((s) => !s.project)) missionLines.push({text: s.text, rev: Number(ctx.memory.head())});
   const missions = ctx.memory.stmt('SELECT mission, state FROM missions ORDER BY mission').all() as {mission: string; state: string}[];
+  const closed = new Set(missions.filter((m) => m.state === 'closed').map((m) => m.mission));
   const flow = (ctx.memory.stmt('SELECT mission, line, event, key, body, revision FROM flow_events ORDER BY revision DESC').all() as {mission: string; line: string; event: string; key: string; body: string; revision: number}[]).map((r) => ({...r, body: JSON.parse(ctx.memory.data.text(r.body)) as any}));
   const withdrawn = new Set((ctx.memory.stmt("SELECT record FROM log WHERE kind = 'basis.withdrawn'").all() as {record: string}[]).map((r) => JSON.parse(r.record).line as string));
   const contested = new Map<string, boolean>();
@@ -40,9 +54,9 @@ export function pmLayer1(ctx: ProcessContext): string {
     if (e.line === 'requirements' && e.event === 'constraint' && !seen.has(b.line)) {
       seen.add(b.line);
       const scope = scopes.get(b.line) ?? b.scope;
-      if (!withdrawn.has(b.line) && (scope?.mission == null || missions.some((m) => m.mission === scope.mission && m.state === 'open'))) projectLines.push(`[${b.line}] constraint${scope?.mission ? ` @${scope.mission}` : ' project'}: ${short(b.text)}`);
+      if (!withdrawn.has(b.line) && constraintTakesLayer1Line({scope}, closed)) projectLines.push(`[${b.line}] constraint${scope?.mission ? ` @${scope.mission}` : ' project'}: ${short(b.text)}${mark(b.line)}`);
     } else if (open && e.line === 'requirements' && e.event === 'item' && !withdrawn.has(b.line) && contested.get(b.line) !== true && !seen.has(b.line)) {
-      seen.add(b.line); missionLines.push({text: `[${b.line}] @${e.mission} requirement ${b.type}: ${short(b.text)}`, rev: e.revision});
+      seen.add(b.line); missionLines.push({text: `[${b.line}] @${e.mission} requirement ${b.type}: ${short(b.text)}${mark(b.line)}`, rev: e.revision});
     } else if (open && e.line === 'plan' && e.event === 'effective' && !seen.has(`plan:${e.mission}`)) {
       seen.add(`plan:${e.mission}`); missionLines.push({text: `[${b.dplan}] @${e.mission} detailed plan in effect`, rev: e.revision});
     } else if (open && e.line === 'plan' && e.event === 'pm-plan-effective' && !seen.has(`pmplan:${e.mission}`)) {
@@ -51,22 +65,27 @@ export function pmLayer1(ctx: ProcessContext): string {
       missionLines.push({text: `[${e.mission}/${e.key}] decision by ${b.by}: ${b.what?.option ?? ''}${b.noWords ? '; by the PM, no words on record' : ''}`, rev: e.revision});
     }
   }
-  for (const i of pmInbox(ctx)) projectLines.push(`[${i.id}] inbox ${i.state}: ${short(i.text)}; ${i.action}`);
-  for (const d of unconfirmedSeats(ctx.memory)) projectLines.push(`[${d.dispatch}] unconfirmed seat (${d.mission}); stop ${d.stops.join(', ')}; release --ended after harness confirmation`);
-  const other = [...projectLines, ...missionLines.sort((a, b) => b.rev - a.rev).map((l) => l.text)];
+  // 4.4 (G7): what the PM must act on comes first after the principles: one line always counts the
+  // inbox and names its read; its entries and the unconfirmed seats follow as they fit
+  const inbox = pmInbox(ctx);
+  const inboxLine = inbox.length === 0 ? 'PM inbox: nothing waits (mp pm inbox)' : `PM inbox: ${inbox.length} item(s) wait: mp pm inbox`;
+  const actionLines = [...inbox.map((i) => `[${i.id}] inbox ${i.state}: ${short(i.text)}; ${i.action}`), ...unconfirmedSeats(ctx.memory).map((d) => `[${d.dispatch}] unconfirmed seat (${d.mission}); stop ${d.stops.join(', ')}; release --ended after harness confirmation`)];
+  const other = [...actionLines, ...projectLines, ...missionLines.sort((a, b) => b.rev - a.rev).map((l) => l.text)];
   const stops = Number((ctx.memory.stmt("SELECT COUNT(*) AS n FROM stops WHERE state = 'active'").get() as {n: number}).n);
   const flight = Number((ctx.memory.stmt("SELECT COUNT(*) AS n FROM dispatches WHERE state = 'in-flight'").get() as {n: number}).n);
   const status = `Status layer 0: ${missions.filter((m) => m.state === 'open').length} open mission(s); ${flight} dispatch(es) in flight; ${stops} stop(s); mp read status`;
   const header = 'PM memory — layer 1 (read by subject: mp read words; verbatim: mp read show words W-n)';
   const footerReserve = 580;
   const lines = [header];
+  let reserved: string[] = [inboxLine];
   let omittedPrinciples = 0, omittedOther = 0;
   const add = (line: string): boolean => {
-    if (Buffer.byteLength([...lines, line, status].join('\n'), 'utf8') + footerReserve > 8192) return false;
+    if (Buffer.byteLength([...lines, line, ...reserved, status].join('\n'), 'utf8') + footerReserve > 8192) return false;
     lines.push(line); return true;
   };
   let principlesFull = false;
   for (const line of principles) {if (principlesFull || !add(line)) {principlesFull = true; omittedPrinciples++;}}
+  lines.push(inboxLine); reserved = [];
   if (omittedPrinciples === 0) {for (const line of other) if (!add(line)) omittedOther++;}
   else omittedOther = other.length;
   if (omittedPrinciples > 0) lines.push(`${omittedPrinciples} more principles in force: mp read words --tag principle --in-force. Read ALL before a PM-class decision; consolidate.`);

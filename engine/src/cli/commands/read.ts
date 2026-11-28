@@ -12,6 +12,7 @@ import { entryLines, resolveSubtasks } from '../layers.ts';
 import { buildGraph, chain, resolveNodes, tree, walk } from '../tree.ts';
 import { fullRunMarkers } from '../../process/index.ts';
 import { fullRunLines } from './seat.ts';
+import { pmNotes } from '../../process/secretary.ts';
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -120,7 +121,7 @@ const why: Command = {
 const from: Command = {
   group: 'read',
   name: ['from'],
-  summary: 'walk forward: everything that rests on a node (what a withdrawn requirement or a refuted version affects)',
+  summary: 'walk forward: everything that rests on a node (what a withdrawn requirement or a refuted version affects); from a words entry W-n, also the constraints, waivers and notes that cite it',
   usage: 'mp read from <id>',
   flags: {},
   async run(c, args) {
@@ -189,4 +190,17 @@ const wordsRead: Command = {
   async run(c, a) {const p = P(c); const tag = flagStr(a, 'tag'), mission = flagStr(a, 'mission'), grep = flagStr(a, 'grep')?.toLocaleLowerCase(); if (tag !== null && !['principle','decision','requirement','instruction'].includes(tag)) throw usage('unknown words tag'); if (flagBool(a, 'all') && flagBool(a, 'in-force')) throw usage('choose --all or --in-force'); const entries = taggedWords(p.ctx.memory, p.ctx.memory.data); const words = entries.map((w) => ({...w, tags: w.tags.filter((t) => (tag === null || t.type === tag) && (mission === null || t.mission === mission) && (!flagBool(a, 'in-force') || t.inForce))})).filter((w) => (flagBool(a, 'untyped') ? w.tags.length === 0 && entries.find((x) => x.words === w.words)!.tags.length === 0 : w.tags.length > 0 || (tag === null && mission === null && !flagBool(a, 'in-force'))) && (grep === undefined || w.text.toLocaleLowerCase().includes(grep))); return ok(words.length ? words.flatMap((w) => w.tags.length ? w.tags.map((t) => `[${t.id}] ${t.type}${t.mission ? ` @${t.mission}` : ''} (${t.inForce ? 'in force' : 'out of force'}): ${t.quote ?? w.text}`) : [`[${w.words}] untyped: ${w.text}`]).join('\n') : 'No matching words.', {words});},
 };
 
-export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+// 4.4 (G8): the notes the PM sent, so a new session need not keep its own list
+const notesRead: Command = {
+  group: 'read', name: ['notes'], summary: 'the PM\'s notes to the Secretary, each with its state: current, acknowledged, or replaced (--all lists the replaced ones too)', usage: 'mp read notes [--all]', flags: {all: 'boolean'},
+  async run(c, a) {
+    const all = pmNotes(P(c).ctx.memory);
+    const notes = flagBool(a, 'all') ? all : all.filter((n) => n.state !== 'replaced');
+    const hidden = all.length - notes.length;
+    const lines = notes.map((n) => `[${n.id}] ${n.state === 'replaced' ? `replaced by ${n.replacedBy}` : n.state}${n.replaces !== null ? ` (replaces ${n.replaces})` : ''}${n.words !== null ? ` (${n.words})` : ''}: ${n.text}`);
+    if (hidden > 0) lines.push(`${hidden} replaced note(s): mp read notes --all`);
+    return ok(lines.length > 0 ? lines.join('\n') : 'No notes.', {notes});
+  },
+};
+
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];

@@ -4,7 +4,7 @@
 // The words a command rests on are named as words entries (`--words W-<n>`, decision 1).
 
 import { pmLayer1 } from '../pmMemory.ts';
-import { taggedWords, wordsAuthority } from '../../memory/words.ts';
+import { tagsReportLines, taggedWords, wordsAuthority } from '../../memory/words.ts';
 import { liveSecretary } from '../../memory/resident.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
@@ -143,7 +143,7 @@ const say: Command = {
   group: 'pm',
   name: ['say'],
   summary: 'record the user\'s message verbatim as a words entry W-<n>, before anything else (§6.1; the same text again is the same entry, decision 9)',
-  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin\n       [--tag <type[@mission][:"quote"]>] … [--supersedes W-n#k,…] [--withdraw-items <ids>] [--keep-items <ids>]',
+  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin\n       [--tag <type[@mission][:"quote"]>] … [--supersedes W-n#k,…] [--withdraw-items <ids>] [--keep-items <ids>]\n       (an item or constraint on the superseded entry that is not named is kept and listed; name each authorization and waiver)',
   flags: { file: 'string', stdin: 'boolean', tag: 'repeat', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list' },
   identity: (a) => ({ text: a.positionals.join(' '), file: flagStr(a, 'file'), stdin: flagBool(a, 'stdin'), tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items') }),
   async run(c, args) {
@@ -162,9 +162,9 @@ const say: Command = {
     if (flagList(args, 'supersedes').length && !flagList(args, 'tag').length) throw usage('--supersedes requires the new message’s --tag');
     const r = pmSay(p.ctx, text, {op: c.op!, tags: flagList(args, 'tag'), supersedes: flagList(args, 'supersedes'), withdraw: flagList(args, 'withdraw-items'), keep: flagList(args, 'keep-items')});
     const stop = detectStop(text);
-    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`];
+    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`, ...tagsReportLines(r)];
     if (stop.detected) lines.push(`These words look like a stop (${stop.triggers.join(', ')}): if the user means it, at once \`mp pm stop "<the words>" --words ${r.words}\`.`);
-    return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected });
+    return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected, kept: r.kept, withdrawn: r.withdrawn });
   },
 };
 

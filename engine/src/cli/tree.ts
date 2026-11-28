@@ -28,6 +28,9 @@
 //   exploration, stop    exploration definitions (state: the latest of stopped / settled / reopened
 //                        by a rerun, so a settle stands only until a rerun reopens it); stops with
 //                        their words entry
+//   waiver, note         4.4 (G7): plan-review waivers (the words or the authorization they rest
+//                        on) and the PM's notes (their words entry, the note each replaces);
+//                        constraints link to the words entry they were recorded on
 //
 // Reads: why (walk the "rests on" links back to the maintainer's words), from (walk them
 // forward), chain (one dispatch), tree (a mission as one indented tree). Each node shows its
@@ -41,11 +44,13 @@ import type { Db } from '../memory/index.ts';
 import { PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
 import { ATTEMPTS_AMENDED } from '../flow/exploration/machine.ts';
 import { builtOnOlder, lineAcceptance } from '../flow/execution.ts';
-import { planReviewsWaiverIn, waiverLabel } from '../flow/waivers.ts';
+import { eventsWithWaiversInForce, planReviewsWaiverIn, REVIEWS_WAIVER, selectedWaiver, waiverBy, waiverEnds, waiverLabel } from '../flow/waivers.ts';
 import { purposeOf, type ProcessContext } from '../process/index.ts';
+import { pmNotes } from '../process/secretary.ts';
+import { keptMark, keptOnChangedWords, wordsAuthority } from '../memory/words.ts';
 import { age, clip, filler as fillerText, short } from './render.ts';
 
-export type NodeKind = 'mission' | 'words' | 'requirement' | 'constraint' | 'plan' | 'object' | 'task' | 'dispatch' | 'judgment' | 'run' | 'commit' | 'delivery' | 'landing' | 'escalation' | 'decision' | 'exploration' | 'stop' | 'repair';
+export type NodeKind = 'mission' | 'words' | 'requirement' | 'constraint' | 'plan' | 'object' | 'task' | 'dispatch' | 'judgment' | 'run' | 'commit' | 'delivery' | 'landing' | 'escalation' | 'decision' | 'exploration' | 'stop' | 'repair' | 'waiver' | 'note';
 
 export interface GNode {
   readonly key: string;
@@ -99,6 +104,8 @@ const KIND_LABEL: Readonly<Record<NodeKind, string>> = {
   exploration: 'exploration',
   stop: 'stop',
   repair: 'repair',
+  waiver: 'waiver',
+  note: 'note',
 };
 
 type Json = Record<string, any>;
@@ -230,6 +237,7 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
 
     // requirement item versions, and the version of a line in force at a revision
     const itemVersions = new Map<string, Array<{ version: string; rev: number }>>();
+    const latestConstraint = new Map<string, GNode>();
     const withdrawn = new Map<string, number>();
     const versionAt = (line: string, rev: number): string | null => {
       const xs = itemVersions.get(line) ?? [];
@@ -263,8 +271,29 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         n.by = pmBy.get(n.key) ?? 'the PM via `mp pm constraint add`';
         n.state = 'recorded';
         n.leaves.push(...leafOf(f.rev, /requirements\.md#|constraints\.md#/));
+        latestConstraint.set(String(b['line'] ?? ''), n);
+        // 4.4 (G7): `mp read from W-n` reaches the constraints recorded on the entry
+        if (typeof b['words'] === 'string') {
+          node('words', b['words'], null, 0);
+          edge(n.key, `words:${b['words']}`, 'cites');
+        }
+      } else if (f.event === 'constraint-withdrawn' && typeof b['line'] === 'string') {
+        // 4.4 (G7): a withdrawn constraint reads so, and the words it was withdrawn on reach it
+        const n = typeof b['version'] === 'string' ? nodes.get(`constraint:${b['version']}`) : latestConstraint.get(b['line']);
+        // a 4.3 tagging wrote the words into its fixed reason only ("withdrawn with words tags by W-n")
+        const words = typeof b['words'] === 'string' ? b['words'] : /^withdrawn with words tags by (W-[0-9]+)$/.exec(String(b['reason'] ?? ''))?.[1];
+        if (n !== undefined) {
+          n.state = `withdrawn${words !== undefined ? ` on ${words}` : ''}`;
+          if (words !== undefined) {
+            node('words', words, null, 0);
+            edge(n.key, `words:${words}`, 'was withdrawn on');
+          }
+        }
       }
     }
+    // 4.4 (G7): what a supersession or a re-tag kept, marked on the version that rests on the changed words
+    const kept = keptOnChangedWords(db, data);
+    for (const k of kept.values()) {const n = k.version === null ? undefined : nodes.get(`constraint:${k.version}`); if (n !== undefined) n.state = `${n.state}; ${keptMark(k)}`;}
     // contested items (Calibrator ① asked the user; released when a later plan passes): the last event per line wins
     const contested = new Map<string, boolean>();
     for (const f of flows) if (f.line === REQUIREMENTS_LINE && f.event === 'contested' && typeof f.body['line'] === 'string') contested.set(`${f.mission}\n${f.body['line']}`, f.body['contested'] === true);
@@ -273,6 +302,8 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
         const n = nodes.get(`requirement:${x.version}`);
         if (n === undefined) return;
         n.state = i < xs.length - 1 ? 'superseded' : withdrawn.has(line) ? 'withdrawn' : contested.get(`${n.mission}\n${line}`) === true ? 'contested' : 'in force';
+        const k = kept.get(line);
+        if (k !== undefined && k.version === x.version) n.state = `${n.state}; ${keptMark(k)}`;
       });
     }
 
@@ -849,6 +880,62 @@ export function buildGraph(ctx: ProcessContext, o: { readonly mission?: string |
       if (dn !== undefined && i['state'] === 'done') dn.state = `${dn.state}, landed`;
     }
 
+    // ---- 4.4 (G7): plan-review waivers and the PM's notes, so `mp read from W-n` reaches what cites the entry
+    const planOf = new Map<string, Array<{ event: string; key: string; body: Json; rev: number }>>();
+    for (const f of flows) if (f.line === PLAN_LINE) planOf.set(f.mission, [...(planOf.get(f.mission) ?? []), { event: f.event, key: f.key, body: f.body, rev: f.rev }]);
+    for (const f of flows) {
+      if (f.line !== PLAN_LINE || f.event !== REVIEWS_WAIVER || f.body['action'] === 'withdraw') continue;
+      const b = f.body;
+      const id = `${f.mission}:${f.key}`;
+      const n = node('waiver', id, f.mission, f.rev, `plan reviews waived for ${typeof b['dplan'] === 'string' ? `detailed plan ${b['dplan']}` : `every plan of mission ${f.mission} not in effect yet`}${typeof b['reason'] === 'string' && b['reason'] !== '' ? `; reason: ${clip(b['reason'], 80)}` : ''}`);
+      const events = planOf.get(f.mission) ?? [];
+      const dplan = typeof b['dplan'] === 'string' ? b['dplan'] : null;
+      const effective = dplan === null ? undefined : events.find((e) => e.event === 'effective' && e.key === dplan);
+      const end = waiverEnds(events).get(Number(b['n']));
+      if (effective !== undefined && dplan !== null) {
+        // its plan is in effect: the outcome recorded with that plan (flow/waivers.ts), and whether this is the waiver it took effect on
+        const recorded = planReviewsWaiverIn(events, f.mission, dplan, ctx.planReviewsWaived, ((objects.get(dplan)?.['reviews'] ?? null) as Json[] | null)?.map((r) => String(r['review'])) ?? null);
+        const same = (x: Json) => x['action'] !== 'withdraw' && (x['dplan'] === dplan || x['dplan'] === null) && x['by'] === recorded?.by && x['ref'] === recorded?.ref && (x['reason'] ?? null) === (recorded?.reason ?? null);
+        const used = recorded !== null && events.filter((e) => e.event === REVIEWS_WAIVER && e.rev < effective.rev && same(e.body)).at(-1)?.body['n'] === b['n'];
+        n.state = used ? `${dplan} took effect on it` : `${dplan} took effect without it (${recorded === null ? 'with its reviews' : waiverBy(recorded)})`;
+      } else {
+        // "in force" is the planner's own choice (flow/waivers.ts) for its plan, or for a plan of the mission no plan-specific waiver names
+        const applied = selectedWaiver(eventsWithWaiversInForce(events, f.mission, (w, m) => wordsAuthority(db, data, w, m)), dplan ?? '').waiver?.n === b['n'];
+        const outOfForce = b['by'] === 'words' && wordsAuthority(db, data, String(b['ref']), f.mission) === null;
+        n.state = applied ? 'in force'
+          : end !== undefined ? (end.action === 'withdraw' ? `withdrawn ${end.by === 'words' ? 'on' : 'under'} ${end.ref} (plan-reviews#${end.n})` : `replaced by plan-reviews#${end.n}`)
+            : outOfForce ? 'its words are out of force: it applies to no plan not yet in effect'
+              : 'kept, but the planner does not apply it: a later waiver or withdrawal for the whole mission covers its plan';
+      }
+      // 4.4 (G7): the words a waiver was withdrawn on reach it
+      if (end?.action === 'withdraw' && end.by === 'words') {
+        node('words', end.ref, null, 0);
+        edge(n.key, `words:${end.ref}`, 'was withdrawn on');
+      }
+      const k = end === undefined ? kept.get(`waiver:${id}`) : undefined;
+      if (k !== undefined) n.state = `${n.state}; ${keptMark(k)}`;
+      n.by = `the PM via \`mp pm waive\` ${b['by'] === 'words' ? `on ${String(b['ref'])}` : `under authorization ${String(b['ref'])}`}`;
+      if (b['by'] === 'words' && typeof b['ref'] === 'string') {
+        node('words', b['ref'], null, 0);
+        edge(n.key, `words:${b['ref']}`, 'the user decided in');
+      } else if (b['by'] === 'authority' && typeof b['ref'] === 'string') {
+        const v = versionAt(b['ref'], f.rev);
+        if (v !== null) edge(n.key, `requirement:${v}`, 'rests on authorization');
+      }
+    }
+    if (only === null) {
+      for (const v of pmNotes(db)) {
+        const n = node('note', v.id, null, 0, `"${clip(v.text, 120)}"`);
+        n.state = v.state === 'replaced' ? `replaced by ${v.replacedBy}` : v.state;
+        n.by = pmBy.get(n.key) ?? 'the PM via `mp pm note`';
+        if (v.words !== null) {
+          node('words', v.words, null, 0);
+          edge(n.key, `words:${v.words}`, 'cites');
+        }
+        if (v.replaces !== null) edge(n.key, `note:${v.replaces}`, 'replaces');
+      }
+    }
+
     // ---- stops
     for (const r of db.stmt('SELECT * FROM stops ORDER BY committed_at').all() as Json[]) {
       const scope = JSON.parse(String(r['scope'])) as Json;
@@ -909,9 +996,11 @@ const REL_ORDER: readonly string[] = [
   'relies on',
   'requires',
   'revises',
+  'replaces',
   'based on',
   'serves',
   'cites',
+  'was withdrawn on',
   'involves',
 ];
 
@@ -947,6 +1036,7 @@ export function pmResultKeys(command: string, j: Json): string[] {
   if (command === 'deliver' && s(j['mission']) && s(j['delivery'])) keys.push(`delivery:${j['mission']}/${j['delivery']}`);
   if (command === 'land' && s(j['intent'])) keys.push(`landing:${j['intent']}`);
   if (command === 'stop' && s(j['stop'])) keys.push(`stop:${j['stop']}`);
+  if (command === 'note' && s(j['id'])) keys.push(`note:${j['id']}`);
   if (command === 'answer' && s(j['mission']) && s(j['escalation'])) keys.push(`decision:${j['mission']}/${j['escalation']}`);
   if (command === 'amend-attempts' && s(j['version'])) keys.push(`object:${j['version']}`);
   if (command === 'amend-attempts' && s(j['judgment'])) keys.push(`judgment:${j['judgment']}`);
@@ -1116,6 +1206,8 @@ const LAYER: Readonly<Record<NodeKind, number>> = {
   requirement: 2,
   constraint: 2,
   repair: 2,
+  waiver: 2,
+  note: 2,
   exploration: 3,
   plan: 3,
   escalation: 4,

@@ -32,7 +32,8 @@ test('tags have stable ids and verbatim quotes; composite instructions record al
   } finally {p.cleanup();}
 });
 
-test('entry-level supersession requires explicit withdraw/keep for every item, constraint, authorization and active waiver', async () => {
+// 4.4 (G7) changed this: only an authorization and an active waiver must be named; an item or a constraint not named is kept
+test('entry-level supersession requires explicit withdraw/keep for every authorization and active waiver, and lists every dependency', async () => {
   const p = project43();
   try {
     await done43(p, ['pm','mission','open','m1']);
@@ -50,6 +51,7 @@ test('entry-level supersession requires explicit withdraw/keep for every item, c
     assert.ok(deps?.some((d: any) => d.id === 'item.m1.auth'));
     assert.ok(deps?.some((d: any) => d.id === 'constraint.small'));
     const waiver = deps?.find((d: any) => d.kind === 'waiver').id;
+    assert.deepEqual([...refused.error.detail.toName].sort(), ['item.m1.auth', waiver].sort(), 'what gives power is named one by one');
     await done43(p, [...base, '--withdraw-items',`item.m1.goal,${waiver}`, '--keep-items','item.m1.auth,constraint.small']);
     assert.ok(p.ctx.memory.stmt("SELECT 1 FROM log WHERE kind = 'basis.withdrawn' AND json_extract(record,'$.line') = 'item.m1.goal'").get());
     assert.equal(p.ctx.memory.stmt("SELECT 1 FROM log WHERE kind = 'basis.withdrawn' AND json_extract(record,'$.line') = 'item.m1.auth'").get(), undefined);
@@ -76,15 +78,17 @@ test('B.3 kept waiver loses force after its sole tag is superseded; an already e
   } finally {p.cleanup();}
 });
 
-test('retag requires user authorization and entry-level dispositions; mission closure ends scoped tags without changing history', async () => {
+// 4.4 (G7) changed this: a retag keeps an item it does not name, and lists it, instead of refusing
+test('retag requires user authorization; an item it does not name is kept; mission closure ends scoped tags without changing history', async () => {
   const p = project43();
   try {
     await done43(p, ['pm','mission','open','m1']);
     const w = await done43(p, ['pm','say','Make it small','--tag','principle','--tag','requirement@m1']);
     await done43(p, ['pm','requirement','add','m1','small','--type','goal','--text','small','--quote','small','--words',w.words]);
     const auth = await done43(p, ['pm','say','You may change that tag','--tag','instruction']);
-    assert.equal((await command43(p, ['pm','retag',`${w.words}#1`,'--tag','decision@m1','--words',auth.words])).error.code, 'NOT_ALLOWED');
-    await done43(p, ['pm','retag',`${w.words}#1`,'--tag','decision@m1','--words',auth.words,'--keep-items','item.m1.small']);
+    assert.equal((await command43(p, ['pm','retag',`${w.words}#1`,'--tag','decision@m1'])).error.code, 'USAGE', 'still no retag without the user\'s words');
+    const r = await done43(p, ['pm','retag',`${w.words}#1`,'--tag','decision@m1','--words',auth.words]);
+    assert.deepEqual(r.kept.map((d: any) => d.id), ['item.m1.small']);
     assert.equal(residentRecords(p.ctx.memory, 'user.words-tags').filter((r) => r.words === w.words).length, 2);
     await done43(p, ['pm','close','m1','--words',auth.words]);
     assert.equal(taggedWords(p.ctx.memory, p.ctx.memory.data).find((x) => x.words === w.words)!.tags.some((t) => t.inForce), false);
