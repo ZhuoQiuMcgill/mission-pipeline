@@ -23,12 +23,15 @@ function op(c: RunContext): string {return c.op!;}
 /**
  * The Secretary's fixed launch prompt and the Claude Code launch hint (the same flags as ever). 4.4.1 (Windows): the prompt
  * ends with how to call mp in PowerShell, and a second hint gives the PowerShell launch, which sets MP_SECRETARY for the
- * launch only (only the launch sets it: it does not stay in the PM's session). Elsewhere both are 4.4.0's.
+ * launch only (only the launch sets it: afterwards the PM's session has the value it had before). Elsewhere both are 4.4.0's.
  */
 export function secretaryLaunch(g: {readonly generation: string; readonly name: string}, platform: NodeJS.Platform = process.platform): {readonly prompt: string; readonly launch: string; readonly launchPowerShell: string | null} {
   const prompt = withPowerShellNote(`You are ${g.name}, the resident Secretary of Mission Pipeline. Run mp sec session first; then read your handbook (mp sec handbook) and loop on mp sec next / mp sec wait.`, platform);
   const launch = `MP_SECRETARY=${g.generation} claude --bg -n ${shellQuote(g.name)} ${shellQuote(prompt)}`;
-  const launchPowerShell = onWindows(platform) ? `try { $env:MP_SECRETARY = ${psQuote(g.generation)}; claude --bg -n ${psQuote(g.name)} ${psQuote(prompt)} } finally { Remove-Item Env:MP_SECRETARY }` : null;
+  // the value before is saved and assigned back (assigning $null removes the variable), not removed with Remove-Item: a
+  // cmdlet's defaults may be changed in a session (-WhatIf would leave the PM acting as the Secretary), and a value the
+  // caller had before is kept
+  const launchPowerShell = onWindows(platform) ? `$mpSecretaryBeforeLaunch = $env:MP_SECRETARY; try { $env:MP_SECRETARY = ${psQuote(g.generation)}; claude --bg -n ${psQuote(g.name)} ${psQuote(prompt)} } finally { $env:MP_SECRETARY = $mpSecretaryBeforeLaunch }` : null;
   return {prompt, launch, launchPowerShell};
 }
 

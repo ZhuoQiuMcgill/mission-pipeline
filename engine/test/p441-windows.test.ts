@@ -104,22 +104,38 @@ describe('A: everyone told to run mp on Windows is told how in PowerShell', () =
     const win = secretaryLaunch(g, 'win32');
     assert.equal(win.prompt, `${prompt440} ${POWERSHELL_NOTE}`);
     assert.ok(win.launch.startsWith('MP_SECRETARY=S-2 claude --bg -n '), 'the existing hint stays beside it');
-    assert.equal(win.launchPowerShell, `try { $env:MP_SECRETARY = 'S-2'; claude --bg -n 'it''s-Secretary' ${psQuote(win.prompt)} } finally { Remove-Item Env:MP_SECRETARY }`);
+    // the value before is saved and assigned back: no cmdlet, and a value the caller had is kept
+    assert.equal(win.launchPowerShell, `$mpSecretaryBeforeLaunch = $env:MP_SECRETARY; try { $env:MP_SECRETARY = 'S-2'; claude --bg -n 'it''s-Secretary' ${psQuote(win.prompt)} } finally { $env:MP_SECRETARY = $mpSecretaryBeforeLaunch }`);
+    assert.ok(psQuote(win.prompt).includes("it''s-Secretary, the resident Secretary"), 'the quote in the prompt is doubled');
+    assert.doesNotMatch(win.launchPowerShell!, /Remove-Item|\n/, 'one command line, with no cmdlet');
     assert.equal(psQuote('a\u2019b'), "'a\u2019\u2019b'", 'PowerShell reads a typographic quote as a quote too');
   });
 
   const shell = ['pwsh', 'powershell.exe'].find((s) => spawnSync(s, ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 60_000 }).status === 0);
-  it('the PowerShell launch hint parses, passes the name and the prompt as given, and leaves MP_SECRETARY unset after the launch', { skip: shell === undefined ? 'no PowerShell on this machine' : false }, () => {
+  it('the PowerShell launch hint parses, passes the name and the prompt as given, and gives MP_SECRETARY back the value it had (none: absent), with Remove-Item defaulting to -WhatIf', { skip: process.platform !== 'win32' ? 'the PowerShell launch is the Windows one' : shell === undefined ? 'no PowerShell on this machine' : false }, () => {
     const dir = mkdtempSync(join(tmpdir(), 'mp-ps-'));
     try {
-      const hint = secretaryLaunch({ generation: 'S-3', name: "it's-Secretary" }, 'win32').launchPowerShell!;
+      const launched = secretaryLaunch({ generation: 'S-3', name: "it's-Secretary" }, 'win32');
+      const hint = launched.launchPowerShell!;
       // a stand-in for claude: prints its arguments and the variable it sees, one per line
-      const script = ["function claude { [Console]::Out.WriteLine(\"env=$env:MP_SECRETARY\"); foreach ($a in $args) { [Console]::Out.WriteLine(\"arg=$a\") } }", hint, '[Console]::Out.WriteLine("after=[$env:MP_SECRETARY]")'].join('\n');
+      const script = [
+        "$PSDefaultParameterValues['Remove-Item:WhatIf'] = $true",
+        "function claude { [Console]::Out.WriteLine(\"env=$env:MP_SECRETARY\"); foreach ($a in $args) { [Console]::Out.WriteLine(\"arg=$a\") } }",
+        "$env:MP_SECRETARY = 'S-old'",
+        hint,
+        '[Console]::Out.WriteLine("after=[$env:MP_SECRETARY]")',
+        '$env:MP_SECRETARY = $null',
+        hint,
+        '[Console]::Out.WriteLine("absent=$(-not (Test-Path Env:MP_SECRETARY))")',
+      ].join('\n');
       writeFileSync(join(dir, 'launch.ps1'), `\uFEFF${script}\n`);
-      const r = spawnSync(shell!, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(dir, 'launch.ps1')], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, MP_SECRETARY: '' } });
+      const env = { ...process.env };
+      for (const k of Object.keys(env)) if (k.toUpperCase() === 'MP_SECRETARY') delete env[k];
+      const r = spawnSync(shell!, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(dir, 'launch.ps1')], { encoding: 'utf8', timeout: 120_000, env });
       assert.equal(r.status, 0, r.stderr);
       const lines = r.stdout.split(/\r?\n/).filter((l) => l !== '');
-      assert.deepEqual(lines, ['env=S-3', 'arg=--bg', 'arg=-n', "arg=it's-Secretary", `arg=${secretaryLaunch({ generation: 'S-3', name: "it's-Secretary" }, 'win32').prompt}`, 'after=[]']);
+      const call = ['env=S-3', 'arg=--bg', 'arg=-n', "arg=it's-Secretary", `arg=${launched.prompt}`];
+      assert.deepEqual(lines, [...call, 'after=[S-old]', ...call, 'absent=True']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -151,7 +167,7 @@ describe('A: everyone told to run mp on Windows is told how in PowerShell', () =
     const pm = readFileSync(join(plugin, 'pm', 'PM.md'), 'utf8');
     const core = pm.slice(pm.indexOf('<!-- core:start -->'), pm.indexOf('<!-- core:end -->'));
     assert.equal(core.split('\n').filter((l) => l.includes('PowerShell:')).length, 1, 'the PM core, where its first command is');
-    assert.match(pm, /PowerShell: `try \{ \$env:MP_SECRETARY = 'S-<n>'; claude --bg/, 'the launch beside the VAR=value form');
+    assert.match(pm, /PowerShell: `\$mpSecretaryBeforeLaunch = \$env:MP_SECRETARY; try \{ \$env:MP_SECRETARY = 'S-<n>'; claude --bg .* finally \{ \$env:MP_SECRETARY = \$mpSecretaryBeforeLaunch \}`/, 'the launch beside the VAR=value form');
     const sec = readFileSync(join(plugin, 'secretary', 'SECRETARY.md'), 'utf8');
     const identity = sec.slice(sec.indexOf('## Session and identity'), sec.indexOf('## The dispatch loop'));
     assert.equal(identity.split('\n').filter((l) => l.startsWith('PowerShell:')).length, 1, 'the Secretary handbook, where its first command is');
@@ -210,6 +226,11 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
     assert.equal(decodeInput(Buffer.concat([BOM, BOM, Buffer.from(text)]), 'x').text, text);
     assert.equal(decodeInput(Buffer.from(`\uFEFF${text}`, 'utf8').subarray(3), 'x').text, text);
     assert.equal(decodeInput(Buffer.from(`a\uFEFF`, 'utf8'), 'x').text, 'a\uFEFF', 'a U+FEFF after the start is text');
+    // the doubled mark is dropped, nothing beyond: a third is the text's
+    assert.equal(decodeInput(Buffer.concat([BOM, BOM, BOM, Buffer.from('A')]), 'x').text, '\uFEFFA', 'UTF-8 with three marks keeps the third');
+    // UTF-16: after the signature every character is the text's, a U+FEFF too
+    assert.equal(decodeInput(Buffer.from([0xff, 0xfe, 0xff, 0xfe, 0x41, 0x00]), 'x').text, '\uFEFFA', 'UTF-16 LE keeps a U+FEFF after its signature');
+    assert.equal(decodeInput(Buffer.from([0xfe, 0xff, 0xfe, 0xff, 0x00, 0x41]), 'x').text, '\uFEFFA', 'UTF-16 BE keeps a U+FEFF after its signature');
     const dir = mkdtempSync(join(tmpdir(), 'mp-read-'));
     try {
       writeFileSync(join(dir, 'f.txt'), utf16le('from a file'));

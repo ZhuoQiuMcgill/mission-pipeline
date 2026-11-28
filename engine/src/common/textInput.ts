@@ -2,9 +2,10 @@
 // (`--file`, `--report`, `--result`, `--notes`, `--request`, `--attempts`, `config.json`) or on the
 // standard input (`--stdin`). Windows tools write a UTF-8 byte-order mark (Windows PowerShell 5.1's
 // `Set-Content -Encoding UTF8`, many editors) or UTF-16 with one (5.1's `Out-File` and `>`):
-//   - a UTF-8 byte-order mark at the start is not part of the text: it is dropped (repeated too, as
-//     Windows PowerShell 5.1 pipes it);
-//   - UTF-16 with a byte-order mark (little or big endian) is decoded;
+//   - a UTF-8 byte-order mark at the start is not part of the text: it is dropped, and one more right
+//     after it (Windows PowerShell 5.1 pipes it twice), none beyond;
+//   - UTF-16 with a byte-order mark (little or big endian) is decoded; after the signature every
+//     character is the text's, a U+FEFF too;
 //   - bytes that are not UTF-8 are read as U+FFFD, as before, and the command says so in one warning
 //     line (no new refusal, R2);
 //   - a NUL with no byte-order mark is kept as it is: where it was refused it still is, and the
@@ -88,9 +89,11 @@ export function decodeInput(input: string | Uint8Array, what: string, o: { reado
   if (typeof input === 'string') text = input;
   else {
     const b = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
-    if (b.length >= 3 && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) {
+    const utf8Mark = (at: number): boolean => b.length >= at + 3 && b[at] === 0xef && b[at + 1] === 0xbb && b[at + 2] === 0xbf;
+    if (utf8Mark(0)) {
       bom = 'utf-8';
-      const rest = b.subarray(3);
+      // Windows PowerShell 5.1 writes the mark twice to a program's stdin ($OutputEncoding = UTF8): one more is dropped, none beyond
+      const rest = b.subarray(utf8Mark(3) ? 6 : 3);
       text = rest.toString('utf8');
       invalid = !isUtf8(rest);
     } else if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) {
@@ -104,8 +107,7 @@ export function decodeInput(input: string | Uint8Array, what: string, o: { reado
       text = b.toString('utf8');
       invalid = !isUtf8(b);
     }
-    // Windows PowerShell 5.1 writes the mark twice to a program's stdin ($OutputEncoding = UTF8): a mark repeated at the start is a mark too
-    if (bom !== null) text = text.replace(/^\uFEFF+/, '');
+    // a UTF-16 text is the decoder's output after its signature: a U+FEFF that follows is the text's own
   }
   const nul = bom === null && text.includes('\u0000');
   const markedPipe = o.stdin === true && bom !== null && text.includes('?');

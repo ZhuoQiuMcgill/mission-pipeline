@@ -13,7 +13,7 @@ The engine runs without error in PowerShell on Windows. 4.4.0 was built and test
 ### Changed
 
 - On Windows the seat's fixed prompt, the Secretary's launch prompt and the optional hook's session pointer end with one sentence: in PowerShell write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty), and `mp.cmd` called from PowerShell drops double quotes inside an argument. On Linux and macOS they are 4.4.0's, byte for byte.
-- On Windows `mp pm secretary start` prints a second launch hint, the PowerShell form, which sets `MP_SECRETARY` for the launch only (`launchHintPowerShell` in its JSON).
+- On Windows `mp pm secretary start` prints a second launch hint, the PowerShell form, which sets `MP_SECRETARY` for the launch only and gives it back the value it had before (`launchHintPowerShell` in its JSON).
 - The seat role pages, both handbooks and the card's hand-back section give the PowerShell form beside the here-document and the `MP_SECRETARY=… claude …` launch, one line each, marked "PowerShell:" (the Researcher's page, at its 8 KB budget with its card, leaves it to the card).
 
 ### Added

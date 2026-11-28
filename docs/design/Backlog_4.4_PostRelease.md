@@ -258,12 +258,20 @@ What 4.4.1 documents and does not change (`engine/README.md`, "Windows and Power
 - **Only CRLF and LF** count as the same line break in "occurs verbatim"; a lone CR does not.
 - **An operation's identity** still fingerprints a file as 4.4.0 read it (a mark included), so a
   4.4.0 command retried with the same `--op` replays; the same file saved again in another encoding
-  is another operation, as any change of its content is.
+  is another operation, as any change of its content is. That reading collapses different
+  characters of a UTF-16 file, so a command repeated with the same `--op` and a changed UTF-16 file
+  can replay the first receipt. And a note from a file with a UTF-8 mark, interrupted under 4.4.0
+  after its write and retried under 4.4.1, ends in `OP_CONFLICT`. What to do: the first run is on
+  the record; read it before running the command again.
+- **The duplicate-checkout lookup** (`mp pm detach-duplicate`) compares paths as strings: a worktree
+  at the root of a network share, or named with another letter case than git registered, is not
+  found. What to do: WI-01's other ways still apply.
 - The static pages quote the seat's prompt in its Linux form; on Windows the prompt `mp sec dispatch`
   prints ends with the PowerShell sentence, and the Secretary's handbook says to give it as printed.
 - The PowerShell launch of the Secretary takes the flags of the existing Claude Code hint
   (`--bg -n`); it was checked with a stand-in for `claude` (the variable is set for the launch and
-  removed after), not with Claude Code on Windows.
+  given back the value it had after, also where `Remove-Item` defaults to `-WhatIf`), not with Claude
+  Code on Windows.
 - A hand-back on stdin that holds a NUL with no mark gives two warning lines (the standard input, and
   the hand-back file written from it).
 

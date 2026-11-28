@@ -46,7 +46,7 @@ For Claude Code 2.1.319 (to verify on your version), launch:
 MP_SECRETARY=S-<n> claude --bg -n "<project>-Secretary" "<prompt printed by mp>"
 ```
 
-PowerShell: `try { $env:MP_SECRETARY = 'S-<n>'; claude --bg -n '<project>-Secretary' '<prompt printed by mp>' } finally { Remove-Item Env:MP_SECRETARY }` (on Windows `mp pm secretary start` prints it).
+PowerShell: `$mpSecretaryBeforeLaunch = $env:MP_SECRETARY; try { $env:MP_SECRETARY = 'S-<n>'; claude --bg -n '<project>-Secretary' '<prompt printed by mp>' } finally { $env:MP_SECRETARY = $mpSecretaryBeforeLaunch }` (on Windows `mp pm secretary start` prints it).
 
 The fixed prompt is: "You are `<project>-Secretary`, the resident Secretary of Mission Pipeline. Run `mp sec session` first; then read your handbook (`mp sec handbook`) and loop on `mp sec next` / `mp sec wait`."
 Bind the returned session id: `mp pm secretary handle <S-n> <handle>`.
