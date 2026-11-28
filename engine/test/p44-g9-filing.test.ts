@@ -199,6 +199,23 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     assert.deepEqual((await ports.ledger.events({ mission: M, line: 'repairs', event: 'ended' })).map((e) => e.key), ['R-1', 'R-2']);
   });
 
+  it('a pass interrupted after it ended a filing and before it cancelled the queued step: the next pass cancels it', async () => {
+    const { ports, engine } = await setup('fast');
+    await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }], 'Please export JSON.');
+    await engine.reconcile(M);
+    const step = ports.scheduler.queued('architect-repair')[0]!.task;
+    await withdrawItem(ports, { mission: M, item: 'g2', reason: 'taken back' });
+    const sched = ports.scheduler as unknown as { cancel: (t: string) => Promise<void> };
+    const cancel = sched.cancel.bind(ports.scheduler);
+    sched.cancel = async () => { throw new Error('interrupted'); };
+    await engine.reconcile(M).catch(() => undefined);
+    sched.cancel = cancel;
+    assert.deepEqual((await ports.ledger.events({ mission: M, line: 'repairs', event: 'ended' })).map((e) => e.key), ['R-1'], 'ended before the interruption');
+    assert.equal(ports.scheduler.tasks.get(step)?.state, 'queued');
+    await engine.reconcile(M);
+    assert.equal(ports.scheduler.tasks.get(step)?.state, 'abandoned', 'cancelled on the next pass');
+  });
+
   it('another process withdraws the item between the decision\'s read and its write: nothing is applied, and the next pass ends the filing', async () => {
     const { ports, engine } = await setup('fast');
     await extend(ports, [{ item: 'g2', text: 'JSON export', quote: 'export JSON' }], 'Please export JSON.');
