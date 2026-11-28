@@ -32,8 +32,8 @@ export interface CliIo {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly now?: () => number;
-  /** The standard input, read whole (`mp pm say --stdin`). */
-  readonly stdin?: () => string;
+  /** The standard input, read whole (`mp pm say --stdin`). 4.4.1: its bytes, decoded by the one reader (common/textInput.ts); a string is taken as it is. */
+  readonly stdin?: () => string | Uint8Array;
   /** Tests: options for the process context (an environment observation, a clock). */
   readonly process?: ProcessOptions;
   /** 4.4 (F8): writes the standard output and resolves once it is out; a command's afterOutput runs after it. Absent: runCli returns the output and runs afterOutput first. */

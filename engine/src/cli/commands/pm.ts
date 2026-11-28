@@ -9,6 +9,8 @@ import { liveSecretary } from '../../memory/resident.ts';
 import { answerOutcome } from '../../process/decisions.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
+import { decodeInput, nulHint, nulNote, readInputFile, type InputText } from '../../common/textInput.ts';
+import { occursVerbatim } from '../../common/verbatim.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
 import { ITEM_ID, missionIdProblem } from '../../common/ids.ts';
 import { LOOP_KINDS, type LoopKind } from '../../common/records.ts';
@@ -155,20 +157,24 @@ const say: Command = {
   async run(c, args) {
     const p = P(c);
     const file = flagStr(args, 'file');
+    // 4.4.1 (Windows): a file or the standard input through the one reader (a byte-order mark dropped, UTF-16 decoded)
+    let input: InputText | null = null;
     let text: string;
-    if (file !== null) text = readFileSync(file, 'utf8');
+    if (file !== null) text = (input = readInputFile(file)).text;
     else if (flagBool(args, 'stdin')) {
       if (c.io.stdin === undefined) throw usage('--stdin: no standard input');
-      text = c.io.stdin();
+      text = (input = decodeInput(c.io.stdin(), 'the standard input')).text;
     } else {
       if (args.positionals.length === 0) throw usage('the user\'s message, verbatim (or --file <file>, --stdin)');
       text = args.positionals.join(' ');
     }
     if (text.trim() === '') throw usage('the message is empty');
     if (flagList(args, 'supersedes').length && !flagList(args, 'tag').length) throw usage('--supersedes requires the new message’s --tag');
+    // a words entry is text without NUL (refused as before); the refusal says what to do
+    if (input?.nul === true) throw refused('BAD_REQUEST', `${nulHint(file !== null ? `the file ${file}` : 'the standard input')} (a words entry is text without NUL); nothing was recorded`);
     const r = pmSay(p.ctx, text, {op: c.op!, tags: flagList(args, 'tag'), supersedes: flagList(args, 'supersedes'), withdraw: flagList(args, 'withdraw-items'), keep: flagList(args, 'keep-items')});
     const stop = detectStop(text);
-    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`, ...tagsReportLines(r)];
+    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`, ...(input?.warning != null ? [input.warning] : []), ...tagsReportLines(r)];
     if (stop.detected) lines.push(`These words look like a stop (${stop.triggers.join(', ')}): if the user means it, at once \`mp pm stop "<the words>" --words ${r.words}\`.`);
     return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected, kept: r.kept, withdrawn: r.withdrawn });
   },
@@ -382,7 +388,8 @@ function stopEntry(ctx: ProcessContext, args: ParsedArgs, words: string): string
     const w = wordsOfMessage(db, latest.message);
     if (w === null) return null;
     try {
-      return ctx.memory.data.text(w.text).includes(words) ? w.words : null;
+      // 4.4.1 (Windows): a CRLF and an LF count as the same line break
+      return occursVerbatim(ctx.memory.data.text(w.text), words) ? w.words : null;
     } catch {
       return null;
     }
@@ -548,12 +555,14 @@ const requirement: Command = {
   },
 };
 
-/** The attempts file of a change form (a JSON array of registered attempts). */
-function attemptsFile(file: string): unknown {
+/** The attempts file of a change form (a JSON array of registered attempts), with the reader's warning line (4.4.1). */
+function attemptsFile(file: string): { readonly attempts: unknown; readonly warning: string | null } {
+  let input: InputText | null = null;
   try {
-    return JSON.parse(readFileSync(file, 'utf8'));
+    input = readInputFile(file);
+    return { attempts: JSON.parse(input.text), warning: input.warning };
   } catch (e) {
-    throw usage(`cannot read the attempts ${file}: ${(e as Error).message}`);
+    throw usage(`cannot read the attempts ${file}: ${(e as Error).message}${input !== null ? nulNote(input, 'it') : ''}`);
   }
 }
 
@@ -608,7 +617,8 @@ const repair: Command = {
     const answers = flagStr(args, 'answers');
     if (answers !== null && file === null) throw usage('--answers goes with --attempts: the change that settles an earlier repair about the exploration');
     if (answers !== null && !/^R-[1-9][0-9]*$/.test(answers)) throw usage(`--answers names a repair R-<n>, not ${JSON.stringify(answers)}`);
-    const change: RepairChange | undefined = file !== null ? { form: 'attempts', attempts: attemptsFile(file), ...(answers !== null ? { answers } : {}) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
+    const read = file !== null ? attemptsFile(file) : null;
+    const change: RepairChange | undefined = read !== null ? { form: 'attempts', attempts: read.attempts, ...(answers !== null ? { answers } : {}) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
     const again = flagBool(args, 'again');
     if (again && change !== undefined) throw usage('--again files a repair again; a change form (--attempts, --rerun, --resnapshot) is a new decision of its own');
     // 4.4 (G4, G5): the open items this repair is for
@@ -620,7 +630,7 @@ const repair: Command = {
     // 4.4 (G9): a missing feature is filed as a repair still (nothing is refused); the line points to the entry of its own
     const extendLine = kind === 'missing' ? '\nA missing feature the user now wants is a new requirement: mp pm extend records it as requirement items and starts the same light path (mp help pm extend).' : '';
     if (r.changed !== undefined) {
-      const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...changedLines(m, about!, words, r.changed)];
+      const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...(read?.warning != null ? [read.warning] : []), ...changedLines(m, about!, words, r.changed)];
       return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: false, about: r.about, changed: r.changed });
     }
     const what = r.about?.kind === 'exploration' ? `exploration ${r.about.id} is reopened with it as an added question; its author gets the turn now (in the attempts phase the method goes back to its author)` : 'an Architect repair step amends the plan in effect (mechanical checks only); mp pm next lists it';
@@ -843,11 +853,15 @@ const plan: Command = {
     const file = flagStr(args, 'file');
     if (file === null) throw usage('--file: the PM plan document (JSON)');
     let doc: unknown;
+    // 4.4.1 (Windows): the one reader (a byte-order mark dropped, UTF-16 decoded)
+    let input: InputText | null = null;
     try {
-      doc = JSON.parse(readFileSync(file, 'utf8'));
+      input = readInputFile(file);
+      doc = JSON.parse(input.text);
     } catch (e) {
-      throw usage(`cannot read the plan ${file}: ${(e as Error).message}`);
+      throw usage(`cannot read the plan ${file}: ${(e as Error).message}${input !== null ? nulNote(input, 'it') : ''}`);
     }
+    const warning = input.warning !== null ? `\n${input.warning}` : '';
     const words = flagList(args, 'words');
     if (words.length === 0) throw usage('--words W-<n>: the words entries this batch aligns (decision 1)');
     for (const w of words) if (!WORDS.test(w) || p.ctx.memory.read((db) => wordsEntry(db, w)) === null) throw refused('NO_WORDS', `there is no words entry ${w}`);
@@ -866,9 +880,9 @@ const plan: Command = {
       throw refused('BAD_PLAN', `the PM plan does not validate: ${issues}. Its format, prefilled for this mission: mp pm plan template ${m}`);
     }
     if (r.recheck === true) {
-      return ok(`The plan document is the plan in effect, unchanged: batch ${r.batch} re-checks ${r.plan} (no new version, no Architect). Calibrator ① judges it again on the requirement items as they are now (mp pm next); a current deciding pass restores its proof; dependents recover only while their own inputs remain current.`, { mission: m, batch: r.batch, plan: r.plan, recheck: true });
+      return ok(`The plan document is the plan in effect, unchanged: batch ${r.batch} re-checks ${r.plan} (no new version, no Architect). Calibrator ① judges it again on the requirement items as they are now (mp pm next); a current deciding pass restores its proof; dependents recover only while their own inputs remain current.${warning}`, { mission: m, batch: r.batch, plan: r.plan, recheck: true });
     }
-    return ok(`PM plan batch ${r.batch} recorded (plan ${r.plan}); Calibrator ① checks it next (mp pm next). The Architect starts only after it passes.`, { mission: m, batch: r.batch, plan: r.plan });
+    return ok(`PM plan batch ${r.batch} recorded (plan ${r.plan}); Calibrator ① checks it next (mp pm next). The Architect starts only after it passes.${warning}`, { mission: m, batch: r.batch, plan: r.plan });
   },
 };
 
@@ -1260,14 +1274,14 @@ const amendAttempts: Command = {
     const x = positional(args, 1, 'exploration');
     const file = flagStr(args, 'file');
     if (file === null) throw usage('--file <attempts.json>: a JSON array of attempts in the schema of a method\'s registered attempts (a new id is added, a registered id replaces that attempt)');
-    const attempts = attemptsFile(file);
+    const read = attemptsFile(file);
     const answers = flagStr(args, 'answers');
     if (answers !== null && !/^R-[1-9][0-9]*$/.test(answers)) throw usage(`--answers names a repair R-<n>, not ${JSON.stringify(answers)}`);
     const w = wordsArg(p.ctx, args, true)!;
     const reason = flagStr(args, 'reason');
     // a repair of its own unless it answers one recorded before (4.1.3, E-5)
-    const r = await pmAmendAttempts(p.ctx, { mission: m, exploration: x, attempts, words: w, reason, answers, ...(answers === null ? { repair: olderRepair(p, args, w) } : {}) });
-    return ok([olderName('amend-attempts', m, x, w, `--attempts ${file}`), ...(r.repair !== null ? [`Repair recorded: ${r.repair}, answered by this amendment.`] : []), ...changedLines(m, x, w, { form: 'attempts', result: r })].join('\n'), { mission: m, exploration: x, ...r });
+    const r = await pmAmendAttempts(p.ctx, { mission: m, exploration: x, attempts: read.attempts, words: w, reason, answers, ...(answers === null ? { repair: olderRepair(p, args, w) } : {}) });
+    return ok([olderName('amend-attempts', m, x, w, `--attempts ${file}`), ...(read.warning !== null ? [read.warning] : []), ...(r.repair !== null ? [`Repair recorded: ${r.repair}, answered by this amendment.`] : []), ...changedLines(m, x, w, { form: 'attempts', result: r })].join('\n'), { mission: m, exploration: x, ...r });
   },
 };
 

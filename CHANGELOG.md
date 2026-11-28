@@ -6,6 +6,40 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.4.1] - 2026-11-28
+
+The engine runs without error in PowerShell on Windows. 4.4.0 was built and tested on Linux only; on Linux and macOS only the pages, the card's hand-back line and the fixes below change. What stays is in `docs/design/Backlog_4.4_PostRelease.md` ("Windows and PowerShell").
+
+### Changed
+
+- On Windows the seat's fixed prompt, the Secretary's launch prompt and the optional hook's session pointer end with one sentence: in PowerShell write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty), and `mp.cmd` called from PowerShell drops double quotes inside an argument. On Linux and macOS they are 4.4.0's, byte for byte.
+- On Windows `mp pm secretary start` prints a second launch hint, the PowerShell form, which sets `MP_SECRETARY` for the launch only (`launchHintPowerShell` in its JSON).
+- The seat role pages, both handbooks and the card's hand-back section give the PowerShell form beside the here-document and the `MP_SECRETARY=… claude …` launch, one line each, marked "PowerShell:" (the Researcher's page, at its 8 KB budget with its card, leaves it to the card).
+
+### Added
+
+- `plugin/bin/mp.ps1`: the PowerShell entry of the optional adapter, beside `mp` and `mp.cmd`.
+- `engine/README.md`: a section "Windows and PowerShell".
+<!-- 4.4.1 integration: the line "The test suite passes on Windows" goes here, from the packages that make it pass. -->
+
+### Fixed
+
+- A file or standard input with a UTF-8 byte-order mark (Windows PowerShell 5.1's `Set-Content -Encoding UTF8`, many editors; 5.1 pipes it twice with `$OutputEncoding = [Text.Encoding]::UTF8`) no longer records U+FEFF as the first character of the user's words, and a JSON file with one (`mp pm plan submit --file`, `--attempts`, a hand-back's result, `config.json`) is no longer refused with `Unexpected token`. A UTF-16 file with a mark (5.1's `Out-File` and `>`) is read. One reader serves every file and stdin a person or a seat hands the engine.
+- Bytes that are not UTF-8 (a file saved in the system code page) are read as U+FFFD as before, and the command now says so in one warning line. A NUL with no byte-order mark is refused where it was, and the refusal says the file is probably UTF-16 without a mark: save it as UTF-8.
+- A quote of the user's words (a tag, a requirement item, a repair's reason, `mp pm extend`, a stop's words) that spans a line break matches whether the words and the quote use CRLF or LF; what is recorded does not change.
+
+### Compatibility
+
+- A 4.3 or 4.4.0 memory opens with no migration; nothing is written in a new form.
+- With no byte-order mark, the text the engine reads, an operation's identity and its payload are 4.4.0's; a 4.4.0 command retried with the same `--op` replays its receipt (an operation's identity still fingerprints a file as 4.4.0 read it, a mark included).
+- What 4.4.0 recorded with a leading U+FEFF stays as it was; the same file recorded again under 4.4.1 is a new entry.
+- New JSON: `launchHintPowerShell` on Windows (`mp pm secretary start`). A command that read such an input carries the reader's warning line when there is one (in its text; a hand-back's `notes`, `mp pm note`'s `warnings`).
+
+### Upgrade steps
+
+- An engine installed linked (`npm install -g .` in `engine/`) needs no new install: pull, and the link serves 4.4.1.
+- Run `mp docs update`: it installs the pages with their PowerShell lines. On Windows, call it `mp.ps1 docs update` in PowerShell.
+
 ## [4.4.0] - 2026-11-28
 
 The PM stays the user's anchor on long missions, and each seat gets what its part needs. Design: `docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md` (G1 to G9; it rules) and `docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md` (F1 to F19, as amended); what was built differently and what is left: `docs/design/Backlog_4.4_PostRelease.md`.

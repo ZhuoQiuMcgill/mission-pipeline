@@ -75,6 +75,7 @@ On a revision, fix exactly what the card says came back, and carry everything el
 - `mp seat <id> card`, `mp seat <id> read <material> [--page <n>]`, `mp seat <id> checkout`.
 - Repair only: `mp seat <id> owners <path>...`: which accepted products of this mission changed each path. Repair, and an answer on a task with an accepted product: `mp seat <id> checkout --product <task>`: a read-only directory holding that task's accepted product, shared like any checkout.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
+- PowerShell: write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty; `mp.cmd` drops double quotes inside an argument), and hand back with a here-string: a line `@'`, the document, then a line `'@ | mp.ps1 seat <id> handback --stdin`.
 
 ## Upstream and downstream
 - Decomposition: upstream, the PM plan approved by Calibrator ①. Downstream: the program's mechanical checks, the feasibility review, then Calibrator ②. A plan that fails a check comes back to you. A structural revision of a detailed plan waits for PM approval (`plan-structure-change`); added, dropped, split or merged tasks, declared interfaces, data formats and storage count even without accepted work.

@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { ENGINE, cli, gitProject, type TestProject } from './cli-fixtures.ts';
+import { POWERSHELL_NOTE } from '../src/common/powershell.ts';
 
 const ADAPTER = join(ENGINE, 'plugin', 'hooks', 'claude-code.mjs');
 
@@ -64,9 +65,10 @@ describe('the optional Claude Code adapter', () => {
     const before = [count(p.dir, 'SELECT COUNT(*) AS n FROM log'), count(p.dir, 'SELECT COUNT(*) AS n FROM pm_actions')];
     const r = hook('session-start', { cwd: p.dir }, p.dir);
     assert.equal(r.code, 0);
+    // 4.4.1: on Windows the pointer ends with how to call mp in PowerShell (test/p441-windows.test.ts checks both forms)
     assert.equal(
       r.out,
-      'This project uses Mission Pipeline.\nIf you are the PM, read the core of `.mission-pipeline/pm/PM.md` and run `mp pm session`.\nIf you were started as a seat, your card (`mp seat <id> card`) is your whole instruction.\n',
+      `This project uses Mission Pipeline.\nIf you are the PM, read the core of \`.mission-pipeline/pm/PM.md\` and run \`mp pm session\`.\nIf you were started as a seat, your card (\`mp seat <id> card\`) is your whole instruction.\n${process.platform === 'win32' ? `${POWERSHELL_NOTE}\n` : ''}`,
     );
     assert.doesNotMatch(r.out, /Notices \(first\)|Ready steps/, 'no PM steps are shown');
     assert.deepEqual([count(p.dir, 'SELECT COUNT(*) AS n FROM log'), count(p.dir, 'SELECT COUNT(*) AS n FROM pm_actions')], before, 'nothing was written: no mp pm next ran');

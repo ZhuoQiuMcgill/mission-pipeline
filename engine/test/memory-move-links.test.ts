@@ -4,7 +4,7 @@ import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path';
 import { listNotices } from '../src/process/notices.ts';
 import { initMemory, openMemory } from '../src/memory/index.ts';
-import type { GitRunner } from '../src/memory/git.ts';
+import { gitLinkPath, type GitRunner } from '../src/memory/git.ts'; // 4.4.1: link files hold git's form (forward slashes on Windows)
 import { tempDir, throwsCode } from './memory-fixtures.ts';
 
 test('zero from old repair is insufficient: direct links are verified, failed listing holds and notices; retry finishes without touching work', () => {
@@ -48,8 +48,8 @@ test('zero from old repair is insufficient: direct links are verified, failed li
       throwsCode(() => alreadyOpen.assertGitWrites('delivery'), 'GIT_WRITES_HELD');
     } finally { alreadyOpen.close(); }
     const admin = join(copied, '.git', 'worktrees', 'D-1');
-    assert.equal(readFileSync(join(copied, suffix, '.git'), 'utf8'), `gitdir: ${admin}\n`, 'direct rewrite corrected the forward link');
-    assert.equal(readFileSync(join(admin, 'gitdir'), 'utf8'), `${join(copied, suffix, '.git')}\n`);
+    assert.equal(readFileSync(join(copied, suffix, '.git'), 'utf8'), `gitdir: ${gitLinkPath(admin)}\n`, 'direct rewrite corrected the forward link');
+    assert.equal(readFileSync(join(admin, 'gitdir'), 'utf8'), `${gitLinkPath(join(copied, suffix, '.git'))}\n`);
     m.close();
     m = openMemory(copied, { git });
     assert.notEqual(m.status().movePending, null);
@@ -121,7 +121,7 @@ test('a copied Windows registration is relocated, and a wrong commondir refuses 
     assert.match(readFileSync(join(worktree, '.git'), 'utf8'), /C:\/Project/, 'no unsafe rewrite on a wrong common directory');
     writeFileSync(join(admin, 'commondir'), '../..\n');
     assert.equal(repairWorktrees(git, root, [worktree], common, 'C:\\Project').code, 0);
-    assert.equal(readFileSync(join(worktree, '.git'), 'utf8'), `gitdir: ${admin}\n`);
+    assert.equal(readFileSync(join(worktree, '.git'), 'utf8'), `gitdir: ${gitLinkPath(admin)}\n`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -158,6 +158,6 @@ test('a missing copied .git is reported as prunable without holding recovery', (
     assert.equal(status.movePending, null);
     assert.deepEqual(status.lastMove!.findings.git, { kind: 'repaired', worktrees: 1 });
     assert.deepEqual(status.lastMove!.findings.layout, [`Skipped prunable worktree registration (no .git in this copy): ${join(copied, 'deleted')}`]);
-    assert.equal(readFileSync(join(live, '.git'), 'utf8'), `gitdir: ${join(copied, '.git', 'worktrees', 'live')}\n`);
+    assert.equal(readFileSync(join(live, '.git'), 'utf8'), `gitdir: ${gitLinkPath(join(copied, '.git', 'worktrees', 'live'))}\n`);
   } finally { m.close(); rmSync(base, { recursive: true, force: true }); }
 });

@@ -39,7 +39,7 @@ function assertOwnRepository(dir: string): void {
   assert.equal(realpathSync(ok(dir, 'rev-parse', '--absolute-git-dir')), join(realpathSync(dir), '.git'));
 }
 
-test('attribute repository init ignores a global refusing reference-transaction hook', { skip: process.platform === 'win32' }, async () => {
+test('attribute repository init ignores a global refusing reference-transaction hook', async () => {
   const f = fixture();
   const saved = process.env['GIT_CONFIG_GLOBAL'];
   const scratch = tempDir('mp-attr-refuse-');
@@ -265,7 +265,7 @@ test('the configuration holds a checkout path with quotes, backslashes and space
 });
 
 
-test('global hooks do not fire during setup, but declared git commands inherit them', { skip: process.platform === 'win32' }, async () => {
+test('global hooks do not fire during setup, but declared git commands inherit them', async () => {
   const f = fixture();
   const saved = process.env['GIT_CONFIG_GLOBAL'];
   try {
@@ -279,7 +279,7 @@ test('global hooks do not fire during setup, but declared git commands inherit t
       chmodSync(hook, 0o755);
     }
     const cfg = join(hooks, 'global-config');
-    writeFileSync(cfg, `[core]\n hooksPath = "${hooks}"\n`);
+    writeFileSync(cfg, `[core]\n hooksPath = ${JSON.stringify(hooks)}\n`); // a quoted value: a Windows path's backslashes escaped
     process.env['GIT_CONFIG_GLOBAL'] = cfg;
     const dir = runCheckoutDir(f.m.paths, 'hooks');
     await checkoutCommit(f.ctx, { commit: f.base, dir, repository: true });
@@ -298,7 +298,7 @@ test('global hooks do not fire during setup, but declared git commands inherit t
   }
 });
 
-test('a rejecting global reference hook cannot interrupt checkout preparation, including internal LFS conversion', { skip: process.platform === 'win32' }, async () => {
+test('a rejecting global reference hook cannot interrupt checkout preparation, including internal LFS conversion', async () => {
   const content = Buffer.from('LFS payload\n');
   const pointer = lfsClean(content);
   const f = fixture({ files: { '.gitattributes': 'blob.dat filter=lfs -text\n', 'blob.dat': pointer.blob.toString('utf8') } });
@@ -314,7 +314,7 @@ test('a rejecting global reference hook cannot interrupt checkout preparation, i
     writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' "$1" >> ${shellQuote(counter)}\nexit 1\n`);
     chmodSync(hook, 0o755);
     const cfg = join(hooks, 'global-config');
-    writeFileSync(cfg, `[core]\n hooksPath = "${hooks}"\n`);
+    writeFileSync(cfg, `[core]\n hooksPath = ${JSON.stringify(hooks)}\n`); // a quoted value: a Windows path's backslashes escaped
     process.env['GIT_CONFIG_GLOBAL'] = cfg;
     // Both paths initialize a scratch attribute repository; only a run attaches its own .git.
     const reading = runCheckoutDir(f.m.paths, 'hookless-reading');

@@ -357,7 +357,7 @@ test('a bare common repository with linked worktrees: the project’s own worktr
   }
 });
 
-test('"consistent" after a fast-forward that changes end of line, ident, symlinks, modes and types', { skip: !POSIX }, async () => {
+test('"consistent" after a fast-forward that changes end of line, ident, symlinks, modes and types', { skip: POSIX ? false : 'it checks out symbolic links and the executable bit, which Windows checkouts do not hold (core.symlinks, core.filemode false)' }, async () => {
   const f = fixture({ files: { '.gitattributes': '*.crlf text eol=crlf\n*.id ident\n', 'a.crlf': 'one\n', 'b.id': '$Id$\n', 'tool.sh': 'echo\n', 'typ': 'plain\n' } });
   try {
     // Let git materialize the attribute-bearing files, as a checkout would.

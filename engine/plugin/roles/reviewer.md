@@ -49,6 +49,7 @@ Of the Constructor's reasoning you get its hand-back only, as claims to check. Y
 - `mp seat <id> checkout`, `mp seat <id> rerun <command> [--detach]`, `mp seat <id> wait <run>`.
 - On an integration task: `mp seat <id> owners <path>...`, and `mp seat <id> full-run` when the project has a full suite.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
+- PowerShell: write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty; `mp.cmd` drops double quotes inside an argument), and hand back with a here-string: a line `@'`, the document, then a line `'@ | mp.ps1 seat <id> handback --stdin`.
 
 ## Upstream and downstream
 - Upstream: the Constructor, whose candidate you judge (on an integration task with nothing to write: its dependencies' accepted work, laid together).

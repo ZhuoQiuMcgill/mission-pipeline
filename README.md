@@ -3,7 +3,7 @@
 Mission Pipeline exists so that agents produce results that are responsible to the user.
 You talk to one PM, your anchor: it understands your logic and needs, keeps the plan aligned and makes big decisions on your recorded words.
 A resident Secretary runs the loop, dispatches seats, handles exceptions and decides most field matters within the plan.
-Version 4.4.0 is in [`engine/`](engine/).
+Version 4.4.1 is in [`engine/`](engine/).
 It keeps the PM the user's anchor on long missions: each decision reaches the PM with the Secretary's brief, a question of design goes to an Architect in one step, and the Secretary and the Architect write what reaches a task.
 A new requirement is recorded as one (`mp pm extend`) and takes a repair's light path; holds, notes and what is left open at the review cap are on the record for anyone to read; seats get the material they need, a Constructor can stop and ask, and a standard says how it is checked.
 
@@ -48,6 +48,8 @@ npm install -g .        # links the `mp` command to this folder
 cd /path/to/your/project
 mp init --pointer both  # adds one line to CLAUDE.md and AGENTS.md pointing the PM to its handbook
 ```
+
+On Windows, in PowerShell write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty); see [Windows and PowerShell](engine/README.md#windows-and-powershell).
 
 Then open the project with an agent harness and tell it what you want.
 It reads `.mission-pipeline/pm/PM.md`, starts its PM session, and launches the resident Secretary with `mp pm secretary start`.

@@ -24,6 +24,8 @@ import { commitOn, fixture, gitWrapper, holdGitWrites, IDENT, M, recordedDeliver
 import { tempDir } from './memory-fixtures.ts';
 
 const POSIX = process.platform !== 'win32';
+/** Why a test that runs a POSIX shell script as git (gitWrapper, a slow stand-in) is skipped on Windows. */
+const SH_AS_GIT = 'it runs a POSIX shell script as the git program, which Windows cannot start';
 const DELIVER_CHILD = fileURLToPath(new URL('./git41-deliver-child.ts', import.meta.url));
 
 // ---------------------------------------------------------------- helpers
@@ -71,7 +73,7 @@ function pending(): { promise: Promise<void>; resolve: () => void } {
 
 // ---------------------------------------------------------------- #1
 
-test('#1 two deliveries running at once each build and record their own candidate, in their own directory', { skip: !POSIX }, async () => {
+test('#1 two deliveries running at once each build and record their own candidate, in their own directory', async () => {
   const f = fixture({ files: { 'src/a.txt': 'base\n' } });
   try {
     await product(f, 'o1', M, { 'src/a.txt': 'BAD\n' });
@@ -101,7 +103,7 @@ test('#1 two deliveries running at once each build and record their own candidat
 
 // ---------------------------------------------------------------- #2
 
-test('#2 a delivery-ref intent is never closed because the ref is absent: a late git, a retry and a lock all end with one record at D', { skip: !POSIX }, async () => {
+test('#2 a delivery-ref intent is never closed because the ref is absent: a late git, a retry and a lock all end with one record at D', { skip: POSIX ? false : SH_AS_GIT }, async () => {
   const f = fixture({ files: { 'src/a.txt': 'base\n' } });
   try {
     await product(f, 'o1');
@@ -307,7 +309,7 @@ test('#7 a capability stop reaches deliveries and landings: derived from the mis
 
 // ---------------------------------------------------------------- #8
 
-test('#8 the final authorization re-checks the labels: recomputing waits; a label input committed meanwhile reopens them and checks again', { skip: !POSIX }, async () => {
+test('#8 the final authorization re-checks the labels: recomputing waits; a label input committed meanwhile reopens them and checks again', async () => {
   const f = fixture({ files: { 'src/a.txt': 'base\n' } });
   try {
     await product(f, 'o1');
@@ -364,7 +366,7 @@ test('#9 detaching a duplicate checkout is refused while git writes are held, an
 
 // ---------------------------------------------------------------- #10
 
-test('#10 the Windows branch of the async runner ends on time although a descendant keeps the pipes open', { skip: !POSIX }, async () => {
+test('#10 the Windows branch of the async runner ends on time although a descendant keeps the pipes open', { skip: POSIX ? false : SH_AS_GIT }, async () => {
   const dir = tempDir('mp-timeout-');
   try {
     const script = join(dir, 'slow.sh');
@@ -380,7 +382,7 @@ test('#10 the Windows branch of the async runner ends on time although a descend
   }
 });
 
-test('#10b the synchronous runner (the landing\u2019s git step) returns when git exits: a descendant holding its output neither delays it nor makes it a timeout', { skip: !POSIX }, () => {
+test('#10b the synchronous runner (the landing\u2019s git step) returns when git exits: a descendant holding its output neither delays it nor makes it a timeout', { skip: POSIX ? false : SH_AS_GIT }, () => {
   const dir = tempDir('mp-timeout-');
   try {
     const slow = join(dir, 'slow.sh');
@@ -637,7 +639,7 @@ test('r3 #1 a submodule’s changes hidden by assume-unchanged or skip-worktree 
   }
 });
 
-test('r3 #2 a path or submodule that cannot be read is "undetermined", never "match"', { skip: !POSIX || process.getuid?.() === 0 }, async () => {
+test('r3 #2 a path or submodule that cannot be read is "undetermined", never "match"', { skip: !POSIX ? 'a file mode cannot make a file unreadable on Windows' : process.getuid?.() === 0 ? 'root reads every file' : false }, async () => {
   const f = fixture({ files: { 'src/a.txt': 'a\n' } });
   const locked: string[] = [];
   try {

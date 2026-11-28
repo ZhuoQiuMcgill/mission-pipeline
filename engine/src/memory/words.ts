@@ -1,4 +1,5 @@
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { occursVerbatim } from '../common/verbatim.ts';
 import type { BasisLineId, BasisVersionId, ContentHash, MissionId } from '../common/ids.ts';
 import type { BaseRecord } from '../common/records.ts';
 import type { Db } from './db.ts';
@@ -61,7 +62,8 @@ export function parseTag(raw: string, text: string): Omit<WordsTag, 'id'> {
   if (type === 'requirement' && mission === null) notAllowed('a requirement tag names @mission');
   const q = m[3];
   const quote = q === undefined ? null : q.startsWith('"') && q.endsWith('"') ? q.slice(1, -1) : q;
-  if (quote !== null && (quote === '' || !text.includes(quote))) notAllowed('the tag quote must occur verbatim in the words entry');
+  // 4.4.1 (Windows): a CRLF and an LF count as the same line break (the quote is recorded as given)
+  if (quote !== null && (quote === '' || !occursVerbatim(text, quote))) notAllowed('the tag quote must occur verbatim in the words entry');
   return {type, mission, quote};
 }
 

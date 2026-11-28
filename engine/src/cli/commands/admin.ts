@@ -1,8 +1,9 @@
 // The project's own commands (design 4.1 §3.1, §4.1, §9): `mp init`, `mp config`, `mp recompute`,
 // `mp docs update`.
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readInputFile } from '../../common/textInput.ts';
 import { recompute } from '../../evaluator/index.ts';
 import { flagBool, flagStr, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
@@ -59,12 +60,15 @@ const config: Command = {
     const p = P(c);
     const file = configPath(p.dir);
     if (!existsSync(file)) return ok('No config.json: the defaults are used (target branch main, no full suite, no version commands). mp init writes one.', readConfig(p.dir));
-    const cfg = parseConfig(JSON.parse(readFileSync(file, 'utf8')));
+    // 4.4.1 (Windows): the one reader (a byte-order mark an editor wrote is dropped, UTF-16 decoded), and its warning
+    const input = readInputFile(file, '.mission-pipeline/config.json');
+    const cfg = parseConfig(JSON.parse(input.text));
     const src = fullSuiteSource(cfg);
     const suite = fullSuiteOf(cfg);
     const shells = shellsInEffect(cfg);
     const lines = [
       `.mission-pipeline/config.json is valid.`,
+      ...(input.warning !== null ? [input.warning] : []),
       ...(src.both ? ['Warning: both fullSuite and the deprecated closingChecks are present; fullSuite is used and closingChecks is ignored (remove it).'] : []),
       `Target branch: ${cfg.targetBranch}`,
       ...section('Local tests: verificationCommands (the Architect may assign them to tasks)', cfg.verificationCommands.map((x) => `${x.id}: ${typeof x.command === 'string' ? x.command : x.command.join(' ')}`), 'none'),

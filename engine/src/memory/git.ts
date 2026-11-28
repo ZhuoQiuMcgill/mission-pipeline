@@ -1,9 +1,11 @@
 // The few git commands the memory itself runs (design 4.1 §3.1, §3.3): the
-// exclude line at init, the repository layout check, `git worktree repair`
-// after a move, and the object closure of the commits the memory names. Plain
-// git from PATH on every platform, synchronously, inside the `mp` command that
-// needs it (§2.5); nothing here rewrites the repository except the worktree
-// repair, and that only when the repository lies inside the folder.
+// exclude line at init, the repository layout check, the worktree links after
+// a move (rewritten inside the copy, then checked with `git worktree list`;
+// 4.4.1: no longer `git worktree repair`), and the object closure of the
+// commits the memory names. Plain git from PATH on every platform,
+// synchronously, inside the `mp` command that needs it (§2.5); nothing here
+// rewrites the repository except the worktree links, and those only when the
+// repository lies inside the folder.
 //
 // The memory's recovery runs while a folder is opened, so it uses this small
 // synchronous runner by default; a caller may replace it (OpenOptions.git),
@@ -182,8 +184,12 @@ export function gitLinkPath(p: string, platform: NodeJS.Platform = process.platf
 }
 
 /** Repair and verify every link without reading/writing HEAD, the index or worktree contents.
- * Older git can exit zero without repairing a copy: rewrite its two link files, then verify
- * again. commondir is verified, never guessed. A partial rewrite is safe to retry on next open. */
+ * Each copied worktree's two link files are rewritten when they disagree, then verified again;
+ * both lie inside the copy. commondir is verified, never guessed. A partial rewrite is safe to
+ * retry on next open. 4.4.1: `git worktree repair` is not run: run in a copy, git 2.45 (Git for
+ * Windows) followed the copied links back and rewrote the ORIGINAL folder's links to point into
+ * the copy, while a newer git repairs the copy; a copy never writes where it came from.
+ * (`git` is still the runner of the `git worktree list` check.) */
 export function repairWorktrees(git: GitRunner, projectDir: string, worktrees: readonly string[], commonDir?: string, previousDir = projectDir): GitResult {
   const common = commonDir ?? repositoryLayout(git, projectDir).commonDir;
   if (common === null) return { code: 1, stdout: '', stderr: 'cannot identify the copied common git directory' };
@@ -199,7 +205,6 @@ export function repairWorktrees(git: GitRunner, projectDir: string, worktrees: r
       if (!inside(real(admin), real(join(common, 'worktrees'))) || real(admin) === real(join(common, 'worktrees'))) throw new Error(`${dotgit} does not name an admin directory in the copied common directory`);
       plans.push({ worktree, dotgit, admin });
     }
-    if (targets.length > 0) git(['worktree', 'repair', ...targets], { cwd: projectDir });
     const linksValid = (): boolean => {
       try {
         return plans.every(({ worktree, dotgit, admin }) => {

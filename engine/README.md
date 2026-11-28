@@ -1,6 +1,6 @@
 # Mission Pipeline 4.4 engine
 
-Version 4.4.0. What 4.4 changes is in [the 4.4 PM design](../docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md) and [the 4.4 repair plan](../docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md) as the PM design amends it (the PM design rules where they differ); [the post-release backlog](../docs/design/Backlog_4.4_PostRelease.md) lists what was built differently and what is left.
+Version 4.4.1. What 4.4 changes is in [the 4.4 PM design](../docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md) and [the 4.4 repair plan](../docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md) as the PM design amends it (the PM design rules where they differ); [the post-release backlog](../docs/design/Backlog_4.4_PostRelease.md) lists what was built differently and what is left.
 The role split and word rules are in [the 4.3 design](../docs/design/DesignDoc_PMSecretary_2026-11-06_v03.md); Appendix A supersedes the named text and Appendix B wins over A.
 The [4.1 design](../docs/design/DesignDoc_MissionPipeline_4.1_2026-10-10_v06.md) still governs the unchanged process (section numbers below refer to it).
 Where it says "v51 unchanged", the [4.0 design](../docs/design/DesignDoc_SeatsLedgerRuntime_4.0_2026-10-08_v51.md) applies.
@@ -29,7 +29,7 @@ npm install
 npm install -g .
 ```
 
-`npm install -g .` links the global `mp` command to this folder (on Windows npm makes an `mp.cmd`), so keep the clone where it is. Node strips TypeScript types only outside `node_modules`, so `mp` must run from its own folder: install it linked as above, not from a packed copy. Without npm: `node <clone>/engine/bin/mp.mjs …`, or link `bin/mp.mjs` onto your `PATH` as `mp`.
+`npm install -g .` links the global `mp` command to this folder (on Windows npm makes `mp.cmd` and `mp.ps1` beside it; in PowerShell call `mp.ps1`, see [Windows and PowerShell](#windows-and-powershell)), so keep the clone where it is. Node strips TypeScript types only outside `node_modules`, so `mp` must run from its own folder: install it linked as above, not from a packed copy. Without npm: `node <clone>/engine/bin/mp.mjs …`, or link `bin/mp.mjs` onto your `PATH` as `mp`.
 
 ## Start a project
 
@@ -236,7 +236,7 @@ Any harness needs shell commands, a resident conversation, sub-agents and a way 
 The engine starts no sessions; the harness owns launch, messaging, permissions and process lifetime.
 
 **Claude Code 2.1.319 — to verify on your version.**
-`MP_SECRETARY=S-<n> claude --bg -n "<project>-Secretary" "<prompt printed by mp>"` starts the resident and must pass its environment to every `mp` command.
+`MP_SECRETARY=S-<n> claude --bg -n "<project>-Secretary" "<prompt printed by mp>"` starts the resident and must pass its environment to every `mp` command (in PowerShell, the form `mp pm secretary start` prints on Windows, which sets the variable for the launch only).
 Bind the returned id with `mp pm secretary handle <S-n> <id>`.
 `claude attach` and `claude --resume` should reach the named session; verify their selection syntax on your version.
 Verify that the two sessions can message each other to wake the recorded inbox or note.
@@ -253,6 +253,15 @@ Use the harness's supported resident and sub-agent features and check that its s
 ## Platforms
 
 Linux, Windows and macOS with Node 22.12+ (the built-in `node:sqlite`) and git. Paths in the memory are relative to the project folder, so a copy reads the same on any of them. Declared commands run with the platform's shell, or the one config `shell` names. Process locks (a landing, the recovery after a move, a declared run while it executes) are SQLite file locks the operating system releases when the holder exits.
+
+## Windows and PowerShell
+
+- **Calling the engine.** In PowerShell write `mp.ps1` for `mp`: there `mp` is PowerShell's own alias of Move-ItemProperty, which wins over a program on the PATH, and a harness starts PowerShell with no profile, so nothing set up once changes it. In Git Bash and cmd.exe `mp` works. Where scripts may not run (an execution policy), call `node <engine>\bin\mp.mjs …`. On Windows the seat's fixed prompt, the Secretary's launch prompt and the optional session pointer end with one sentence that says so; the pages carry a line marked "PowerShell:". `plugin/bin/mp.ps1` is the PowerShell entry of the optional adapter.
+- **Text that holds double quotes.** `mp.cmd` called from PowerShell drops the double quotes inside an argument, silently, and so does Windows PowerShell 5.1 on its way to any program, `mp.ps1` included. Pass such text with `--file` or `--stdin`, or use `mp.ps1` in PowerShell 7.
+- **Piped text in Windows PowerShell 5.1.** 5.1 pipes text to a program as ASCII by default: non-ASCII characters arrive as `?` and cannot be restored. Use `--file`, PowerShell 7, or set `$OutputEncoding = [Text.Encoding]::UTF8` first.
+- **Here-documents and `VAR=value command`** are a POSIX shell's. In PowerShell the stdin hand-back is a single-quoted here-string, piped: a line `@'`, the document, then a line `'@ | mp.ps1 seat <id> handback --stdin`. `mp pm secretary start` prints a PowerShell launch beside the POSIX one.
+- **Output.** The engine writes UTF-8. A console on another code page shows it garbled when the output is captured (into a variable or a pipe): set `[Console]::OutputEncoding = [Text.Encoding]::UTF8` first.
+- **Files and stdin the engine reads** (`--file`, `--stdin`, hand-back files, the plan and attempts JSON, `config.json`): a UTF-8 byte-order mark is dropped (what 5.1's `Set-Content -Encoding UTF8` and many editors write), UTF-16 with a mark is decoded (5.1's `Out-File` and `>`), and a file in the system code page is read with U+FFFD where it is not UTF-8, with one warning line. A quote of the user's words (a tag, a requirement, a repair's reason, a stop) matches across CRLF and LF line ends; the words are recorded as given.
 
 ## Layout
 
@@ -291,5 +300,5 @@ Linux, Windows and macOS with Node 22.12+ (the built-in `node:sqlite`) and git. 
 - A hold window that repeats daily is placed by hand each day. Disk `limits` can be passed by a few claims at the same moment.
 - A judgment that rests only on data outside the commit, citing no run, is not re-reviewed after an environment change; `mp read show evidence <id> --check-data` says whether the data changed.
 - Two defects of 4.3 remain: the option `restart` never restarts a step (the question returns to the PM), and a plan-review waiver granted under an authorization goes on applying after `mp pm requirement withdraw` of that authorization (withdraw the waiver too). The [post-release backlog](../docs/design/Backlog_4.4_PostRelease.md) lists the rest.
-- Tested on Linux (WSL2). Windows and macOS use the same code (Node, git, SQLite file locks) but have not been through the scenario suites yet.
+- Tested on Linux (WSL2), and on Windows 11 in PowerShell 7.7 and Windows PowerShell 5.1 with Node 22: the commands a PM and a seat type, the encodings and the shims above. macOS uses the same code (Node, git, SQLite file locks) but has not been through the scenario suites yet.
 - 4.4 does not read 4.0.x ledgers; a field PM migrates missions by the new rules.

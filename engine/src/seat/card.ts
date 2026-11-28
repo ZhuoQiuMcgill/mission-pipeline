@@ -511,6 +511,9 @@ export function renderSeatCard(card: { readonly seat: string } & Readonly<Record
         '    ```',
         '    EOF',
         '',
+        // 4.4.1 (Windows): PowerShell has no here-document; a single-quoted here-string is piped instead
+        `PowerShell: the same document between a line \`@'\` and a line \`'@ | mp.ps1 seat ${o.dispatch} handback --stdin\` (a here-string, piped).`,
+        '',
         'The fields match this JSON schema:',
       ];
   const evidence = seatCommandsOf(card, o).includes('request-evidence') ? `\nAn evidence request (the last fenced json block of your notes on \`mp seat ${o.dispatch} request-evidence --stdin\`, or the file \`${f.request}\`) matches this JSON schema:\n\n\`\`\`json\n${JSON.stringify(z.toJSONSchema(EvidenceRequestSchema), null, 2)}\n\`\`\`\n` : '';
