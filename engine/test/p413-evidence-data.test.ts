@@ -141,9 +141,10 @@ describe('b: the file check', () => {
     assert.equal((await checkDataFile(join(DIR, 'b/none.csv'))).state, 'missing');
     assert.equal((await checkDataFile(join(DIR, 'b'))).state, 'not-a-file');
     const fifo = join(DIR, 'b/pipe');
-    let made = true;
+    // 4.4.1 (Windows): no FIFOs there; a mkfifo on the PATH (Git for Windows' MSYS one) makes nothing Node sees as a file
+    let made = process.platform !== 'win32';
     try {
-      execFileSync('mkfifo', [fifo]);
+      if (made) execFileSync('mkfifo', [fifo]);
     } catch {
       made = false;
     }

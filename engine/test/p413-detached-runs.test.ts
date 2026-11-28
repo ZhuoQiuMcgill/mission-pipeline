@@ -274,7 +274,7 @@ function realProject(files: Record<string, string>, config: Record<string, unkno
   return pp;
 }
 
-describe('5-7: real workers', { skip: !POSIX }, () => {
+describe('5-7: real workers', { skip: POSIX ? false : 'its workers run in POSIX process groups and are ended by signals, which Windows does not have' }, () => {
   it('5: started from a shell, it outlives that mp process, in its own process group, under the experiment limit; the cleanup runs', async () => {
     const mark = join(process.env['TMPDIR'] ?? '/tmp', `mp-p413-cleanup-${process.pid}-${Date.now()}`);
     p = realProject(

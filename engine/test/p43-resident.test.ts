@@ -29,7 +29,8 @@ test('B.6/A.2 pending → live; replacement fences old commands and writes; pend
     assert.equal(generations(p.ctx.memory)[0]?.state, 'retired');
     assert.equal((await command43(p, ['sec','session'], pending.generation)).error.code, 'NOT_ALLOWED');
     await done43(p, ['sec','session','--filled-by','any/model'], again.generation);
-    assert.match((await done43(p, ['sec','handbook'], again.generation)).path, /secretary\/SECRETARY\.md$/);
+    // a native path (4.4.1: on Windows its separator is a backslash)
+    assert.match((await done43(p, ['sec','handbook'], again.generation)).path, /secretary[\\/]SECRETARY\.md$/);
     for (const name of ['next','dispatch','release','drain','renew','alerts']) assert.equal((await command43(p, ['pm',name])).error.code, 'NOT_ALLOWED', name);
     const old = secretary43(p, again.generation);
     try {

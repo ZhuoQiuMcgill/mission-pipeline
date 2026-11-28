@@ -145,7 +145,7 @@ describe('a mission through the shell-invoked mp, copied to another folder mid-w
     cpSync(p.dir, copy, { recursive: true });
     const st = await ok(copy, 'read', 'status');
     assert.ok(st.problems.some((x: { code: string }) => x.code === 'MOVED'), JSON.stringify(st.problems));
-    assert.ok(!st.problems.some((x: { code: string }) => x.code === 'CHAIN_BROKEN' || x.code === 'GIT_WRITES_HELD'));
+    assert.ok(!st.problems.some((x: { code: string }) => x.code === 'CHAIN_BROKEN' || x.code === 'GIT_WRITES_HELD'), JSON.stringify(st.problems));
     assert.deepEqual(st.result.inFlight.map((d: { dispatch: string }) => d.dispatch), ['D-4']);
     assert.equal(st.result.missions[0].mission, M);
     const original = await ok(p.dir, 'read', 'status', '--no-mark');

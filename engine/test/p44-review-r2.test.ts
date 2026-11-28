@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import type { MissionId } from '../src/common/ids.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import type { DetailedPlanDoc } from '../src/flow/plandoc.ts';
@@ -88,7 +89,8 @@ describe('p3-3: every command-line claim takes the checked path', () => {
     const sec = SEC_COMMANDS.find((c) => c.name[0] === 'dispatch')!;
     assert.equal(sec.run, dispatch.run, 'mp sec dispatch is mp pm dispatch');
     assert.match(dispatch.run.toString(), /pmDispatchChecked\(/);
-    const engine = new URL('..', import.meta.url).pathname;
+    // a file path, not the URL's pathname (on Windows that is "/C:/…")
+    const engine = fileURLToPath(new URL('..', import.meta.url));
     const files = [...readdirSync(join(engine, 'src', 'cli', 'commands')).map((f) => join(engine, 'src', 'cli', 'commands', f)), join(engine, 'src', 'cli', 'main.ts'), join(engine, 'src', 'process', 'secretary.ts')];
     for (const f of files) assert.doesNotMatch(readFileSync(f, 'utf8'), /\bpmDispatch\(/, `${f} claims through the checked path`);
     // and it claims a repair step end to end
