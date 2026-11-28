@@ -8,10 +8,11 @@ import { changedBoundLines, reviewInputVersions, changedPlanningInputs, type Pla
 import { resolveBases, resolveConstraints, resolveItems } from '../../memory/domain/constraints.ts';
 import { factById, flowEvents, flowMissions, recordsByKind, loopState, type Db } from '../../memory/index.ts';
 import type { DataStore } from '../../memory/data.ts';
-import { attemptPast, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage } from '../../flow/execution.ts';
+import { attemptPast, attemptReopenRepairs, lineAcceptance, ownersOfPaths, planData, productAttempt, targetConstructor, taskCardHash, taskLineage, withAttemptItems } from '../../flow/execution.ts';
 import { acceptedEntry } from '../../flow/repair.ts';
 import { CONSTRUCTOR_CLAIMS_MATERIAL, FEASIBILITY_REPORT_MATERIAL, PREVIOUS_HANDBACK_MATERIAL, PREVIOUS_REVIEW_MATERIAL, attach, attemptOfPlan, claimsMaterial, type Attached, feasibilityReportMaterial, previousHandBackMaterial, previousReviewMaterial, returnedFeasibilityOf, sourceAt, type HandBackReaders } from '../../flow/handbackMaterials.ts';
-import { repairPlanMaterial } from './architect.ts';
+import { repairItemsBlock, repairPlanMaterial } from './architect.ts';
+import type { ItemVersionBody } from '../../flow/requirements.ts';
 import { cardQuestions, taskQuestions, withoutAnswers } from '../../flow/openItems.ts';
 import { cardItemNames, issueResolver, itemIssue, riskItemsOf, takenItems, type IssueNote } from '../../flow/riskItems.ts';
 import type { MaterialRef } from './common.ts';
@@ -21,7 +22,7 @@ import type { FlowEvent } from '../../flow/ports.ts';
 import { secretaryOptions, type EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
-import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints, addressedForPlanning, planReviewInstructions, repairsOfTaskWork, writtenForTask, noteOfHandBack } from './dynamic.ts';
+import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints, addressedForPlanning, planReviewInstructions, repairsOfTaskWork, writtenForTask, noteOfHandBack } from './dynamic.ts';
 import { repairRef, type RepairBody } from '../../flow/plandoc.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
@@ -125,6 +126,15 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     else l.push(e);
   }
   const lineOf = (id: string): FlowEvent[] => lines.get(`task:${id}`) ?? [];
+  // 4.4 (G9): the requirement items a filing's reopen binds attempt k of a task to (flow/execution.ts attemptItems, from the same records)
+  const reopenItemsOf = (id: string, k: number): string[] => {
+    const out: string[] = [];
+    for (const repair of attemptReopenRepairs(lineOf(id), k)) {
+      const d = events.find((e) => e.line === 'repairs' && e.event === 'decided' && e.key === repair)?.body as { reopen?: ReadonlyArray<{ task: string; items?: readonly string[] }> } | undefined;
+      for (const l of d?.reopen?.find((x) => x.task === id)?.items ?? []) if (!out.includes(l)) out.push(l);
+    }
+    return out;
+  };
   // 4.4 (G5, p10-5): the items a card lists, each with the issue it is about (a finding of a 4.3 acceptance: its issue record)
   const cardItems = (names: readonly string[]) => {
     const need = riskItemsOf(events).some((i) => names.includes(i.id) && i.kind === 'finding' && itemIssue(i) === undefined);
@@ -197,6 +207,15 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const queued = new Set(card.accepted.map((a) => a.product));
       card.constraints = planningConstraints(constraints, mission);
       planningAddressed(card, { repair: card.repair.id, ...(card.repair.about?.startsWith('task ') === true ? { about: card.repair.about.slice('task '.length) } : {}) });
+      // 4.4 (G9): the filing's items as they stand at the claim (one withdrawn since says so) and the limits in force
+      const filing = events.find((e) => e.line === 'repairs' && e.event === 'repair' && e.key === card.repair.id)?.body as RepairBody | undefined;
+      if (filing !== undefined) {
+        delete card.entry;
+        delete card.items;
+        delete card.limits;
+        delete card.limitsMore;
+        Object.assign(card, repairItemsBlock(mission, filing, items, events.filter((e) => e.line === 'requirements' && e.event === 'item').map((e) => e.body as ItemVersionBody)));
+      }
       card.plan = plan;
       card.accepted = plan.tasks.flatMap((t) => {
         const sel = lineAcceptance(lineOf(t.id));
@@ -303,6 +322,8 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       Object.assign(card, planData(plan));
       // 4.4 (F3): a later attempt's past, when the card lacks it
       const k = (lineOf(task.id).find((e) => e.event === 'dispatched' && e.key === spec.task)?.body as { k?: number } | undefined)?.k;
+      // 4.4 (G9): with the items a filing's reopen binds this attempt to, as the queue-time builder lists them
+      if (k !== undefined) card.requirementItems = taskRequirementItems(items, withAttemptItems(task, reopenItemsOf(task.id, k)));
       writtenFor(card, task, k ?? null);
       // 4.4 (F4; G5): the questions as they stand at the claim: an answer given since the step was queued reaches this card
       const qs = k === undefined ? [] : taskQuestions(events, task.id, k);
@@ -327,6 +348,12 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const versions = contractLines(obj.mission, task!, ix, fixed).map((line) => ix.current.get(line));
       const standardChanged = changedBoundLines(ix, previous).some((line) => ix.records.get(ix.current.get(line)!)?.basisKind === 'standard');
       if (!standardChanged && versions.every((v) => v !== undefined)) card.binding.bases = data.putList([...new Set(versions as string[])].sort());
+      // 4.4 (G9): the text of the items the judgment is bound to, as the binding stands now (a card queued by 4.3 gets them here)
+      const before = task === undefined ? undefined : lineOf(task.id).filter((e) => e.event === 'review' && (e.body as { task?: string }).task !== spec.task).at(-1)?.body as { judgment?: string } | undefined;
+      const prior = before?.judgment === undefined ? undefined : factById(db, 'judgment', before.judgment)?.record as { bases?: ListRef } | undefined;
+      const bound = reviewerItems(events, data.getList(card.binding.bases as ListRef), prior?.bases === undefined ? null : data.getList(prior.bases));
+      if (bound.length > 0) card.requirementItems = bound;
+      else delete card.requirementItems;
       const input = objectConstraints(constraints, obj);
       card.binding.constraints = data.putList(input.checks);
       card.constraints = [...input.list, ...(task === undefined ? [] : constraintsForTask(constraints, task, mission).filter((c) => c.kind === 'instruction').map((c) => ({ id: c.line, text: c.text, kind: c.kind })))];

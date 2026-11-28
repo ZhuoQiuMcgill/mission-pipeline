@@ -212,6 +212,7 @@ Do not supply the user's words; send all such choices to the PM inbox.
 A repair without a change form about an exploration gives its author the turn at once.
 In the attempts phase, runs already in flight finish; queued attempts the new method changes or drops are withdrawn; unchanged records keep counting.
 Other repairs go to the Architect: reopen responsible work, change a card with no accepted product, or add unowned work.
+A new requirement (`mp pm extend`) goes the same way; its work is bound to its items, which stay outside the set the plan was checked against, so nothing else loses proof or waits. A filing whose items the user withdrew before its amendment was applied ends, and its step is cancelled.
 Only mechanical checks apply; nothing else loses proof; accepted tasks keep their cards and a changed card starts a new attempt carrying prior work.
 A decision that changes a card another repair changed since its Architect's card was built goes back to that Architect once, as a mechanical return.
 A repair's reopen is not counted: its work gets a fresh rework loop. A reopen that may come after other work of its repair waits for it, and that repair's tasks wait while a dependency it reopens is pending.

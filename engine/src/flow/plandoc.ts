@@ -437,6 +437,21 @@ export interface RepairBody {
   readonly op?: string;
   /** 4.4 (G4, G5): the open items this repair is for (`--open-items`); its decision says which task takes each. Absent: none named. */
   readonly openItems?: readonly string[];
+  /**
+   * 4.4 (G9): the requirement items (ids) the filing's work is bound to: those `mp pm extend` recorded with it, or the one a
+   * repair falls short of (`mp pm repair … --item`). Absent: none (every 4.3 repair, and a repair that names no item).
+   */
+  readonly items?: readonly string[];
+  /** 4.4 (G9): "extend": the filing of a new requirement (`mp pm extend`), on a repair's light path. Absent: a repair. */
+  readonly entry?: 'extend';
+}
+/** 4.4 (G9): a filing whose every item was withdrawn before its amendment was applied ends (line "repairs", event "ended", key the filing). */
+export const REPAIR_ENDED = 'ended';
+export interface RepairEndedBody {
+  readonly repair: string;
+  readonly items: readonly string[];
+  /** The Architect step whose hand-back, if one comes, is kept on the record and not applied. */
+  readonly arch: string | null;
 }
 /** The Architect repair step's outcome, once its amendment passed the mechanical checks (event "decided", key the repair id). */
 export interface RepairDecidedBody {
@@ -450,7 +465,7 @@ export interface RepairDecidedBody {
    * and then opens the next). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every
    * reopen before 4.4).
    */
-  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[]; readonly openItems?: readonly string[] }>;
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[]; readonly openItems?: readonly string[]; readonly items?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
   /** 4.4 (G3, F2): the Architect's note on its decision, printed on the cards of the tasks it added, changed or reopened (absent: a 4.3 decision). */
@@ -473,14 +488,15 @@ export interface RepairDecidedBody {
 export const REOPEN_PINNED = 'reopen-pinned';
 export const REOPEN_CARRIED = 'reopen-carried';
 export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
-/** A repair as a card shows it (every card of the work it caused). */
+/** A repair as a card shows it (every card of the work it caused). 4.4 (G9): `entry` "extend", a new requirement's filing. */
 export interface RepairRef {
   readonly id: string;
   readonly kind: RepairKind;
   readonly text: string;
   readonly words: string;
+  readonly entry?: 'extend';
 }
-export const repairRef = (r: RepairBody): RepairRef => ({ id: r.id, kind: r.kind, text: r.text, words: r.words });
+export const repairRef = (r: RepairBody): RepairRef => ({ id: r.id, kind: r.kind, text: r.text, words: r.words, ...(r.entry !== undefined ? { entry: r.entry } : {}) });
 
 /**
  * The event the decision layer writes when a PM plan version passes Calibrator ① (line "plan",

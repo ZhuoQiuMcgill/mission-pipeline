@@ -65,6 +65,7 @@ import {
   pmRelease,
   pmRenew,
   pmRepair,
+  pmExtend,
   type RepairChange,
   type RepairChanged,
   pmRequirement,
@@ -575,8 +576,9 @@ const repair: Command = {
     '       --answers R-<n>: with --attempts, this change also settles that earlier repair (its author turn is taken back); without it, a change while the method is back with its author is refused\n' +
     '       --rerun: run registered attempts again on the same method version; --resnapshot: the exploration reads the target branch as it is now\n' +
     '       --again: file it as a new repair although the same repair (words, kind, text, subject) was decided (about an exploration: its round is over); one still in work is returned\n' +
-    '       --open-items <id>[,<id>...]: the items left at the cap this repair is for (mp read open-items lists them); its Architect gives each to a task, whose Reviewer answers it',
-  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean', again: 'boolean', 'open-items': 'list' },
+    '       --open-items <id>[,<id>...]: the items left at the cap this repair is for (mp read open-items lists them); its Architect gives each to a task, whose Reviewer answers it\n' +
+    '       --item <id>: the requirement item the repair falls short of: its Architect sees it, and the work is bound to it (optional). A missing feature is a new requirement: mp pm extend',
+  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean', again: 'boolean', 'open-items': 'list', item: 'string' },
   identity: (a) => ({
     positionals: a.positionals,
     flags: a.flags,
@@ -612,7 +614,11 @@ const repair: Command = {
     // 4.4 (G4, G5): the open items this repair is for
     const openItems = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
     if (openItems.length > 0 && change !== undefined) throw usage('--open-items goes with a repair of the plan in effect, not with a change form');
-    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}), ...(again ? { again: true, op: c.op } : {}), ...(openItems.length > 0 ? { openItems } : {}) });
+    const item = flagStr(args, 'item');
+    if (item !== null && !ITEM_ID.test(item)) throw usage(`--item names a requirement item by its id (1 to 64 letters, digits or "-"), not ${JSON.stringify(item)}`);
+    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}), ...(again ? { again: true, op: c.op } : {}), ...(openItems.length > 0 ? { openItems } : {}), ...(item !== null ? { item } : {}) });
+    // 4.4 (G9): a missing feature is filed as a repair still (nothing is refused); the line points to the entry of its own
+    const extendLine = kind === 'missing' ? '\nA missing feature the user now wants is a new requirement: mp pm extend records it as requirement items and starts the same light path (mp help pm extend).' : '';
     if (r.changed !== undefined) {
       const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...changedLines(m, about!, words, r.changed)];
       return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: false, about: r.about, changed: r.changed });
@@ -624,7 +630,68 @@ const repair: Command = {
       : r.repeated && r.over !== undefined ? ` ${r.over} is that repair, and ${over}: --again files a new one.`
       : r.repeated && again ? ` The same repair is still in work: --again filed nothing new.` : '';
     const items = openItems.length > 0 && !r.repeated ? ` It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.` : '';
-    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}${items}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
+    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}${items}${item !== null && !r.repeated ? ` The work its Architect plans is bound to item ${item}.` : ''}${extendLine}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
+  },
+};
+
+/**
+ * 4.4 (G9, H-9): `mp pm extend`: a new requirement recorded as one. Several items: --item, --text and --quote repeated in
+ * order, one each per item; --type and --item-words, when given, once per item.
+ */
+const extend: Command = {
+  group: 'pm',
+  name: ['extend'],
+  summary:
+    "a new requirement of the user, recorded as one (H-9): requirement items for what the user now wants, quoting their words, outside the set the plan was checked against (its proof, and that of every product not bound to them, stay as they are); its work starts in the same write on a repair's light path: one Architect step under the mechanical checks, no Calibrator, no feasibility review. For work whose acceptance can be written in advance; a new exploration goes into the plan",
+  usage:
+    'mp pm extend <mission> --words W-<n> --item <id> --text "<the item>" --quote "<verbatim from W-n>" [--type goal|acceptance|limit] [--item-words W-<m>]\n' +
+    '       several items in one filing (one Architect step): repeat --item, --text and --quote in order, one each per item; --type and --item-words, when given, once per item (--item-words: the words entry of that item, where it differs from --words)\n' +
+    '       --open-items <id>[,<id>...]: items left at the cap the new work is for, as on mp pm repair (its Architect gives each to a task)',
+  flags: { words: 'string', item: 'repeat', text: 'repeat', quote: 'repeat', type: 'repeat', 'item-words': 'repeat', 'open-items': 'list' },
+  decides: true,
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const words = wordsArg(p.ctx, args, true)!;
+    const ids = flagList(args, 'item');
+    const texts = flagList(args, 'text');
+    const quotes = flagList(args, 'quote');
+    const types = flagList(args, 'type');
+    const own = flagList(args, 'item-words');
+    if (ids.length === 0) throw usage('--item <id>: the id of the requirement item for what the user now wants (with --text and --quote)');
+    if (texts.length !== ids.length || quotes.length !== ids.length) throw usage(`one --text and one --quote per --item, in order (${ids.length} item(s), ${texts.length} text(s), ${quotes.length} quote(s))`);
+    if (types.length !== 0 && types.length !== ids.length) throw usage('--type: none, or one per --item in order');
+    if (own.length !== 0 && own.length !== ids.length) throw usage('--item-words: none, or one per --item in order');
+    for (const id of ids) if (!ITEM_ID.test(id)) throw usage(`--item is a requirement item id (1 to 64 letters, digits or "-"), not ${JSON.stringify(id)}`);
+    for (const t of types) if (!['goal', 'acceptance', 'limit'].includes(t)) throw usage(`--type of a new requirement's item is goal, acceptance or limit, not ${JSON.stringify(t)}`);
+    const items = ids.map((item, i) => {
+      const w = own[i] ?? words;
+      if (own[i] !== undefined && (!WORDS.test(w) || p.ctx.memory.read((db) => wordsEntry(db, w)) === null)) throw usage(`--item-words of ${item}: there is no words entry ${w}`);
+      return { item, type: (types[i] ?? 'goal') as 'goal' | 'acceptance' | 'limit', text: texts[i]!, quote: quotes[i]!, words: w };
+    });
+    // 4.4 (G5 with G9): open items left at the cap, named as on a repair
+    const openItems = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+    // (p12-r2-2) with its operation id: a retry after a lost receipt returns the filing this operation made
+    const r = await pmExtend(p.ctx, { mission: m, items, ...(openItems.length > 0 ? { openItems } : {}), ...(typeof c.op === 'string' ? { op: c.op } : {}) });
+    const named = `item${r.items.length === 1 ? '' : 's'} ${r.items.join(', ')}`;
+    const lines = r.repeated
+      ? [`New requirement already recorded: ${r.repair} of ${m} (${named}): nothing new was recorded.`]
+      : r.again !== undefined
+      ? [
+          // 4.4 (G9, p12-8): its work was re-planned away: filed again against the items as recorded
+          `New requirement filed again: ${r.repair} of ${m}, ${named}: a task ${r.again} added for them is no longer in the plan in effect. The items stay as recorded (no new version).`,
+          'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it.',
+          ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
+        ]
+      : [
+          `New requirement recorded: ${r.repair} of ${m}, ${named} (from ${[...new Set(items.map((i) => i.words))].join(', ')}).`,
+          `The items are outside the set ${r.outsideOf !== null ? `PM plan ${r.outsideOf}` : 'the plan'} was checked against: its proof, and that of every product not bound to them, stay as they are; a changed plan submitted later is checked against them.`,
+          'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it. Withdrawing every item before its amendment is applied ends the filing.',
+          ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
+        ];
+    // 4.4 (G9, P-4, p12-1): an audit made before 4.4 did not see the new items: it reads out of date now; said, with what to do
+    for (const l of r.olderAudits) lines.push(`Legalization ${l} was judged before 4.4 against the items the plan was checked against alone: it does not cover these items, so its audit is no longer current (the stamp it gave stays on the record); request it again to cover them.`);
+    return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: r.repeated, items: r.items, term: r.term, outsideOf: r.outsideOf, olderAudits: r.olderAudits, ...(r.again !== undefined ? { again: r.again } : {}) });
   },
 };
 
@@ -1461,6 +1528,7 @@ export const PM_COMMANDS: readonly Command[] = [
   mission,
   requirement,
   repair,
+  extend,
   constraint,
   plan,
   waive,

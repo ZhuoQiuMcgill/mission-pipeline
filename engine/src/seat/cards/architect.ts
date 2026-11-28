@@ -485,8 +485,42 @@ export const ArchitectRepairCardSchema = z.object({
    * reopen); one given to no task stays open. Absent: none named (or a card queued before 4.4).
    */
   openItems: z.array(z.object({ id: z.string().min(1), kind: z.string(), text: z.string(), from: z.string() })).optional(),
+  /**
+   * 4.4 (G9): the requirement items the filing's work is bound to (a new requirement's, recorded with it by `mp pm extend`;
+   * or the one a repair falls short of, `--item`), each with the user's words and whether it is still in force. `entry`
+   * "extend": a new requirement's filing. Absent: none (a card queued before 4.4, or a repair that names no item).
+   */
+  entry: z.literal('extend').optional(),
+  items: z.array(z.object({ id: z.string().min(1), type: z.string(), text: z.string(), quote: z.string().optional(), words: z.string().optional(), withdrawn: z.boolean().optional() })).optional(),
+  /** 4.4 (G9, E-4): the limit and acceptance items in force in the mission, by reference (one line each, at most LIMITS_LISTED; `limitsMore` counts the rest). */
+  limits: z.array(z.object({ id: z.string().min(1), type: z.string(), text: z.string() })).optional(),
+  limitsMore: z.number().int().positive().optional(),
 });
 export type ArchitectRepairCard = z.infer<typeof ArchitectRepairCardSchema>;
+
+/** 4.4 (G9): the limit and acceptance items a repair Architect's card lists, at most, and the length of each line. */
+export const LIMITS_LISTED = 50;
+const LIMIT_TEXT = 200;
+
+/**
+ * 4.4 (G9, E-4): what the user already set, for a repair Architect's card: the filing's items with their state and words,
+ * and by reference the limit and acceptance items in force in the mission. Built alike when the step is queued and when it
+ * is claimed (seat/cards/refresh.ts). `inForce`: the mission's items in force; `recorded`: every item version recorded.
+ */
+export function repairItemsBlock(mission: string, filing: { readonly items?: readonly string[]; readonly entry?: 'extend' }, inForce: ReadonlyArray<{ readonly line: string; readonly type: string; readonly text: string; readonly source: { readonly kind: string; readonly words?: string; readonly quote?: string } }>, recorded: ReadonlyArray<{ readonly line: string; readonly type: string; readonly text: string; readonly source: { readonly kind: string; readonly words?: string; readonly quote?: string } }>): Pick<ArchitectRepairCard, 'entry' | 'items' | 'limits' | 'limitsMore'> {
+  const ids = filing.items ?? [];
+  if (ids.length === 0) return {};
+  const items = ids.map((id) => {
+    const line = `item.${mission}.${id}`;
+    const now = inForce.find((i) => i.line === line);
+    const b = now ?? recorded.filter((i) => i.line === line).at(-1);
+    return { id: line, type: b?.type ?? 'goal', text: b?.text ?? '(not recorded)', ...(b?.source.kind === 'words' ? { quote: b.source.quote ?? '', words: b.source.words ?? '' } : {}), ...(now === undefined ? { withdrawn: true } : {}) };
+  });
+  const own = new Set(items.map((i) => i.id));
+  const all = inForce.filter((i) => (i.type === 'limit' || i.type === 'acceptance') && !own.has(i.line));
+  const limits = all.slice(0, LIMITS_LISTED).map((i) => ({ id: i.line, type: i.type, text: i.text.length <= LIMIT_TEXT ? i.text : `${i.text.slice(0, LIMIT_TEXT - 1)}…` }));
+  return { ...(filing.entry !== undefined ? { entry: filing.entry } : {}), items, ...(limits.length > 0 ? { limits } : {}), ...(all.length > LIMITS_LISTED ? { limitsMore: all.length - LIMITS_LISTED } : {}) };
+}
 
 /** The repair card's plan material, built alike when the step is queued and when it is claimed (4.4, F5). */
 export function repairPlanMaterial(put: (doc: string) => string, dplan: string, plan: DetailedPlanDoc): MaterialRef {
@@ -504,6 +538,8 @@ export const ArchitectRepairResultShape = {
         after: z.array(z.string().min(1)).optional().describe('4.4: tasks this repair adds, changes or reopens whose new work this task builds on: its new attempt waits until they are accepted and starts on their work.'),
         // 4.4 (G4, G5)
         open_items: z.array(z.string().min(1)).optional().describe('4.4: open items listed on the card that this reopened task takes: its new attempt\'s cards list them and its Reviewer answers each. Omit when it takes none.'),
+        // 4.4 (G9)
+        items: z.array(z.string().min(1)).optional().describe('4.4: with several requirement items on the card, the items (their ids as listed) this reopen serves; its new attempts are bound to them. With one item it is bound to it by itself.'),
       }),
     )
     .describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
@@ -521,7 +557,11 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
   const p = c.plan;
   return (
     renderCommon(c) +
-    `## The repair\n${c.repair.id} (${c.repair.kind}${c.repair.about !== null ? `, about ${c.repair.about}` : ''}): the user's reason, verbatim from ${c.repair.words}: "${c.repair.text}"\n\n` +
+    // 4.4 (G9): a new requirement's filing shows its items; a repair its reason (and the item it falls short of, if named)
+    (c.entry === 'extend'
+      ? `## The new requirement\n${c.repair.id}: what the user now wants, recorded as requirement items. They are outside the set the plan was checked against; no Calibrator or feasibility review follows your amendment.\n\n`
+      : `## The repair\n${c.repair.id} (${c.repair.kind}${c.repair.about !== null ? `, about ${c.repair.about}` : ''}): the user's reason, verbatim from ${c.repair.words}: "${c.repair.text}"\n\n`) +
+    renderFilingItems(c) +
     list('Your questions on this repair and the answers', (c.answers ?? []).map((x) => `You asked: ${x.question}\n  Answer (${x.by}): ${x.answer}`)) +
     list('Open items this repair is for (give each to a task: openItems on an added or changed card, open_items on a reopen; its Reviewer then answers it; one you give to no task stays open)', (c.openItems ?? []).map((i) => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`)) +
     `## The plan in effect\nDetailed plan ${c.dplan} (PM plan ${c.pmPlan}), ${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'}${(c.materials ?? []).length > 0 ? `, in full in material ${(c.materials ?? [])[0]!.id}` : ''}.\n\n` +
@@ -534,6 +574,24 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
     renderPlanningRules(c.projectCommands) +
     (c.revision !== null ? list('Mechanical check failures of your previous hand-back to fix', c.revision.mechanicalFailures) : '') +
     renderMaterials(c.materials ?? [])
+  );
+}
+
+/** 4.4 (G9): the filing's requirement items, how the work is bound to them, and the limits in force by reference. */
+function renderFilingItems(c: ArchitectRepairCard): string {
+  const items = c.items ?? [];
+  if (items.length === 0) return '';
+  // 4.4 (G9, p12-6): the rule is the one the amendment applies: by the number of the filing's items in force (this card is
+  // rebuilt at its claim, so it names them as they stand then)
+  const live = items.filter((i) => i.withdrawn !== true);
+  const ids = live.map((i) => i.id).join(', ');
+  const bound = live.length === 1
+    ? `One item of it is in force: ${ids}. Every task you add, change or reopen for it is bound to this item by itself, with no action of yours: its Reviewer judges against it. A card you change also keeps the items in force its task already carries. (The number of its items in force when your amendment is applied decides this.)`
+    : `${live.length} items of it are in force: ${ids}. Name on each task the items it serves: in \`requirementItems\` of a task you add or change, in \`items\` of a reopen (their ids as listed). A task on which you name none is bound to none of them and is shown as naming none. Name only these items; a card you change keeps the items in force its task already carries, also those you leave out; any other comes back to you as a mechanical failure. (The number of its items in force when your amendment is applied decides this.)`;
+  return (
+    list(c.entry === 'extend' ? 'Its requirement items' : 'The requirement item this repair falls short of', items.map((i) => `[${i.id}] (${i.type}) ${i.text}${i.quote !== undefined ? ` — the user's words (${i.words}): "${i.quote}"` : ''}${i.withdrawn === true ? ' (withdrawn since: plan nothing for it)' : ''}`)) +
+    (live.length > 0 ? `${bound}\n\n` : '') +
+    list('Limits and acceptance items the user set for the mission (by reference: the work respects them)', [...(c.limits ?? []).map((l) => `[${l.id}] (${l.type}) ${l.text}`), ...(c.limitsMore !== undefined ? [`and ${c.limitsMore} more (mp read items lists them)`] : [])])
   );
 }
 

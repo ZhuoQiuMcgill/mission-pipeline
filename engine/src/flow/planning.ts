@@ -95,8 +95,8 @@ import {
   type StoredDetailedPlan,
   taskLine,
 } from './plandoc.ts';
-import type { FlowEventInput, FlowPorts } from './ports.ts';
-import { currentItems, currentConstraints, itemLine, requirementSetLine, setContested, type CurrentItem } from './requirements.ts';
+import type { AppendGuard, FlowEventInput, FlowPorts } from './ports.ts';
+import { currentItems, currentConstraints, itemLine, newRequirementsLine, planSetItems, planSetLines, requirementSetLine, setContested, termLines, type CurrentItem } from './requirements.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carried, carryGuard, carryOut, closeEscalations, closedEscalation, closing, commitCarrying, decisionFor, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, type Carry, type EscalationBody } from './secretary.ts';
 import { WI } from './wi.ts';
 import { itemIds, recordOnAct, riskItemsOf } from './riskItems.ts';
@@ -118,6 +118,11 @@ export interface PmBatchBody {
   /** The mission's default (4.1, maintainer: one default per task, exceptions by goal). */
   readonly mode: 'stable' | 'fast';
   readonly requirementSet?: string;
+  /**
+   * 4.4 (G9): the versions of the other requirement-set lines the plan is checked against (the term lines of the items
+   * `mp pm extend` recorded before it), part of the request's identity with `requirementSet`. Absent: none (every 4.3 batch).
+   */
+  readonly planSets?: readonly string[];
 }
 
 /**
@@ -133,6 +138,8 @@ export interface RecheckBody {
   readonly n: number;
   readonly m: number;
   readonly requirementSet?: string;
+  /** 4.4 (G9): as on the batch (absent: none). */
+  readonly planSets?: readonly string[];
   readonly mode?: 'stable' | 'fast';
   readonly userWords: readonly string[];
   readonly changedItems: readonly string[];
@@ -235,8 +242,24 @@ const cal2Task = (dplan: string, full: boolean): string => safeId(`cal2.${dplan}
  */
 export async function submitPmBatch(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly plan: unknown; readonly userWords: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' },
+  req: PmBatchRequest,
 ): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
+  // 4.4 (G9, p12-4, p12-r2-3): the write is checked against the version of reqnew.<m> read with the term lines (every item
+  // write of `mp pm extend` makes one); one written in between refuses it, and the batch is built again from a fresh read
+  // (bounded: another such writer each time). Nothing else refuses it: an ordinary repair touches no requirement set
+  for (let tries = 1; ; tries++) {
+    try {
+      return await submitPmBatchOnce(ports, req);
+    } catch (e) {
+      if (tries >= PM_BATCH_TRIES || (e as { code?: unknown }).code !== 'STALE_REQUEST') throw e;
+    }
+  }
+}
+
+type PmBatchRequest = { readonly mission: MissionId; readonly plan: unknown; readonly userWords: readonly string[]; readonly changedItems?: readonly string[]; readonly dependentItems?: readonly string[]; readonly mode?: 'stable' | 'fast' };
+const PM_BATCH_TRIES = 3;
+
+async function submitPmBatchOnce(ports: FlowPorts, req: PmBatchRequest): Promise<{ readonly batch: string; readonly plan: string; readonly recheck?: boolean }> {
   const ctx = flowCtx(ports, req.mission);
   const doc = PmPlanDoc.parse(req.plan);
   if (doc.mission !== req.mission) throw new Error(`the plan names mission ${doc.mission}, not ${req.mission}`);
@@ -255,6 +278,8 @@ export async function submitPmBatch(
   const dependent = (req.dependentItems ?? []).map(lineOf);
   const ix = await basisIndex(ctx);
   const requirementSet = ix.current.get(requirementSetLine(req.mission)) ?? `${requirementSetLine(req.mission)}.v1`;
+  // 4.4 (G9): the versions of the term lines a plan is checked against besides reqset (null: none, a 4.3 plan or no extension)
+  const setsOf = (lines: readonly string[]): string[] | null => { const vs = lines.filter((l) => l !== requirementSetLine(req.mission)).flatMap((l) => { const v = ix.current.get(l); return v === undefined ? [] : [v]; }); return vs.length > 0 ? vs : null; };
   const mode = req.mode ?? last?.mode ?? 'stable';
   if (last !== null && last.doc === docHash) {
     // the plan document is the latest version's: a retry of the latest request about it, or (once
@@ -262,12 +287,14 @@ export async function submitPmBatch(
     const effective = (await eventOf(ctx, PLAN_LINE, PM_PLAN_EFFECTIVE, last.plan)) !== null;
     const rechecks = effective ? (await eventsOf<RecheckBody>(ctx, PLAN_LINE, CAL1_RECHECK)).filter((e) => e.body.plan === last.plan).map((e) => e.body) : [];
     const latestRequest: PmBatchBody | RecheckBody = rechecks.at(-1) ?? last;
-    if (latestRequest.requirementSet === requirementSet && (latestRequest.mode ?? last.mode) === mode && canonicalJson(latestRequest.dependentItems) === canonicalJson(dependent) && canonicalJson(latestRequest.userWords) === canonicalJson(req.userWords) && canonicalJson(latestRequest.changedItems) === canonicalJson(changed)) {
+    const lastObj = await objectRecord(ctx, last.plan);
+    const planSets = lastObj === null ? null : setsOf(planSetLines(lastObj, ix));
+    if (latestRequest.requirementSet === requirementSet && canonicalJson(latestRequest.planSets ?? null) === canonicalJson(planSets) && (latestRequest.mode ?? last.mode) === mode && canonicalJson(latestRequest.dependentItems) === canonicalJson(dependent) && canonicalJson(latestRequest.userWords) === canonicalJson(req.userWords) && canonicalJson(latestRequest.changedItems) === canonicalJson(changed)) {
       return { batch: latestRequest.batch, plan: last.plan, ...(latestRequest !== last ? { recheck: true } : {}) };
     }
     if (effective && (req.mode === undefined || req.mode === last.mode)) {
       const m = rechecks.length + 1;
-      const body: RecheckBody = { batch: `${last.batch}.c${m}`, plan: last.plan, n: last.n, m, requirementSet, mode, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent };
+      const body: RecheckBody = { batch: `${last.batch}.c${m}`, plan: last.plan, n: last.n, m, requirementSet, ...(planSets !== null ? { planSets } : {}), mode, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent };
       await commit(ctx, `flow:cal1-recheck:${req.mission}:${last.plan}:${m}`, { events: [ev(ctx, PLAN_LINE, CAL1_RECHECK, `${last.plan}#c${m}`, body)] });
       return { batch: body.batch, plan: last.plan, recheck: true };
     }
@@ -275,6 +302,11 @@ export async function submitPmBatch(
   const n = (last?.n ?? 0) + 1;
   const plan = pmPlanObject(req.mission, n);
   const authLines = doc.authorizations.map(lineOf);
+  // 4.4 (G9): a plan is checked against every item in force: besides reqset, the term lines of the items `mp pm extend`
+  // recorded before it (none: 4.3's contract). The items recorded after it fall in its own term, outside its check
+  const terms = termLines(ix, req.mission);
+  // (p12-r2-3) the version of reqnew.<m> the term lines were read with (absent: none yet)
+  const reqnewRead = ix.current.get(newRequirementsLine(req.mission)) ?? null;
   const rec: ObjectVersionRecord = {
     kind: 'object.version',
     object: plan as ObjectVersionId,
@@ -284,10 +316,11 @@ export async function submitPmBatch(
     content: docHash,
     prerequisites: ports.ledger.content.putList([]),
     scope: { paths: [PM_PLAN_PATH], taskType: 'pm-plan' },
-    reviews: [{ review: 'calibrator-1', basisLines: [requirementSetLine(req.mission), ...authLines] as BasisLineId[], reliesOn: [] }],
+    reviews: [{ review: 'calibrator-1', basisLines: [requirementSetLine(req.mission), ...terms, ...authLines] as BasisLineId[], reliesOn: [] }],
     ...(last !== null ? { predecessor: last.plan as ObjectVersionId } : {}),
   };
-  const body: PmBatchBody = { batch: `b${n}`, n, plan, predecessor: last?.plan ?? null, round: doc.round, doc: docHash, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent, mode, requirementSet };
+  const planSets = setsOf(terms);
+  const body: PmBatchBody = { batch: `b${n}`, n, plan, predecessor: last?.plan ?? null, round: doc.round, doc: docHash, userWords: [...req.userWords], changedItems: changed, dependentItems: dependent, mode, requirementSet, ...(planSets !== null ? { planSets } : {}) };
   const records: BaseRecord[] = [rec];
   // the calibrator-1 contract needs a requirement-set version, even an empty one (v31 5.2)
   const setLine = requirementSetLine(req.mission);
@@ -299,8 +332,13 @@ export async function submitPmBatch(
   const stale: string[] = [];
   for (const o of batches) for (const e of await openEscalations(ctx, `plan:${o.body.plan}`)) stale.push(e.id);
   const close = closing(ctx, stale, `PM plan ${plan} (batch b${n}) was submitted: a decision on the earlier batch is not carried out`);
-  const guard = carryGuard([close]);
-  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, ...(guard !== undefined ? { guard } : {}) });
+  const carry = carryGuard([close]);
+  // (p12-4, p12-r2-3) the term lines the contract lists are the ones there are at the write: reqnew.<m> as it was read
+  const sets = [{ line: newRequirementsLine(req.mission), version: reqnewRead }];
+  const guard: AppendGuard = carry !== undefined
+    ? { ...carry, bases: sets, message: `${carry.message} (or a requirement item of mp pm extend was recorded meanwhile)` }
+    : { absent: [], bases: sets, code: 'STALE_REQUEST', message: `a requirement item of mp pm extend was recorded while PM plan ${plan} was being recorded; nothing was written (the batch is built again with it)` };
+  await commit(ctx, `flow:pm-batch:${req.mission}:${n}`, { events: [ev(ctx, PLAN_LINE, 'pm-batch', body.batch, body), ...close.events], records, guard });
   await cancelSecretarySteps(ctx, stale);
   return { batch: body.batch, plan };
 }
@@ -735,8 +773,12 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
   const obj = await objectRecord(ctx, b.plan);
   if (obj === null) throw new Error(`Missing plan object ${b.plan}`);
   const constraints = objectConstraints(await currentConstraints(ctx), obj);
-  const items = await currentItems(ctx);
-  const contractLines = [requirementSetLine(ctx.mission), ...doc.authorizations.map((a) => itemLine(ctx.mission, a))];
+  // 4.4 (G9): the items the plan is checked against: those its contract's requirement-set lines list (every item in force
+  // in 4.3); the items `mp pm extend` recorded after it are outside its check, so a re-check leaves them aside
+  const inSet = planSetItems(obj, ix, (r) => ctx.ports.ledger.content.getList(r));
+  const items = (await currentItems(ctx)).filter((i) => inSet.has(i.line));
+  // the plan's own contract (a 4.3 plan's names reqset and its authorizations, as recomputed before 4.4)
+  const contractLines = [...(obj.reviews.find((r) => r.review === 'calibrator-1')?.basisLines ?? [requirementSetLine(ctx.mission), ...doc.authorizations.map((a) => itemLine(ctx.mission, a))])];
   // the pass a continuation extends: the previous version's, or (a re-check) the plan's own before it
   const prevBatch = recheck !== null ? b : b.predecessor === null ? null : (batches.find((x) => x.plan === b.predecessor) ?? null);
   const j0 = forceFull || prevBatch === null ? null : await cal1PassOf(ctx, prevBatch.plan);
@@ -754,7 +796,7 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
     const j0Bases = ctx.ports.ledger.content.getList(j0rec.bases);
     const j0Lines = j0Bases.map((v) => ix.lineOf.get(v)).filter((l): l is string => l !== undefined);
     changedLines = [...new Set([...j0Lines.filter((l) => !j0Bases.includes(ix.current.get(l) ?? '')), ...contractLines.filter((l) => !j0Lines.includes(l))])];
-    const diff = requirementSetChanges(ctx, ix, j0Bases);
+    const diff = requirementSetChanges(ctx, ix, j0Bases, contractLines);
     for (const l of diff.changed) touched.add(l);
     withdrawnSince = diff.withdrawn;
     const versions = new Map((await eventsOf<import('./requirements.ts').ItemVersionBody>(ctx, 'requirements', 'item')).map((e) => [e.body.version, e.body]));
@@ -838,18 +880,17 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
  * The requirement items that changed between the requirement-set version among `bases` (a
  * judgment's) and the current one: added or revised lines, and lines no longer in force.
  */
-function requirementSetChanges(ctx: FlowCtx, ix: Awaited<ReturnType<typeof basisIndex>>, bases: readonly string[]): { readonly changed: string[]; readonly withdrawn: string[]; readonly entries: Array<{ line: string; old: string | undefined; current: string | undefined }> } {
-  const line = requirementSetLine(ctx.mission);
-  const then = bases.find((v) => ix.lineOf.get(v) === line);
-  const nowV = ix.current.get(line);
-  const snapshot = (v: string | undefined): Map<string, string> => {
+function requirementSetChanges(ctx: FlowCtx, ix: Awaited<ReturnType<typeof basisIndex>>, bases: readonly string[], contract: readonly string[] = [requirementSetLine(ctx.mission)]): { readonly changed: string[]; readonly withdrawn: string[]; readonly entries: Array<{ line: string; old: string | undefined; current: string | undefined }> } {
+  const snapshot = (v: string | undefined, into: Map<string, string>): void => {
     const rec = v === undefined ? undefined : ix.records.get(v);
-    const out = new Map<string, string>();
-    if (rec?.basisKind === 'requirement-set') for (const iv of ctx.ports.ledger.content.getList(rec.snapshot)) out.set(ix.lineOf.get(iv) ?? iv, iv);
-    return out;
+    if (rec?.basisKind === 'requirement-set') for (const iv of ctx.ports.ledger.content.getList(rec.snapshot)) into.set(ix.lineOf.get(iv) ?? iv, iv);
   };
-  const a = snapshot(then);
-  const b = snapshot(nowV);
+  // 4.4 (G9): over every requirement-set line the plan is checked against (reqset alone in 4.3), as bound then and as they are now
+  const setLine = (l: string): boolean => ix.records.get(ix.current.get(l) ?? '')?.basisKind === 'requirement-set';
+  const a = new Map<string, string>();
+  const b = new Map<string, string>();
+  for (const v of bases) if (setLine(ix.lineOf.get(v) ?? '')) snapshot(v, a);
+  for (const l of contract) if (setLine(l)) snapshot(ix.current.get(l), b);
   return { changed: [...b].filter(([l, v]) => a.get(l) !== v).map(([l]) => l).sort(), withdrawn: [...a.keys()].filter((l) => !b.has(l)).sort(), entries: [...new Set([...a.keys(), ...b.keys()])].filter((l) => a.get(l) !== b.get(l)).sort().map((line) => ({ line, old: a.get(line), current: b.get(line) })) };
 }
 

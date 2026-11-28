@@ -7,6 +7,8 @@ import type { Memory, WriteTx } from './memory.ts';
 import { wordsEntry } from './queries.ts';
 import { notAllowed } from './resident.ts';
 import { appendRecords } from './domain/facts.ts';
+import { resolveBases } from './domain/constraints.ts';
+import { newItemTerms, setVersionsFor } from './domain/requirementSets.ts';
 
 type Texts = {text(hash: string): string};
 export interface TaggedWords {
@@ -236,12 +238,23 @@ export function tagWordsInTx(tx: WriteTx, o: AssignTagsOptions): TagsReport {
         event(tx, dep.mission, 'requirements', dep.kind === 'item' ? 'withdrawn' : 'constraint-withdrawn', dep.line, {line: dep.line, reason: `withdrawn with words tags by ${o.authorizedBy ?? o.words}`, ...(dep.kind === 'constraint' ? {version: dep.version, words: o.authorizedBy ?? o.words} : {})});
         if (dep.kind === 'item') {
           const line = `reqset.${dep.mission}`;
-          const baseRows = (tx.stmt("SELECT record FROM log WHERE kind = 'basis.version' ORDER BY rev").all() as {record: string}[]).map((r) => JSON.parse(r.record) as {line: string; version: string});
-          const n = baseRows.filter((b) => b.line === line).length + 1;
-          const latest = new Map<string, string>();
-          for (const b of baseRows) if (b.line.startsWith(`item.${dep.mission}.`)) latest.set(b.line, b.version);
-          const items = [...latest].filter(([id]) => tx.stmt("SELECT 1 FROM log WHERE kind = 'basis.withdrawn' AND json_extract(record, '$.line') = ?").get(id) === undefined).map(([, version]) => version);
-          appendRecords(tx, [{kind: 'basis.version', basisKind: 'requirement-set', line: line as BasisLineId, version: `${line}.v${n}` as BasisVersionId, mission: dep.mission as MissionId, scope: null, snapshot: tx.data.putList(items)}]);
+          const baseRows = (tx.stmt("SELECT record FROM log WHERE kind = 'basis.version' ORDER BY rev").all() as {record: string}[]).map((r) => JSON.parse(r.record) as BaseRecord & {line: string; version: string});
+          // 4.4 (G9): an item recorded by `mp pm extend` is withdrawn from its term line and `reqnew.<m>`, never from
+          // the set the plan was checked against; any other item as in 4.3 (the items in force outside the terms)
+          const withdrawnRows = (tx.stmt("SELECT record FROM log WHERE kind = 'basis.withdrawn' ORDER BY rev").all() as {record: string}[]).map((r) => JSON.parse(r.record) as BaseRecord);
+          const ix = resolveBases([...baseRows, ...withdrawnRows]);
+          const getList = (r: never): readonly string[] => tx.data.getList(r);
+          const terms = newItemTerms(ix, getList, dep.mission);
+          if (terms.has(dep.line)) {
+            const inForce = [...ix.current].filter(([l]) => l.startsWith(`item.${dep.mission}.`) && !ix.withdrawn.has(l)).map(([l, version]) => ({line: l, version}));
+            appendRecords(tx, setVersionsFor(ix, getList, dep.mission, {line: dep.line, version: null}, inForce).map((s) => ({kind: 'basis.version' as const, basisKind: 'requirement-set' as const, line: s.line as BasisLineId, version: s.version as BasisVersionId, mission: dep.mission as MissionId, scope: null, snapshot: tx.data.putList(s.snapshot)})));
+          } else {
+            const n = baseRows.filter((b) => b.line === line).length + 1;
+            const latest = new Map<string, string>();
+            for (const b of baseRows) if (b.line.startsWith(`item.${dep.mission}.`) && !terms.has(b.line)) latest.set(b.line, b.version);
+            const items = [...latest].filter(([id]) => tx.stmt("SELECT 1 FROM log WHERE kind = 'basis.withdrawn' AND json_extract(record, '$.line') = ?").get(id) === undefined).map(([, version]) => version);
+            appendRecords(tx, [{kind: 'basis.version', basisKind: 'requirement-set', line: line as BasisLineId, version: `${line}.v${n}` as BasisVersionId, mission: dep.mission as MissionId, scope: null, snapshot: tx.data.putList(items)}]);
+          }
         }
       }
     }

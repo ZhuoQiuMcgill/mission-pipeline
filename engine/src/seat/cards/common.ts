@@ -169,7 +169,7 @@ export const commonCardFields = {
   allowAsyncEvidence: z.boolean().optional(),
   continuation: Continuation.optional(),
   /** 4.1.2 (D-10): the repairs this work answers: the user's reason verbatim, its kind and words entry. */
-  repairs: z.array(z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string().min(1), words: z.string().min(1) })).optional(),
+  repairs: z.array(z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string().min(1), words: z.string().min(1), entry: z.literal('extend').optional() })).optional(),
   /**
    * 4.1.3 (E-4): the data outside the commit that this work's materials cite (data:<path>…), each
    * with the check mp made when it was handed back (full, or partial for a file over 2 GiB), as
@@ -212,11 +212,12 @@ export function list(title: string, items: readonly string[]): string {
 }
 
 /** The common head of every card body. */
-export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string; kind?: string }[]; decisionQuotes: readonly string[]; seat?: string; authorizations?: readonly { id: string; quote: string; notifyCondition: string | null }[]; continuation?: ContinuationT | undefined; repairs?: readonly { id: string; kind: string; text: string; words: string }[] | undefined; dataChecked?: readonly { pointer: string; label: string }[] | undefined } & Parameters<typeof renderAddressed>[0]): string {
+export function renderCommon(c: { duties: string; constraints: readonly { id: string; text: string; kind?: string }[]; decisionQuotes: readonly string[]; seat?: string; authorizations?: readonly { id: string; quote: string; notifyCondition: string | null }[]; continuation?: ContinuationT | undefined; repairs?: readonly { id: string; kind: string; text: string; words: string; entry?: string | undefined }[] | undefined; dataChecked?: readonly { pointer: string; label: string }[] | undefined } & Parameters<typeof renderAddressed>[0]): string {
   const k = c.continuation;
   return (
     (c.duties.trim() !== '' ? `## Your duties on this task\n${c.duties.trim()}\n\n` : '') +
-    list("Repairs this work answers (the user's reason, verbatim)", (c.repairs ?? []).map((r) => `[${r.id}] ${r.kind} (${r.words}): "${r.text}"`)) +
+    // 4.4 (G9): a new requirement's filing says so (its items' text is on the card with the requirement items)
+    list("Repairs this work answers (the user's reason, verbatim)", (c.repairs ?? []).map((r) => `[${r.id}] ${r.entry === 'extend' ? 'new requirement' : r.kind} (${r.words}): "${r.text}"`)) +
     (k !== undefined
       ? `## This card continues task ${k.previous}\nYou asked for evidence; here is what came back. Your previous notes${k.notes !== null ? ` are material ${k.notes}` : ' were not saved'}.\n\n${k.evidence.trim()}\n\n`
       : '') +

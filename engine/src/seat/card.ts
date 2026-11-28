@@ -154,6 +154,12 @@ export const ReviewerCardSchema = z.object({
   questions: z.array(Question).optional(),
   /** 4.4 (G5): the open items this task took: answer each (item_responses). */
   openItems: z.array(TakenItem).optional(),
+  /**
+   * 4.4 (G9, E-4): the requirement items the judgment is bound to (its binding's item versions), with their text; `was`, the
+   * text the task's previous judgment was bound to, when the item changed since; `withdrawn`, an item withdrawn since that the
+   * binding keeps (p12-2). Absent: none, or a card queued before 4.4.
+   */
+  requirementItems: z.array(z.object({ id: z.string().min(1), version: z.string().min(1), text: z.string(), was: z.string().optional(), withdrawn: z.literal(true).optional() })).optional(),
   /** The judgment's binding inputs, fixed by the card's contract (5.2). */
   binding: z.object({
     judgment: z.string().min(1),
@@ -216,6 +222,8 @@ export function renderCard(c: SeatCard): string {
     // 4.4 (F10): a standard a person checks is never put to the Reviewer as met or not met
     list('Acceptance standards (answer every one)', c.standards.filter((s) => standardCheck(s) !== 'person').map(standardText)) +
     list('Standards a person checks (not yours to judge: leave them out of your judgments)', c.standards.filter((s) => standardCheck(s) === 'person').map((s) => `[${s.id}] ${s.text}`)) +
+    // 4.4 (G9): what the judgment is bound to; the duty stays the standards
+    list('Requirement items this task carries (your judgment is bound to them; judge each standard as above, and if the standards no longer answer an item, hand back "needs-decision" saying so)', (c.requirementItems ?? []).map((i) => `[${i.id}] ${i.text}${i.was !== undefined ? `\n  changed since this task was last judged; it read: ${i.was}` : ''}${i.withdrawn === true ? '\n  withdrawn by the user since the task took it: a decider settles the work done for it; judge the standards as above' : ''}`)) +
     list('Interfaces', c.interfaces.map((i) => `${i.name}: ${i.definition}`)) +
     renderPlanData(c) +
     list('Changed paths in the candidate', c.candidate.changedPaths) +
