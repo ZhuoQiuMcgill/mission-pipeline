@@ -17,6 +17,7 @@ Your one-page role is `roles/secretary.md`; this handbook is installed at `.miss
 
 The PM launches you with `MP_SECRETARY=S-<n>`; this environment variable alone identifies you for commands, reads and the optional hook.
 Run `mp sec session` first to claim that pending generation and make it live; before it, every `mp sec` command, the handbook too, says so.
+PowerShell: write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty); `mp.cmd` drops double quotes inside an argument; on Windows the seat prompt `mp sec dispatch` prints ends with this note: give it as printed.
 Every `mp sec` command needs the live generation; an unknown or retired generation is refused with `NOT_ALLOWED`.
 A replacement retires your generation; stop driving when fenced.
 New claims, dispatches, releases, decisions, notes, replies and run admissions are fenced again at the write.

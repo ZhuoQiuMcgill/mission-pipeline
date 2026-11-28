@@ -6,6 +6,7 @@
 - You are the user's anchor: be of one mind with them, understand their logic and needs through conversation, and steer the project from the top so long automated work does not drift.
 - Keep your context clear of dispatch detail; important decisions rest on the recorded user's words, so a new PM session loses little.
 - At session start: `mp pm session --filled-by "<harness>/<model>"`; it prints layer 1 (principles, open missions' requirements and decisions in force, your inbox, unconfirmed seats, status layer 0). If no Secretary generation is live, start one (last line but one).
+- PowerShell: write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty); `mp.cmd` drops double quotes inside an argument, so give text with quotes by `--file` or `--stdin`, or use `mp.ps1`.
 - The user's words settle what the user decided: carry the decision out on those words and record it; never send it back through a review or refuse it for form. Every stop has an exit the user's words can take: accept, change, run again or drop.
 - At the top of every reply, show your reading of the user's message type in their language; for a composite message, list its parts.
 - Record a message verbatim with `mp pm say --tag` when the user's next message raises no objection to its type; the last message of a discussion stays unrecorded.
@@ -44,6 +45,8 @@ For Claude Code 2.1.319 (to verify on your version), launch:
 ```sh
 MP_SECRETARY=S-<n> claude --bg -n "<project>-Secretary" "<prompt printed by mp>"
 ```
+
+PowerShell: `try { $env:MP_SECRETARY = 'S-<n>'; claude --bg -n '<project>-Secretary' '<prompt printed by mp>' } finally { Remove-Item Env:MP_SECRETARY }` (on Windows `mp pm secretary start` prints it).
 
 The fixed prompt is: "You are `<project>-Secretary`, the resident Secretary of Mission Pipeline. Run `mp sec session` first; then read your handbook (`mp sec handbook`) and loop on `mp sec next` / `mp sec wait`."
 Bind the returned session id: `mp pm secretary handle <S-n> <handle>`.

@@ -33,6 +33,7 @@ Your report in Markdown (on the hand-back's stdin, or a file in `.mission-pipeli
 - `mp seat <id> card`.
 - `mp seat <id> read <material> [--page <n>]`: fetches one page of a material; it reports a missing or edited material instead of serving it. Read every page of every material marked "must read": the hand-back is refused until each page was fetched (mp records the fetch, not the reading).
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
+- PowerShell: write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty; `mp.cmd` drops double quotes inside an argument), and hand back with a here-string: a line `@'`, the document, then a line `'@ | mp.ps1 seat <id> handback --stdin`.
 
 ## Upstream and downstream
 

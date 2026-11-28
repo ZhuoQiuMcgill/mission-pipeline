@@ -237,6 +237,35 @@ engine README's known limitations.
   read a passing review of attempt k can record its acceptance after another process started attempt
   k+1. The reads credit a repair only with the attempt that carried it, so they do not misreport.
 
+## Windows and PowerShell (4.4.1)
+
+What 4.4.1 documents and does not change (`engine/README.md`, "Windows and PowerShell"):
+
+- **Windows PowerShell 5.1 pipes text to a program as ASCII** by default: non-ASCII characters arrive
+  as `?`, and the engine cannot restore them. What to do: `--file`, PowerShell 7, or
+  `$OutputEncoding = [Text.Encoding]::UTF8` first (5.1 then writes the byte-order mark twice; the
+  reader drops both).
+- **Double quotes inside an argument are dropped** by `mp.cmd` called from PowerShell, and by Windows
+  PowerShell 5.1 on its way to any program, `mp.ps1` included (the npm shim is npm's). What to do:
+  `--file` or `--stdin`, or `mp.ps1` in PowerShell 7. Candidate: a shim that escapes the quotes for
+  5.1's legacy argument passing.
+- **A console on another code page** shows the engine's UTF-8 output garbled when it is captured.
+  What to do: `[Console]::OutputEncoding = [Text.Encoding]::UTF8`.
+- **A file in the system code page** is read with U+FFFD where it is not UTF-8, with a warning; the
+  engine does not guess the code page. UTF-16 without a byte-order mark stays refused where a NUL was
+  (the refusal says what to do); UTF-32 is not decoded.
+- **Only CRLF and LF** count as the same line break in "occurs verbatim"; a lone CR does not.
+- **An operation's identity** still fingerprints a file as 4.4.0 read it (a mark included), so a
+  4.4.0 command retried with the same `--op` replays; the same file saved again in another encoding
+  is another operation, as any change of its content is.
+- The static pages quote the seat's prompt in its Linux form; on Windows the prompt `mp sec dispatch`
+  prints ends with the PowerShell sentence, and the Secretary's handbook says to give it as printed.
+- The PowerShell launch of the Secretary takes the flags of the existing Claude Code hint
+  (`--bg -n`); it was checked with a stand-in for `claude` (the variable is set for the launch and
+  removed after), not with Claude Code on Windows.
+- A hand-back on stdin that holds a NUL with no mark gives two warning lines (the standard input, and
+  the hand-back file written from it).
+
 ## Defects of 4.3 found and not fixed
 
 - **`restart` never restarts a step.** `src/flow/failures.ts` offers `restart` for a failed seat only
