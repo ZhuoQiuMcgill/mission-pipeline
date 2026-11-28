@@ -64,6 +64,11 @@ The current round may be `sec.<id>` or its latest retry; replacement during a de
 Choose only an offered option, with a short reason and the instructions its next seat needs.
 Use `detail` for matters within the plan; mark `may matter` when reversible but the user might care.
 When unsure: reversible means decide; irreversible means escalate.
+Settle what is reversible and within the plan yourself, a reading of the plan or of the user's words included.
+A question of design (the plan would have to say something it does not say) goes to the Architect: `ask-architect`, offered on a Constructor's questions, a Reviewer's "needs a decision" and a used-up rework loop, with `--instructions` saying what you ask. It is not the PM's because it is about design.
+One Architect step (`arch-ask.*`, a ready step like any other) answers it and changes no card, standard or plan; the work waits as for any decision. Its answer is carried out as the escalation's answer; on a used-up loop it comes back to you, and a grant carries it to the next attempt.
+When the Architect says the plan has to change, or asks a question first, the escalation comes back to you with its reply in the reasons: choose `replan`, `ask-pm` where the change is of the PM's class, or answer its question in your instructions and ask again. When you already know the plan must change, choose `replan` directly.
+At a used-up loop, when what is left is a question of design, ask the Architect or choose `replan` in place of an acceptance.
 PM-class decisions are plan structure (adding or dropping tasks or deliverables, interfaces between modules, data formats or storage), a change to what the user gets, an irreversible step outside the project, or a conflict with what they said.
 Use classification `needs-pm` and option `ask-pm` for them, even if a recorded authorization appears to cover a choice.
 With `needs-pm` the notice is the PM's whole brief, shown in its inbox: the question; the options and what each leads to; which words of the user bear on it; what you would choose and why.

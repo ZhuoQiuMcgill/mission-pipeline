@@ -26,7 +26,7 @@ A structural detailed-plan revision waits for your `approve` or `send-back` answ
 
 Words: `mp pm say --tag`, `mp pm tag`, `mp pm retag`, `mp pm summary`; read: `mp read words`, `mp read show words`.
 Alignment: `mp pm mission`, `mp pm requirement`, `mp pm constraint`, `mp pm plan`, `mp pm waive`.
-Answers: `mp pm answer --by pm --words`, or `--no-words --reason`; the user's own choice uses `--by user --words`; `mp pm inbox --asked-user <item>` marks a pending question without words. While a Secretary is live, its next pass applies an answer. `--defer <n,…>` puts a Constructor's questions off as open items (`mp read open-items <mission>`); `mp pm open-item answer <item> --answer "…" [--words W-n]` answers one, of any class.
+Answers: `mp pm answer --by pm --words`, or `--no-words --reason`; the user's own choice uses `--by user --words`; `mp pm inbox --asked-user <item>` marks a pending question without words. While a Secretary is live, its next pass applies an answer. `--option ask-architect --by pm --instructions "…"` asks one Architect step a question of design (a reply that comes back reopens the item). `--defer <n,…>` puts a Constructor's questions off as open items (`mp read open-items <mission>`); `mp pm open-item answer <item> --answer "…" [--words W-n]` answers one, of any class.
 Decisions and completion: `mp pm grant`, `mp pm repair`, `mp pm full-run`, `mp pm finish`, `mp pm legalize`.
 Stops: `mp pm stop`, `mp pm stop-narrow`, `mp pm stop-release`; follow the handbook's fallback before any PM release.
 Secretary: `mp pm secretary start`, `mp pm secretary handle`, `mp pm secretary stop [--gone | --idle]`, `mp read secretary`.

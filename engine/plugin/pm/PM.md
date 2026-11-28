@@ -110,6 +110,7 @@ It prints the principles in force and the number of other tags in force (`mp rea
 For the no-words default, use `--by pm --no-words --reason "..."` instead.
 For the user's own answer: `mp pm answer <mission> <escalation> --option <option> --by user --words W-<n>`.
 Choose only an offered option; add instructions or extra rounds as the card requires.
+You or the user may still answer any escalation on the user's words. A question of design is the Architect's, asked by the Secretary; on the user's words you may ask it too: `--option ask-architect --by pm --instructions "…"` (never `--by user`). One Architect step answers; its answer is carried out, and a reply that the plan must change, or a question, comes back to your inbox (`mp read show escalation <mission>/<id>` gives it in full).
 An answer to a Constructor's questions may put some off (`--defer <n,…>`): each stays an open item, listed by `mp read open-items <mission>` and on the task's cards; `mp pm open-item answer <[mission/]item> --answer "…" [--words W-n]` answers one at any time, and the answer reaches the task's next cards.
 `mp pm inbox --asked-user <item>` marks your question pending, with no words; record the user's answer on the spot and answer with its words.
 
