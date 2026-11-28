@@ -189,13 +189,15 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     assert.equal((await labels(ports, ['pmplan.m1.1']))['pmplan.m1.1'], 'proven', 'the plan keeps its check');
   });
 
-  it('a legalization whose chain object was made before 4.4 binds reqset alone: mp pm extend names it (the residual, detected)', async () => {
+  it('p12-1: a stamped audit whose chain object was made before 4.4 (it binds reqset alone) reads as in 4.3 until the first new item, then goes out of date; the plan and the products keep their labels', async () => {
     const { ports, engine } = await setup();
     await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? null : happyScript(M)(t, s)));
-    const endpoint = (await products(ports)).at(-1)!;
-    await requestLegalization(ports, { legalization: 'L43', mission: M, endpoint, words: 'legalize the parser', chainEvidence: [], capabilities: [] });
+    const all = await products(ports);
+    const endpoint = all.at(-1)!;
+    const seam = (await ports.ledger.records(['evidence'])).map((c) => c.record.evidence).at(-1)!;
+    await requestLegalization(ports, { legalization: 'L43', mission: M, endpoint, words: 'legalize the parser', chainEvidence: [seam], capabilities: [] });
     await startLegalization(ports, M, 'L43', 'go ahead');
-    // the chain object as 4.3 wrote it: its contract binds reqset alone
+    // the chain object as 4.3 wrote it: its contract binds reqset alone (and no reqnew line is seeded)
     type Append = World['ledger']['append'];
     const append: Append = ports.ledger.append.bind(ports.ledger);
     (ports.ledger as { append: Append }).append = async (op, entries) => {
@@ -203,12 +205,27 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
       const records = (entries.records ?? []).filter((r) => !(r.kind === 'basis.version' && r.line === 'reqnew.m1')).map((r) => (r.kind === 'object.version' ? { ...r, reviews: r.reviews.map((c) => ({ ...c, basisLines: c.basisLines.filter((l) => l !== 'reqnew.m1') })) } : r));
       return append(op, { ...entries, records });
     };
-    for (let i = 0; i < 4; i++) await advanceLegalization(ports, M, 'L43');
+    for (let i = 0; i < 6; i++) {
+      await advanceLegalization(ports, M, 'L43');
+      for (const t of ports.scheduler.queued('auditor-chain')) {
+        const card = t.card as unknown as AuditChainCard;
+        const cite = [`evidence:${seam}`];
+        await ports.scheduler.run(t.task, { handBack: { quotes: card.quotes.map((q) => ({ quote: q.id, honored: 'yes', reason: 'it does', evidence: cite })), seams: card.seams.map((x) => ({ seam: x.id, holds: 'yes', reason: 'it holds', evidence: cite })), findings: [], verdict: 'pass' } satisfies AuditChainResult });
+      }
+    }
     (ports.ledger as { append: Append }).append = append;
+    assert.equal((await advanceLegalization(ports, M, 'L43')).result?.outcome, 'stamped');
     const chain = (await ports.ledger.records(['object.version'])).map((c) => c.record).find((o) => o.objectKind === 'chain-acceptance')!;
-    assert.deepEqual(chain.reviews[0]?.basisLines, ['reqset.m1']);
+    assert.deepEqual(chain.reviews[0]?.basisLines, ['reqset.m1'], 'the 4.3 shape');
+    const before = await labels(ports, ['pmplan.m1.1', ...all, chain.object]);
+    for (const [id, l] of Object.entries(before)) assert.equal(l, 'proven', `${id} before the new item`);
+    assert.equal((await ports.evaluator.ops(['legal.m1.L43'])).states['legal.m1.L43']?.allProven, true);
     const { r } = await extendJson(ports);
-    assert.deepEqual(r.olderAudits, ['L43']);
+    assert.deepEqual(r.olderAudits, ['L43'], 'still named');
+    const after = await labels(ports, ['pmplan.m1.1', ...all, chain.object]);
+    assert.equal(after[chain.object], 'not-fully-proven', 'the audit no longer covers every item in force');
+    assert.equal((await ports.evaluator.ops(['legal.m1.L43'])).states['legal.m1.L43']?.allProven, false);
+    for (const id of ['pmplan.m1.1', ...all]) assert.equal(after[id], 'proven', `${id} does not move`);
   });
 
   it('another process submits a PM plan between the new requirement\'s read and its write: nothing is recorded; run again, it falls in the new plan\'s term', async () => {
