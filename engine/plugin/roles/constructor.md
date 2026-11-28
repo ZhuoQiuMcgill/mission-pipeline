@@ -37,6 +37,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - `mp seat <id> read <material> [--page <n>]`: fetches one page of a material; it reports a missing or edited material instead of serving it.
 - On a blind-experiment card also: `mp seat <id> rerun <command> [--detach]` and `mp seat <id> wait <run>`.
 - `mp seat <id> handback --stdin`: once, your report on stdin ending with the fields as a fenced json block, as the card's hand-back section shows (`mp seat <id> handback --stdin <<'EOF'` … `EOF`; or with two files: `--report <file> --result <file>`). When it refuses, it says why: fix it and run it again.
+- PowerShell: write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty; `mp.cmd` drops double quotes inside an argument), and hand back with a here-string: a line `@'`, the document, then a line `'@ | mp.ps1 seat <id> handback --stdin`.
 - Run the hand-back from the project root, not from inside your worktree: `mp` removes the worktree once the hand-back is recorded, and a shell that sits in it fails its next command.
 
 ## Upstream and downstream

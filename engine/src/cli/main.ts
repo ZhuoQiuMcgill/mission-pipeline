@@ -217,7 +217,8 @@ async function main(): Promise<void> {
   const out = await runCli(process.argv.slice(2), {
     cwd: process.cwd(),
     env: process.env,
-    stdin: () => readFileSync(0, 'utf8'),
+    // 4.4.1 (Windows): the bytes; the command decodes them with the one reader (a byte-order mark dropped, UTF-16 decoded)
+    stdin: () => readFileSync(0),
     out: (text) => written(process.stdout, text),
   });
   // 4.1.3: wait until the output is written: past a full pipe (64 KiB), a write is queued, and the

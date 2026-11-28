@@ -44,7 +44,8 @@
 //   standardsWarn           (4.4) above this many standards on a task, the feasibility reviewer and the PM
 //                           are told (rework rises with their number); default 7; it refuses nothing
 
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { nulNote, readInputFile, type InputText } from '../common/textInput.ts';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { environmentConfig } from '../evaluator/index.ts';
@@ -229,10 +230,13 @@ export function readConfig(projectDir: string): ProjectConfig {
   const file = configPath(projectDir);
   if (!existsSync(file)) return defaultConfig({ targetBranch: 'main', versionCommands: [] });
   let raw: unknown;
+  // 4.4.1 (Windows): the one reader (a byte-order mark an editor wrote is dropped, UTF-16 decoded); `mp config` prints its warning
+  let input: InputText | null = null;
   try {
-    raw = JSON.parse(readFileSync(file, 'utf8'));
+    input = readInputFile(file, '.mission-pipeline/config.json');
+    raw = JSON.parse(input.text);
   } catch (e) {
-    throw new CliError('BAD_CONFIG', `.mission-pipeline/config.json is not JSON: ${(e as Error).message}`, { exitCode: EXIT.REFUSED });
+    throw new CliError('BAD_CONFIG', `.mission-pipeline/config.json is not JSON: ${(e as Error).message}${input !== null ? nulNote(input, 'it') : ''}`, { exitCode: EXIT.REFUSED });
   }
   return parseConfig(raw);
 }

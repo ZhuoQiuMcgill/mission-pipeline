@@ -37,6 +37,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { workspaceDir } from '../git/workspace.ts';
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { withPowerShellNote } from '../common/powershell.ts';
 import type { ContentHash, EvidenceId, MissionId, StopId } from '../common/ids.ts';
 import type { EvidenceRecord, LoopKind } from '../common/records.ts';
 import { drain, labelBatch, labelStatus, recordRenewedRun, renewalCandidates, type DrainReport, type RenewalJudgment } from '../evaluator/index.ts';
@@ -706,9 +707,14 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     cardSha256: out.cardSha256 ?? sha256(card),
     worktree,
     files: handBackFiles(out.dispatch),
-    prompt: `You are the ${title} of Mission Pipeline. Your card: \`mp seat ${out.dispatch} card\`. Use only the \`mp seat ${out.dispatch}\` commands listed there. Finish with \`mp seat ${out.dispatch} handback\`.`,
+    prompt: seatPrompt(title, out.dispatch),
     size: cardSizeReport(ctx, spec.card, card),
   };
+}
+
+/** The fixed prompt a seat is started with (§5.1). 4.4.1 (Windows): it ends with how to call mp in PowerShell; elsewhere it is 4.4.0's, byte for byte. */
+export function seatPrompt(title: string, dispatch: string, platform: NodeJS.Platform = process.platform): string {
+  return withPowerShellNote(`You are the ${title} of Mission Pipeline. Your card: \`mp seat ${dispatch} card\`. Use only the \`mp seat ${dispatch}\` commands listed there. Finish with \`mp seat ${dispatch} handback\`.`, platform);
 }
 
 /**

@@ -29,10 +29,11 @@
 // them again); the first writer of that event wins, the other adopts it.
 
 import { liveSecretary, requireSecretary } from '../memory/resident.ts';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { nulNote, readInputFile, type InputText } from '../common/textInput.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
 import type { BaseRecord, EvidenceRecord, ObjectVersionRecord } from '../common/records.ts';
@@ -571,8 +572,8 @@ export function recordVerified(ctx: ProcessContext, v: DispatchView, runs: reado
 
 // ---------------------------------------------------------------- hand-backs
 
-/** The files of a hand-back, which must be in `.mission-pipeline/tmp/<dispatch>/` (decision 7). */
-function readHandBackFile(ctx: ProcessContext, dispatch: string, file: string, what: string): string {
+/** The files of a hand-back, which must be in `.mission-pipeline/tmp/<dispatch>/` (decision 7). 4.4.1 (Windows): through the one reader. */
+function readHandBackFile(ctx: ProcessContext, dispatch: string, file: string, what: string): InputText {
   const dir = join(ctx.memory.paths.tmp, dispatch);
   const abs = isAbsolute(file) ? file : resolve(ctx.projectDir, file);
   if (!existsSync(abs)) {
@@ -590,7 +591,14 @@ function readHandBackFile(ctx: ProcessContext, dispatch: string, file: string, w
   }
   const rel = relative(realDir, real);
   if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) throw new ProcessError('BAD_FILE', `the ${what} file must be in .mission-pipeline/tmp/${dispatch}/ (the card names it), not ${file}`);
-  return readFileSync(real, 'utf8');
+  return readInputFile(real, `the ${what} file ${file}`);
+}
+
+/** 4.4.1 (Windows): the reader's warning lines, after a hand-back answer's notes (or its problems, when it was refused). */
+export function withInputWarnings(a: HandBackAnswer, warnings: ReadonlyArray<string | null>): HandBackAnswer {
+  const lines = warnings.filter((w): w is string => w !== null);
+  if (lines.length === 0) return a;
+  return a.kind === 'refused' ? { ...a, problems: [...a.problems, ...lines] } : { ...a, notes: [...a.notes, ...lines] };
 }
 
 /** A commit's files as a pointer checker (file:<path>[:<line>]): `git cat-file`, read-only. */
@@ -692,11 +700,11 @@ export async function seatHandback(ctx: ProcessContext, dispatch: string, files:
   const raw = readHandBackFile(ctx, dispatch, files.result, 'result');
   let fields: unknown;
   try {
-    fields = JSON.parse(raw);
+    fields = JSON.parse(raw.text);
   } catch (e) {
-    return refuse(ctx, dispatch, 'handback', [`the result file is not JSON: ${(e as Error).message}`]);
+    return refuse(ctx, dispatch, 'handback', [`the result file is not JSON: ${(e as Error).message}${nulNote(raw, 'it')}`]);
   }
-  return recordSeatHandBack(ctx, dispatch, { report, fields, ...(files.filler !== undefined ? { filler: files.filler } : {}), ...(files.keepScratch === true ? { keepScratch: true } : {}) });
+  return withInputWarnings(await recordSeatHandBack(ctx, dispatch, { report: report.text, fields, ...(files.filler !== undefined ? { filler: files.filler } : {}), ...(files.keepScratch === true ? { keepScratch: true } : {}) }), [report.warning, raw.warning]);
 }
 
 /** The seat's records of an accepted hand-back (the Reviewer's judgment and findings are built here). */
@@ -1113,15 +1121,17 @@ function collectionProblems(c: Exclude<Collection, { kind: 'candidate' }>): stri
 export async function seatRequestEvidence(ctx: ProcessContext, dispatch: string, files: { readonly request: string; readonly notes: string; readonly filler?: Filler | null }): Promise<HandBackAnswer> {
   const v = dispatchView(ctx, dispatch);
   allows(ctx, v, 'request-evidence');
-  const notesText = readHandBackFile(ctx, dispatch, files.notes, 'notes');
+  const notes = readHandBackFile(ctx, dispatch, files.notes, 'notes');
+  let request: InputText | null = null;
   let req: unknown;
   try {
-    req = JSON.parse(readHandBackFile(ctx, dispatch, files.request, 'request'));
+    request = readHandBackFile(ctx, dispatch, files.request, 'request');
+    req = JSON.parse(request.text);
   } catch (e) {
     if (e instanceof ProcessError) throw e;
-    return refuse(ctx, dispatch, 'request-evidence', [`the request file is not JSON: ${(e as Error).message}`]);
+    return refuse(ctx, dispatch, 'request-evidence', [`the request file is not JSON: ${(e as Error).message}${request !== null ? nulNote(request, 'it') : ''}`]);
   }
-  return recordEvidenceRequest(ctx, dispatch, { request: req, notes: notesText, ...(files.filler !== undefined ? { filler: files.filler } : {}) });
+  return withInputWarnings(await recordEvidenceRequest(ctx, dispatch, { request: req, notes: notes.text, ...(files.filler !== undefined ? { filler: files.filler } : {}) }), [notes.warning, request.warning]);
 }
 
 /**
