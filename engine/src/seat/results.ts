@@ -67,6 +67,11 @@ export const ReviewerResultShape = {
     owner: z.string().optional().describe('Required for deferred: who owns the issue next. It is shown as "deferred to <owner>", outside the task fix list.'),
   })).describe('Answer every listed issue on this version, including previously deferred issues. For deferred include both owner and reason; repeating a deferral does not require rework.'),
   findings: z.array(z.string()).describe('Problems outside the standards (they become issue records).'),
+  // 4.4 (G5): the open items the task took, each answered; one not fixed goes back with the review's issues
+  item_responses: z
+    .array(z.object({ item: z.string().min(1), response: z.enum(['fixed', 'not-fixed', 'unclear']), reason: z.string() }))
+    .optional()
+    .describe('4.4: one answer per open item listed on the card as taken by this task (fixed, not-fixed or unclear, with the reason). Omit when the card lists none.'),
   verdict: z.enum(['pass', 'rework', 'needs-decision']),
   reopen: z
     .array(z.object({ task: z.string().min(1).describe('A dependency listed on your card.'), issue: z.string().min(1).describe('What is wrong in its work.'), evidence: z.string().optional().describe('The run or file that shows it.') }))
@@ -238,6 +243,15 @@ function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultCont
     if (i.response === 'deferred' && (!i.owner?.trim() || !i.reason.trim())) out.push(`issue_responses: deferred issue "${i.issue}" needs an owner and a reason`);
   }
   if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes')) out.push('verdict: "pass" leaves a standard not met or unclear');
+  // 4.4 (G5): every open item on the card is answered once (a card without the list asks for none)
+  const items = (card.openItems ?? []).map((i) => i.id);
+  const answered = (r.item_responses ?? []).map((i) => i.item);
+  for (const i of items) if (!answered.includes(i)) out.push(`item_responses: open item "${i}" has no answer (fixed, not-fixed or unclear)`);
+  for (const i of new Set(answered)) {
+    if (!items.includes(i)) out.push(`item_responses: "${i}" is not an open item on the card`);
+    else if (answered.filter((x) => x === i).length > 1) out.push(`item_responses: open item "${i}" is answered more than once`);
+  }
+  for (const i of r.item_responses ?? []) if (i.response !== 'fixed' && i.reason.trim() === '') out.push(`item_responses: give the reason open item "${i.item}" is ${i.response}`);
   out.push(...reopenProblems(card, r));
   return out;
 }

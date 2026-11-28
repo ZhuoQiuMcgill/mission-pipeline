@@ -43,6 +43,7 @@ import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVers
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
+import { ITEM_BATCH, acceptanceReasons, deferredItemBody, itemIssueLine, riskItemBodies, takenItems, type ItemAnswer, type RiskItemBody } from './riskItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -191,6 +192,10 @@ interface ReviewBody {
   readonly deferred?: readonly string[];
   /** An integration review's reopen (D-6): the dependencies whose work causes the failure. */
   readonly reopen?: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly evidence?: string }>;
+  /** 4.4 (G5): the Reviewer's answers to the open items its card listed (absent: none listed, every review before 4.4). */
+  readonly items?: readonly ItemAnswer[];
+  /** 4.4 (G5): the task's deferred issues this review answered fixed (absent: none). */
+  readonly fixed?: readonly string[];
 }
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
@@ -318,6 +323,22 @@ export function riskAcceptance(events: Line['events']): RiskAcceptance | null {
   if (acc === null || acc.decision === undefined) return null;
   if (currentAcceptance(line, line.k)?.judgment !== acc.judgment) return null;
   return { k: line.k, product: acc.product, escalation: acc.decision.escalation, by: acc.decision.by, words: acc.decision.words ?? null, risks: acc.risks ?? [] };
+}
+
+/**
+ * 4.4 (G5): the escalation whose acceptance with risk the task's current acceptance is (the attempt's accepting
+ * record a ruling with risk: accepted, or a re-bound version accepted with its risk), or null (a Reviewer's pass
+ * accepted it, or judged it again since, or it is not accepted). Pure, from the task line's events.
+ */
+export function currentRiskEscalation(events: Line['events']): string | null {
+  const line = new Line(events);
+  if (line.abandoned) return null;
+  const cur = currentAcceptance(line, line.k);
+  if (cur === null) return null;
+  const acc = line.one<{ judgment: string; decision?: { escalation: string; option?: string } }>('accepted', String(line.k));
+  const rb = line.all<ReboundBody>('rebound').filter((r) => r.body.k === line.k && bySeat(r.body)).at(-1)?.body;
+  for (const x of [rb, acc]) if (x?.decision?.option === 'accept-risk' && x.judgment === cur.judgment) return x.decision.escalation;
+  return null;
 }
 
 /** The production start resolver, shared by execution and the closing snapshot. */
@@ -676,6 +697,8 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   const lineName = taskLine(t.id);
   const lineage = taskLineage(ctx.mission, t.id);
   let line = await readLine(ctx, t.id);
+  // 4.4 (G5): the open items of a large acceptance with risk that an interruption left out (written in batches)
+  await riskItemsLeft(ctx, t, line);
 
   // the task's card under this plan; a changed card (re-plan) restarts it at the next attempt
   const hash = taskCardHash(t);
@@ -1572,12 +1595,15 @@ async function acceptRebindWithRisk(ctx: FlowCtx, t: DetailedTask, k: number, e:
   const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
   const body: ReboundBody = { k, n: rb.n, product: rb.product, judgment: ruling, how: 'review', decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks };
+  // 4.4 (G5): one open item per risk accepted, in the same write
+  const items = acceptanceItems(ctx, t.id, k, e.id, e.reasons);
   await commitCarrying(
     ctx,
     `flow:rebound-risk:${ctx.mission}:task:${idPart(t.id)}:${rebind}`,
-    [ev(ctx, taskLine(t.id), 'rebound', rebind, body)],
+    [ev(ctx, taskLine(t.id), 'rebound', rebind, body), ...items.first],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
+  await writeItemBatches(ctx, items.rest);
 }
 
 /**
@@ -1626,12 +1652,49 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // the decider's ruling, written by carryOut in this write (flow/secretary.ts deciderJudgment): the same id here
   const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  // 4.4 (G5): one open item per risk accepted, in the same write
+  const items = acceptanceItems(ctx, t.id, k, e.id, e.reasons);
   await commitCarrying(
     ctx,
     `flow:accepted-risk:${ctx.mission}:task:${idPart(t.id)}:${k}`,
-    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks })],
+    [ev(ctx, taskLine(t.id), 'accepted', String(k), { k, product: risk.product, judgment: ruling, decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }), ...items.first],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })],
   );
+  await writeItemBatches(ctx, items.rest);
+}
+
+/**
+ * 4.4 (G5): the open items an acceptance with risk leaves, one per distinct reason (flow/riskItems.ts): the first
+ * ITEM_BATCH go in the acceptance's own write (the same deterministic records on every run of it), the rest in
+ * writes of their own right after it (writeItemBatches; riskItemsLeft writes on a later pass what an interruption
+ * left out). Nothing else in the acceptance changes.
+ */
+function acceptanceItems(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[]): { readonly first: FlowEventInput[]; readonly rest: RiskItemBody[] } {
+  const bodies = riskItemBodies(task, k, escalation, reasons);
+  return { first: bodies.slice(0, ITEM_BATCH).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)), rest: bodies.slice(ITEM_BATCH) };
+}
+
+/** 4.4 (G5): open items not recorded yet, in bounded writes (an append takes at most 1,000 records), each under the operation id of its own items. */
+async function writeItemBatches(ctx: FlowCtx, bodies: readonly RiskItemBody[], requires?: string): Promise<void> {
+  if (bodies.length === 0) return;
+  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  // an acceptance made under 4.3 wrote no first batch: nothing is written for it (its sentences are listed as not recorded)
+  if (requires !== undefined && !existing.has(requires)) return;
+  const missing = bodies.filter((b) => !existing.has(b.id));
+  for (let i = 0; i < missing.length; i += ITEM_BATCH) {
+    const batch = missing.slice(i, i + ITEM_BATCH);
+    await commit(ctx, `flow:risk-items:${ctx.mission}:${shortHash(batch.map((b) => b.id))}`, { events: batch.map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)) });
+  }
+}
+
+/** 4.4 (G5): the items past the first batch of each acceptance with risk on the task's line, written when an interruption left them out (only such an acceptance is read again). */
+async function riskItemsLeft(ctx: FlowCtx, t: DetailedTask, line: Line): Promise<void> {
+  for (const e of [...line.all<{ k: number; decision?: { escalation: string; option?: string }; risks?: string[] }>('accepted'), ...line.all<ReboundBody>('rebound')]) {
+    const d = e.body.decision;
+    if (d?.option !== 'accept-risk' || (e.body.risks ?? []).length <= ITEM_BATCH) continue;
+    const bodies = riskItemBodies(t.id, e.body.k, d.escalation, acceptanceReasons(e.body, d.escalation));
+    if (bodies.length > ITEM_BATCH) await writeItemBatches(ctx, bodies.slice(ITEM_BATCH), bodies[0]!.id);
+  }
 }
 
 /** The latest review reopen whose integration still waits at its undispatched rebuild. */
@@ -1692,14 +1755,18 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
   }
   const words = by === 'pm' ? (d.words ?? []).map((w) => w.id).join(',') : by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
   const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  // 4.4 (G5): one open item per risk accepted, on the integration task that is accepted, in the same write
+  const items = acceptanceItems(ctx, integration, line.k, e.id, review.issues);
   await commitCarrying(ctx, `flow:accepted-risk:${ctx.mission}:task:${idPart(integration)}:${line.k}`,
     [
       // Adopt the reviewed product at this attempt, preserving its actual source dispatch.
       // Renewal and kept-product rebinds then read the same body as any accepted attempt.
       ev(ctx, taskLine(integration), 'product', String(line.k), { ...product, k: line.k } satisfies ProductBody),
       ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }),
+      ...items.first,
     ],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);
+  await writeItemBatches(ctx, items.rest);
 }
 
 /**
@@ -2094,25 +2161,36 @@ async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string,
     await internalError(ctx, rev, `the accepted Reviewer hand-back of ${rev} has no judgment j.${rev}`);
     return null;
   }
+  // 4.4 (G5): an open item the task took and its Reviewer did not answer fixed goes back with the issues
+  const items: ItemAnswer[] = (r.item_responses ?? []).map((i) => ({ item: i.item, response: i.response, reason: i.reason }));
   const issues = [
     ...r.judgments.filter((j) => j.met !== 'yes').map((j) => `[${j.standard}] ${j.met === 'no' ? 'not met' : 'unclear'}: ${j.reason}`),
     ...r.findings.map((f) => `finding: ${f}`),
     ...r.issue_responses.filter((i) => i.response === 'not-fixed').map((i) => `issue ${i.issue} not fixed: ${i.reason}`),
+    ...items.filter((i) => i.response !== 'fixed').map(itemIssueLine),
   ];
   const deferred = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`);
   const reopen = (r.reopen ?? []).map((x) => ({ task: x.task, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) }));
-  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}) };
-  for (const answer of r.issue_responses.filter((i) => i.response === 'deferred')) {
+  // 4.4 (G5; the plan's F11 "Deferred findings"): a deferral is an open item of the task, one per issue, recorded with
+  // this review; its notice is raised once, when the item is new, not again at each re-review that defers it again
+  const recorded = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  const deferrals = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => ({ answer: i, body: deferredItemBody(t.id, k, rev, i.issue, `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`) }));
+  // the task's deferred issues this review answered fixed: they close those items once the attempt is accepted
+  const fixed = r.issue_responses.filter((i) => i.response === 'fixed' && recorded.has(deferredItemBody(t.id, k, rev, i.issue, '').id)).map((i) => i.issue);
+  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}), ...(items.length > 0 ? { items } : {}), ...(fixed.length > 0 ? { fixed } : {}) };
+  for (const { answer, body } of deferrals) {
+    if (recorded.has(body.id)) continue;
     await notify(ctx, {
       category: 'reviewer-issue-deferred',
       wi: null,
       key: `${rev}:${answer.issue}`,
       trigger: `task ${t.id}, version ${judgment.target}: issue ${answer.issue} deferred to ${answer.owner}: ${answer.reason}`,
-      defaultAction: 'the issue stays unfixed and is listed at close; a re-plan or the user routes the work',
+      defaultAction: `the issue stays unfixed and is listed at close, as open item ${body.id} (mp read open-items ${ctx.mission}); a re-plan or the user routes the work: a re-plan or a repair takes the item, or the user's words close it`,
       detail: { task: t.id, version: judgment.target, judgment: review.judgment, issue: answer.issue, owner: answer.owner, reason: answer.reason },
     });
   }
-  await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, taskLine(t.id), 'review', rev, review)] });
+  const fresh = deferrals.filter((x) => !recorded.has(x.body.id)).map((x) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.body.id, x.body));
+  await commit(ctx, `flow:review:${ctx.mission}:${rev}`, { events: [ev(ctx, taskLine(t.id), 'review', rev, review), ...fresh] });
   return review;
 }
 
@@ -3152,10 +3230,14 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // 4.4 (F4): a continuation reads the hand-back that stopped to ask (optional)
   if (paused !== null) past.push(await pausedHandBack(ctx, { constructor: paused.step, attempt: k, pause: paused.n, parked: paused.parked }));
   // 4.4 (F4; G5): the attempt's questions with their answers, and every question of the task left open
-  const questions = taskQuestions(await ctx.ports.ledger.events({ mission: ctx.mission }), t.id, k);
+  const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
+  const questions = taskQuestions(missionEvents, t.id, k);
+  // 4.4 (G5): the open items the task's card takes, still open
+  const openItems = takenItems(missionEvents, t.openItems);
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: withoutAnswers(await decisionQuotes(ctx, t), questions), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
+    ...(openItems.length > 0 ? { openItems } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
     seat: 'constructor',
     workspace,
@@ -3295,7 +3377,10 @@ async function submitReviewer(
   const contractPlan = taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'));
   const formats = contractPlan === undefined ? null : (await detailedPlanOf(ctx, contractPlan))?.plan;
   // 4.4 (F4): the questions of the attempt under review with their answers, and those left open on the task
-  const questions = taskQuestions(await ctx.ports.ledger.events({ mission: ctx.mission }), t.id, product.k);
+  const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
+  const questions = taskQuestions(missionEvents, t.id, product.k);
+  // 4.4 (G5): the open items the task's card takes, still open: the Reviewer answers each
+  const openItems = takenItems(missionEvents, t.openItems);
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
@@ -3304,6 +3389,7 @@ async function submitReviewer(
       constraints: [...cardConstraintsList, ...await cardConstraints(ctx, t, new Set(['instruction']))],
     }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
+    ...(openItems.length > 0 ? { openItems } : {}),
     seat: 'reviewer',
     workspace: { snapshot: product.snapshot, writablePaths: [] },
     target: product.object,

@@ -86,7 +86,7 @@ import { describeScope, detectStop, parseScope, stopScopeFor, stopWords } from '
 import { planTemplate } from '../templates.ts';
 import { pmCoreText, pmHandbookPath, wiDir } from '../wi.ts';
 import { fullRunLines } from './seat.ts';
-import { answerOpenItem, type AnsweredItem } from '../../process/openItems.ts';
+import { answerOpenItem, closeOpenItem, recordVerified, type AnsweredItem } from '../../process/openItems.ts';
 
 const WORDS = /^W-[1-9][0-9]*$/;
 
@@ -567,8 +567,9 @@ const repair: Command = {
     '       --attempts: add or replace registered attempts (a JSON array in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)\n' +
     '       --answers R-<n>: with --attempts, this change also settles that earlier repair (its author turn is taken back); without it, a change while the method is back with its author is refused\n' +
     '       --rerun: run registered attempts again on the same method version; --resnapshot: the exploration reads the target branch as it is now\n' +
-    '       --again: file it as a new repair although the same repair (words, kind, text, subject) was decided (about an exploration: its round is over); one still in work is returned',
-  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean', again: 'boolean' },
+    '       --again: file it as a new repair although the same repair (words, kind, text, subject) was decided (about an exploration: its round is over); one still in work is returned\n' +
+    '       --open-items <id>[,<id>...]: the items left at the cap this repair is for (mp read open-items lists them); its Architect gives each to a task, whose Reviewer answers it',
+  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean', again: 'boolean', 'open-items': 'list' },
   identity: (a) => ({
     positionals: a.positionals,
     flags: a.flags,
@@ -601,7 +602,10 @@ const repair: Command = {
     const change: RepairChange | undefined = file !== null ? { form: 'attempts', attempts: attemptsFile(file), ...(answers !== null ? { answers } : {}) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
     const again = flagBool(args, 'again');
     if (again && change !== undefined) throw usage('--again files a repair again; a change form (--attempts, --rerun, --resnapshot) is a new decision of its own');
-    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}), ...(again ? { again: true, op: c.op } : {}) });
+    // 4.4 (G4, G5): the open items this repair is for
+    const openItems = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+    if (openItems.length > 0 && change !== undefined) throw usage('--open-items goes with a repair of the plan in effect, not with a change form');
+    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}), ...(again ? { again: true, op: c.op } : {}), ...(openItems.length > 0 ? { openItems } : {}) });
     if (r.changed !== undefined) {
       const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...changedLines(m, about!, words, r.changed)];
       return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: false, about: r.about, changed: r.changed });
@@ -612,7 +616,8 @@ const repair: Command = {
     const note = !r.repeated && r.over !== undefined ? ` Filed again: the same repair as ${r.over}, and ${over}.`
       : r.repeated && r.over !== undefined ? ` ${r.over} is that repair, and ${over}: --again files a new one.`
       : r.repeated && again ? ` The same repair is still in work: --again filed nothing new.` : '';
-    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
+    const items = openItems.length > 0 && !r.repeated ? ` It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.` : '';
+    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}${items}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
   },
 };
 
@@ -847,16 +852,50 @@ export function openItemAnswered(r: AnsweredItem): string {
 const openItem: Command = {
   group: 'pm',
   name: ['open-item'],
-  summary: 'answer an open item (a Constructor\'s question put off or raised as later); the answer goes onto the task\'s next cards. The PM may answer any',
-  usage: 'mp pm open-item answer <[mission/]item> --answer "<text>" [--words W-<n>]   (mp read open-items <mission> lists them)',
-  flags: { answer: 'string', words: 'string' },
+  summary: 'answer an open item (a Constructor\'s question put off or raised as later; the answer goes onto the task\'s next cards; the PM may answer any), or close one left at the cap on the user\'s words (the way through: it is otherwise closed when a task that takes it is accepted with it answered fixed)',
+  usage: 'mp pm open-item answer <[mission/]item> --answer "<text>" [--words W-<n>]\n       mp pm open-item close <[mission/]item> --words W-<n> --reason "<why, from the user\'s words>"   (mp read open-items <mission> lists them)',
+  flags: { answer: 'string', words: 'string', reason: 'string' },
   async run(c, args) {
     const p = P(c);
-    if (positional(args, 0, 'answer') !== 'answer') throw usage('mp pm open-item answer <[mission/]item> --answer "<text>"');
+    const sub = positional(args, 0, 'answer|close');
+    if (sub === 'close') {
+      // 4.4 (G5, E-1): an item left at the cap closed on the user's words
+      const ref = positional(args, 1, 'open item');
+      const w = wordsArg(p.ctx, args, true)!;
+      const r = closeOpenItem(p.ctx, { op: c.op!, ref, words: w, reason: flagStr(args, 'reason') ?? '' });
+      return ok(r.repeated ? `Open item ${r.mission}/${r.item.id} was closed already on ${w} with this reason: nothing new.` : `Open item ${r.mission}/${r.item.id} (task ${r.item.task}, attempt ${r.item.attempt}) closed on the user's words ${w}. The reads list it as closed, with the reason.`, r);
+    }
+    if (sub !== 'answer') throw usage('mp pm open-item answer <[mission/]item> --answer "<text>", or mp pm open-item close <[mission/]item> --words W-<n> --reason "…"');
     const ref = positional(args, 1, 'open item');
     const w = wordsArg(p.ctx, args, false);
     const r = answerOpenItem(p.ctx, { op: c.op!, ref, by: 'pm', answer: flagStr(args, 'answer') ?? '', words: w });
     return ok(openItemAnswered(r), r);
+  },
+};
+
+// 4.4 (the plan's F15, G5): the user's statement that something was checked in the field and holds
+const verified: Command = {
+  group: 'pm',
+  name: ['verified'],
+  summary: 'record the user\'s statement that a requirement item or a repair was checked in the field and holds: shown as the user\'s statement on those words, never as proof (no proof label changes); it closes the open items it names',
+  usage: 'mp pm verified <mission> <item-id|R-<n>> --words W-<n> [--open-items <id>[,<id>...]]   (mp read items <mission> shows it; mp read open-items <mission> lists the items)',
+  flags: { words: 'string', 'open-items': 'list' },
+  async run(c, args) {
+    const p = P(c);
+    const m = missionArg(args, 0);
+    const subject = positional(args, 1, 'item or repair');
+    const w = wordsArg(p.ctx, args, true)!;
+    const items = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
+    const r = recordVerified(p.ctx, { op: c.op!, mission: m, subject, words: w, items });
+    const what = `${r.subject.startsWith('repair:') ? 'repair' : 'requirement item'} ${subject}`;
+    const lines = r.repeated
+      ? [`The user's statement on ${w} about ${what} was recorded already: nothing new.`]
+      : [
+          `Recorded: the user's statement on ${w} that ${what} was checked in the field and holds. It is the user's statement, not proof: no proof label changes.`,
+          ...(r.closed.length > 0 ? [`Open items closed on it: ${r.closed.join(', ')}.`] : []),
+          ...(r.already.length > 0 ? [`Closed already, kept as they were: ${r.already.join(', ')}.`] : []),
+        ];
+    return ok(lines.join('\n'), r);
   },
 };
 
@@ -1388,6 +1427,7 @@ export const PM_COMMANDS: readonly Command[] = [
   waive,
   answer,
   openItem,
+  verified,
   grant,
   legalize,
   deliver,

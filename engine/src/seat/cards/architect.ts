@@ -90,8 +90,18 @@ export const ArchitectDecomposeCardSchema = z.object({
    * this card hands back. Absent: no waiver either way.
    */
   planReviews: z.object({ previous: z.string().nullable(), next: z.string().nullable() }).optional(),
+  /**
+   * 4.4 (G5): the open items left earlier (at an acceptance with risk, or deferred) that no task of the plan it
+   * revises takes, at most OPEN_ITEMS_LISTED; `openItemsMore`, how many more there are. A task takes one by
+   * naming it in its `openItems`. Absent: none (or a card queued before 4.4).
+   */
+  openItems: z.array(z.object({ id: z.string().min(1), kind: z.string(), text: z.string(), from: z.string() })).optional(),
+  openItemsMore: z.number().int().positive().optional(),
 });
 export type ArchitectDecomposeCard = z.infer<typeof ArchitectDecomposeCardSchema>;
+
+/** 4.4 (G5): how many open items a decomposition card lists (the rest are counted). */
+export const OPEN_ITEMS_LISTED = 50;
 
 export const ArchitectDecomposeResultShape = {
   dataFormats: z.array(z.string()).optional(),
@@ -270,6 +280,7 @@ export function renderArchitectDecompose(c: ArchitectDecomposeCard): string {
     list('Requirement items', c.requirementItems.map((i) => `[${i.id}] ${i.text}`)) +
     list('Explorations that have not stood (no task may depend on them)', c.unsettledExplorations) +
     list('Settled exploration conclusions to plan from', c.explorationConclusions.map((x) => `[${x.exploration}] ${x.summary}`)) +
+    list('Open items left earlier that no task takes (a task takes one by naming its id in openItems; its Reviewer then answers it)', [...(c.openItems ?? []).map((i) => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`), ...(c.openItemsMore !== undefined ? [`and ${c.openItemsMore} more, not listed here`] : [])]) +
     `## Git history (exported)\n${c.history.gitLog || '(none)'}\n\n` +
     list('Past run durations', c.history.runs.map((h) => `${h.task} (${h.seat}): ${h.durationMs} ms, ${h.costMicros} micro-dollars`)) +
     renderPlanningRules(c.projectCommands) +

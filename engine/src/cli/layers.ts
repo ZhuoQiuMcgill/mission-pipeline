@@ -51,7 +51,9 @@
 import type { MissionId } from '../common/ids.ts';
 import { labelStatus, OLDER_ENVIRONMENT, olderEnvironmentProof } from '../evaluator/index.ts';
 import { flowCtx } from '../flow/context.ts';
-import { bySeat, taskLineage } from '../flow/execution.ts';
+import { bySeat, currentRiskEscalation, taskLineage } from '../flow/execution.ts';
+import { OPEN_ITEMS_LINE } from '../flow/openItems.ts';
+import { riskItemsOf, type RiskItem } from '../flow/riskItems.ts';
 import { latestEffective } from '../flow/planning.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import type { SettleRecord } from '../flow/exploration/machine.ts';
@@ -167,7 +169,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     const flows: Flow[] = (
       db.stmt('SELECT mission, line, event, key, body, revision FROM flow_events ORDER BY revision').all() as Array<{ mission: string; line: string; event: string; key: string; body: string; revision: number }>
     )
-      .filter((r) => r.line === REQUIREMENTS_LINE || r.line === PLAN_LINE || r.line === SECRETARY_LINE || r.line.startsWith('task:') || r.line.startsWith('exploration:'))
+      .filter((r) => r.line === REQUIREMENTS_LINE || r.line === PLAN_LINE || r.line === SECRETARY_LINE || r.line === OPEN_ITEMS_LINE || r.line.startsWith('task:') || r.line.startsWith('exploration:'))
       .map((r) => ({ mission: r.mission, line: r.line, event: r.event, key: r.key, body: parse(r.body), rev: Number(r.revision) }));
     const steps: Step[] = (db.stmt('SELECT task, lineage, mission, card, state, queued_rev, queued_at FROM tasks ORDER BY queued_rev').all() as Array<Json>).map((r) => ({
       task: String(r['task']),
@@ -267,6 +269,16 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
     return true;
   };
 
+  // 4.4 (G5): an acceptance with risk is told apart from one after a pass, with what it left still open
+  const riskByMission = new Map<string, RiskItem[]>();
+  const risksOf = (m: string): RiskItem[] => riskByMission.get(m) ?? (riskByMission.set(m, riskItemsOf(raw.flows.filter((f) => f.mission === m).map((f) => ({ revision: f.rev, line: f.line, event: f.event, key: f.key, body: f.body })))), riskByMission.get(m)!);
+  const withRisk = (m: string, fs: readonly Flow[], label: string): string => {
+    const esc = currentRiskEscalation(fs.map((f) => ({ revision: f.rev, event: f.event, key: f.key, body: f.body })));
+    if (esc === null || !label.startsWith('accepted')) return label;
+    const mine = risksOf(m).filter((i) => i.escalation === esc);
+    const what = mine.length === 0 || mine.every((i) => !i.recorded) ? `${mine.length} risk(s); what became of them is not recorded` : `${mine.filter((i) => i.closed === null).length} open`;
+    return `accepted with risk (${what})${label.slice('accepted'.length)}`;
+  };
   for (const [m, ids] of taskIds) {
     for (const id of ids) {
       const fs = flowsByLine.get(`${m}\n${taskLine(id)}`) ?? [];
@@ -277,7 +289,7 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
       stepsOf.set(k, steps);
       for (const s of steps) owner.set(s.task, k);
       const last = fs.at(-1);
-      let label = last === undefined ? 'planned' : (TASK_LABEL[last.event]?.(last.body) ?? last.event);
+      let label = last === undefined ? 'planned' : withRisk(m, fs, TASK_LABEL[last.event]?.(last.body) ?? last.event);
       let rev = last?.rev ?? 0;
       // an attempt that a rework started says so (a Reviewer's rejection is a change of state)
       const attempt = Math.max(0, ...fs.map((f) => Number(f.body['k'] ?? 0)).filter((n) => Number.isFinite(n)));
