@@ -222,7 +222,7 @@ Integration never starts early; stable mode still requires proven dependencies.
 
 ## Reviews and reworks
 
-- A Constructor's questions (`constructor-decision`) are numbered, each `before-review` or `later`. The review of that attempt is held in next, naming the escalation, until the answer is carried out; a `later` question is an open item and holds nothing.
+- A Constructor's questions (`constructor-decision`) are numbered, each `before-review` or `later`. The review of that attempt is held in next, naming the escalation, until an answer is carried out; after `replan` it stays held until the re-plan retires it. A `later` question is an open item from the hand-back and holds nothing; questions that are all `later` raise no decision (find them in `mp read open-items` and the task's digest).
 - A blocked hand-back (`cblk.<step>.<n>`, the n-th pause of an attempt): the Constructor stopped to ask, and its edits are a parked commit. Only that task waits. An answer resumes the attempt with a new Constructor step on those edits (no rework, no re-dispatch); `replan` re-plans as usual. A third pause in one attempt is accepted and raises `constructor-paused-again` (WI-08).
 - `mp sec decide <escalation> --option answer --instructions "…" --defer <n,…>` puts those questions off: each stays an open item, and your instructions answer the rest. Put one off only when it need not be settled before the review.
 - `mp read open-items <mission>` lists open items. Answer one of yours at any time with `mp sec open-item answer <item> --answer "…"`; the answer reaches the task's next cards. One whose escalation went to the PM is the PM's.

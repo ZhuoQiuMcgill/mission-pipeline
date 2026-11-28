@@ -34,7 +34,8 @@ export interface OpenItemBody {
 
 export interface OpenItemAnswerBody {
   readonly id: string;
-  readonly by: 'secretary' | 'pm';
+  /** Who answered: the Secretary or the PM (`open-item-answer`); the user, for an answer carried out on the escalation (openItemsOf). */
+  readonly by: 'secretary' | 'pm' | 'user';
   readonly answer: string;
   readonly words?: string;
 }
@@ -64,10 +65,31 @@ export function questionReasons(qs: ReadonlyArray<{ readonly text: string; reado
   return qs.map((q, i) => `Q${i + 1} (${q.when}): ${q.text}`);
 }
 
-/** The open items of a mission's events, each with its answer. */
+/**
+ * The open items of a mission's events, each with its answer: its own (`open-item-answer`), or, for one
+ * put off by a decision that was not carried out (another decider's answer carried out instead, which
+ * does not put it off), the answer that was carried out.
+ */
 export function openItemsOf(events: readonly Ev[]): OpenItem[] {
   const answers = new Map(events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM_ANSWER).map((e) => [e.key, e.body as OpenItemAnswerBody]));
-  return events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM).map((e) => ({ ...(e.body as OpenItemBody), revision: e.revision, answer: answers.get(e.key) ?? null }));
+  const sec = events.filter((e) => e.line === 'secretary');
+  return events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM).map((e) => {
+    const b = e.body as OpenItemBody;
+    const own = answers.get(e.key) ?? null;
+    const carried = own !== null || b.why !== 'deferred' ? null : appliedAnswer(sec, b.escalation);
+    const answer: OpenItemAnswerBody | null = own ?? (carried !== null && !carried.defer.includes(b.question) ? { id: b.id, by: carried.by as OpenItemAnswerBody['by'], answer: carried.text } : null);
+    return { ...b, revision: e.revision, answer };
+  });
+}
+
+/**
+ * 4.4 (F4): the text of an answer: its instructions; where there are none (a user's answer may give only
+ * the words it rests on), the user's cited words, quoted with the entry's id.
+ */
+export function answerText(d: Pick<DecisionBody, 'instructions' | 'by' | 'reason'>): string {
+  if (d.instructions.trim() !== '') return d.instructions;
+  const w = /^([\s\S]*) \((W-[0-9]+)\)\s*$/.exec(d.reason);
+  return w === null ? d.reason : `"${w[1]!.trim()}" (the user's words ${w[2]})`;
 }
 
 /**
@@ -76,19 +98,21 @@ export function openItemsOf(events: readonly Ev[]): OpenItem[] {
  * last round not rejected, else the Secretary's last round). Null: not carried out as an answer.
  */
 export function appliedAnswer(sec: readonly Ev[], escalation: string): { readonly text: string; readonly by: string; readonly defer: readonly number[] } | null {
-  const applied = sec.find((a) => a.event === 'applied' && a.key === escalation)?.body as { what?: { option?: string }; by?: string } | undefined;
+  const applied = sec.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === escalation)?.body as { what?: { option?: string }; by?: string } | undefined;
   if (applied?.what?.option !== 'answer') return null;
-  const answers = sec.filter((a) => (a.event === 'user-answer' && a.key === escalation) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === escalation && !sec.some((r) => r.event === 'pm-answer-rejected' && r.key === a.key)));
+  const answers = sec.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === escalation) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === escalation && !sec.some((r) => r.event === 'pm-answer-rejected' && r.key === a.key))));
   const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
   if (d?.option !== 'answer' || d.by !== applied.by) return null;
-  return { text: d.instructions, by: d.by, defer: d.defer ?? [] };
+  return { text: answerText(d), by: d.by, defer: d.defer ?? [] };
 }
 
 /**
  * Who answers an open item under F-3, as its escalation's class says: the PM when the PM or the user
- * decided the escalation or it was sent to them; otherwise the Secretary.
+ * decided the escalation or it was sent to them; otherwise the Secretary. `handedUp`: whether the
+ * Secretary's accepted hand-back of the escalation's current round sent it to the PM (the inbox's check,
+ * before a pass writes the decision event; process/openItems.ts reads it in the answer's write).
  */
-export function itemDecider(events: readonly Ev[], item: Pick<OpenItemBody, 'escalation'>): 'secretary' | 'pm' {
+export function itemDecider(events: readonly Ev[], item: Pick<OpenItemBody, 'escalation'>, handedUp: (escalation: string) => boolean = () => false): 'secretary' | 'pm' {
   const esc = item.escalation;
   const sec = events.filter((e) => e.line === 'secretary');
   const applied = sec.find((e) => e.event === 'applied' && e.key === esc)?.body as { by?: string } | undefined;
@@ -97,7 +121,20 @@ export function itemDecider(events: readonly Ev[], item: Pick<OpenItemBody, 'esc
   const sentUp = sec.some((e) =>
     (e.event === 'user-answer' && e.key === esc) || (e.event === 'to-user' && e.key === esc) ||
     ((e.event === 'pm-answer' || e.event === 'decision') && (e.body as DecisionBody).escalation === esc && (e.event === 'pm-answer' || ['needs-pm', 'needs-user'].includes((e.body as DecisionBody).classification))));
-  return sentUp ? 'pm' : 'secretary';
+  return sentUp || handedUp(esc) ? 'pm' : 'secretary';
+}
+
+/** 4.4 (F4; G5): the open items of a hand-back's "later" questions: recorded with the accepted hand-back, and again (the same ids and bodies) by the flow. */
+export function laterItemBodies(task: string, attempt: number, escalation: string, qs: ReadonlyArray<{ readonly text: string; readonly when: QuestionWhen }>): OpenItemBody[] {
+  return qs.flatMap((q, i) => (q.when !== 'later' ? [] : [{ id: openItemId(escalation, i + 1), kind: 'question' as const, text: q.text, task, attempt, escalation, question: i + 1, when: 'later' as const, why: 'later' as const }]));
+}
+
+/** 4.4 (F4; G5): the open items a decision puts off (`defer`): recorded with the decision, and again (the same ids and bodies) when it is carried out. */
+export function deferredItemBodies(e: Pick<EscalationBody, 'id' | 'source' | 'facts' | 'subject'>, defer: readonly number[]): OpenItemBody[] {
+  const task = e.subject.startsWith('task:') ? e.subject.slice('task:'.length) : null;
+  const attempt = ((e.facts ?? {}) as { attempt?: unknown }).attempt;
+  if (task === null || typeof attempt !== 'number' || defer.length === 0) return [];
+  return escalationQuestions(e).filter((q) => defer.includes(q.n) && q.when !== 'later').map((q) => ({ id: openItemId(e.id, q.n), kind: 'question' as const, text: q.text, task, attempt, escalation: e.id, question: q.n, when: q.when, why: 'deferred' as const }));
 }
 
 /** A Constructor's question as a card shows it. */
@@ -136,6 +173,12 @@ export function taskQuestions(events: readonly Ev[], task: string, attempt: numb
   const sec = events.filter((e) => e.line === 'secretary');
   const items = new Map(openItemsOf(events).filter((i) => i.task === task).map((i) => [`${i.escalation}#${i.question}`, i]));
   const out: TaskQuestion[] = [];
+  const shown = new Set<string>();
+  const ofItem = (i: OpenItem): TaskQuestion => {
+    shown.add(i.id);
+    const base = { escalation: i.escalation, n: i.question, attempt: i.attempt, text: i.text, when: i.when, item: i.id };
+    return i.answer !== null ? { ...base, state: 'answered', answer: i.answer.answer, by: i.answer.by } : { ...base, state: 'open' };
+  };
   for (const e of sec) {
     if (e.event !== 'escalation') continue;
     const esc = e.body as EscalationBody;
@@ -150,11 +193,13 @@ export function taskQuestions(events: readonly Ev[], task: string, attempt: numb
       const item = items.get(`${esc.id}#${q.n}`);
       if (item === undefined && k !== attempt) continue;
       const base = { escalation: esc.id, n: q.n, attempt: k, text: q.text, when: q.when };
-      if (item !== undefined) out.push(item.answer !== null ? { ...base, item: item.id, state: 'answered', answer: item.answer.answer, by: item.answer.by } : { ...base, item: item.id, state: 'open' });
+      if (item !== undefined) out.push(ofItem(item));
       else if (answer !== null) out.push({ ...base, state: 'answered', answer: answer.text, by: answer.by });
       // carried out otherwise (closed, re-planned): not a question of this card any more
       else if (!applied) out.push({ ...base, state: 'waiting' });
     }
   }
+  // 4.4 (F4, G5): an item with no escalation (a hand-back whose questions are all "later" raises none)
+  for (const i of items.values()) if (!shown.has(i.id)) out.push(ofItem(i));
   return out;
 }

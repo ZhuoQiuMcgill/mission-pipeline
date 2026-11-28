@@ -140,7 +140,7 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
       material('alignment', 'Alignment record (PM batches)', batches.map((b) => `${b.key}: user messages ${(b.body as { userWords: string[] }).userWords.join(', ') || 'none'}`).join('\n') || '(none)', 'record'),
       // 4.4 (F16, P5): a digest that can be read, in place of every event of the task line in full; the
       // constraints are on the card already and are not repeated here
-      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, task === undefined ? [] : openItemsOf(events).filter((i) => i.task === task.id && i.answer === null)), 'record'),
+      material('current-facts', 'Current escalation facts (a digest)', secretaryDigest(e, selectedItems, auths, task, taskLine, task === undefined ? [] : openItemsOf(events).filter((i) => i.task === task.id)), 'record'),
       ...(task === undefined ? [] : [material('task-line', `Task ${task.id}: its card and every event of its line, in full (not must-read)`, canonicalJson({ task, events: taskLine.map((x) => ({ event: x.event, key: x.key, body: x.body })) }), 'record', false)]),
     ],
   };
@@ -165,8 +165,8 @@ function secretaryDigest(e: EscalationBody, items: readonly CurrentItem[], auths
     ...(task === undefined ? [] : [
       `Task ${task.id} (${task.kind}): ${line(task.goal, 300)}`,
       section('Its standards', task.standards.map((s) => `[${s.id}] ${line(s.text, 300)}`)),
-      // 4.4 (F4; G5): a Constructor's question still open is listed on every card of its task
-      ...(open.length > 0 ? [section('Its open questions (open items)', open.map((i) => `[${i.id}] attempt ${i.attempt}, ${i.when}: ${line(i.text)}`))] : []),
+      // 4.4 (F4; G5): a Constructor's question left open is listed on every card of its task, and its answer on the next ones
+      ...(open.length > 0 ? [section('Its open items (questions left open, and their answers)', open.map((i) => `[${i.id}] attempt ${i.attempt}, ${i.when}: ${line(i.text)}${i.answer === null ? ': open' : `: answered by ${i.answer.by === 'pm' ? 'the PM' : i.answer.by === 'user' ? 'the user' : 'the Secretary'}: ${line(i.answer.answer, 300)}`}`))] : []),
       section(`Its line, one event each (in full: material task-line)`, taskLine.map((x) => `${x.event} ${x.key}: ${line(canonicalJson(x.body), 120)}`)),
     ]),
   ].join('\n\n');

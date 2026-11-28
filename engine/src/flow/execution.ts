@@ -42,7 +42,7 @@ import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskR
 import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVersionRecord, type ReviewContract } from '../common/records.ts';
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
-import { OPEN_ITEM, OPEN_ITEMS_LINE, cardQuestions, escalationQuestions, openItemId, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -68,7 +68,7 @@ import { attach, constructorClaims, pausedHandBack, previousHandBack, previousRe
 import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
-import type { FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
+import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
 import { isAskOption } from '../seat/cards/secretary.ts';
 import { grantForDecision, grantedAttempt, cancelSecretarySteps, carryGuard, carried, carryOut, closedEscalation, closing, commitCarrying, decisionFor, deciderOf, escalateToUser, escalation, isApplied, markApplied, openEscalations, raiseEscalation, rulingJudgmentId, type DecisionBody, type EscalationBody } from './secretary.ts';
@@ -168,6 +168,18 @@ const resumeTask = (mission: string, task: string, k: number, n: number): string
 /** 4.4 (F4): the Constructor step of attempt k now: the continuation of its last pause answered, else the attempt's first. */
 function constructorStep(ctx: FlowCtx, task: string, line: Line, k: number): string {
   return line.all<ResumedBody>('resumed').filter((r) => r.body.k === k).at(-1)?.body.step ?? conTask(ctx.mission, task, k);
+}
+
+/**
+ * 4.4 (F4): the escalation a Constructor step's questions go to: `cdec.<step>` with its product; for a
+ * stop to ask, `cblk.<the attempt's first step>.<n>`, its n-th pause (the pauses recorded before it, plus
+ * one). Pure, from the task line: the hand-back's write (process/seat.ts, its open items) and the flow agree.
+ */
+export function questionsEscalationOf(mission: string, task: string, events: Line['events'], step: string, k: number, blocked: boolean): string {
+  if (!blocked) return safeId(`cdec.${step}`);
+  const line = new Line(events);
+  const own = line.all<PausedBody>('paused').find((p) => p.body.step === step)?.body.n;
+  return safeId(`cblk.${conTask(mission, task, k)}.${own ?? line.all<PausedBody>('paused').filter((p) => p.body.k === k).length + 1}`);
 }
 
 /** The state of one task line, read once per pass. */
@@ -788,11 +800,15 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   if ((product.decisions ?? []).length > 0) {
     // 3.8: the Constructor's questions go to the Secretary (raised on every pass until it exists:
     // a crash after the product cannot lose them, code review r1 #14). 4.4 (F4): verification goes on, and
-    // the review waits while a before-review question is not answered and carried out (process/questions.ts);
-    // a "later" question is an open item from this write
+    // the review waits while a before-review question is not answered and carried out (process/questions.ts).
+    // A "later" question is an open item from the accepted hand-back (process/seat.ts), written here again
+    // when it is missing; questions that are all "later" raise no decision: nothing waits on them (G5)
     const qs = (product.decisions ?? []).map((text, i) => ({ text, when: product!.when?.[i] ?? 'before-review' as QuestionWhen }));
     const id = safeId(`cdec.${con}`);
-    await raiseEscalation(ctx, {
+    const later = await laterItems(ctx, t.id, k, id, qs);
+    if (!qs.some((q) => q.when === 'before-review')) {
+      if (later.length > 0) await commit(ctx, `flow:later-items:${ctx.mission}:${id}`, { events: later });
+    } else await raiseEscalation(ctx, {
       id,
       source: 'constructor-decision',
       lineage,
@@ -803,7 +819,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       items: t.requirementItems,
       facts: { task: t.id, attempt: k, questions: product.decisions, product: product.object, ...(product.when !== undefined ? { when: product.when } : {}) },
       handover: { from: con, objects: [product.object] },
-    }, laterItems(ctx, t.id, k, id, qs));
+    }, later);
   }
 
   // the program's verification runs (the only evidence): declared runs on a clean checkout of the candidate
@@ -883,10 +899,20 @@ async function commitVerified(ctx: FlowCtx, lineName: string, k: number, object:
   }
 }
 
-/** 4.4 (F4; G5): the open items a hand-back's "later" questions are from the write that raises their escalation. */
-function laterItems(ctx: FlowCtx, task: string, k: number, escalation: string, qs: ReadonlyArray<{ readonly text: string; readonly when: QuestionWhen }>): FlowEventInput[] {
-  return qs.flatMap((q, i) => (q.when !== 'later' ? [] : [ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, openItemId(escalation, i + 1), { id: openItemId(escalation, i + 1), kind: 'question', text: q.text, task, attempt: k, escalation, question: i + 1, when: 'later', why: 'later' } satisfies OpenItemBody)]));
+/** 4.4 (F4; G5): open-item events not recorded yet (an item is recorded with the decision or hand-back that makes it; a pass writes the same one again only when it is missing). */
+async function missingItems(ctx: FlowCtx, bodies: readonly OpenItemBody[]): Promise<FlowEventInput[]> {
+  if (bodies.length === 0) return [];
+  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  return bodies.filter((b) => !existing.has(b.id)).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
 }
+
+/** 4.4 (F4; G5): a hand-back's "later" questions as open items (recorded with the accepted hand-back; here when missing). */
+function laterItems(ctx: FlowCtx, task: string, k: number, escalation: string, qs: ReadonlyArray<{ readonly text: string; readonly when: QuestionWhen }>): Promise<FlowEventInput[]> {
+  return missingItems(ctx, laterItemBodies(task, k, escalation, qs));
+}
+
+/** 4.4 (F4): the guard of a write that pauses or resumes attempt k: it is still the task's current attempt (no next attempt was started meanwhile). */
+const attemptCurrent = (ctx: FlowCtx, task: string, k: number): AppendGuard['absent'][number] => ({ mission: ctx.mission, line: taskLine(task), event: 'rework', key: String(k + 1) });
 
 /** How many pauses of one attempt are accepted before the Secretary is told (4.4, F4: a third is accepted too). */
 export const PAUSES_TOLD = 3;
@@ -904,7 +930,7 @@ async function pause(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, con: 
   if (line.all<PausedBody>('paused').some((p) => p.body.step === con)) return;
   if (hb.candidate === null) return internalError(ctx, con, `the blocked hand-back of ${con} has no parked commit`);
   const n = line.all<PausedBody>('paused').filter((p) => p.body.k === k).length + 1;
-  const id = safeId(`cblk.${conTask(ctx.mission, t.id, k)}.${n}`);
+  const id = questionsEscalationOf(ctx.mission, t.id, line.events, con, k, true);
   const qs = constructorQuestions(hb.result as ConstructorResult);
   const parked = hb.candidate.commit;
   // told before the write, so a crash after it cannot lose the notice (a notice is raised once by its key)
@@ -930,7 +956,9 @@ async function pause(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, con: 
     items: t.requirementItems,
     facts: { task: t.id, attempt: k, pause: n, blocked: true, parked, questions: qs.map((q) => q.text), ...(qs.some((q) => q.when === 'later') ? { when: qs.map((q) => q.when) } : {}) },
     handover: { from: con, objects: [] },
-  }, [ev(ctx, taskLine(t.id), 'paused', `${k}#${n}`, paused), ...laterItems(ctx, t.id, k, id, qs)]);
+  }, [ev(ctx, taskLine(t.id), 'paused', `${k}#${n}`, paused), ...await laterItems(ctx, t.id, k, id, qs)],
+  // the attempt is still current inside the write: a pass that started the next attempt meanwhile wins, and nothing is paused
+  { absent: [attemptCurrent(ctx, t.id, k)], code: 'STALE_REQUEST', message: `task ${t.id} moved past attempt ${k} meanwhile; its pause is not recorded (the next pass reads it again)` });
 }
 
 /**
@@ -943,10 +971,8 @@ async function answerQuestions(ctx: FlowCtx, t: DetailedTask, line: Line, e: Esc
   if (await isApplied(ctx, e.id)) return;
   const facts = (e.facts ?? {}) as { attempt?: number; pause?: number; blocked?: boolean };
   const k = facts.attempt ?? line.k;
-  const deferred = new Set(d.defer ?? []);
-  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
-  const items = escalationQuestions(e).filter((q) => (q.when === 'later' || deferred.has(q.n)) && !existing.has(openItemId(e.id, q.n))).map((q) =>
-    ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, openItemId(e.id, q.n), { id: openItemId(e.id, q.n), kind: 'question', text: q.text, task: t.id, attempt: k, escalation: e.id, question: q.n, when: q.when, why: q.when === 'later' ? 'later' : 'deferred' } satisfies OpenItemBody));
+  // the items it makes are recorded with the decision and the hand-back (flow/secretary.ts, process/seat.ts); written here when missing
+  const items = await missingItems(ctx, [...laterItemBodies(t.id, k, e.id, escalationQuestions(e)), ...deferredItemBodies(e, d.defer ?? [])]);
   const n = facts.blocked === true && typeof facts.pause === 'number' && line.k === k ? facts.pause : null;
   const resume = n === null || line.one('resumed', `${k}#${n}`) !== null ? [] : [ev(ctx, taskLine(t.id), 'resumed', `${k}#${n}`, { k, n, step: resumeTask(ctx.mission, t.id, k, n), escalation: e.id } satisfies ResumedBody)];
   const carry = await carryOut(ctx, e.id, { option: 'answer' });
@@ -954,7 +980,8 @@ async function answerQuestions(ctx: FlowCtx, t: DetailedTask, line: Line, e: Esc
   await commit(ctx, `flow:answer:${ctx.mission}:${e.id}`, {
     events: [...items, ...resume, ...carry.events],
     records: carry.records,
-    guard: { ...guard, absent: [...guard.absent, ...(resume.length > 0 ? [{ mission: ctx.mission, line: taskLine(t.id), event: 'resumed', key: `${k}#${n}` }] : [])] },
+    // a resume needs the attempt still current inside the write (p8-6)
+    guard: { ...guard, absent: [...guard.absent, ...(resume.length > 0 ? [{ mission: ctx.mission, line: taskLine(t.id), event: 'resumed', key: `${k}#${n}` }, attemptCurrent(ctx, t.id, k)] : [])] },
   });
   await carried(ctx, [carry]);
 }
@@ -2251,6 +2278,13 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   if (e.source === 'needs-disposition' || (e.source === 'loop-exhausted' && facts.loop !== undefined && facts.loop !== 'rework')) return false;
   // 4.4 (F4): a Constructor's questions with its product do not hold the task (its review waits: process/questions.ts); a pause does
   const blocking = e.source !== 'constructor-decision' || (e.facts as { blocked?: unknown } | undefined)?.blocked === true;
+  // 4.4 (F4, p8-6): a pause of an attempt the task has moved past (a pass started the next attempt while another
+  // wrote the pause) blocks nothing and takes no decision: it is closed. Attempts only grow, so the read is safe.
+  const pausedAt = (e.facts ?? {}) as { blocked?: unknown; attempt?: unknown };
+  if (e.source === 'constructor-decision' && pausedAt.blocked === true && typeof pausedAt.attempt === 'number' && pausedAt.attempt < line.k) {
+    await commitCarrying(ctx, `flow:pause-superseded:${ctx.mission}:${e.id}`, [], [closing(ctx, [e.id], `task ${t.id} moved past attempt ${pausedAt.attempt}: the pause of that attempt is moot`)], [e.id]);
+    return false;
+  }
   const d = await decisionFor(ctx, e.id);
   // #57: an open loop-exhausted escalation that a failed re-bind review raised before accept-risk was offered there
   // (undecided, or waiting for the PM or the user) is closed as superseded; this pass's re-bind step raises a fresh

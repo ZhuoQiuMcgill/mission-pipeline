@@ -13,7 +13,7 @@ import { runCli } from '../src/cli/main.ts';
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { pmDispatch } from '../src/process/pm.ts';
 import { secNext } from '../src/process/secretary.ts';
-import { addDetailedPlan, ENV_A, readAll, readyOf, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
+import { addDetailedPlan, ENV_A, readAll, readyOf, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 import { command43, done43, live43, project43, secretary43 } from './p43-fixtures.ts';
 import { constructorAsks, liveWithEscalation } from './p44-decision-fixtures.ts';
 
@@ -112,6 +112,21 @@ test('a blocked hand-back through mp seat says what it handed in is a parked com
     assert.match(r.out, /Parked commit \(your edits so far, not a product\) [0-9a-f]{40} on base [0-9a-f]{40}: src\/add\.js/);
     assert.match(r.out, /You stopped to ask: your edits are kept as commit [0-9a-f]{40}\. It is not a product: nothing is verified or reviewed\./);
     assert.doesNotMatch(r.out, /Verification /);
+  } finally { p.cleanup(); }
+});
+
+test('p8-7: questions that are all later raise no decision: with the task accepted, the PM is told that all tasks are accepted, the item open or answered', async () => {
+  const p = project43();
+  try {
+    const item = 'cdec.con.m1.impl.1.q1';
+    await constructorAsks(p, [{ question: 'Is a BOM kept?', when: 'later' }] as never);
+    assert.deepEqual((await done43(p, ['read', 'open-items', 'm1'])).items.map((i: any) => [i.id, i.answer]), [[item, null]]);
+    await step(p.ctx, 'reviewer', (c) => reviewerPass(c));
+    const id = await live43(p);
+    const ended = (items: any[]): boolean => items.some((i) => String(i.id).startsWith('mission-end:m1:'));
+    assert.ok(ended((await done43(p, ['pm', 'inbox'])).items), 'an open later question holds no completion');
+    await done43(p, ['sec', 'open-item', 'answer', item, '--answer', 'The BOM is dropped.'], id);
+    assert.ok(ended((await done43(p, ['pm', 'inbox'])).items));
   } finally { p.cleanup(); }
 });
 

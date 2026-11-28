@@ -10,8 +10,12 @@ import type { ContentHash, MissionId } from '../common/ids.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, OPEN_ITEM_ANSWER, itemDecider, openItemsOf, type OpenItem, type OpenItemAnswerBody } from '../flow/openItems.ts';
 import { appendRecords, flowEventExists, flowEvents, flowMissions, type Db } from '../memory/index.ts';
 import { requireSecretary } from '../memory/resident.ts';
+import type { EscalationBody } from '../flow/secretary.ts';
+import { secretaryRoundInputs } from '../seat/cards/dynamic.ts';
+import { isAskOption } from '../seat/cards/secretary.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
+import { handedBackResult } from './secretary.ts';
 
 export interface OpenItemView extends OpenItem {
   readonly mission: string;
@@ -35,7 +39,15 @@ function linesOf(db: Db, data: { text(h: string): string }, mission: string) {
 
 function viewsOf(db: Db, data: { text(h: string): string }, mission: string): OpenItemView[] {
   const events = linesOf(db, data, mission);
-  return openItemsOf(events).map((i) => ({ ...i, mission, decider: itemDecider(events, i) }));
+  // 4.4 (F4, p8-4): an escalation the Secretary's accepted hand-back sends to the PM is the PM's from that
+  // hand-back, before a pass writes its decision: the inbox's check, read in the same snapshot or write
+  const handedUp = (escalation: string): boolean => {
+    const e = events.find((x) => x.line === 'secretary' && x.event === 'escalation' && x.key === escalation);
+    if (e === undefined) return false;
+    const r = handedBackResult(db, data, secretaryRoundInputs(e.body as EscalationBody, events as never).esc.task);
+    return r !== undefined && (r.classification === 'needs-pm' || r.classification === 'needs-user' || isAskOption(r.option));
+  };
+  return openItemsOf(events).map((i) => ({ ...i, mission, decider: itemDecider(events, i, handedUp) }));
 }
 
 /** `mp read open-items <mission>`: every open item of the mission, oldest first, with its state and its decider (one read). */
@@ -76,7 +88,7 @@ export function answerOpenItem(ctx: ProcessContext, req: { readonly op: string; 
     if (item === undefined) throw new ProcessError('NOT_READY', `no open item ${at.id} in mission ${at.mission} (mp read open-items ${at.mission} lists them)`);
     if (item.answer !== null) {
       if (item.answer.answer === req.answer && item.answer.by === req.by) return { mission: at.mission, item, repeated: true };
-      throw new ProcessError('NOT_ALLOWED', `open item ${at.id} was answered already by ${item.answer.by === 'pm' ? 'the PM' : 'the Secretary'}: ${item.answer.answer}`);
+      throw new ProcessError('NOT_ALLOWED', `open item ${at.id} was answered already by ${item.answer.by === 'pm' ? 'the PM' : item.answer.by === 'user' ? 'the user' : 'the Secretary'}: ${item.answer.answer}`);
     }
     // F-3: the Secretary answers within the plan; an item of the PM's class is the PM's
     if (req.by === 'secretary' && item.decider === 'pm') throw new ProcessError('NOT_ALLOWED', `open item ${at.id} is the PM's: its escalation ${item.escalation} went to the PM or the user. The PM answers it with mp pm open-item answer ${at.mission}/${at.id}`);

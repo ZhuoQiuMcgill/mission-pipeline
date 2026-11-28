@@ -67,7 +67,9 @@ import { handBackDataTexts, handBackProblems, handBackRecords, seatCardEntry } f
 import { dataPaths, recordedData, type DataChecks, type RecordedData } from '../seat/cards/experiment.ts';
 import { checkDataFiles } from '../common/dataFile.ts';
 import { explorationCardAtHandBack } from './explorationSnapshot.ts';
-import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
+import { citedEvidence, constructorQuestions, findingRecords, judgmentRecord, type ConstructorResult, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE, deferredItemBodies, laterItemBodies, type OpenItemBody } from '../flow/openItems.ts';
+import type { EscalationBody } from '../flow/secretary.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
 import { anchorCommit, productObjectId, verificationStopped } from './actions.ts';
 import type { ProcessContext } from './context.ts';
@@ -80,7 +82,7 @@ import { requestExecutor } from '../flow/exploration/cards.ts';
 import { explorationLine } from '../flow/plandoc.ts';
 import { passingFullRunEvidence, runFullSuite, suiteHash, treeOf, type FullRunMarker } from './fullRuns.ts';
 import { tagScope } from '../delivery/scope.ts';
-import { pathOwners } from '../flow/execution.ts';
+import { pathOwners, questionsEscalationOf } from '../flow/execution.ts';
 import { flowCtx } from '../flow/context.ts';
 import { advance } from './advance.ts';
 import { lateForClose, takeBackForClose } from './close.ts';
@@ -794,6 +796,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     };
     const r = recordHandback(tx, { dispatch, report: input.report, result: doc, filler: input.filler ?? null });
     if (r.accepted && kept.length > 0) appendRecords(tx, kept);
+    // 4.4 (F4; G5): a question raised as later, or put off by an answer, is an open item from this write
+    if (r.accepted) appendRecords(tx, questionItems(tx, v, input.fields));
     return { outcome: r.outcome, accepted: r.accepted, report: r.report, closed: close !== null, moot: moot ?? mootBefore };
   });
   const notes: string[] = out.closed ? [`mission ${v.info.mission} closed before this hand-back: it is recorded, not accepted; the step waits until the mission is opened again`] : [];
@@ -850,6 +854,38 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
     if (v.card.seat === 'secretary' && out.accepted && typeof escalation === 'string') decision = ctx.memory.read((db) => decisionOutcome(db, data, { mission: v.info.mission, escalation, task: v.info.task, fields: input.fields, why }));
   }
   return { kind: 'recorded', dispatch, outcome: out.outcome, repeated: false, report: out.report, candidate, verification, notes, ...(parked ? { parked: true as const } : {}), ...(decision !== undefined ? { decision } : {}) };
+}
+
+/**
+ * 4.4 (F4; PM design G5): the open items an accepted hand-back makes, in its own write: a Constructor's
+ * questions raised as "later", and the questions a Secretary's answer puts off (`defer`). Their ids and
+ * bodies are the flow's (flow/openItems.ts), so its pass writes one again only when it is missing.
+ */
+function questionItems(tx: WriteTx, v: DispatchView, fields: unknown): BaseRecord[] {
+  const mission = v.info.mission;
+  const parse = (h: string): unknown => JSON.parse(tx.data.text(h));
+  let bodies: OpenItemBody[] = [];
+  if (v.card.seat === 'constructor') {
+    const r = fields as ConstructorResult;
+    const qs = constructorQuestions(r);
+    if (!qs.some((q) => q.when === 'later')) return [];
+    const row = tx.stmt("SELECT line, body FROM flow_events WHERE mission = ? AND event = 'dispatched' AND key = ? AND line LIKE 'task:%' ORDER BY revision LIMIT 1").get(mission, v.info.task) as { line: string; body: string } | undefined;
+    const k = row === undefined ? undefined : (parse(row.body) as { k?: unknown }).k;
+    if (row === undefined || typeof k !== 'number') return [];
+    const paused = flowEvents(tx, { mission, line: row.line, event: 'paused', limit: 10_000 }).map((e) => ({ revision: Number(e.revision), event: e.event, key: e.key, body: parse(e.body) }));
+    const task = row.line.slice('task:'.length);
+    bodies = laterItemBodies(task, k, questionsEscalationOf(mission, task, paused, v.info.task, k, r.blocked === true), qs);
+  } else if (v.card.seat === 'secretary') {
+    const r = fields as { option?: unknown; defer?: unknown };
+    const id = (v.card as { request?: { id?: unknown } }).request?.id;
+    if (r.option !== 'answer' || !Array.isArray(r.defer) || r.defer.length === 0 || typeof id !== 'string') return [];
+    const e = tx.stmt("SELECT body FROM flow_events WHERE mission = ? AND line = ? AND event = 'escalation' AND key = ?").get(mission, SECRETARY_LINE, id) as { body: string } | undefined;
+    if (e === undefined) return [];
+    bodies = deferredItemBodies(parse(e.body) as EscalationBody, r.defer as number[]);
+  }
+  return bodies
+    .filter((b) => !flowEventExists(tx, { mission, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id }))
+    .map((b) => ({ kind: 'flow.event' as const, mission, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash }));
 }
 
 /**

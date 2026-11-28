@@ -210,7 +210,7 @@ const openItemsRead: Command = {
   async run(c, a) {
     const m = positional(a, 0, 'mission');
     const items = listOpenItems(P(c).ctx, m);
-    const who = (x: 'secretary' | 'pm'): string => (x === 'pm' ? 'the PM' : 'the Secretary');
+    const who = (x: 'secretary' | 'pm' | 'user'): string => (x === 'pm' ? 'the PM' : x === 'user' ? 'the user' : 'the Secretary');
     const lines = items.map((i) => `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt}, ${i.why === 'later' ? 'raised as later' : 'put off by its answer'}): ${i.answer === null ? `open; ${who(i.decider)} answers it` : `answered by ${who(i.answer.by)}${i.answer.words !== undefined ? ` on ${i.answer.words}` : ''}`}\n  ${i.text}${i.answer !== null ? `\n  Answer: ${i.answer.answer}` : ''}`);
     const open = items.filter((i) => i.answer === null).length;
     return ok(items.length === 0 ? `Mission ${m} has no open items.` : [`Open items of mission ${m}: ${open} open, ${items.length - open} answered`, ...lines].join('\n'), {mission: m, items});

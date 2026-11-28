@@ -15,8 +15,8 @@ import { flowCtx } from '../src/flow/context.ts';
 import { openItemsOf, taskQuestions } from '../src/flow/openItems.ts';
 import type { FlowEvent, FlowTask } from '../src/flow/ports.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
-import { constructorDone, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
-import { escalation, raiseEscalation, secretaryOptions } from '../src/flow/secretary.ts';
+import { architect, constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
+import { answerEscalation, escalation, raiseEscalation, secretaryOptions } from '../src/flow/secretary.ts';
 import { heldForQuestions } from '../src/process/questions.ts';
 import { pmDispatch, readSteps } from '../src/process/pm.ts';
 import { REDISPATCH_LOOP } from '../src/process/index.ts';
@@ -182,44 +182,58 @@ describe('4.4 F4: a review waits for the answer to its Constructor\'s questions'
     assert.ok(all.some((e) => e.line === 'task:impl' && e.event === 'accepted'));
   });
 
-  it('a question raised as later does not hold the review: it is an open item, listed on the cards until its decider answers it, and the answer reaches the next card', async () => {
+  it('questions that are all "later" raise no decision and hold no review: open items from the hand-back, on every card of the task, their answers on the next ones (p8-3, p8-7, p8-8)', async () => {
     const { ports, engine } = await setup();
-    let reviews = 0;
+    await drive(engine, ports.scheduler, withKinds({ constructor: (t: FlowTask) => (t.task === 'con.m1.impl.1' ? null : { handBack: constructorDone() }) }));
+    await ports.scheduler.run('con.m1.impl.1', { handBack: constructorDone({ decisions_needed: [{ question: 'Is a BOM kept?', when: 'later' }] }) });
+    const item = 'cdec.con.m1.impl.1.q1';
+    assert.deepEqual(listOpenItems(ports.ctx, M).map((i) => [i.id, i.why, i.decider]), [[item, 'later', 'secretary']], 'an open item from the hand-back\'s write, before any pass');
+    let reviewed = false;
     await drive(engine, ports.scheduler, withKinds({
       secretary: () => null,
+      constructor: () => null,
       reviewer: (t) => {
         const c = t.card as unknown as ReviewerCard;
         if (!c.target.includes('impl')) return { handBack: reviewer(c, 'pass') };
-        if (reviews > 0) return null;
-        reviews++;
-        return { handBack: reviewer(c, 'rework', { failing: 'S1' }) };
+        if (reviewed) return null;
+        reviewed = true;
+        return { handBack: reviewer(c, 'needs-decision') };
       },
-      constructor: (t: FlowTask) => (t.task === 'con.m1.impl.2' ? null : { handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: [{ question: 'Is a BOM kept?', when: 'later' }] } : {}) }),
     }));
-    const item = 'cdec.con.m1.impl.1.q1';
-    assert.equal(reviews, 1, 'the review ran while the later question was open');
+    assert.ok(!(await events(ports, { line: 'secretary', event: 'escalation' })).some((e) => e.key.startsWith('cdec.')), 'no decision is raised: nothing waits on a later question');
+    assert.ok(reviewed, 'the review ran while the later question was open');
     assert.deepEqual(claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1').questions?.map((q) => [q.id, q.state]), [[item, 'open']]);
-    assert.deepEqual(ports.scheduler.card<ConstructorCard>('con.m1.impl.2').questions?.map((q) => [q.id, q.state]), [[item, 'open']], 'listed on the next attempt\'s card');
-    const facts = ports.scheduler.card<SecretaryCard>('sec.cdec.con.m1.impl.1').materials.find((m) => m.id === 'current-facts')!;
-    assert.ok(ports.ledger.content.get(facts.ref as never).includes(`Its open questions (open items):\n- [${item}] attempt 1, later: Is a BOM kept?`), 'and on the Secretary\'s card of the task');
-    // the Secretary answers it (the escalation is undecided: the item is the Secretary's)
+    // a Secretary card of the task (the Reviewer's needs-decision) lists it
+    const sec = 'sec.rnd.rev.m1.impl.1';
+    const digest = (c: SecretaryCard): string => ports.ledger.content.get(c.materials.find((m) => m.id === 'current-facts')!.ref as never);
+    assert.ok(digest(ports.scheduler.card<SecretaryCard>(sec)).includes(`Its open items (questions left open, and their answers):\n- [${item}] attempt 1, later: Is a BOM kept?: open`));
+    // the Secretary answers it (no escalation: the item is the Secretary's)
     const a = answerOpenItem(ports.ctx, { op: 't1', ref: item, by: 'secretary', answer: 'The BOM is dropped.' });
     assert.equal(a.repeated, false);
     assert.equal(answerOpenItem(ports.ctx, { op: 't2', ref: `${M}/${item}`, by: 'secretary', answer: 'The BOM is dropped.' }).repeated, true, 'the same answer again is a no-op');
     assert.throws(() => answerOpenItem(ports.ctx, { op: 't3', ref: item, by: 'pm', answer: 'Keep it.' }), /answered already/);
     assert.deepEqual(listOpenItems(ports.ctx, M).map((i) => [i.id, i.answer?.answer ?? null, i.decider]), [[item, 'The BOM is dropped.', 'secretary']]);
-    // the next card claimed carries the answer (refreshed at its claim)
+    // the next Secretary card of the task carries the answer and who gave it (p8-8)
+    pmDispatch(ports.ctx, sec, { filledBy: 'test/scripted' });
+    assert.ok(digest(claimedCard<SecretaryCard>(ports, sec)).includes(`- [${item}] attempt 1, later: Is a BOM kept?: answered by the Secretary: The BOM is dropped.`));
+    await ports.scheduler.run(sec, { handBack: secretary(claimedCard<SecretaryCard>(ports, sec), 'rework', { instructions: 'Quote fields with commas.' }) });
+    await drive(engine, ports.scheduler, withKinds({ constructor: () => null, secretary: () => null }));
+    // and the next Constructor card (refreshed at its claim)
     const d = pmDispatch(ports.ctx, 'con.m1.impl.2', { filledBy: 'test/scripted' });
     assert.ok(d.card.includes(`[${item}] attempt 1, later: Is a BOM kept?\n  Answered by the Secretary: The BOM is dropped.`), d.card);
   });
 
-  it('an answer may put a question off: it becomes an open item at once, the review goes on, and the PM may answer it later', async () => {
+  it('an answer may put a question off: it becomes an open item with the decision that defers it (p8-3), the review goes on, and the PM may answer it later', async () => {
     const { ports, engine } = await setup();
     await drive(engine, ports.scheduler, withKinds({
       constructor: (t: FlowTask) => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: ['Which quote character?', 'Which licence header?'] } : {}) }),
-      secretary: answers((c) => c.request.source === 'constructor-decision', 'Use double quotes.', { defer: [2] }),
+      secretary: () => null,
     }));
     const id = 'cdec.con.m1.impl.1';
+    // the Secretary's decision hand-back records the item in its own write, before any pass
+    await ports.scheduler.run(`sec.${id}`, { handBack: { ...secretary(ports.scheduler.card<SecretaryCard>(`sec.${id}`), 'answer', { instructions: 'Use double quotes.' }), defer: [2] } });
+    assert.deepEqual(listOpenItems(ports.ctx, M).map((i) => [i.id, i.why, i.answer]), [[`${id}.q2`, 'deferred', null]]);
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null }));
     assert.deepEqual(openItemsOf(await events(ports)).map((i) => [i.id, i.why, i.question]), [[`${id}.q2`, 'deferred', 2]]);
     const rev = claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1');
     assert.deepEqual(rev.questions?.map((q) => [q.id, q.state, q.answer ?? null]), [[`${id}#1`, 'answered', 'Use double quotes.'], [`${id}.q2`, 'open', null]]);
@@ -248,5 +262,127 @@ describe('4.4 F4: a review waits for the answer to its Constructor\'s questions'
     assert.deepEqual(secretaryProblems(card, { ...base, option: 'answer', defer: [2] }, new Set()), []);
     assert.ok(secretaryProblems(card, { ...base, option: 'answer', defer: [3] }, new Set()).some((p) => p.startsWith('defer: name questions')));
     assert.ok(secretaryProblems(card, { ...base, option: 'replan', defer: [1] }, new Set()).some((p) => p.startsWith('defer: only')));
+  });
+});
+
+/** The impl task's Constructor hands back with `questions`; the Secretary step of its escalation is left queued. */
+async function asks(questions: ConstructorResult['decisions_needed'], o: { blocked?: boolean } = {}): Promise<{ ports: World; engine: FlowEngine }> {
+  const w = await setup();
+  await drive(w.engine, w.ports.scheduler, withKinds({
+    constructor: (t: FlowTask) => ({ handBack: t.task === 'con.m1.impl.1' ? (o.blocked === true ? blocked(questions) : constructorDone({ decisions_needed: questions })) : constructorDone() }),
+    secretary: () => null,
+  }));
+  return w;
+}
+
+describe('4.4 F4, review round 1', () => {
+  it('p8-1: a re-plan carries the question out with no answer: the old review stays held, in the ready list and in the claim, until the re-plan retires it', async () => {
+    const { ports, engine } = await asks(['Should empty lines be skipped?']);
+    const id = 'cdec.con.m1.impl.1';
+    const firstPlan = detailedPlan(M);
+    // the Secretary re-plans; the Architect's new decomposition is left queued (the window)
+    await drive(engine, ports.scheduler, withKinds({
+      secretary: (t) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'replan', { instructions: 'stream the input' }) }),
+      'architect-decompose': () => null,
+    }));
+    assert.equal(((await events(ports, { line: 'secretary', event: 'applied' })).find((e) => e.key === id)?.body as { what: { option: string } }).what.option, 'replan');
+    assert.ok(ports.scheduler.heldQueued().some((h) => h.task === 'rev.m1.impl.1'), 'the old review is still queued, and held');
+    const held = readSteps(ports.ctx).held.find((h) => h.step === 'rev.m1.impl.1');
+    assert.match(held?.why ?? '', /escalation cdec\.con\.m1\.impl\.1 was carried out without an answer \(replan\): the review waits until that work retires it/);
+    assert.throws(() => pmDispatch(ports.ctx, 'rev.m1.impl.1', { filledBy: 'test/scripted' }), (e: Error & { code?: string }) => e.code === 'NOT_READY' && e.message.includes(id));
+    // the new plan changes the card: the old review is cancelled, the next attempt starts
+    await drive(engine, ports.scheduler, withKinds({
+      'architect-decompose': () => ({ handBack: architect({ ...firstPlan, tasks: firstPlan.tasks.map((t) => (t.id === 'impl' ? { ...t, goal: 'Implement the parser, streaming' } : t)) }) }),
+      constructor: () => null,
+    }));
+    assert.notEqual(ports.scheduler.tasks.get('rev.m1.impl.1')?.state, 'queued', 'retired by the re-plan');
+    assert.ok(ports.scheduler.queued('constructor').some((t) => t.task === 'con.m1.impl.2'));
+    assert.equal(ports.ctx.memory.read((db) => db.stmt("SELECT COUNT(*) AS n FROM dispatches WHERE task = 'rev.m1.impl.1'").get() as { n: number }).n, 0, 'the old review was never claimed');
+  });
+
+  it('p8-2: a user\'s answer with no instructions shows the user\'s cited words, on the resumed Constructor\'s card and on the Reviewer\'s', async () => {
+    const { ports, engine } = await asks(['Which separator?'], { blocked: true });
+    const id = 'cdec.con.m1.impl.1';
+    void id;
+    await answerEscalation(ports, { mission: M, escalation: 'cblk.con.m1.impl.1.1', option: 'answer', words: `${SEED_TEXT} (W-1)` });
+    await drive(engine, ports.scheduler, withKinds({ constructor: (t: FlowTask) => (t.task === 'con.m1.impl.1.p1' ? null : { handBack: constructorDone() }) }));
+    const expected = `"${SEED_TEXT}" (the user's words W-1)`;
+    const d = pmDispatch(ports.ctx, 'con.m1.impl.1.p1', { filledBy: 'test/scripted' });
+    assert.ok(d.card.includes(`[cblk.con.m1.impl.1.1#1] attempt 1, before-review: Which separator?\n  Answered by the user: ${expected}`), d.card);
+    await ports.scheduler.run('con.m1.impl.1.p1', { handBack: constructorDone() });
+    await drive(engine, ports.scheduler, happyScript(M));
+    assert.deepEqual(claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1').questions?.map((q) => [q.state, q.by, q.answer]), [['answered', 'user', expected]]);
+  });
+
+  it('p8-3: a user\'s answer that puts a question off records the open item in its own write', async () => {
+    const { ports } = await asks(['Which quote character?', 'Which licence header?']);
+    await answerEscalation(ports, { mission: M, escalation: 'cdec.con.m1.impl.1', option: 'answer', instructions: 'Double quotes.', defer: [2], words: `${SEED_TEXT} (W-1)` });
+    assert.deepEqual(listOpenItems(ports.ctx, M).map((i) => [i.id, i.why, i.answer, i.decider]), [['cdec.con.m1.impl.1.q2', 'deferred', null, 'pm']], 'listed before any pass, the PM\'s (the user answered)');
+  });
+
+  it('p8-4: once the Secretary\'s accepted hand-back sends the escalation to the PM, its open items are the PM\'s, before any pass records the decision', async () => {
+    const { ports } = await asks(['Which quote character?', { question: 'Which licence header?', when: 'later' }]);
+    const id = 'cdec.con.m1.impl.1';
+    await ports.scheduler.run(`sec.${id}`, { handBack: secretary(ports.scheduler.card<SecretaryCard>(`sec.${id}`), 'ask-user') });
+    assert.equal((await events(ports, { line: 'secretary', event: 'decision' })).length, 0, 'no pass has recorded the decision');
+    assert.throws(() => answerOpenItem(ports.ctx, { op: 's1', ref: `${id}.q2`, by: 'secretary', answer: 'MIT.' }), /is the PM's/);
+    assert.equal(answerOpenItem(ports.ctx, { op: 'p1', ref: `${id}.q2`, by: 'pm', answer: 'MIT.' }).item.answer?.by, 'pm');
+  });
+
+  it('p8-5: upgrade: a product accepted at a later attempt (a 4.3 ruling adopting it) holds none of its reviews on the question 4.3 left open', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({
+      constructor: (t: FlowTask) => (t.task === 'con.m1.impl.2' ? null : { handBack: constructorDone() }),
+      reviewer: (t) => {
+        const c = t.card as unknown as ReviewerCard;
+        return { handBack: reviewer(c, c.target.includes('impl') ? 'rework' : 'pass', { failing: 'S1' }) };
+      },
+    }));
+    // attempt 1's product, not accepted at attempt 1; a ruling of 4.3 adopted it at attempt 2
+    assert.equal((await events(ports, { line: 'task:impl', event: 'accepted' })).length, 0);
+    const product = (await events(ports, { line: 'task:impl', event: 'product' }))[0]!.body as { object: string };
+    await ports.ledger.append('test:adopted-at-2', { events: [{ mission: M, line: 'task:impl', event: 'accepted', key: '2', body: { k: 2, product: product.object, judgment: 'j.sec.x' } }] });
+    await raiseEscalation(flowCtx(ports, M), { id: 'cdec.con.m1.impl.1', source: 'constructor-decision', lineage: 'task.m1.impl', subject: 'task:impl', summary: 'questions', reasons: ['left open?'], options: ['answer', 'replan', 'ask-user'], facts: { task: 'impl', attempt: 1, questions: ['left open?'], product: product.object } });
+    const spec = { mission: M, lineage: 'task.m1.impl', card: { seat: 'reviewer', target: product.object } } as never;
+    assert.equal(ports.ctx.memory.read((db) => heldForQuestions(db, ports.ctx.memory.data, spec)), null);
+  });
+
+  it('p8-6: a pause written while another pass started the next attempt is not recorded; the next attempt goes on', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({ constructor: (t: FlowTask) => (t.task === 'con.m1.impl.1' ? null : { handBack: constructorDone() }) }));
+    await ports.scheduler.run('con.m1.impl.1', { handBack: blocked(['Which separator?']) });
+    const next = { mission: M, line: 'task:impl', event: 'rework', key: '2', body: { k: 2, reason: 'respec', issues: [], instructions: ['a repair changed the card'] } };
+    const append = ports.ledger.append.bind(ports.ledger);
+    let raced = false;
+    ports.ledger.append = async (op, entries) => {
+      // another pass starts attempt 2 just before this pass writes the pause
+      if (!raced && op.startsWith(`flow:escalation:${M}:cblk.`)) {
+        raced = true;
+        await append('test:other-pass', { events: [next] });
+      }
+      return append(op, entries);
+    };
+    const reports = await engine.reconcile(M);
+    ports.ledger.append = append;
+    assert.ok(raced);
+    assert.ok(reports[0]!.errors.some((e) => /moved past attempt 1/.test(e.message)), JSON.stringify(reports));
+    assert.equal((await events(ports, { line: 'task:impl', event: 'paused' })).length, 0, 'the pause is not recorded');
+    assert.ok(!(await events(ports, { line: 'secretary', event: 'escalation' })).some((e) => e.key.startsWith('cblk.')));
+    await drive(engine, ports.scheduler, withKinds({ constructor: () => null }));
+    assert.ok(ports.scheduler.queued('constructor').some((t) => t.task === 'con.m1.impl.2'), 'attempt 2 goes on');
+  });
+
+  it('p8-6: a pause of an attempt the task moved past is closed, and blocks the next attempt no more', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({ constructor: (t: FlowTask) => (t.task === 'con.m1.impl.1' ? null : { handBack: constructorDone() }) }));
+    await ports.ledger.append('test:next-attempt', { events: [{ mission: M, line: 'task:impl', event: 'rework', key: '2', body: { k: 2, reason: 'respec', issues: [], instructions: ['a repair changed the card'] } }] });
+    // a pause of attempt 1 recorded anyway (as a pass without the attempt check wrote it)
+    const id = 'cblk.con.m1.impl.1.1';
+    await raiseEscalation(flowCtx(ports, M), { id, source: 'constructor-decision', lineage: 'task.m1.impl', subject: 'task:impl', summary: 'paused', reasons: ['Q1 (before-review): Which separator?'], options: ['answer', 'replan', 'ask-user'], facts: { task: 'impl', attempt: 1, pause: 1, blocked: true, parked: 'c'.repeat(40), questions: ['Which separator?'] } });
+    await drive(engine, ports.scheduler, withKinds({ constructor: () => null, secretary: () => null }));
+    const applied = (await events(ports, { line: 'secretary', event: 'applied' })).find((e) => e.key === id)?.body as { what?: { option?: string; why?: string } } | undefined;
+    assert.equal(applied?.what?.option, 'superseded');
+    assert.match(applied?.what?.why ?? '', /moved past attempt 1/);
+    assert.ok(ports.scheduler.queued('constructor').some((t) => t.task === 'con.m1.impl.2'), 'attempt 2 goes on');
   });
 });

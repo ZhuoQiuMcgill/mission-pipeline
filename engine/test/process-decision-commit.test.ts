@@ -18,7 +18,7 @@ import { explorationStep } from '../src/flow/exploration/step.ts';
 import { explorationState } from '../src/flow/exploration/flow.ts';
 import { planningStep, submitPmBatch } from '../src/flow/planning.ts';
 import { cal1Pass, cal2Escalate, cal2Pass } from '../src/flow/scripted.ts';
-import { closedEscalation, decisionFor, isApplied, openEscalations, secretaryStep } from '../src/flow/secretary.ts';
+import { closedEscalation, decisionFor, isApplied, openEscalations, raiseEscalation, secretaryStep } from '../src/flow/secretary.ts';
 import { pmAnswer, pmDispatch, pmLegalize, pmMission, pmNext, pmPlan, pmRelease, pmRequirement, pmSay, pmStartLegalization } from '../src/process/index.ts';
 import { dispatchView, recordSeatHandBack, seatCard } from '../src/process/seat.ts';
 import type { AuditNodeCard, AuditNodeResult } from '../src/seat/cards/auditor.ts';
@@ -424,14 +424,16 @@ describe('#3 and #4: a given-up task and an ended legalization leave nothing ope
       const d = pmDispatch(p.ctx, s.step);
       write(join(p.dir, d.worktree!), 'src/add.js', `exports.add = (a, b) => a + b; // v${n}\n`);
       write(join(p.dir, d.worktree!), 'src/check.js', CHECK_JS);
-      // 4.4 (F4): questions due later, so each review goes on beside its open escalation (a before-review one holds its review)
-      await handBack(p.ctx, d.dispatch, { done: `v${n}`, unmet_standards: [], unfixed_problems: [], decisions_needed: [{ question: `question ${n}?`, when: 'later' }] });
+      await handBack(p.ctx, d.dispatch, { done: `v${n}`, unmet_standards: [], unfixed_problems: [], decisions_needed: [] });
       await step(p.ctx, 'reviewer', (c) => {
         const pass = reviewerPass(c) as { judgments: Array<Record<string, unknown>> };
         return { ...pass, judgments: pass.judgments.map((j) => ({ ...j, met: 'no', reason: `missing ${n}` })), findings: [`missing ${n}`], verdict: 'rework' };
       });
     }
     const ctx = flowCtx(p.ctx.ports(), 'm1' as MissionId);
+    // 4.4 (F4): a Constructor's questions open beside its reviews come from 4.3 now (a before-review one holds
+    // its review, and questions that are all "later" raise no decision): two in the 4.3 shape
+    for (const n of [1, 2]) await raiseEscalation(ctx, { id: `cdec.con.m1.impl.${n}`, source: 'constructor-decision', lineage: 'task.m1.impl', subject: 'task:impl', summary: `questions ${n}`, reasons: [`question ${n}?`], options: ['answer', 'replan', 'ask-user'], facts: { task: 'impl', attempt: n, questions: [`question ${n}?`] } });
     assert.ok((await openEscalations(ctx, 'task:impl')).filter((e) => e.id.startsWith('cdec.')).length >= 2);
     await handOver(p, pmDispatch(p.ctx, 'sec.exh.task.m1.impl.3').dispatch, SEC('abandon'));
     const nx = await pmNext(p.ctx);
