@@ -61,6 +61,10 @@ describe('4.4 G9: mp pm extend', () => {
     const read = await cli(p.dir, ['read', 'repairs', M]);
     assert.match(read.out, /\[R-1\] new requirement \(W-\d+\): "Could it also subtract"/);
     assert.ok(read.out.includes('its items: item.m1.sub, item.m1.fast; outside the set PM plan pmplan.m1.1 was checked against: item.m1.sub, item.m1.fast'), read.out);
+    // a repair with the same words and text is not the same filing as a new requirement
+    const rep = await cli(p.dir, ['pm', 'repair', M, '--words', words, '--kind', 'missing', '--text', 'Could it also subtract']);
+    assert.match(rep.out, /Repair recorded: R-2 \(missing\)/);
+    assert.doesNotMatch((await cli(p.dir, ['read', 'repairs', M])).out, /filed again/);
   });
 
   it('mp pm repair --kind missing still files a repair and points to mp pm extend; --item binds it to an item; a repair that added tasks and names no item is marked in the read', async () => {

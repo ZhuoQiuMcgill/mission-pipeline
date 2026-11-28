@@ -198,8 +198,8 @@ export interface RepairRead {
   readonly done: boolean | null;
 }
 
-/** The same repair (flow/repair.ts recordRepair): the same words, kind, text and subject. */
-const sameRepair = (a: RepairBody, b: RepairBody): boolean => a.words === b.words && a.kind === b.kind && a.text === b.text && canonicalJson(a.about) === canonicalJson(b.about);
+/** The same repair (flow/repair.ts recordRepair): the same words, kind, text and subject; 4.4 (G9): never a new requirement's filing, and the same item named (none: as 4.3). */
+const sameRepair = (a: RepairBody, b: RepairBody): boolean => a.words === b.words && a.kind === b.kind && a.text === b.text && canonicalJson(a.about) === canonicalJson(b.about) && a.entry === undefined && b.entry === undefined && canonicalJson(a.items ?? null) === canonicalJson(b.items ?? null);
 
 /** Whether a seat took attempt k of a task (as execution.ts attemptTaken): it was reviewed, or a dispatch of its Constructor or Reviewer exists. */
 function attemptTaken(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], k: number): boolean {
