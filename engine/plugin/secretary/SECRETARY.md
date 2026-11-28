@@ -102,7 +102,7 @@ PM commands in resident mode record without reconciling; next and wait do the op
 
 The order of work within the plan is yours: hold what must not start yet, for your own reason and with no words, and never keep it in your own log only.
 `mp sec hold add --task <id> | --step <id> | --resource <name> | --all [--mission <m>] [--after [<mission>/]<task>] [--from <time>] [--until <time>] --reason "<why>"`; `mp sec hold release <H-n>`.
-A task's hold holds its Constructor steps (no new attempt; its reviews and decisions go on); a step's holds one queued step (a review, a repair's Architect step); a resource's every step that leases or needs it; `--all` every step but a Secretary decision.
+A task's hold holds its Constructor steps in its own mission (no new attempt; its reviews and decisions go on; `--mission` names the mission when the id is in several); a step's holds one queued step (a review, a repair's Architect step); a resource's every step that leases or needs it, a Secretary decision too; `--all` every step but a Secretary decision.
 It blocks new dispatches only: dispatches in flight, hand-backs, runs, delivery and landing go on; a stop is a stop, never a hold.
 It ends when released by hand, at its `--until` time, or when its `--after` task is accepted; `--from` starts it later. `mp read holds` lists them, with the steps each holds now.
 A hold the PM placed on the user's words is the PM's to release; if you release one, the command warns: tell the PM (`mp sec ask-pm`).
@@ -263,7 +263,7 @@ Legalization starts only on the user's request and consent through the PM; dispa
 Each recorded candidate commit is held by a ref under `refs/mission-pipeline/kept/`, so `git gc` keeps accepted work before delivery; each pass also anchors a product of an open mission that has none (one from 4.3). It is no branch or tag, never pushed, and stays after landing.
 Next sweeps killed processes' leftovers for at most 1.5 s per call.
 Between missions, `mp pm clean` removes the rest and reports space freed and what it kept and why.
-`mp read scratch` lists the worktrees, shared checkouts and scratch folders with size, owner and age; config `limits: { worktrees, freeBytes }` holds new Constructor steps while one is passed, with the reason in next (none by default).
+`mp read scratch` lists the worktrees, shared checkouts and scratch folders with size, owner and age; config `limits: { worktrees, freeBytes }` holds new Constructor steps (an experiment's too) while one is passed, with the reason in next (none by default; claims at the same moment can exceed a limit by a few, and the next one is held).
 Never delete under `.mission-pipeline/` by hand.
 
 ## Upgrading to 4.3

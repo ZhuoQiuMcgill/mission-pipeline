@@ -56,12 +56,14 @@ export type ResidentEvent =
   | { readonly kind: 'user.words-tags'; readonly words: string; readonly tags: readonly WordsTag[]; readonly supersedes: readonly string[]; readonly authorizedBy: string | null; readonly kept?: readonly string[]; readonly withdrew?: readonly string[]; readonly confirms?: readonly string[] }
   | { readonly kind: 'words.summary'; readonly id: string; readonly text: string; readonly covers: readonly { readonly id: string; readonly fingerprint: string }[] }
   /**
-   * 4.4 (G6, the plan's F6): "not this yet" on the record. `mission` narrows a task, resource or
-   * everything to one mission (null: every mission); `after`: in force while that task is not accepted;
-   * `from` / `until` (ms): in force from / until that time. `by` the PM (with the user's words) or the
-   * Secretary (its own reason, no words). A 4.3 engine ignores both kinds.
+   * 4.4 (G6, the plan's F6): "not this yet" on the record. `mission`: the mission of a task or a step,
+   * resolved at placement; for a resource or everything, the one it is narrowed to (null: every mission).
+   * `after` (`<mission>/<task>`, resolved at placement): in force while that task is not accepted.
+   * `from` / `until` (ms): in force from / until that time; `given`: the two as they were typed (a
+   * repeat of the same command matches on them). `by` the PM (with the user's words) or the Secretary
+   * (its own reason, no words). A 4.3 engine ignores both kinds.
    */
-  | { readonly kind: 'hold.placed'; readonly hold: string; readonly subject: HoldSubject; readonly mission: string | null; readonly after: string | null; readonly from: number | null; readonly until: number | null; readonly reason: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null }
+  | { readonly kind: 'hold.placed'; readonly hold: string; readonly subject: HoldSubject; readonly mission: string | null; readonly after: string | null; readonly from: number | null; readonly until: number | null; readonly given: { readonly from: string | null; readonly until: string | null }; readonly reason: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null }
   /** 4.4 (G6): a hold released by hand. */
   | { readonly kind: 'hold.released'; readonly hold: string; readonly by: 'pm' | 'secretary'; readonly generation: string | null; readonly words: string | null; readonly reason: string | null };
 

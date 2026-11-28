@@ -5,7 +5,7 @@
 
 import { missionIdProblem } from '../../common/ids.ts';
 import { readSteps } from '../../process/index.ts';
-import { bytesText, endsText, holdViews, parseHoldTime, placeHold, releaseHold, subjectText, timeText, type HoldSubject, type HoldView } from '../../process/holds.ts';
+import { bytesText, checkAfters, endsText, holdViews, parseHoldTime, placeHold, releaseHold, subjectText, timeText, type HoldSubject, type HoldView } from '../../process/holds.ts';
 import { scratchListing, type ScratchEntry } from '../../process/scratchList.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
 import { ok, type Command, type CommandResult, type RunContext } from '../command.ts';
@@ -63,10 +63,11 @@ async function holdRun(group: 'pm' | 'sec', c: RunContext, a: ParsedArgs): Promi
       if (v !== null && parseHoldTime(v, p.ctx.now()) === null) throw usage(`--${f} is a time: an ISO date and time such as 2026-11-28T09:00Z (without a zone, local time), or +<n>m, +<n>h, +<n>d from now`);
     }
     const r = placeHold(p.ctx, { op: c.op!, subject, mission, after: flagStr(a, 'after'), from: flagStr(a, 'from'), until: flagStr(a, 'until'), reason, words });
-    // its state and what it holds now, in one read after the write
+    // its state and what it holds now, in one read after the write (an unpinned acceptance its `after` names counted as production counts it)
+    const afters = await checkAfters(p.ctx);
     const { view, holdsNow } = p.ctx.memory.read((db) => ({
-      view: holdViews(db, p.ctx.memory.data, p.ctx.now()).find((h) => h.id === r.hold)!,
-      holdsNow: readSteps(p.ctx).held.filter((h) => h.holds?.some((x) => x.id === r.hold)).map((h) => `${h.step} (${h.kind})`),
+      view: holdViews(db, p.ctx.memory.data, p.ctx.now(), afters).find((h) => h.id === r.hold)!,
+      holdsNow: readSteps(p.ctx, { afters }).held.filter((h) => h.holds?.some((x) => x.id === r.hold)).map((h) => `${h.step} (${h.kind})`),
     }));
     const lines = [
       r.repeated ? `Hold ${r.hold} was placed already with these arguments (${stateText(view)}): nothing new was recorded.` : `Hold ${r.hold} placed by ${placedBy(view)}: ${subjectText(view)}.`,
@@ -87,7 +88,7 @@ async function holdRun(group: 'pm' | 'sec', c: RunContext, a: ParsedArgs): Promi
   throw usage(`mp ${group} hold add|release`);
 }
 
-const TIME_NOTE = '(<time>: 2026-11-28T09:00Z, or +<n>m, +<n>h, +<n>d from now; --mission narrows a task, a resource or --all to one mission)';
+const TIME_NOTE = '(<time>: 2026-11-28T09:00Z, or +<n>m, +<n>h, +<n>d from now; --mission names the mission of a task whose id is in several, or narrows a resource or --all to one mission)';
 
 const pmHold: Command = {
   group: 'pm',
@@ -123,6 +124,7 @@ const readHolds: Command = {
     const shown = flagBool(a, 'all') ? all : open;
     const lines = shown.flatMap((v) => [
       `[${v.id}] ${stateText(v)}: ${subjectText(v)}; placed by ${placedBy(v)} at ${timeText(v.placedAt)}: ${v.reason}`,
+      ...(v.state === 'in-force' && v.note !== null ? [`    ${v.note}`] : []),
       ...(v.state === 'in-force' || v.state === 'waiting' ? [`    ends when ${endsText({ hold: v.id, until: v.until, after: v.after }, p.ctx.secretary !== null ? 'sec' : 'pm')}${v.from !== null && v.state === 'in-force' ? ` (in force since ${timeText(v.from)})` : ''}`, `    holds now: ${v.holdsNow.join(', ') || 'no queued step'}`] : []),
     ]);
     const rest = all.length - open.length;

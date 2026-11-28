@@ -35,7 +35,8 @@
 //                           dispatches it; default 6; it refuses nothing
 //   limits                  (4.4) { worktrees?, freeBytes? }: while this many worktrees are on disk, or
 //                           the project's disk has fewer free bytes, new Constructor steps are held
-//                           with the reason shown (`mp read scratch` lists the space); default none
+//                           with the reason shown (`mp read scratch` lists the space); default none;
+//                           claims at the same moment can exceed a limit by a few (it is no quota)
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -12,8 +12,10 @@ import { beginAction, endAction } from '../src/cli/project.ts';
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { flowCtx } from '../src/flow/context.ts';
 import { raiseEscalation } from '../src/flow/secretary.ts';
-import { openProcess, pmDispatch, type ProcessOptions } from '../src/process/index.ts';
-import { holdsOn, placeHold, type HoldRow } from '../src/process/holds.ts';
+import { gitActions, openProcess, pmDispatch, type ProcessOptions } from '../src/process/index.ts';
+import { heldByHolds, holdsInForce, holdsOn, placeHold, type HoldRow } from '../src/process/holds.ts';
+import { appendRecords, queueTask } from '../src/memory/index.ts';
+import { canonicalJson } from '../src/common/hash.ts';
 import { secWait, secretaryWakes, SECRETARY_WAKE } from '../src/process/secretary.ts';
 import type { TaskSpecDoc } from '../src/process/ports.ts';
 import type { MissionId } from '../src/common/ids.ts';
@@ -124,19 +126,147 @@ test('G6: a task hold leaves its review; a step hold holds that one step; mp rea
   }
 });
 
-test('G6: a resource hold holds every step that needs it: a capability, or an exclusive resource it leases', async () => {
+const syntheticHold = (subject: HoldRow['placed']['subject'], mission: string | null = null): HoldRow => ({ placed: { kind: 'hold.placed', hold: 'H-9', subject, mission, after: null, from: null, until: null, given: { from: null, until: null }, reason: 'r', by: 'secretary', generation: 'S-1', words: null }, rev: 1, at: 0, released: null });
+const syntheticSpec = (seat: string, exclusive: string[] = [], capabilities: string[] = ['seat']): TaskSpecDoc => ({ format: 'mp41.task.v1', task: 't', lineage: 'L', mission: 'm1' as MissionId, card: { seat } as never, priority: 1, capabilities, mode: 'fast', exclusive });
+
+test('G6 (review p5-2): a resource hold holds every step that needs it, a Secretary decision too; only a hold on everything leaves a Secretary decision', async () => {
   const p = project43();
   try {
     const constructor = await atConstructor(p);
-    await done(p, ['pm', 'hold', 'add', '--resource', 'run-commands', '--reason', 'the build machine is down']);
-    assert.ok((await done(p, ['pm', 'next'])).held.some((x: any) => x.step === constructor && x.holds[0].id === 'H-1'));
-    const hold = (resource: string, mission: string | null = null): HoldRow => ({ placed: { kind: 'hold.placed', hold: 'H-9', subject: { kind: 'resource', resource }, mission, after: null, from: null, until: null, reason: 'r', by: 'secretary', generation: 'S-1', words: null }, rev: 1, at: 0, released: null });
-    const spec = (seat: string, exclusive: string[]): TaskSpecDoc => ({ format: 'mp41.task.v1', task: 't', lineage: 'L', mission: 'm1' as MissionId, card: { seat } as never, priority: 1, capabilities: ['seat'], mode: 'fast', exclusive });
+    await raiseEscalation(flowCtx(p.ctx.ports(), 'm1' as MissionId), { id: 'choice', source: 'constructor-decision', lineage: 'L', subject: 'task:impl', summary: 'choose a detail', reasons: ['a choice'], options: ['answer', 'accept', 'grant', 'ask-user'] });
+    const id = await live43(p);
+    await done(p, ['sec', 'hold', 'add', '--resource', 'model', '--reason', 'the model is at its usage limit'], { identity: id });
+    const next = await done(p, ['sec', 'next'], { identity: id });
+    assert.ok(next.held.some((x: any) => x.kind === 'secretary' && x.holds[0].id === 'H-1'), 'before the fix a Secretary decision passed a resource hold');
+    assert.ok(next.held.some((x: any) => x.step === constructor && x.holds[0].id === 'H-1'));
+    const card = await mp(p, ['sec', 'card', 'choice'], { identity: id });
+    assert.equal(card.error?.code, 'NOT_READY', JSON.stringify(card));
+    await done(p, ['sec', 'hold', 'release', 'H-1'], { identity: id });
+    await done(p, ['sec', 'hold', 'add', '--all', '--reason', 'the machine is busy'], { identity: id });
+    const all = await done(p, ['sec', 'next'], { identity: id });
+    assert.ok(all.ready.some((x: any) => x.kind === 'secretary'), 'a hold on everything leaves a Secretary decision');
+    assert.ok(all.held.some((x: any) => x.step === constructor));
     const q = { task: 't', mission: 'm1', lineage: 'L' };
-    assert.equal(holdsOn([hold('simulator')], q, spec('reviewer', ['simulator'])).length, 1);
-    assert.equal(holdsOn([hold('simulator')], q, spec('reviewer', [])).length, 0);
-    assert.equal(holdsOn([hold('simulator', 'm2')], q, spec('reviewer', ['simulator'])).length, 0, '--mission narrows it');
-    assert.equal(holdsOn([hold('seat')], q, spec('secretary', [])).length, 0, 'a Secretary decision is held only by a hold on its own step');
+    assert.equal(holdsOn([syntheticHold({ kind: 'resource', resource: 'simulator' })], q, syntheticSpec('reviewer', ['simulator'])).length, 1, 'an exclusive resource it leases');
+    assert.equal(holdsOn([syntheticHold({ kind: 'resource', resource: 'simulator' })], q, syntheticSpec('reviewer')).length, 0);
+    assert.equal(holdsOn([syntheticHold({ kind: 'resource', resource: 'simulator' }, 'm2')], q, syntheticSpec('reviewer', ['simulator'])).length, 0, '--mission narrows it');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('G6 (review p5-1): a task hold is bound to its one mission at placement; an id in several missions asks for --mission, a bare --after likewise', async () => {
+  const p = project43();
+  try {
+    const first = await atConstructor(p, 'm1');
+    const h = await done(p, ['pm', 'hold', 'add', '--task', 'impl', '--reason', 'await the design']);
+    assert.equal(h.mission, 'm1');
+    // a later mission with a task of the same id is not held
+    const second = await atConstructor(p, 'm2');
+    const next = await done(p, ['pm', 'next']);
+    assert.ok(next.ready.some((x: any) => x.step === second), 'before the fix m2/impl inherited the hold');
+    assert.ok(next.held.some((x: any) => x.step === first && x.holds[0].id === 'H-1'));
+    const ambiguous = await mp(p, ['pm', 'hold', 'add', '--task', 'impl', '--reason', 'later']);
+    assert.equal(ambiguous.code, 3);
+    assert.match(ambiguous.error.message, /task impl is in missions m1, m2: name the one the hold is for with --mission <m>/);
+    const bareAfter = await mp(p, ['pm', 'hold', 'add', '--all', '--after', 'impl', '--reason', 'later']);
+    assert.match(bareAfter.error.message, /task impl is in missions m1, m2: name the one meant as --after <mission>\/impl/);
+    const onStep = await done(p, ['pm', 'hold', 'add', '--step', second, '--after', 'impl', '--reason', 'after its own task']);
+    assert.equal(onStep.after, 'm2/impl', 'a bare --after is the task of the hold\'s own mission');
+    assert.equal((await mp(p, ['pm', 'hold', 'add', '--task', 'nowhere', '--reason', 'later'])).error.message.includes('task nowhere is in no mission\'s plan: name its mission with --mission <m>'), true);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('G6 (review p5-3): --after counts an acceptance as production does: one on an unpinned start counts once its start is found valid; the claim re-checks the product', async () => {
+  const p = project43();
+  try {
+    const constructor = await atConstructor(p);
+    await done(p, ['pm', 'mission', 'open', 'm2']);
+    // an acceptance recorded before prerequisite pins: its dispatch carries none
+    p.ctx.memory.write({ op: 'legacy', payload: 1 }, (tx) => {
+      const ev = (event: string, key: string, body: unknown) => ({ kind: 'flow.event' as const, mission: 'm2' as MissionId, line: 'task:legacy', event, key, body: tx.data.put(JSON.stringify(body)) as never });
+      appendRecords(tx, [ev('dispatched', 'con.m2.legacy.1', { k: 1, snapshot: 'x', commit: 'x', dplan: 'dplan.m2.1.1' }), ev('accepted', '1', { k: 1, product: 'prod.legacy', judgment: 'j.legacy' })]);
+    });
+    await done(p, ['pm', 'hold', 'add', '--step', constructor, '--after', 'm2/legacy', '--reason', 'after the legacy task']);
+    const read = await done(p, ['read', 'holds']);
+    assert.equal(read.holds[0].state, 'in-force', 'a pure read does not check the start: the hold stays');
+    assert.match(read.holds[0].note, /accepted on a start recorded before prerequisite pins/);
+    // production cannot check its start (no such product here): not accepted, the step stays held
+    assert.ok((await done(p, ['pm', 'next'])).held.some((x: any) => x.step === constructor), 'before the fix the hold read as over');
+    assert.equal((await mp(p, ['pm', 'dispatch', constructor])).error?.code, 'NOT_READY');
+    // its start found valid: accepted, the hold is over and the claim goes through
+    const valid: ProcessOptions = { actions: (ctx) => ({ ...gitActions(ctx), startHolds: async () => ({ holds: true, missing: [] }) }) };
+    assert.ok((await done(p, ['pm', 'next'], { process: valid })).ready.some((x: any) => x.step === constructor));
+    // in the claim: a verdict on another product than the current one does not count
+    const rows = p.ctx.memory.read((db) => holdsInForce(db, p.ctx.memory.data, Date.now(), new Map([['m2/legacy', 'prod.other']])));
+    assert.deepEqual(rows.map((r) => r.placed.hold), ['H-1']);
+    assert.equal((await mp(p, ['pm', 'dispatch', constructor, '--filled-by', 'test/scripted'], { process: valid })).code, 0);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('F6 (review p5-5): a disk limit holds every new Constructor step, an experiment Constructor too, in the ready list and in the claim', async () => {
+  const p = project43();
+  try {
+    const q = { task: 't', mission: 'm1', lineage: 'L' };
+    assert.equal(heldByHolds([], 'a disk limit', q, syntheticSpec('constructor-experiment'))?.diskLimit, true);
+    assert.equal(heldByHolds([], 'a disk limit', q, syntheticSpec('reviewer')), null);
+    await done(p, ['pm', 'mission', 'open', 'm1']);
+    const spec = { ...syntheticSpec('constructor-experiment'), task: 'exp.m1.e1.1', lineage: 'L-exp' };
+    p.ctx.memory.write({ op: 'queue-exp', payload: 1 }, (tx) => queueTask(tx, { task: spec.task, lineage: spec.lineage, mission: 'm1' as MissionId, card: tx.data.put(canonicalJson(spec)) as never }));
+    writeConfig(p.dir, { ...defaultConfig({ targetBranch: 'main', versionCommands: [] }), limits: { freeBytes: 1_000_000 } });
+    const low = { process: { diskFree: () => 1_000 } };
+    const next = await done(p, ['pm', 'next'], low);
+    assert.ok(next.held.some((x: any) => x.step === spec.task && x.diskLimit === true), 'before the fix it was ready');
+    const claim = await mp(p, ['pm', 'dispatch', spec.task], low);
+    assert.equal(claim.error?.code, 'NOT_READY');
+    assert.match(claim.error.message, /a disk limit of config\.json is passed/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('G6 (review p5-6, p5-7): the same hold with a relative time, run again later without --op, is the first one with its own end; a words entry that does not resolve is recorded as none, with a warning', async () => {
+  const p = project43();
+  try {
+    await atConstructor(p);
+    const t0 = Date.UTC(2026, 10, 28, 8, 0);
+    const first = await done(p, ['pm', 'hold', 'add', '--all', '--until', '+1h', '--reason', 'maintenance'], { process: { now: () => t0 } });
+    const again = await done(p, ['pm', 'hold', 'add', '--all', '--until', '+1h', '--reason', 'maintenance'], { process: { now: () => t0 + 60_000 } });
+    assert.deepEqual([again.hold, again.repeated, again.until], [first.hold, true, t0 + 3_600_000], 'before the fix a second hold with a later end was placed');
+    await done(p, ['pm', 'hold', 'release', first.hold], { process: { now: () => t0 + 60_000 } });
+    assert.deepEqual((await done(p, ['read', 'holds'], { process: { now: () => t0 + 60_000 } })).holds, [], 'releasing the id it returned leaves no hold in force');
+    const unresolved = await mp(p, ['pm', 'hold', 'add', '--all', '--reason', 'maintenance', '--words', 'W-999']);
+    assert.equal(unresolved.code, 0, 'before the fix an entry that does not resolve refused the hold');
+    assert.match(unresolved.result.warnings.join('\n'), /there is no words entry W-999: the hold is recorded without words/);
+    assert.equal((await done(p, ['read', 'holds'])).holds[0].words, null);
+    const release = await mp(p, ['pm', 'hold', 'release', unresolved.result.hold, '--words', 'W-999']);
+    assert.equal(release.code, 0);
+    assert.equal(release.result.released, true);
+    assert.match(release.result.warnings.join('\n'), /there is no words entry W-999: the release is recorded without words/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('G6 (review p5-8): a hold on a step a stop also covers is shown beside the stop, in next, in mp read blocked and in mp read holds; once the stop is released the hold holds it', async () => {
+  const p = project43();
+  try {
+    const constructor = await atConstructor(p);
+    await done(p, ['pm', 'hold', 'add', '--step', constructor, '--reason', 'its review of the interface comes first']);
+    const stop = await done(p, ['pm', 'stop', 'stop the add mission', '--scope', 'mission:m1']);
+    const held = (await done(p, ['pm', 'next'])).held.find((x: any) => x.step === constructor);
+    assert.match(held.why, /^a stop covers it .*; also hold H-1 \(the PM\): its review of the interface comes first/);
+    assert.deepEqual(held.holds.map((x: any) => x.id), ['H-1'], 'before the fix the stop hid the hold');
+    const entry = (await done(p, ['read', 'blocked'])).blocked.find((e: any) => e.blocked.because.includes(constructor));
+    assert.match(entry.blocked.next, /stop-release.*; it waits while H-1 holds it/);
+    assert.deepEqual((await done(p, ['read', 'holds'])).holds[0].holdsNow, [`${constructor} (constructor)`]);
+    await done(p, ['pm', 'stop-release', stop.stop]);
+    const after = (await done(p, ['pm', 'next'])).held.find((x: any) => x.step === constructor);
+    assert.match(after.why, /^hold H-1/);
   } finally {
     p.cleanup();
   }

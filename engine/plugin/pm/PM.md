@@ -133,7 +133,7 @@ It stays on the Secretary's next read until `mp sec ack-note <id>`.
 To change one, `mp pm note "<text>" --replaces N-<x>`: the old note shows as replaced and leaves the Secretary's list.
 `mp read notes [--all]` lists your notes with their state: current, acknowledged or replaced.
 The user's "not this yet" is a hold, not a note: `mp pm hold add --task <id> | --step <id> | --resource <name> | --all [--mission <m>] [--after [<mission>/]<task>] [--from <time>] [--until <time>] --reason "<why>" --words W-<n>`.
-A task's hold holds its Constructor steps (its reviews and decisions go on); `--all` holds every step but a Secretary decision.
+A task's hold holds its Constructor steps in its own mission (its reviews and decisions go on; `--mission` names the mission when the id is in several); `--all` holds every step but a Secretary decision.
 A hold blocks new dispatches only: work in flight, hand-backs, runs, delivery and landing go on; a stop still stops.
 It ends when released by hand (`mp pm hold release <H-n>` when the user lifts it), at its `--until` time, or when its `--after` task is accepted; `mp read holds` lists them.
 A usage threshold of your harness is a hold `--all --until <the reset time>`, or one you release by hand.
@@ -233,7 +233,7 @@ Every stop has an exit their words can take: accept, change, run again or drop.
 
 "How is it going?": `mp read status`, one query: layer 0 and only subtasks changed since the last ask; no changes means layer 0 only.
 "Why is it not done?": `mp read blocked`, with reasons and next steps; a held step names its hold (`mp read holds`).
-What takes the disk: `mp read scratch`; config `limits: { worktrees, freeBytes }` holds new Constructor steps while one is passed (none by default).
+What takes the disk: `mp read scratch`; config `limits: { worktrees, freeBytes }` holds new Constructor steps while one is passed (none by default; claims at the same moment can exceed a limit by a few).
 "The details of X": `mp read show <kind> <id>`, only X; evidence: `mp read leaf <id>`.
 "Why was this done?": `mp read why <id>`; what rests on it: `mp read from <id>`; one dispatch: `mp read chain <dispatch>`; a mission: `mp read tree <mission>`.
 `mp read from W-<n>` also lists the constraints, waivers and notes that cite the entry.
