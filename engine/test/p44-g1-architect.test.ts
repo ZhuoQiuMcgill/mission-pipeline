@@ -342,6 +342,19 @@ describe('4.4 G1: the step as a step like any other', () => {
     assert.equal(await applied(ports, id), undefined);
     assert.equal((await ports.ledger.loop('task.m1.impl', REDISPATCH_LOOP)).attempts, 0, 'the task\'s re-dispatch allowance is untouched');
   });
+
+  it('a command run again: the PM\'s ask retried after its write writes nothing new; one ask, one step, and the passes queue it once', async () => {
+    const { ports, engine } = await constructorAsks(['Which?']);
+    const id = 'cdec.con.m1.impl.1';
+    const req = { mission: M, escalation: id, option: 'ask-architect' as const, words: [], noWords: true, reason: 'a question of design', instructions: ASK };
+    const first = await answerByPm(ports, req);
+    const again = await answerByPm(ports, req);
+    assert.deepEqual([first.round, again.round], [1, 1], 'the same round, the same record');
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': () => null }));
+    await drive(engine, ports.scheduler, withKinds({ secretary: () => null, 'architect-answer': () => null }));
+    assert.equal((await events(ports, { line: 'secretary', event: 'pm-answer' })).length, 1);
+    assert.deepEqual([...ports.scheduler.tasks.keys()].filter((t) => t.startsWith('arch-ask.')), [askTask(M, { escalation: id, by: 'pm', round: 1 })]);
+  });
 });
 
 describe('4.4 G1: who asks, and who answers in between', () => {
