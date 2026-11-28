@@ -26,6 +26,8 @@ import { repairRef, type RepairBody } from '../../flow/plandoc.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
 import type { ArchitectDecomposeCard, ArchitectFeasibilityCard, ArchitectRepairCard } from './architect.ts';
+import { answerPlanMaterial, type ArchitectAnswerCard } from './architectAnswer.ts';
+import { askStanding, earlierReplies } from '../../flow/architectAnswers.ts';
 import type { SecretaryCard } from './secretary.ts';
 import type { AuditNodeCard, AuditChainCard } from './auditor.ts';
 import type { AuthorCard, ReaderCard, InterpreterCard } from './researcher.ts';
@@ -33,7 +35,7 @@ import type { ExperimentCard } from './experiment.ts';
 import type { CrititorCard } from './crititor.ts';
 import type { StabilizerCard } from './stabilizer.ts';
 
-type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
+type DispatchCard = ConstructorCard | ReviewerCard | Calibrator1Card | Calibrator2Card | ArchitectDecomposeCard | ArchitectFeasibilityCard | ArchitectRepairCard | ArchitectAnswerCard | SecretaryCard | AuditNodeCard | AuditChainCard | AuthorCard | ReaderCard | InterpreterCard | ExperimentCard | CrititorCard | StabilizerCard;
 
 /** A card's constraint that is a project constraint (a basis line of `mp pm constraint`), not an exploration definition's own. */
 function projectConstraint(ix: BasisIndex, id: string): boolean {
@@ -66,6 +68,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
   // explorations planned before it are selected below. Blind cards exclude intent (§4.3).
   switch (card.seat) {
     case 'architect-repair':
+    case 'architect-answer':
     case 'researcher-author':
     case 'researcher-reader':
     case 'researcher-interpreter':
@@ -165,7 +168,7 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     Object.assign(c, writtenForTask(constraints, events, mission, t.id, ids));
   };
   // 4.4 (G3, F1): an Architect's card prints the addressed instructions of the repair in hand (or its task) in full, the rest as an index
-  const planningAddressed = (c: ArchitectRepairCard | ArchitectDecomposeCard, inHand: { repair?: string; about?: string }): void => {
+  const planningAddressed = (c: ArchitectRepairCard | ArchitectDecomposeCard | ArchitectAnswerCard, inHand: { repair?: string; about?: string }): void => {
     const a = addressedForPlanning(constraints, mission, inHand);
     delete c.addressed;
     delete c.addressedIndex;
@@ -216,6 +219,35 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
       const listed = takenItems(events, named);
       if (listed.length > 0) card.openItems = listed;
       else delete card.openItems;
+      break;
+    }
+    case 'architect-answer': {
+      // 4.4 (G1): an ask no longer current (answered by another decider, carried out, closed, its round closed) is not
+      // claimed: the flow's next pass cancels the step; a reply of it would change nothing (flow/architectAsk.ts)
+      const moot = askStanding(events.filter((e) => e.line === 'secretary'), { escalation: card.escalation.id, by: card.asked.by, round: card.asked.round });
+      if (moot !== null) throw new ProcessError('NOT_READY', `Architect step ${spec.task} was superseded: ${moot}; run mp pm next.`);
+      // review p11-7 (F5): the card is current when it is claimed: rebuilt from the records in force now, by the
+      // queue-time builder's selections. A new card of its task makes the question moot: not claimed
+      const eff = planInEffect(events);
+      const stored = eff === undefined ? undefined : object(eff.dplan);
+      const plan = stored === undefined || eff === undefined ? undefined : amendedPlan(DetailedPlanDoc.parse((JSON.parse(data.text(stored.content)) as StoredDetailedPlan).plan), eff.amendments);
+      const now = plan?.tasks.find((t) => t.id === card.taskCard.id);
+      if (eff === undefined || plan === undefined || now === undefined || taskCardHash(now) !== taskCardHash(card.taskCard)) throw new ProcessError('NOT_READY', `Architect step ${spec.task} was superseded: task ${card.taskCard.id} has a new card, or is not in the plan in effect; run mp pm next.`);
+      // the constraints in force at the claim, those addressed to its task in full (G3), the decisions, the requirement texts
+      card.constraints = planningConstraints(constraints, mission);
+      planningAddressed(card, { about: now.id });
+      card.decisionQuotes = taskDecisionQuotes(items, events, now, constraintsForTask(constraints, now, mission), eff.dplan);
+      card.requirementItems = taskRequirementItems(items, now);
+      // the plan in effect, the tasks an answer may name, the earlier replies
+      card.dplan = eff.dplan;
+      card.tasks = plan.tasks.map((t) => t.id).filter((t) => t !== now.id);
+      card.earlier = earlierReplies(events.filter((e) => e.line === 'secretary'), card.escalation.id);
+      // a material that cannot be stored never refuses the claim: the queued one stays
+      try { card.materials = [answerPlanMaterial((d) => data.put(d), eff.dplan, plan), ...(card.materials ?? []).filter((m) => m.id !== 'plan')]; } catch { /* the queued plan material stays */ }
+      // the task's accepted product as it stands (an unpinned start the queue-time builder took stays; another by the resolver's rule with no recorded prerequisite)
+      const sel = lineAcceptance(lineOf(now.id));
+      const queuedProducts = new Set(card.accepted.map((a) => a.product));
+      card.accepted = sel.product === null || (!sel.pinned && !queuedProducts.has(sel.product) && !noRecordedPrerequisites(sel.product)) ? [] : [acceptedEntry(now.id, lineOf(now.id), sel.product, object(sel.product)?.source?.commit)];
       break;
     }
     case 'researcher-author':

@@ -109,7 +109,7 @@ describe('flow: the Reviewer rework loop (8.1, 6.5)', () => {
     assert.equal(secretaries.length, 1);
     assert.equal(secretaries[0]?.request.source, 'loop-exhausted');
     // 4.1.3 (E-1, #35): the attempt has a verified hand-back, so the decision may also accept it with its risks
-    assert.deepEqual(secretaries[0]?.options.map((o) => o.id), ['grant', 'replan', 'accept-risk', 'abandon', 'ask-user']);
+    assert.deepEqual(secretaries[0]?.options.map((o) => o.id), ['grant', 'ask-architect', 'replan', 'accept-risk', 'abandon', 'ask-user']);
     assert.equal(ports.ledger.notices.filter((n) => n.wi === 'WI-08').length, 1);
     assert.deepEqual(await accepted(ports), ['task:iface', 'task:impl']);
     assert.equal((await new FlowEngine(ports).reconcile(M))[0]?.passes, 1, 'settled');

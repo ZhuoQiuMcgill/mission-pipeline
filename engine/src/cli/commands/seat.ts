@@ -45,6 +45,8 @@ function answerResult(a: HandBackAnswer, p?: Project): CommandResult {
     ...(a.verification !== null ? a.verification.map((v) => `Verification ${v.evidence}: ${v.passed ? 'passed' : 'failed'} — ${v.summary}`) : []),
     // 4.4 (F9): a Secretary decision says what became of it
     ...(a.decision !== undefined ? [`Decision on ${a.decision.mission}/${a.decision.escalation}: ${a.decision.text}`] : []),
+    // 4.4 (G1): an Architect's reply says what became of it
+    ...(a.reply !== undefined ? [`Your reply on ${a.reply.mission}/${a.reply.escalation}: ${a.reply.text}`] : []),
     ...a.notes,
     'You are done: end here.',
   ];
@@ -81,7 +83,7 @@ const read: Command = {
 const checkout: Command = {
   group: 'seat',
   name: ['checkout'],
-  summary: 'print the path of a read-only directory holding the commit your card names (shared with the other seats reading that commit; read there, never write); a repair Architect reads an accepted product with --product <task>',
+  summary: 'print the path of a read-only directory holding the commit your card names (shared with the other seats reading that commit; read there, never write); a repair Architect, or an Architect answering a question on a task with an accepted product, reads it with --product <task>',
   usage: 'mp seat <dispatch> checkout [--product <task>]',
   flags: { product: 'string' },
   async run(c, args) {

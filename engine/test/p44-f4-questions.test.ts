@@ -86,7 +86,7 @@ describe('4.4 F4: a Constructor stops and asks (a blocked hand-back)', () => {
     assert.equal(esc.source, 'constructor-decision');
     // review r2 (p8-7): every question of a stop to ask is needed before the work resumes, whatever its mark
     assert.deepEqual(esc.reasons, ['Q1 (before-review): Is a header row required?', 'Q2 (before-review): May the output be cached later?']);
-    assert.deepEqual(esc.options, ['answer', 'replan', 'ask-user'], 'the options of a Constructor\'s questions');
+    assert.deepEqual(esc.options, ['answer', 'ask-architect', 'replan', 'ask-user'], 'the options of a Constructor\'s questions');
     assert.match(secretaryOptions(esc, true).find((o) => o.id === 'answer')!.outcome, /the paused attempt resumes on its parked edits/);
     assert.deepEqual(ports.scheduler.queued().map((t) => t.task), [`sec.${id}`], 'the task waits: only the decision is queued');
     assert.deepEqual(openItemsOf(await events(ports)), [], 'none of its questions is an open item');

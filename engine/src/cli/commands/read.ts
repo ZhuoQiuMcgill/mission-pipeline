@@ -231,7 +231,8 @@ const openItemsRead: Command = {
     const questions = only ? all.questions.filter((q) => q.answer === null) : all.questions;
     const risks = only ? all.items.filter((i) => i.closed === null) : all.items;
     const now = p.ctx.now();
-    const who = (x: 'secretary' | 'pm' | 'user'): string => (x === 'pm' ? 'the PM' : x === 'user' ? 'the user' : 'the Secretary');
+    // 4.4 (G1): a question answered by the Architect's answer carried out on its escalation
+    const who = (x: 'secretary' | 'pm' | 'user' | 'architect'): string => (x === 'pm' ? 'the PM' : x === 'user' ? 'the user' : x === 'architect' ? 'the Architect' : 'the Secretary');
     const old = (at: number | null | undefined): string => (at == null ? '' : `, ${age(now - at)} old`);
     const lines = [
       ...questions.map((i) => ({ revision: i.revision, text: `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt}, ${i.why === 'later' ? 'raised as later' : 'put off by its answer'}): ${i.answer === null ? `open; ${who(i.decider)} answers it` : `answered by ${who(i.answer.by)}${i.answer.words !== undefined ? ` on ${i.answer.words}` : ''}`}\n  ${i.text}${i.answer !== null ? `\n  Answer: ${i.answer.answer}` : ''}${i.superseded !== undefined ? `\n  (the answer carried out on its escalation took precedence over ${who(i.superseded.by)}'s earlier answer: ${i.superseded.answer})` : ''}` })),

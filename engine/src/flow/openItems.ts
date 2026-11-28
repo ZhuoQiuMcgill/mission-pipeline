@@ -13,6 +13,7 @@
 
 import type { QuestionWhen } from '../seat/results.ts';
 import type { DecisionBody, EscalationBody } from './secretary.ts';
+import { carriedArchitectAnswer, currentHandUp, reopenedAt } from './architectAnswers.ts';
 
 export const OPEN_ITEMS_LINE = 'open-items';
 export const OPEN_ITEM = 'open-item';
@@ -34,8 +35,8 @@ export interface OpenItemBody {
 
 export interface OpenItemAnswerBody {
   readonly id: string;
-  /** Who answered: the Secretary or the PM (`open-item-answer`); the user, for an answer carried out on the escalation (openItemsOf). */
-  readonly by: 'secretary' | 'pm' | 'user';
+  /** Who answered: the Secretary or the PM (`open-item-answer`); the user or (4.4, G1) the Architect, for an answer carried out on the escalation (openItemsOf). */
+  readonly by: 'secretary' | 'pm' | 'user' | 'architect';
   readonly answer: string;
   readonly words?: string;
 }
@@ -108,7 +109,10 @@ export function answerText(d: Pick<DecisionBody, 'instructions' | 'by' | 'reason
 export function appliedAnswer(sec: readonly Ev[], escalation: string): { readonly text: string; readonly by: string; readonly defer: readonly number[] } | null {
   const applied = sec.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === escalation)?.body as { what?: { option?: string }; by?: string } | undefined;
   if (applied?.what?.option !== 'answer') return null;
-  const answers = sec.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === escalation) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === escalation && !sec.some((r) => r.event === 'pm-answer-rejected' && r.key === a.key))));
+  // 4.4 (G1): the Architect's answer carried out on the asker's decision: its text, given by the Architect (it puts nothing off)
+  const architect = carriedArchitectAnswer(sec.filter((a) => a.line === 'secretary'), escalation);
+  if (architect !== null) return { text: architect.text, by: 'architect', defer: [] };
+  const answers = sec.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === escalation) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === escalation && !(a.event === 'pm-answer' && sec.some((r) => r.event === 'pm-answer-rejected' && r.key === a.key)))));
   const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
   if (d?.option !== 'answer' || d.by !== applied.by) return null;
   return { text: answerText(d), by: d.by, defer: d.defer ?? [] };
@@ -126,9 +130,13 @@ export function itemDecider(events: readonly Ev[], item: Pick<OpenItemBody, 'esc
   const applied = sec.find((e) => e.event === 'applied' && e.key === esc)?.body as { by?: string } | undefined;
   if (applied?.by === 'secretary') return 'secretary';
   if (applied?.by === 'pm' || applied?.by === 'user') return 'pm';
-  const sentUp = sec.some((e) =>
-    (e.event === 'user-answer' && e.key === esc) || (e.event === 'to-user' && e.key === esc) ||
-    ((e.event === 'pm-answer' || e.event === 'decision') && (e.body as DecisionBody).escalation === esc && (e.event === 'pm-answer' || ['needs-pm', 'needs-user'].includes((e.body as DecisionBody).classification))));
+  // 4.4 (G1, review p11-2, p11-r2-2): in a Secretary round an Architect's reply reopened, only what came after it sends it up
+  const since = reopenedAt(sec, esc);
+  const sentUp = since !== null
+    ? sec.some((e) => e.event === 'user-answer' && e.key === esc) || currentHandUp(sec, esc) !== undefined || sec.some((e) => e.event === 'decision' && e.revision > since && (e.body as DecisionBody).escalation === esc && ['needs-pm', 'needs-user'].includes((e.body as DecisionBody).classification))
+    : sec.some((e) =>
+      (e.event === 'user-answer' && e.key === esc) || (e.event === 'to-user' && (e.key === esc || e.key.startsWith(`${esc}#`))) ||
+      ((e.event === 'pm-answer' || e.event === 'decision') && (e.body as DecisionBody).escalation === esc && (e.event === 'pm-answer' || ['needs-pm', 'needs-user'].includes((e.body as DecisionBody).classification))));
   return sentUp || handedUp(esc) ? 'pm' : 'secretary';
 }
 

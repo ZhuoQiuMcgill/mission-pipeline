@@ -11,6 +11,7 @@ import { labelSummary, OLDER_ENVIRONMENT, olderEnvironmentProof, recordedEnviron
 import { explorationState } from '../flow/exploration/flow.ts';
 import { attemptRecorded, olderSnapshotEvidence, type AttemptsAmendedBody, type XState } from '../flow/exploration/machine.ts';
 import { PLAN_LINE, SECRETARY_LINE } from '../flow/plandoc.ts';
+import { ARCHITECT_ANSWER, type ArchitectAnswerBody } from '../flow/architectAnswers.ts';
 import { activeStops, cursor, deliveryInfo, flowEvents, listMissions, openIntents, setCursor, taskQueue, type Db } from '../memory/index.ts';
 import { listNotices, readSteps, type ProcessContext } from '../process/index.ts';
 import type { Project } from './project.ts';
@@ -304,6 +305,10 @@ export async function showItem(p: Project, kind: string, id: string, o: { readon
       extra.push(...section('  reasons (in full)', (b.reasons ?? []).map((r) => `- ${r}`)));
     }
     extraJson['escalations'] = bodies;
+    // 4.4 (G1): the replies of the Architects asked on it, each as recorded (a moot one says why it changed nothing)
+    const architect = ctx.memory.read((db) => found.filter((n) => n.mission !== null).flatMap((n) => flowEvents(db, { mission: n.mission as MissionId, line: SECRETARY_LINE, event: ARCHITECT_ANSWER, limit: 10_000 }).map((e) => JSON.parse(ctx.memory.data.text(e.body)) as ArchitectAnswerBody).filter((x) => `${n.mission}/${x.escalation}` === n.id)));
+    extra.push(...section('  the Architect asked', architect.map((x) => `- ${x.step} (asked by ${x.ask.by === 'pm' ? 'the PM' : 'the Secretary'}): ${x.reply}: ${x.text}${x.why !== undefined ? `; why: ${x.why}` : ''}${(x.tasks ?? []).length > 0 ? `; names ${x.tasks!.join(', ')}` : ''}${x.moot !== undefined ? ` (moot, changes nothing: ${x.moot})` : ''}`)));
+    if (architect.length > 0) extraJson['architect'] = architect;
   }
   if (kind === 'dispatch' && found[0] !== undefined) {
     const d = found[0].id;

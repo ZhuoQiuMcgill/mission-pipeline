@@ -11,6 +11,7 @@ import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
 import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
+import { ARCHITECT_ANSWER, carriedArchitectAnswer, effectiveAnswer, type ArchitectAnswerBody } from '../../flow/architectAnswers.ts';
 import { cardItemNames, riskItemsOf, type RiskItem } from '../../flow/riskItems.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
@@ -258,16 +259,33 @@ export function repairsOfTaskWork(mission: string, amendments: readonly Amendmen
   return ids;
 }
 
-/** 4.4 (G3): a recorded text of an Architect and the tasks it names. */
-export interface ArchitectText { readonly from: string; readonly repair: string | null; readonly tasks: readonly string[]; readonly text: string }
+/**
+ * 4.4 (G3): a recorded text of an Architect and the tasks it names. `since` (G1, an Architect's answer): the
+ * revision it was recorded at; it reaches a named task's cards under the card that task had then, as an answer
+ * belongs to the card it was given under.
+ */
+export interface ArchitectText { readonly from: string; readonly repair: string | null; readonly tasks: readonly string[]; readonly text: string; readonly since?: number }
 
 /**
  * 4.4 (G3): the Architect's recorded texts: the note of each repair decision, naming the tasks it added,
- * changed or reopened. A later source (an Architect's answer on an escalation, fix G1) is added here.
+ * changed or reopened; (G1) an Architect's answer on an escalation that names other tasks of the plan. An
+ * answer of a kind carried out as an answer counts once it was carried out (one another decider's answer
+ * overrode is not printed); a moot one never does. The asking task gets it as its escalation's answer.
  */
 export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
   const out: ArchitectText[] = [];
+  let sec: FlowEvent[] | undefined;
   for (const e of events) {
+    if (e.line === 'secretary' && e.event === ARCHITECT_ANSWER) {
+      const a = e.body as ArchitectAnswerBody;
+      if (a.reply !== 'answer' || a.moot !== undefined || (a.tasks ?? []).length === 0) continue;
+      sec ??= events.filter((x) => x.line === 'secretary');
+      const esc = sec.find((x) => x.event === 'escalation' && x.key === a.escalation)?.body as EscalationBody | undefined;
+      // review p11-5: only the escalation's effective answer (the one carried out, or a loop's latest); earlier ones stay its history
+      if (esc === undefined || effectiveAnswer(sec, a.escalation, esc.source)?.key !== e.key) continue;
+      out.push({ from: `escalation ${a.escalation} (${esc.subject}), the Architect's answer`, repair: null, tasks: [...(a.tasks ?? [])], text: a.text, since: e.revision });
+      continue;
+    }
     if (e.line !== 'repairs' || e.event !== 'decided') continue;
     const d = e.body as RepairDecidedBody;
     if (typeof d.note !== 'string' || d.note.trim() === '') continue;
@@ -276,9 +294,13 @@ export function architectTexts(events: readonly FlowEvent[]): ArchitectText[] {
   return out;
 }
 
-/** 4.4 (G3): the Architect's texts printed on a task's cards: those naming it; a repair's only while it is among the repairs its work answers. */
+/**
+ * 4.4 (G3): the Architect's texts printed on a task's cards: those naming it; a repair's only while it is among the
+ * repairs its work answers; (G1) an answer only while the task keeps the card it had when the answer was recorded.
+ */
 export function architectNotesFor(events: readonly FlowEvent[], task: string, repairs: readonly string[]): Array<{ from: string; text: string }> {
-  return architectTexts(events).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair))).map((t) => ({ from: t.from, text: t.text }));
+  const spec = events.filter((e) => e.line === `task:${task}` && e.event === 'spec').at(-1)?.revision ?? 0;
+  return architectTexts(events).filter((t) => t.tasks.includes(task) && (t.repair === null || repairs.includes(t.repair)) && (t.since === undefined || spec < t.since)).map((t) => ({ from: t.from, text: t.text }));
 }
 
 /**
@@ -294,6 +316,14 @@ export function writtenForTask(constraints: readonly ConstraintBody[], events: r
 }
 
 /**
+ * 4.4 (G1, review p11-r2-1): a PM answer its rejection set aside. A rejection names a PM round (`id#r`), and a
+ * Secretary retry's decision can carry the same key (`id#n`): it applies to PM answers only.
+ */
+function rejectedPmAnswer(events: readonly FlowEvent[], a: FlowEvent): boolean {
+  return a.event === 'pm-answer' && events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key);
+}
+
+/**
  * The answer in effect on one escalation of a task (the user's first, then the PM's latest round, then the
  * Secretary's), when it was carried out as an answer with a text (answerText: its instructions, or else the
  * user's cited words). The current card's decisions and the earlier-decisions list read it alike.
@@ -301,9 +331,18 @@ export function writtenForTask(constraints: readonly ConstraintBody[], events: r
 function carriedAnswer(events: readonly FlowEvent[], esc: EscalationBody): DecisionBody | null {
   const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id);
   const what = applied?.body as { what?: { option?: string }; by?: string } | undefined;
+  // 4.4 (G1, review p11-3, p11-5): a used-up loop carried out with a grant: the Architect's latest answer on it reaches
+  // the task's next cards as an answer does (the granted attempt's Constructor and Reviewer, at queue time and at the claim)
+  if (what?.what?.option === 'grant' && esc.source === 'loop-exhausted') {
+    const ruling = effectiveAnswer(events.filter((a) => a.line === 'secretary'), esc.id, esc.source);
+    return ruling === null ? null : { escalation: esc.id, by: (what.by ?? 'secretary') as DecisionBody['by'], option: 'answer', classification: 'detail', authorization: null, reason: '', instructions: ruling.text, grantExtra: 0, notice: '', mayMatter: false, architect: ruling.key };
+  }
   if (what?.what?.option !== 'answer') return null;
-  const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
+  const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !rejectedPmAnswer(events, a))));
   const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
+  // 4.4 (G1): the Architect's answer carried out on the asker's decision: its text, read from its reply (the asker stays the decider)
+  const architect = carriedArchitectAnswer(events.filter((a) => a.line === 'secretary'), esc.id);
+  if (architect !== null && d !== undefined) return { ...d, option: 'answer', instructions: architect.text, architect: architect.key };
   return d?.option === 'answer' && d.by === what.by && answerText(d).trim() !== '' ? d : null;
 }
 
@@ -319,7 +358,7 @@ export function earlierTaskAnswers(events: readonly FlowEvent[], task: string): 
     const esc = e.body as EscalationBody;
     if (esc.subject !== `task:${task}`) continue;
     const d = carriedAnswer(events, esc);
-    if (d !== null) out.push(`[${esc.id}] ${d.by}: ${line(answerText(d), 200)}`);
+    if (d !== null) out.push(`[${esc.id}] ${d.architect !== undefined ? 'architect' : d.by}: ${line(answerText(d), 200)}`);
   }
   return out;
 }
@@ -469,9 +508,9 @@ export function earlierDecisionsOf(e: EscalationBody, events: readonly FlowEvent
     if (x.line !== 'secretary' || x.event !== 'escalation') continue;
     const esc = x.body as EscalationBody;
     if (esc.id === e.id || esc.subject !== e.subject) continue;
-    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !events.some((r) => r.line === 'secretary' && r.event === 'pm-answer-rejected' && r.key === a.key))));
+    const answers = events.filter((a) => a.line === 'secretary' && ((a.event === 'user-answer' && a.key === esc.id) || ((a.event === 'decision' || a.event === 'pm-answer') && (a.body as DecisionBody).escalation === esc.id && !rejectedPmAnswer(events, a))));
     const d = (answers.find((a) => a.event === 'user-answer') ?? answers.filter((a) => a.event === 'pm-answer').at(-1) ?? answers.at(-1))?.body as DecisionBody | undefined;
-    const applied = events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id)?.body as { what?: { option?: string } } | undefined;
+    const applied =events.find((a) => a.line === 'secretary' && a.event === 'applied' && a.key === esc.id)?.body as { what?: { option?: string } } | undefined;
     if (d === undefined && applied?.what?.option !== 'superseded') continue;
     out.push({
       escalation: esc.id,

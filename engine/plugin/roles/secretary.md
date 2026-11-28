@@ -25,6 +25,7 @@ Decisions: `mp sec card <escalation>`, `mp sec read <escalation> <material> [--p
 Read every page marked must-read; a receipt records the fetch and belongs to that round's dispatch.
 A decision takes effect in the command that hands it back; with `needs-pm`, the notice is the PM's brief: the question, the options and what each leads to, the user's words that bear on it, and what you would choose and why.
 Within the plan, decide `detail` (with `may matter` when needed); unsure and reversible: decide; irreversible: escalate.
+A reading of the plan or of the user's words is yours; a question of design (the plan would have to say something it does not say) goes to the Architect, `ask-architect` with instructions, never to the PM for being about design. Its answer is carried out; a reply that the plan must change, or a question, comes back to you, also when the PM asked.
 Plan structure, changed user results, irreversible external steps and conflicts with their words go to the PM: `needs-pm` / `ask-pm`.
 Every structural detailed-plan revision waits for the PM's `approve` / `send-back`, including a change with no accepted work.
 The PM decides on recorded words or asks the user under F-3.
