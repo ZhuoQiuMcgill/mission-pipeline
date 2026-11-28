@@ -14,13 +14,19 @@ import { fullCompute, type ContinuationRequest, type ContinuationResult, type De
 import { identityOf, initMemory, openMemory, type Memory, type OpenOptions, type WriteTx } from '../src/memory/index.ts';
 
 let base: string | null = null;
+/** The memories of label projects not cleaned up (a scenario's mirror lives until the process ends). */
+const stillOpen = new Set<() => Memory>();
 
 /** One temp folder per process for the mirrors' memories, removed at exit. */
 function baseDir(): string {
   if (base === null) {
     base = mkdtempSync(join(tmpdir(), 'mp-lbl-'));
     const b = base;
-    process.on('exit', () => rmSync(b, { recursive: true, force: true }));
+    process.on('exit', () => {
+      // 4.4.1 (Windows): a file still open there cannot be removed (EBUSY), so the memories close first
+      for (const m of stillOpen) m().close();
+      rmSync(b, { recursive: true, force: true });
+    });
   }
   return base;
 }
@@ -35,6 +41,8 @@ export function labelProject(opts: OpenOptions = {}): { readonly m: Memory; read
   const o: OpenOptions = { git: null, extensions: [LABELS_EXTENSION], ...opts };
   initMemory(dir, o);
   let m = openMemory(dir, o);
+  const current = (): Memory => m;
+  stillOpen.add(current);
   return {
     get m() {
       return m;
@@ -46,6 +54,7 @@ export function labelProject(opts: OpenOptions = {}): { readonly m: Memory; read
       return m;
     },
     cleanup() {
+      stillOpen.delete(current);
       m.close();
       forgetObservedEnvironment(m.projectDir);
       rmSync(dir, { recursive: true, force: true });

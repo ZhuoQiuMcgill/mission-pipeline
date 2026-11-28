@@ -39,10 +39,18 @@ let p: ProcessProject | null = null;
 const children: ChildProcess[] = [];
 let gateFile: string | null = null;
 
-afterEach(() => {
+afterEach(async () => {
   for (const c of children.splice(0)) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL');
   // a killed holder leaves its command running: the open gate ends it
-  if (gateFile !== null && existsSync(dirname(gateFile))) writeFileSync(gateFile, '');
+  if (gateFile !== null && existsSync(dirname(gateFile))) {
+    writeFileSync(gateFile, '');
+    // 4.4.1 (Windows): a folder that is a live process's working directory cannot be removed there (EBUSY),
+    // so the clean-up waits until the commands the gate ends have exited (their pids are in the counter)
+    const counter = join(dirname(gateFile), 'executions.txt');
+    const pids = existsSync(counter) ? readFileSync(counter, 'utf8').split('\n').filter((x) => x !== '').map(Number) : [];
+    await waitFor('the gated commands to end', () => pids.every((pid) => !alive(pid)), 10_000);
+    await new Promise((r) => setTimeout(r, process.platform === 'win32' ? 200 : 0));
+  }
   gateFile = null;
   const q = p;
   p = null;
@@ -86,6 +94,15 @@ function evidenceOf(ctx: ProcessContext, command: string): Array<{ evidence: str
         .stmt("SELECT json_extract(record, '$.evidence') AS evidence, json_extract(record, '$.runClass') AS runClass FROM log WHERE kind = 'evidence' AND json_extract(record, '$.fields.command') = ? ORDER BY rev")
         .all(command) as Array<{ evidence: string; runClass: string }>,
   );
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function waitFor(what: string, ok: () => boolean, ms = 60_000): Promise<void> {
