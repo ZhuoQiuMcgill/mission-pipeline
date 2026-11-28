@@ -132,8 +132,6 @@ engine README's known limitations.
   not reviewed again when one of the items changes. The reads show it as not named (G9).
 - A repair that names no item still cannot be ended once it is filed, as in 4.3 (G9); a filing with
   items ends when the user withdraws every item before its amendment is applied.
-- `mp read repairs` prints the bare state `architect` for a repair whose Architect step is queued or
-  in work, and `waiting` for one not yet queued.
 - A task dropped by a plan and added again later with an identical card can be attributed by the next
   plan to the earliest repair that added it. The gate of a newer repair's reopen of its dependency is
   then passed over, and the task can start on the product that reopen replaces. The proof labels show
@@ -142,8 +140,8 @@ engine README's known limitations.
   new detailed plan: when the first filing's item is withdrawn while the task is under construction, its
   product can pass with no "basis withdrawn" escalation, because the item it took on the reopen is not
   carried through the changed card and the new plan. What a user sees: `mp read items` shows the item
-  withdrawn and the task under it accepted. What to do: stop the task when the user withdraws a
-  requirement, as for any work.
+  withdrawn, and the task's product was accepted with no decider asked. What to do: stop the task when
+  the user withdraws a requirement, as for any work.
 - When a later change restores the card a task had before a new requirement's filing changed it, the
   task's id is still in the plan, so repeating the same `mp pm extend` returns the old filing although
   none of its work is left. What to do: file with new words of the user.
@@ -154,6 +152,14 @@ engine README's known limitations.
   receipt keeps every reason; `mp read show decision` shows them.
 - `mp read items` shows a delivered output's current label: when the label changes after a successful
   delivery, the row no longer shows the label at delivery. The close shows both.
+
+## Evidence and reviews (`src/evaluator/runs.ts`, `src/process/runs.ts`)
+
+- A declared run is reused by its candidate, command, directory and environment; the files the command
+  names are not part of that key. So when a command names a file for the first time, on a commit and an
+  environment where it already ran, the earlier run is reused, and it kept no file. The Reviewer's card
+  then lists no kept file for it (it says nothing false). What to do: the Reviewer reruns the command
+  (`mp seat <id> rerun`) when it needs the file.
 
 ## Questions, Architect answers and their bounds (`src/flow/execution.ts`, `src/flow/architectAsk.ts`, `src/process/pm.ts`)
 

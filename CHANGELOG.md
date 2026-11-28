@@ -42,7 +42,7 @@ The PM stays the user's anchor on long missions, and each seat gets what its par
 
 - `mp pm extend <mission> --words W-n --item <id> --text … --quote …`: a new requirement recorded as one, one or several items a filing, its work started in the same write on a repair's light path (one Architect step under the mechanical checks, no plan review). Its items stay outside the set the plan was checked against, so nothing else loses proof or waits (G9).
 - The work of a filing is bound to its items: with exactly one in force when the amendment is applied, every task the Architect adds, changes or reopens carries it; with several, the Architect names them per task, and a task with none named is bound to none and shown so (G9).
-- The user can take a filing back: withdrawing every item before its amendment is applied ends it (G9).
+- The user can take a filing back: withdrawing every item before its amendment is applied ends it; its Architect step is no longer claimed, and a hand-back that still comes is kept and not applied (G9).
 - `mp pm repair --item <id>` (the requirement item it falls short of), `--again` (file a decided repair anew, #60), `--open-items <ids>` (what was left at the cap that it is for).
 - Option `ask-architect` on a Constructor's questions, a Reviewer's needs-decision and a used-up rework loop: one Architect step (`architect-answer` card) answers a question of design and changes nothing; its answer is carried out, any other reply returns to the Secretary (G1).
 - A repair's Architect that cannot decide hands back its question to the PM's inbox (`repair-question`) (G4).
@@ -52,7 +52,7 @@ The PM stays the user's anchor on long missions, and each seat gets what its par
 - Config `limits` with `mp read scratch`: new Constructor steps are held while a worktree or free-disk limit is passed (H-3).
 - Notes: `mp pm note --replaces`, `--file`, `mp read notes`; a note naming an open escalation warns (G8).
 - Open items: `mp read open-items [--open | --all]`, `mp pm open-item answer | close`, `mp sec open-item answer`, `--defer` on `mp pm answer` and `mp sec decide`, `mp pm verified` (the user's statement that something was checked in the field, never proof) (G5, F4).
-- Reads: `mp read items` (the state of each requirement item and repair), `mp read repairs`, `mp read constraints [--reach]`, `mp read reviews`, `mp read show escalation`; `mp read from W-n` also reaches constraints, waivers and notes (G5, G7, F13, F15).
+- Reads: `mp read items` (the state of each requirement item and repair), `mp read repairs`, `mp read constraints [--reach]`, `mp read reviews`, `mp read show escalation`; `mp read from W-n` also reaches constraints, waivers and notes (G5, G7, F13, F15). `mp read items` and `mp read repairs` credit a repair, a filing or an item only with the attempt that carried it, and take its acceptance, risk, proof and delivery from that attempt's product.
 - A Constructor can stop and ask: `"blocked": true` keeps its edits as a parked commit, nothing is verified or reviewed, and the answer resumes the attempt on them, counted on no loop; a third pause raises `constructor-paused-again` (WI-08) (F4).
 - Each question in `decisions_needed` may say when it must be settled: `before-review` or `later` (F4).
 - A standard says how it is checked (`check`: command, reading, report, artifact, person); a `person` standard is not put to the Reviewer; the fourth answer `cannot-verify` with `needed` sends a review to a decider; `standardsWarn` and the notice `many-standards` (F10).
