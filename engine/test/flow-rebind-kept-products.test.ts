@@ -1605,10 +1605,12 @@ describe('4.4 (F14): re-binding with less noise', () => {
   it('compatibility (review r2-1): 1,001 open 4.3 notices are adopted in bounded batches; the pass reaches its tasks', async () => {
     const { ports, engine } = await setup();
     await drive(engine, ports.scheduler, happyScript(M, keeps));
-    // 4.3 left 1,001 notices open for one product (one per stale set it saw)
-    for (let from = 0; from < 1001; from += 250) {
+    // 4.3 left 1,001 notices open for one product (one per stale set it saw, each in a write of its own). Raised
+    // here in writes of 100 (4.4.1): a notice's journal entry takes about 3 ms on Windows, so 250 in one write
+    // came near the 2 s budget there under load
+    for (let from = 0; from < 1001; from += 100) {
       ports.ctx.memory.write({ op: `test:legacy-notices:${from}`, payload: from }, (tx) => {
-        for (let i = from; i < Math.min(1001, from + 250); i++) raiseNotice(tx, { mission: M, category: 'kept-product-not-rebound', wi: null, key: `impl:prod.con.m1.impl.1:dplan.m1.1.1:prerequisites:${i}`, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.1.1', stale: [`prod.old.${i}`], missing: [] } });
+        for (let i = from; i < Math.min(1001, from + 100); i++) raiseNotice(tx, { mission: M, category: 'kept-product-not-rebound', wi: null, key: `impl:prod.con.m1.impl.1:dplan.m1.1.1:prerequisites:${i}`, trigger: 'raised by 4.3', defaultAction: 'as 4.3 said', detail: { task: 'impl', product: 'prod.con.m1.impl.1', dplan: 'dplan.m1.1.1', stale: [`prod.old.${i}`], missing: [] } });
       });
     }
     await engine.reconcile(M);
