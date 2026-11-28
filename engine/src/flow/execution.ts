@@ -66,7 +66,7 @@ import {
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
 import { attach, constructorClaims, pausedHandBack, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
-import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { DetailedTask, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
@@ -103,14 +103,11 @@ interface ReworkBody {
   readonly after?: readonly string[];
 }
 /**
- * 4.4 (F13): the records of a repair's reopen request on the repairs line (the read of repairs shows them; the
- * states they make, and the writes that move them, are described above RequestState). Each is keyed "<repair>:<task>#<n>", n its place among the
- * request's records. Pinned: it waits for that attempt of the task to be accepted. Carried: that attempt was opened
- * with the repair's issue on its card. Not carried: the task was given up or left the plan; told to the PM.
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (plandoc.ts, beside the decision, so the
+ * cards and the read of repairs read them without this module; the states they make, and the writes that move
+ * them, are described above RequestState).
  */
-export const REOPEN_PINNED = 'reopen-pinned';
-export const REOPEN_CARRIED = 'reopen-carried';
-export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
+export { REOPEN_PINNED, REOPEN_CARRIED, REOPEN_NOT_CARRIED };
 export interface ReopenCarriedBody {
   readonly repair: string;
   readonly task: string;
@@ -2073,8 +2070,9 @@ async function reopenRequests(ctx: FlowCtx): Promise<ReopenRequest[]> {
  * given under its earlier cards (writtenForTask).
  */
 async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<{ readonly repairs: RepairRef[]; readonly written: ReturnType<typeof writtenForTask> }> {
-  const ids = repairsOfTaskWork(ctx.mission, eff.amendments, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), k);
-  const all = ids.length === 0 ? [] : await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
+  const repairsLine = await eventsOf(ctx, REPAIRS_LINE);
+  const ids = repairsOfTaskWork(ctx.mission, eff.amendments, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
+  const all = repairsLine.filter((e) => e.event === 'repair') as Array<{ readonly key: string; readonly body: RepairBody }>;
   const written = writtenForTask(await currentConstraints(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), ctx.mission, t.id, ids);
   return { repairs: all.filter((r) => ids.includes(r.key)).map((r) => repairRef(r.body)), written };
 }

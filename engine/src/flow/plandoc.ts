@@ -421,6 +421,16 @@ export interface RepairDecidedBody {
    */
   readonly tracked?: true;
 }
+/**
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (execution.ts writes and reads them; the
+ * cards and the read of repairs read them too, seat/cards/dynamic.ts reopenRecordState). Each is keyed
+ * "<repair>:<task>#<n>", n its place among the request's records. Pinned: it waits for that attempt of the task to be
+ * accepted. Carried: that attempt was opened with the repair's issue on its card. Not carried: the task was given up
+ * or left the plan; told to the PM.
+ */
+export const REOPEN_PINNED = 'reopen-pinned';
+export const REOPEN_CARRIED = 'reopen-carried';
+export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
 /** A repair as a card shows it (every card of the work it caused). */
 export interface RepairRef {
   readonly id: string;

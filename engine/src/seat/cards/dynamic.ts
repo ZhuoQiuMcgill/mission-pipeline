@@ -1,6 +1,6 @@
 import type { CurrentItem, ConstraintBody, ItemVersionBody } from '../../flow/requirements.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
-import { elementsOf, repairOfTask, type AmendmentEntry, type DetailedTask, type RepairDecidedBody } from '../../flow/plandoc.ts';
+import { elementsOf, repairOfTask, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, type AmendmentEntry, type DetailedTask, type RepairDecidedBody } from '../../flow/plandoc.ts';
 import type { DecisionBody, EscalationBody } from '../../flow/secretary.ts';
 import { scopesOverlap } from '../../flow/mechanical.ts';
 import { xid } from '../../flow/exploration/definition.ts';
@@ -159,28 +159,68 @@ export function coveredReopenKeys(mission: string, task: string, line: readonly 
     .map((v) => v.key);
 }
 
+/** 4.4 (F13): where a repair's reopen of one task stands by 4.4's records (flow/execution.ts, the three states above RequestState). */
+export type ReopenRecordState =
+  /** It waits for the task's attempt `attempt` to be accepted: as decided, or `pinned` again to a later attempt the task moved on to. */
+  | { readonly state: 'requested'; readonly attempt: number; readonly pinned: boolean }
+  /** The task's attempt `attempt` was opened with the repair's issue on its card (the record at `revision`). */
+  | { readonly state: 'carried'; readonly attempt: number; readonly revision: number }
+  /** Final: the task was given up, left the plan, or had no accepted work to reopen; the PM was told. */
+  | { readonly state: 'not-carried'; readonly attempt: number; readonly why: string };
+
 /**
- * 4.4 (G3, F2, F13): each attempt of a task, under its current card, whose card carries a repair's reopen with
- * its issue: the attempt the repair's reopen started (a "rework" with `reopen`), and the attempt a grant on a
+ * 4.4 (F13): repair `repair`'s reopen of `task` as its records on the repairs line say: its latest record, else its
+ * 4.4 decision (requested at the attempt it names), as execution.ts reopenRequests reads them. Null: 4.4 does not
+ * track it (a decision with no `tracked` that no record was written for: 4.3's ways, which its cards tell).
+ */
+export function reopenRecordState(repairs: readonly LineEvent[], repair: string, task: string): ReopenRecordState | null {
+  const last = repairs.filter((e) => (e.event === REOPEN_PINNED || e.event === REOPEN_CARRIED || e.event === REOPEN_NOT_CARRIED) &&
+    (e.body as { repair?: string }).repair === repair && (e.body as { task?: string }).task === task).at(-1);
+  if (last !== undefined) {
+    const b = last.body as { attempt: number; why?: string };
+    if (last.event === REOPEN_CARRIED) return { state: 'carried', attempt: b.attempt, revision: last.revision };
+    if (last.event === REOPEN_NOT_CARRIED) return { state: 'not-carried', attempt: b.attempt, why: b.why ?? '' };
+    return { state: 'requested', attempt: b.attempt, pinned: true };
+  }
+  const d = repairs.find((e) => e.event === 'decided' && (e.body as RepairDecidedBody).repair === repair)?.body as RepairDecidedBody | undefined;
+  const x = d?.tracked === true ? d.reopen.find((r) => r.task === task) : undefined;
+  return x === undefined ? null : { state: 'requested', attempt: x.attempt, pinned: false };
+}
+
+/**
+ * 4.4 (G3, F2, F13): each attempt of a task whose card carries a repair's reopen with its issue. A reopen 4.4
+ * tracks (reopenRecordState): the attempt its `reopen-carried` record names, whatever card the task has since (a
+ * re-plan after it, or a Reviewer who carries the issue on, does not undo it). One 4.3 decided (no record), under
+ * the task's current card: the attempt its reopen started (a "rework" with `reopen`), and the attempt a grant on a
  * used-up rework loop started for it (its card carries the covered request's issue: execution.ts reworkAt). The
- * one place the reopens of a repair are read (cards and `mp read repairs`); a later change of how reopens are
- * carried (merged into an open attempt, pinned to a later one) is read here too.
+ * one place the reopens of a repair are read (cards and `mp read repairs`).
  */
 export function repairReopensCarried(
   mission: string,
   task: string,
   line: readonly LineEvent[],
   secretary: readonly LineEvent[],
+  repairs: readonly LineEvent[],
   // 4.4 (p6-r2-1): a read that must know a card showed the issue: a granted attempt counts only when one of its
   // claimed cards (its Constructor's or its Reviewer's) carries the reopen's issue (absent: the cards are being built)
   check?: { readonly issue: (repair: string) => string | null; readonly cards: (attempt: number) => readonly string[] },
 ): Array<{ readonly attempt: number; readonly repair: string; readonly revision: number }> {
+  const out: Array<{ attempt: number; repair: string; revision: number }> = [];
+  // the reopens of this task 4.4 tracks: their records say, never the cards
+  const tracked = new Set<string>();
+  for (const e of repairs) {
+    if (e.event !== 'decided') continue;
+    const d = e.body as RepairDecidedBody;
+    const s = reopenRecordState(repairs, d.repair, task);
+    if (s === null) continue;
+    tracked.add(d.repair);
+    if (s.state === 'carried') out.push({ attempt: s.attempt, repair: d.repair, revision: s.revision });
+  }
   const spec = line.filter((e) => e.event === 'spec').at(-1)?.revision ?? 0;
   const reworks = line.filter((e) => e.event === 'rework' && e.revision > spec);
-  const out: Array<{ attempt: number; repair: string; revision: number }> = [];
   for (const e of reworks) {
     const reopen = (e.body as { reopen?: { kind?: string; repair?: string } }).reopen;
-    if (reopen?.kind === 'repair' && typeof reopen.repair === 'string') out.push({ attempt: Number(e.key), repair: reopen.repair, revision: e.revision });
+    if (reopen?.kind === 'repair' && typeof reopen.repair === 'string' && !tracked.has(reopen.repair)) out.push({ attempt: Number(e.key), repair: reopen.repair, revision: e.revision });
   }
   const granted = new Set(secretary.filter((e) => e.event === 'applied' && (e.body as { what?: { option?: string } }).what?.option === 'grant').map((e) => e.key));
   for (const e of secretary) {
@@ -190,7 +230,7 @@ export function repairReopensCarried(
     if (next === undefined) continue;
     for (const key of coveredReopenKeys(mission, task, line, { body: e.body as EscalationBody, revision: e.revision })) {
       const repair = key.slice('reopen:repair:'.length);
-      if (!key.startsWith('reopen:repair:') || out.some((x) => x.attempt === attempt! + 1 && x.repair === repair)) continue;
+      if (!key.startsWith('reopen:repair:') || tracked.has(repair) || out.some((x) => x.attempt === attempt! + 1 && x.repair === repair)) continue;
       if (check !== undefined) {
         const issue = check.issue(repair);
         if (issue === null || !check.cards(attempt! + 1).some((c) => c.includes(issue))) continue;
@@ -203,17 +243,17 @@ export function repairReopensCarried(
 
 /**
  * 4.4 (G3, F2): the repairs a task's work answers: the repair that added the task (every attempt), every repair
- * whose amendment changed its card, and every repair whose reopen a card of the task carried under its current
- * card at this attempt or before (repairReopensCarried: the reopened attempt and every later one, a granted
- * reopen too). 4.3 showed the adding repair and this attempt's own reopen only.
+ * whose amendment changed its card, and every repair whose reopen a card of the task carried at this attempt or
+ * before (repairReopensCarried: the reopened attempt and every later one, a granted reopen too). 4.3 showed the
+ * adding repair and this attempt's own reopen only.
  */
-export function repairsOfTaskWork(mission: string, amendments: readonly AmendmentEntry[] | undefined, task: string, line: readonly LineEvent[], secretary: readonly LineEvent[], k: number): string[] {
+export function repairsOfTaskWork(mission: string, amendments: readonly AmendmentEntry[] | undefined, task: string, line: readonly LineEvent[], secretary: readonly LineEvent[], repairs: readonly LineEvent[], k: number): string[] {
   const ids: string[] = [];
   const add = (r: string): void => { if (!ids.includes(r)) ids.push(r); };
   const added = repairOfTask(amendments, task);
   if (added !== null) add(added);
   for (const a of amendments ?? []) if ((a.changed ?? []).some((t) => t.id === task)) add(a.repair);
-  for (const c of repairReopensCarried(mission, task, line, secretary)) if (c.attempt <= k) add(c.repair);
+  for (const c of repairReopensCarried(mission, task, line, secretary, repairs)) if (c.attempt <= k) add(c.repair);
   return ids;
 }
 

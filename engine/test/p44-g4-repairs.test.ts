@@ -53,7 +53,7 @@ const FIX: DetailedTask = {
 };
 
 describe('4.4 G3, F2: the Architect\'s note and the repair on every card it caused', () => {
-  it('a reopen: the note is recorded with the decision and printed on the reopened attempt and on every later one, with the repair; done only when the accepted attempt\'s card carried the repair\'s issue', async () => {
+  it('a reopen: the note is recorded with the decision and printed on the reopened attempt and on every later one, with the repair; done once the task is accepted at the reopened attempt or later', async () => {
     const { ports, engine, script } = await setup();
     await drive(engine, ports.scheduler, script());
     const w2 = say(ports, 'The output loses the header row.');
@@ -76,13 +76,13 @@ describe('4.4 G3, F2: the Architect\'s note and the repair on every card it caus
     const r = repairs(ports).repairs[0]!;
     assert.equal(r.state, 'decided');
     assert.equal(r.note, 'impl writes the rows, so the header is its to keep.');
-    // review p6-4: attempt 3 was a rework of the Reviewer's (its card carries the review's issues, not this repair's): not done
-    assert.ok(!claimed<ConstructorCard>(ports, 'con.m1.impl.3').duties.includes('keep the header row'), 'the later card did not carry the issue');
-    assert.equal(r.reopened[0]?.state, "reopened at attempt 2; accepted at attempt 3 (prod.con.m1.impl.3); the accepted attempt's card did not carry this repair's issue");
-    assert.equal(r.done, false);
+    // 4.4 (F13): the reopen's record names attempt 2, and a rework of the Reviewer's on the reopen's own loop is part of
+    // its work: accepted at attempt 3, the repair is done (a decision of 4.3, read from its cards: p44-p6-merge)
+    assert.equal(r.reopened[0]?.state, 'reopened at attempt 2; accepted at attempt 3 (prod.con.m1.impl.3)');
+    assert.equal(r.done, true);
     assert.ok(r.dispatches.length >= 1 && r.dispatches.every((d) => d.seat === 'architect-repair'), JSON.stringify(r.dispatches));
     const text = repairsText(repairs(ports));
-    assert.ok(text.includes('[R-1] usability (W-2), about task impl: "loses the header row"') && text.includes('decided; not done') && text.includes("the Architect's note: impl writes the rows"), text);
+    assert.ok(text.includes('[R-1] usability (W-2), about task impl: "loses the header row"') && text.includes('decided; done') && text.includes("the Architect's note: impl writes the rows"), text);
   });
 
   it('an added task: read repairs says not done until it is accepted; an instruction addressed to the repair reaches its Architect card in full and the added task\'s cards; another repair\'s Architect card indexes it', async () => {

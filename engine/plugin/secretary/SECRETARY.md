@@ -214,7 +214,7 @@ A changed card also answers a waiting re-plan; `repair-decided` names a pass, an
 The reason appears on cards, in why and at close; repairs require an open mission.
 The Architect's note on a repair decision is recorded and printed on the cards of the tasks it added, changed or reopened, with the repair, on every later attempt too.
 An Architect that cannot decide hands back a question with no edit; it waits in the PM inbox (`repair-question`), and the PM's answer starts the repair's next Architect step with it on the card.
-`mp read repairs <mission>` shows each repair, its note, the tasks it touched with their state, and whether it is done.
+`mp read repairs <mission>` shows each repair, its note, whether it was filed again (`--again`), the tasks it touched with their state, and whether it is done. A reopen decided by 4.4 reads from its records: waiting for an attempt, carried out at an attempt (done once the task is accepted there or later, also after a re-plan or a further rework), or not carried out with the reason (the repair is then not done).
 
 An exploration planned after others starts once they settle; its author must read their hand-offs and latest versions, its Crititor, Stabilizer and interpreter may, and blind executors do not see them.
 Without `after`, other explorations' results do not reach the seats.

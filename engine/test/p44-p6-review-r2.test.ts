@@ -141,8 +141,9 @@ describe('p6-r2-1: a reopen granted on a task with no Constructor (a 4.3 decisio
     // the same records with a claimed card that did not show the issue (an attempt built before this fix): not carried
     const line = await ports.ledger.events({ mission: M, line: 'task:integ' });
     const secretaryLine = await ports.ledger.events({ mission: M, line: 'secretary' });
-    const shown = repairReopensCarried('m1', 'integ', line, secretaryLine, { issue: () => issue, cards: () => [rev.duties] });
-    const hidden = repairReopensCarried('m1', 'integ', line, secretaryLine, { issue: () => issue, cards: () => ['Judge the candidate of task integ.'] });
+    const repairsLine = await ports.ledger.events({ mission: M, line: 'repairs' });
+    const shown = repairReopensCarried('m1', 'integ', line, secretaryLine, repairsLine, { issue: () => issue, cards: () => [rev.duties] });
+    const hidden = repairReopensCarried('m1', 'integ', line, secretaryLine, repairsLine, { issue: () => issue, cards: () => ['Judge the candidate of task integ.'] });
     assert.deepEqual([shown.map((c) => c.attempt), hidden.length], [[2], 0]);
   });
 });

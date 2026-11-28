@@ -11,15 +11,16 @@
 
 import type { BaseRecord, ObjectVersionRecord } from '../common/records.ts';
 import { idPart, type MissionId } from '../common/ids.ts';
+import { canonicalJson } from '../common/hash.ts';
 import { safeId } from '../flow/context.ts';
 import { flowEvents, flowMissions, recordsByKind, factById, type Db } from '../memory/index.ts';
 import type { DataStore } from '../memory/data.ts';
 import { resolveBases, resolveConstraints } from '../memory/domain/constraints.ts';
 import { constraintAuthor, type ConstraintBody } from '../flow/requirements.ts';
-import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
+import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, REOPEN_NOT_CARRIED, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import type { FlowEvent } from '../flow/ports.ts';
 import type { EscalationBody } from '../flow/secretary.ts';
-import { addressee, constraintsForTask, forRepairArchitect, isAddressed, planInEffect, repairReopensCarried } from '../seat/cards/dynamic.ts';
+import { addressee, constraintsForTask, forRepairArchitect, isAddressed, planInEffect, repairReopensCarried, reopenRecordState, type ReopenRecordState } from '../seat/cards/dynamic.ts';
 import { lineAcceptance, taskLineage } from '../flow/execution.ts';
 import { repairLineage } from '../flow/repair.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED } from '../flow/exploration/machine.ts';
@@ -156,6 +157,11 @@ export interface RepairRead {
   readonly text: string;
   readonly about: string | null;
   readonly state: 'waiting' | 'architect' | 'decided' | 'exploration' | 'answered';
+  /**
+   * 4.4 (F13): filed again: with `--again` (`flag`, its operation recorded with it), and the same repair (words, kind,
+   * text and subject) filed before it (`of`, null: none). Null: neither.
+   */
+  readonly filedAgain: { readonly flag: boolean; readonly of: string | null } | null;
   /** The Architect's note on its decision ("" when it gave none); null: not decided, or decided before 4.4 (not recorded). */
   readonly note: string | null;
   /** The Architect's question waiting for the PM (4.4, G4), with its escalation. */
@@ -168,8 +174,36 @@ export interface RepairRead {
   /** The dispatches of its Architect steps (and their decisions), and the count of dispatches on its tasks since its decision. */
   readonly dispatches: ReadonlyArray<{ readonly dispatch: string; readonly seat: string; readonly state: string }>;
   readonly taskDispatches: number;
-  /** Derived: every added task accepted; every changed task accepted after the card the repair gave it; every reopened task accepted at the reopened attempt or later. Null: not a repair of the plan's tasks, or not decided. */
+  /**
+   * Derived: every added task accepted; every changed task accepted after the card the repair gave it; every reopened
+   * task accepted at the attempt its reopen opened or later (4.4: by its `reopen-carried` record, once a seat took that
+   * attempt; a reopen waiting or not carried out is not done; 4.3: the accepted attempt's card carried the issue).
+   * Null: not a repair of the plan's tasks, or not decided.
+   */
   readonly done: boolean | null;
+}
+
+/** The same repair (flow/repair.ts recordRepair): the same words, kind, text and subject. */
+const sameRepair = (a: RepairBody, b: RepairBody): boolean => a.words === b.words && a.kind === b.kind && a.text === b.text && canonicalJson(a.about) === canonicalJson(b.about);
+
+/** Whether a seat took attempt k of a task (as execution.ts attemptTaken): it was reviewed, or a dispatch of its Constructor or Reviewer exists. */
+function attemptTaken(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], k: number): boolean {
+  if (line.some((e) => e.event === 'review' && (e.body as { k?: number }).k === k)) return true;
+  const con = safeId(`con.${mission}.${idPart(task)}.${k}`);
+  const rev = safeId(`rev.${mission}.${idPart(task)}.${k}`);
+  return s.dispatches.some((d) => d.task === con || d.task === rev || d.task.startsWith(`${rev}.r`));
+}
+
+/** 4.4 (F13): a reopen 4.4 tracks as the read of repairs says it, from its records (seat/cards/dynamic.ts reopenRecordState). */
+function reopenState(s: Snapshot, mission: string, task: string, line: readonly FlowEvent[], st: ReturnType<typeof taskState>, rec: ReopenRecordState): RepairTaskState {
+  if (rec.state === 'not-carried') return { task, state: `the reopen was not carried out: ${rec.why}; ${st.state}`, done: false };
+  if (rec.state === 'requested') {
+    const at = st.accepted && st.k >= rec.attempt ? `attempt ${rec.attempt}${st.k > rec.attempt ? ` and the task since (attempt ${st.k})` : ''} accepted: the next pass opens attempt ${st.k + 1} with its issue`
+      : `it waits for attempt ${rec.attempt} to be accepted, then opens the next attempt with its issue`;
+    return { task, state: `the reopen is not carried out yet: ${at}; ${st.state}`, done: false };
+  }
+  if (!attemptTaken(s, mission, task, line, rec.attempt)) return { task, state: `the reopen opened attempt ${rec.attempt}, which no seat has taken yet; ${st.state}`, done: false };
+  return { task, state: `reopened at attempt ${rec.attempt}; ${st.state}`, done: st.accepted && st.k >= rec.attempt };
 }
 
 /** A task's state as the repair read shows it, from its line: accepted (at which attempt), in work, or given up. */
@@ -219,12 +253,21 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       return { task: t, state: !ever ? `${st.state}; no card of this repair's has run yet` : `${st.state}${current ? '' : '; its card changed since this repair'}`, done: st.accepted && current };
     });
     const secretaryEvents = s.events.filter((x) => x.line === 'secretary');
-    const reopened = (body?.reopen ?? []).map((x): RepairTaskState => {
+    const repairsEvents = s.events.filter((x) => x.line === 'repairs');
+    // 4.4 (F13): the tasks its decision reopens, and one recorded with the decision as not carried out (never in `reopen`)
+    const notInDecision = [...new Set(repairsEvents.filter((x) => x.event === REOPEN_NOT_CARRIED && (x.body as { repair?: string }).repair === r.id).map((x) => (x.body as { task: string }).task))]
+      .filter((t) => !(body?.reopen ?? []).some((x) => x.task === t));
+    const reopened = [...(body?.reopen ?? []), ...notInDecision.map((task) => ({ task, issue: '' }))].map((x): RepairTaskState => {
       const line = lineOf(s, x.task);
       const st = taskState(line);
-      // 4.4 (F13, p6-4): the attempts whose card carried this repair's own issue (its reopen, or a grant that covered it,
-      // p6-r2-1: when one of that attempt's claimed cards shows the issue), under the current card
-      const carried = repairReopensCarried(mission, x.task, line, secretaryEvents, { issue: (repair) => (repair === r.id ? x.issue : null), cards: (k) => attemptDuties(s, data, mission, x.task, k) }).filter((c) => c.repair === r.id);
+      // 4.4 (F13): a reopen 4.4 tracks reads from its records: carried out once a seat took the attempt it opened, and
+      // done once the task is accepted at that attempt or later (a re-plan after it, or a Reviewer who carries the
+      // issue on to a further attempt, does not undo it); requested or pinned: what it waits for; not carried: why
+      const rec = reopenRecordState(repairsEvents, r.id, x.task);
+      if (rec !== null) return reopenState(s, mission, x.task, line, st, rec);
+      // a 4.3 decision (no record): the attempts whose card carried this repair's own issue (its reopen, or a grant that
+      // covered it, p6-r2-1: when one of that attempt's claimed cards shows the issue), under the current card (p6-4)
+      const carried = repairReopensCarried(mission, x.task, line, secretaryEvents, repairsEvents, { issue: (repair) => (repair === r.id ? x.issue : null), cards: (k) => attemptDuties(s, data, mission, x.task, k) }).filter((c) => c.repair === r.id);
       if (carried.length === 0) {
         const before = line.some((y) => y.event === 'rework' && (y.body as { reopen?: { kind?: string; repair?: string } }).reopen?.repair === r.id);
         return { task: x.task, state: `${st.state}; ${before ? 'its card changed since the reopen' : 'the reopen is not carried out yet'}`, done: false };
@@ -237,8 +280,11 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
     const lineage = repairLineage(mission, r.id);
     const tasks = new Set([...(body?.add ?? []), ...(body?.changed ?? []), ...(body?.reopen ?? []).map((x) => x.task)].map((t) => taskLineage(mission, t)));
     const all = [...added, ...changed, ...reopened];
+    // 4.4 (F13): filed again, with --again or (its earlier one's work over) as the same repair
+    const same = on('repair').find((x) => x.revision < e.revision && sameRepair(x.body as RepairBody, r))?.key ?? null;
+    const filedAgain = r.op !== undefined || same !== null ? { flag: r.op !== undefined, of: same } : null;
     out.push({
-      id: r.id, kind: r.kind, words: r.words, text: r.text, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state,
+      id: r.id, kind: r.kind, words: r.words, text: r.text, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state, filedAgain,
       note: body?.note ?? null,
       question: open === undefined ? null : { escalation: open.id, text: open.reasons[0] ?? open.summary },
       added, changed, reopened,
@@ -258,6 +304,7 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
     const done = x.done === null ? '' : x.done ? '; done' : '; not done';
     lines.push(`[${x.id}] ${x.kind} (${x.words})${x.about !== null ? `, about ${x.about}` : ''}: "${clip(x.text, 200)}"`);
     lines.push(`    ${x.state}${done}`);
+    if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)` : ''}`);
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
     if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
     for (const [label, ts] of [['added', x.added], ['changed', x.changed], ['reopened', x.reopened]] as const) for (const t of ts) lines.push(`    ${label} ${t.task}: ${t.state}`);
