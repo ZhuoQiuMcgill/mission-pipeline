@@ -2,7 +2,8 @@
 // (`--file`, `--report`, `--result`, `--notes`, `--request`, `--attempts`, `config.json`) or on the
 // standard input (`--stdin`). Windows tools write a UTF-8 byte-order mark (Windows PowerShell 5.1's
 // `Set-Content -Encoding UTF8`, many editors) or UTF-16 with one (5.1's `Out-File` and `>`):
-//   - a UTF-8 byte-order mark at the start is not part of the text: it is dropped;
+//   - a UTF-8 byte-order mark at the start is not part of the text: it is dropped (repeated too, as
+//     Windows PowerShell 5.1 pipes it);
 //   - UTF-16 with a byte-order mark (little or big endian) is decoded;
 //   - bytes that are not UTF-8 are read as U+FFFD, as before, and the command says so in one warning
 //     line (no new refusal, R2);
@@ -83,6 +84,8 @@ export function decodeInput(input: string | Uint8Array, what: string): InputText
       text = b.toString('utf8');
       invalid = !isUtf8(b);
     }
+    // Windows PowerShell 5.1 writes the mark twice to a program's stdin ($OutputEncoding = UTF8): a mark repeated at the start is a mark too
+    if (bom !== null) text = text.replace(/^﻿+/, '');
   }
   const nul = bom === null && text.includes('\u0000');
   const warning = invalid

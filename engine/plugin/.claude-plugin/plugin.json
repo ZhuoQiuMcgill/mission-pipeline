@@ -1,6 +1,6 @@
 {
   "name": "mission-pipeline",
-  "version": "4.4.0",
+  "version": "4.4.1",
   "description": "Optional Claude Code adapter for Mission Pipeline 4.4: puts `mp` on PATH, prints a neutral session pointer, and reminds the PM about message types and deferred recording. It records no messages and is silent on prompts when MP_SECRETARY is set. Any harness can act as the PM or resident Secretary without this plugin.",
   "author": { "name": "Zhuo Qiu" },
   "homepage": "https://github.com/ZhuoQiuMcgill/mission-pipeline",

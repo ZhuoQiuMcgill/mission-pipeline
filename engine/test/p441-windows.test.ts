@@ -200,6 +200,10 @@ describe('B: one reader for text a person or a seat hands the engine', () => {
       const r = decodeInput(bytes, 'x');
       assert.deepEqual([r.text, r.bom, r.invalid, r.nul, r.warning], [text, bom, false, false, null]);
     }
+    // Windows PowerShell 5.1 with $OutputEncoding = UTF8 pipes the mark twice
+    assert.equal(decodeInput(Buffer.concat([BOM, BOM, Buffer.from(text)]), 'x').text, text);
+    assert.equal(decodeInput(Buffer.from(`﻿${text}`, 'utf8').subarray(3), 'x').text, text);
+    assert.equal(decodeInput(Buffer.from(`a﻿`, 'utf8'), 'x').text, 'a﻿', 'a U+FEFF after the start is text');
     const dir = mkdtempSync(join(tmpdir(), 'mp-read-'));
     try {
       writeFileSync(join(dir, 'f.txt'), utf16le('from a file'));
