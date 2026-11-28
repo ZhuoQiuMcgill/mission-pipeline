@@ -20,7 +20,8 @@ import { constraintAuthor, type ConstraintBody } from '../flow/requirements.ts';
 import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, REOPEN_NOT_CARRIED, taskCardHash, type AmendmentEntry, type DetailedPlanDoc as Plan, type RepairBody, type RepairDecidedBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import type { FlowEvent } from '../flow/ports.ts';
 import type { EscalationBody } from '../flow/secretary.ts';
-import { addressee, constraintsForTask, forRepairArchitect, isAddressed, planInEffect, repairReopensCarried, reopenRecordState, type ReopenRecordState } from '../seat/cards/dynamic.ts';
+import { addressee, constraintsForTask, forRepairArchitect, isAddressed, noteOfHandBack, planInEffect, repairNoteOf, repairReopensCarried, reopenRecordState, type ReopenRecordState } from '../seat/cards/dynamic.ts';
+import { taskStatus } from '../process/ports.ts';
 import { lineAcceptance, taskLineage } from '../flow/execution.ts';
 import { repairLineage } from '../flow/repair.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED } from '../flow/exploration/machine.ts';
@@ -149,7 +150,8 @@ export function constraintsText(r: ReturnType<typeof constraintsRead>, reach: bo
 
 // ---------------------------------------------------------------- mp read repairs
 
-export interface RepairTaskState { readonly task: string; readonly state: string; readonly done: boolean }
+/** A task a repair added, changed or reopened, and its state; `notRecorded`: a 4.3 reopen the record does not show the outcome of. */
+export interface RepairTaskState { readonly task: string; readonly state: string; readonly done: boolean; readonly notRecorded?: true }
 
 export interface RepairRead {
   readonly id: string;
@@ -163,8 +165,17 @@ export interface RepairRead {
    * text and subject) filed before it (`of`, null: none). Null: neither.
    */
   readonly filedAgain: { readonly flag: boolean; readonly of: string | null } | null;
-  /** The Architect's note on its decision ("" when it gave none); null: not decided, or decided before 4.4 (not recorded). */
+  /**
+   * The Architect's note on its decision ("" when it gave none); a decision 4.3 recorded has none, and its note is
+   * the one in its Architect step's accepted hand-back. Null: not decided, or no note recorded or readable.
+   */
   readonly note: string | null;
+  /**
+   * 4.4: a decision 4.3 recorded: its parts that are open (not done by the rules of `done`) and those whose outcome
+   * the record does not show (a reopen 4.3 ran its own way); its line says "decided under 4.3" with them instead of
+   * "not done". Null: decided by 4.4, or not decided.
+   */
+  readonly under43: { readonly open: readonly string[]; readonly notRecorded: readonly string[] } | null;
   /** The Architect's question waiting for the PM (4.4, G4), with its escalation. */
   readonly question: { readonly escalation: string; readonly text: string } | null;
   readonly added: readonly RepairTaskState[];
@@ -178,7 +189,8 @@ export interface RepairRead {
   /**
    * Derived: every added task accepted; every changed task accepted after the card the repair gave it; every reopened
    * task accepted at the attempt its reopen opened or later (4.4: by its `reopen-carried` record, once a seat took that
-   * attempt; a reopen waiting or not carried out is not done; 4.3: the accepted attempt's card carried the issue).
+   * attempt; a reopen waiting or not carried out is not done; 4.3, no record: 4.3 counted the reopen on the task's
+   * loop, or an attempt's card carried its issue, and the task is accepted at a later attempt than the decision's).
    * Null: not a repair of the plan's tasks, or not decided.
    */
   readonly done: boolean | null;
@@ -210,6 +222,11 @@ function reopenState(s: Snapshot, mission: string, task: string, line: readonly 
   }
   if (!attemptTaken(s, mission, task, line, rec.attempt)) return { task, state: `the reopen opened attempt ${rec.attempt}, which no seat has taken yet; ${st.state}`, done: false };
   return { task, state: `reopened at attempt ${rec.attempt}; ${st.state}`, done: st.accepted && st.k >= rec.attempt };
+}
+
+/** The parts of a repair (added, changed, reopened tasks) that `pick` names, as "added x". */
+function partsOf(added: readonly RepairTaskState[], changed: readonly RepairTaskState[], reopened: readonly RepairTaskState[], pick: (t: RepairTaskState) => boolean): string[] {
+  return ([['added', added], ['changed', changed], ['reopened', reopened]] as const).flatMap(([label, ts]) => ts.filter(pick).map((t) => `${label} ${t.task}`));
 }
 
 /** A task's state as the repair read shows it, from its line: accepted (at which attempt), in work, or given up. */
@@ -271,16 +288,17 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       // issue on to a further attempt, does not undo it); requested or pinned: what it waits for; not carried: why
       const rec = reopenRecordState(repairsEvents, r.id, x.task);
       if (rec !== null) return reopenState(s, mission, x.task, line, st, rec);
-      // a 4.3 decision (no record): the attempts whose card carried this repair's own issue (its reopen, or a grant that
-      // covered it, p6-r2-1: when one of that attempt's claimed cards shows the issue), under the current card (p6-4)
+      // a reopen of a 4.3 decision with no record: only what the record establishes (4.4 schedules nothing for it, so
+      // nothing here promises a later step). 4.3 counted it on the task's loop (its marker or its verdict), or an
+      // attempt's card carried its issue (repairReopensCarried: its reopen, or a grant that covered it, p6-r2-1)
+      const decidedAt = 'attempt' in x ? x.attempt : null;
+      const counted = line.some((y) => (y.event === 'loop-return' || y.event === 'loop-verdict') && y.key === `reopen:repair:${r.id}`);
       const carried = repairReopensCarried(mission, x.task, line, secretaryEvents, repairsEvents, { issue: (repair) => (repair === r.id ? x.issue : null), cards: (k) => attemptDuties(s, data, mission, x.task, k) }).filter((c) => c.repair === r.id);
-      if (carried.length === 0) {
-        const before = line.some((y) => y.event === 'rework' && (y.body as { reopen?: { kind?: string; repair?: string } }).reopen?.repair === r.id);
-        return { task: x.task, state: `${st.state}; ${before ? 'its card changed since the reopen' : 'the reopen is not carried out yet'}`, done: false };
+      if ((counted || carried.length > 0) && decidedAt !== null && st.k > decidedAt) {
+        const head = `reopened under 4.3${carried.length > 0 ? ` at attempt ${carried.map((c) => c.attempt).join(', ')}` : ''}`;
+        return st.accepted ? { task: x.task, state: `${head} and ${st.state}`, done: true } : { task: x.task, state: `${head}; ${st.state}`, done: false };
       }
-      const at = carried.find((c) => c.attempt === st.k);
-      const done = st.accepted && at !== undefined && st.acceptedRev > at.revision;
-      return { task: x.task, state: `reopened at attempt ${carried.map((c) => c.attempt).join(', ')}; ${st.state}${st.accepted && !done ? "; the accepted attempt's card did not carry this repair's issue" : ''}`, done };
+      return { task: x.task, state: `decided under 4.3: what became of this reopen is not recorded; ${st.state}`, done: false, notRecorded: true };
     });
     const open = escalations.find((q) => q.subject === `repair:${r.id}` && q.source === 'repair-question' && !applied.has(q.id));
     const lineage = repairLineage(mission, r.id);
@@ -297,9 +315,15 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
     const itemIds = [...new Set([...(r.openItems ?? []), ...took.keys()])];
     const closedNow = itemIds.length === 0 ? new Set<string>() : new Set(riskItemsOf(s.events).filter((i) => i.closed !== null).map((i) => i.id));
     const openItems = itemIds.map((id) => ({ id, named: (r.openItems ?? []).includes(id), takenBy: took.get(id) ?? [], closed: closedNow.has(id) }));
+    // 4.4: a decision 4.3 recorded (its reopens carry no `tracked`; one with none carries no note): its parts not done,
+    // each open or not recorded, said as such instead of "not done"
+    const under43 = body === undefined || r.about?.kind === 'exploration' || body.tracked === true || (body.reopen.length === 0 && body.note !== undefined) ? null
+      : { open: partsOf(added, changed, reopened, (t) => !t.done && t.notRecorded !== true), notRecorded: partsOf(added, changed, reopened, (t) => t.notRecorded === true) };
     out.push({
       id: r.id, kind: r.kind, words: r.words, text: r.text, about: r.about === null ? null : `${r.about.kind} ${r.about.id}`, state, filedAgain,
-      note: body?.note ?? null,
+      // 4.4 (G3, G4): a 4.3 decision has no note; its Architect's accepted hand-back has one
+      note: body === undefined ? null : repairNoteOf(body, (step) => noteOfHandBack(taskStatus(db, data, step)?.handBack)),
+      under43,
       question: open === undefined ? null : { escalation: open.id, text: open.reasons[0] ?? open.summary },
       added, changed, reopened,
       instructions: s.constraints.filter((c) => isAddressed(c) && (c.scope.repairs ?? []).includes(r.id)).map((c) => c.line),
@@ -318,10 +342,14 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
   for (const x of r.repairs) {
     const done = x.done === null ? '' : x.done ? '; done' : '; not done';
     lines.push(`[${x.id}] ${x.kind} (${x.words})${x.about !== null ? `, about ${x.about}` : ''}: "${clip(x.text, 200)}"`);
-    lines.push(`    ${x.state}${done}`);
+    // a 4.3 decision not done says only what the record establishes: its parts open, and those not recorded
+    const u = x.under43;
+    lines.push(u !== null && x.done === false
+      ? `    decided under 4.3${u.open.length > 0 ? `; open: ${u.open.join(', ')}` : ''}${u.notRecorded.length > 0 ? `; not recorded: ${u.notRecorded.join(', ')}` : ''}`
+      : `    ${x.state}${done}`);
     if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)` : ''}`);
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
-    if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
+    if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? "(not recorded: decided under 4.3, and its Architect's hand-back has none that can be read)" : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
     for (const [label, ts] of [['added', x.added], ['changed', x.changed], ['reopened', x.reopened]] as const) for (const t of ts) lines.push(`    ${label} ${t.task}: ${t.state}`);
     // 4.4 (G4, G5): what its decision gave of the open items it is for (mp read open-items says what takes one now)
     for (const i of x.openItems ?? []) lines.push(`    open item ${i.id}${i.named ? '' : ' (not named on the repair)'}: ${i.takenBy.length > 0 ? `its decision gave it to ${i.takenBy.map((t) => `task ${t}`).join(', ')}` : x.state === 'decided' ? 'given to no task by its decision' : 'not given to a task yet (not decided)'}${i.closed ? '; closed' : '; still open'}`);

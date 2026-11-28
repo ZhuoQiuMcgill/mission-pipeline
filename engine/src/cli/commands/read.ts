@@ -215,7 +215,7 @@ const constraintsReadCmd: Command = {
 };
 // 4.4 (the plan's F13): each repair, what it did and whether it is done
 const repairsReadCmd: Command = {
-  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs: kind, words, subject and the Architect\'s note; whether it was filed again (--again); the tasks each added, changed and reopened with their state (a reopen waiting for an attempt, carried out, or not carried out and why); its dispatches; and whether it is done', usage: 'mp read repairs <mission>', flags: {},
+  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs: kind, words, subject and the Architect\'s note; whether it was filed again (--again); the tasks each added, changed and reopened with their state (a reopen waiting for an attempt, carried out, or not carried out and why); its dispatches; and whether it is done (a repair decided under 4.3: done, or "decided under 4.3" with its parts open or not recorded)', usage: 'mp read repairs <mission>', flags: {},
   async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const r = p.ctx.memory.read((db) => repairsRead(db, p.ctx.memory.data, m)); return ok(repairsText(r), r);},
 };
 

@@ -5,7 +5,7 @@
 //        earlier-decisions list by those words
 //   p6-3 a changed task is done only when accepted under the card this repair gave it
 //   p6-4 a reopen carried by a grant on a used-up loop (one 4.3 counted) is a reopen of the repair (card and read);
-//        "done" needs the accepted attempt's card to carry the repair's issue (the other direction is in p44-g4-repairs)
+//        the read says it was reopened under 4.3 and accepted (what its record establishes: p44-p6-v1)
 //   p6-5 a Reviewer's answer counts for the instruction version its card showed
 //   p6-6 (kept) a decision with --tasks is not printed as a decision on other tasks; a task that links it lists it
 //   p6-7 a repair Architect's question is not posted once another pass moved the repair on
@@ -201,7 +201,7 @@ describe('p6-4: a reopen carried by a grant on a used-up rework loop (a 4.3 deci
     assert.deepEqual(con.architectNotes?.map((n) => n.text), ['impl writes the rows.']);
     assert.deepEqual(con.addressed?.map((a) => a.id), ['constraint.for-r1']);
     const r = repairs(ports)[0]!;
-    assert.equal(r.reopened[0]?.state, 'reopened at attempt 4; accepted at attempt 4 (prod.con.m1.impl.4)');
+    assert.equal(r.reopened[0]?.state, 'reopened under 4.3 at attempt 4 and accepted at attempt 4 (prod.con.m1.impl.4)');
     assert.equal(r.done, true);
   });
 });

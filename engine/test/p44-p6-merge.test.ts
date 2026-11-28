@@ -4,7 +4,8 @@
 //                 later (a re-plan that changes the card after it, or a Reviewer who carries the issue on, keeps it)
 //   requested     the decision or a `reopen-pinned` record: not done; the read says which attempt it waits for
 //   not carried   a `reopen-not-carried` record: not done; the read says why (also one recorded with the decision)
-// A reopen 4.3 decided and counted (no record) is read from its cards as before. A repair filed with --again says so.
+// A reopen 4.3 decided and counted (no record) reads what its record establishes (p44-p6-v1). A repair filed with
+// --again says so.
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -159,7 +160,7 @@ describe('p6 with p7: a reopen 4.4 decided is done by its records', () => {
     assert.ok(text.includes('decided; not done') && text.includes('    reopened impl: the reopen was not carried out: the task was given up; given up'), text);
   });
 
-  it('a reopen 4.3 decided and counted (no record) is read from its cards: a Reviewer\'s rework accepted later did not carry its issue', async () => {
+  it('a reopen 4.3 decided and counted (no record) reads what its record establishes: reopened under 4.3 and accepted at a later attempt', async () => {
     const { ports, engine, script } = await setup();
     await drive(engine, ports.scheduler, script());
     await fileRepair(ports, 'loses the header row');
@@ -167,10 +168,10 @@ describe('p6 with p7: a reopen 4.4 decided is done by its records', () => {
     await drive(engine, ports.scheduler, script({ 'architect-repair': reopenImpl('keep the header row'), 'rev.m1.impl.2': (t) => ({ handBack: reviewer(t.card as never, 'rework') }) }));
     restore();
     assert.equal((await events(ports, 'repairs', REOPEN_CARRIED)).length, 0, '4.3 ran it: no record');
-    assert.ok(!claimed<ConstructorCard>(ports, 'con.m1.impl.3').duties.includes('keep the header row'), 'the later card did not carry the issue');
+    // v1 (verification on 4.3 memories): 4.3 counted it and the task was accepted later; nothing in 4.4 acts on it
     const r = repair(ports, 'R-1');
-    assert.equal(r.reopened[0]?.state, "reopened at attempt 2; accepted at attempt 3 (prod.con.m1.impl.3); the accepted attempt's card did not carry this repair's issue");
-    assert.equal(r.done, false);
+    assert.equal(r.reopened[0]?.state, 'reopened under 4.3 at attempt 2 and accepted at attempt 3 (prod.con.m1.impl.3)');
+    assert.equal(r.done, true);
   });
 });
 
