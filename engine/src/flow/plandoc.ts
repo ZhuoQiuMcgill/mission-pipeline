@@ -411,6 +411,8 @@ export interface RepairDecidedBody {
   readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
+  /** 4.4 (G3, F2): the Architect's note on its decision, printed on the cards of the tasks it added, changed or reopened (absent: a 4.3 decision). */
+  readonly note?: string;
   /**
    * 4.4 (F13, p7-1): its reopens are tracked requests (requested, carried out, not carried out: execution.ts): one
    * whose task moved on waits for the open attempt and opens the next, or is told as not carried out, and an
@@ -419,6 +421,16 @@ export interface RepairDecidedBody {
    */
   readonly tracked?: true;
 }
+/**
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (execution.ts writes and reads them; the
+ * cards and the read of repairs read them too, seat/cards/dynamic.ts reopenRecordState). Each is keyed
+ * "<repair>:<task>#<n>", n its place among the request's records. Pinned: it waits for that attempt of the task to be
+ * accepted. Carried: that attempt was opened with the repair's issue on its card. Not carried: the task was given up
+ * or left the plan; told to the PM.
+ */
+export const REOPEN_PINNED = 'reopen-pinned';
+export const REOPEN_CARRIED = 'reopen-carried';
+export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
 /** A repair as a card shows it (every card of the work it caused). */
 export interface RepairRef {
   readonly id: string;

@@ -37,6 +37,8 @@ export const ESCALATION_SOURCES = [
   'cost-overrun',
   'plan-restarts-work',
   'plan-structure-change',
+  // 4.4 (G4): a repair Architect's question, handed to the PM directly (flow/secretary.ts DIRECT_TO_PM)
+  'repair-question',
 ] as const;
 export type EscalationSource = (typeof ESCALATION_SOURCES)[number];
 

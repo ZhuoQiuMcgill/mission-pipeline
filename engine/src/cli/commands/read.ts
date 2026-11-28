@@ -13,6 +13,7 @@ import { buildGraph, chain, resolveNodes, tree, walk } from '../tree.ts';
 import { fullRunMarkers } from '../../process/index.ts';
 import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
+import { constraintsRead, constraintsText, repairsRead, repairsText } from '../workReads.ts';
 import { listOpenItems } from '../../process/openItems.ts';
 
 function P(c: RunContext): Project {
@@ -204,6 +205,17 @@ const notesRead: Command = {
   },
 };
 
+// 4.4 (G3): who wrote each constraint and what it reaches, so a PM that writes for tasks again can be seen
+const constraintsReadCmd: Command = {
+  group: 'read', name: ['constraints'], summary: 'the constraints in force for a mission, each with its author (PM or Secretary) and its address or scope; --reach adds the task cards each reaches, its size and the Reviewers\' answers', usage: 'mp read constraints <mission> [--reach]', flags: {reach: 'boolean'},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const reach = flagBool(a, 'reach'); const r = p.ctx.memory.read((db) => constraintsRead(db, p.ctx.memory.data, m, reach)); return ok(constraintsText(r, reach), r);},
+};
+// 4.4 (the plan's F13): each repair, what it did and whether it is done
+const repairsReadCmd: Command = {
+  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs: kind, words, subject and the Architect\'s note; whether it was filed again (--again); the tasks each added, changed and reopened with their state (a reopen waiting for an attempt, carried out, or not carried out and why); its dispatches; and whether it is done', usage: 'mp read repairs <mission>', flags: {},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const r = p.ctx.memory.read((db) => repairsRead(db, p.ctx.memory.data, m)); return ok(repairsText(r), r);},
+};
+
 // 4.4 (F4; G5): what is left open and what became of it, from the record (p10 adds the items of an acceptance with risk)
 const openItemsRead: Command = {
   group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later, each with its task, its state, who answers it and its answer', usage: 'mp read open-items <mission>', flags: {},
@@ -217,4 +229,4 @@ const openItemsRead: Command = {
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, openItemsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, constraintsReadCmd, repairsReadCmd, openItemsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
