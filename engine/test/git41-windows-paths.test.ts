@@ -4,9 +4,9 @@
 // native ("C:\x\y") and Node reports a file id as the inode.
 
 import assert from 'node:assert/strict';
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { inferOrigin, statDiffers, type DebugEntry } from '../src/git/externalWorktrees.ts';
 import { nativeGitPath, rootFromGitdirFile } from '../src/git/worktreeRecord.ts';
@@ -55,7 +55,7 @@ test('a copied folder whose git left the worktree links as they were: the direct
     initMemory(original);
     git(original, 'worktree', 'add', '-q', '--detach', join('.mission-pipeline', 'worktrees', 'D-1'));
     cpSync(original, copied, { recursive: true });
-    // a git whose repair exits zero and fixes nothing (Git for Windows 2.45 does so for a copy)
+    // a git whose repair exits zero and fixes nothing in the copy (mp no longer asks git to repair)
     const plain = plainGit();
     const inert: GitRunner = (args, opts) => (args[0] === 'worktree' && args[1] === 'repair' ? { code: 0, stdout: '', stderr: '' } : plain(args, opts));
     const m = openMemory(copied, { git: inert });
@@ -72,6 +72,62 @@ test('a copied folder whose git left the worktree links as they were: the direct
     assert.equal(git(wt, 'status', '--porcelain'), '');
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+/** Every file under `dir`, by path, with its bytes as hex (what "untouched" is compared on). */
+function filesUnder(dir: string, rel = '', out = new Map<string, string>()): Map<string, string> {
+  for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
+    const p = rel === '' ? e.name : join(rel, e.name);
+    if (e.isDirectory()) filesUnder(dir, p, out);
+    else out.set(p, readFileSync(join(dir, p)).toString('hex'));
+  }
+  return out;
+}
+
+test('opening a copied folder never writes to the original folder, whatever git does with a repair', () => {
+  // What `git worktree repair <copied worktree>` run in the copy did with git 2.45 (Git for
+  // Windows): it followed the copied link back to the original's administrative directory and
+  // pointed the ORIGINAL's two links into the copy, leaving the copy's links as they were.
+  const plain = plainGit();
+  const repairsTheOriginal: GitRunner = (args, opts) => {
+    if (args[0] !== 'worktree' || args[1] !== 'repair') return plain(args, opts);
+    for (const copied of args.slice(2)) {
+      const originalAdmin = readFileSync(join(copied, '.git'), 'utf8').trim().slice('gitdir: '.length);
+      const originalDotgit = readFileSync(join(originalAdmin, 'gitdir'), 'utf8').trim();
+      writeFileSync(join(originalAdmin, 'gitdir'), `${gitLinkPath(join(copied, '.git'))}\n`);
+      writeFileSync(originalDotgit, `gitdir: ${gitLinkPath(join(opts.cwd, '.git', 'worktrees', basename(originalAdmin)))}\n`);
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  for (const [name, runner] of [['plain git', plain], ['a repair that rewrites the original', repairsTheOriginal]] as const) {
+    const base = mkdtempSync(join(tmpdir(), 'mp-untouched-'));
+    try {
+      const original = join(base, 'original');
+      const copied = join(base, 'copy');
+      mkdirSync(original);
+      repo(original);
+      initMemory(original);
+      for (const path of [join('.mission-pipeline', 'worktrees', 'D-1'), 'other-worktree']) git(original, 'worktree', 'add', '-q', '--detach', path);
+      cpSync(original, copied, { recursive: true });
+      const before = filesUnder(original);
+      const m = openMemory(copied, { git: runner });
+      try {
+        assert.equal(m.status().gitHold, null, `${name}: ${JSON.stringify(m.status().gitHold)}`);
+        assert.deepEqual(m.status().lastMove!.findings.git, { kind: 'repaired', worktrees: 2 }, name);
+      } finally {
+        m.close();
+      }
+      const after = filesUnder(original);
+      assert.deepEqual([...after.keys()].filter((k) => after.get(k) !== before.get(k)), [], `${name}: nothing under the original folder changed`);
+      assert.equal(after.size, before.size);
+      for (const path of [join('.mission-pipeline', 'worktrees', 'D-1'), 'other-worktree']) {
+        assert.equal(realpathSync(git(join(original, path), 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(original, '.git')), `${name}: ${path} of the original`);
+        assert.equal(realpathSync(git(join(copied, path), 'rev-parse', '--path-format=absolute', '--git-common-dir')), realpathSync(join(copied, '.git')), `${name}: ${path} of the copy`);
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   }
 });
 
