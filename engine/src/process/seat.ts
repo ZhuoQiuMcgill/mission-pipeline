@@ -493,7 +493,7 @@ export async function seatFullRun(ctx: ProcessContext, dispatch: string): Promis
  * cites a passing full run of its candidate (its tree, the current suite); rework and
  * needs-decision need none. Empty: nothing to refuse.
  */
-function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: unknown): string[] {
+function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: ReadonlyArray<{ readonly run: string }>): string[] {
   if (!integrationReview(ctx, v.card)) return [];
   const r = fields as { verdict?: unknown; judgments?: Array<{ standard?: unknown; met?: unknown; evidence?: unknown }> } | null;
   if (r === null || typeof r !== 'object' || r.verdict !== 'pass') return [];
@@ -518,7 +518,28 @@ function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: u
   const data = ctx.memory.data;
   const passing = ctx.memory.read((db) => passingFullRunEvidence(db, data, tree, suiteHash(ctx.fullSuite)));
   if ([...cited].some((e) => passing.has(e))) return [];
+  // 4.4 (F10; review F3-7): with no standard of its own to judge (a person checks each one, and the acceptance
+  // lists them as open items to verify), the pass rests on the passing full run this dispatch had mp make
+  if ((Array.isArray(r.judgments) ? r.judgments : []).length === 0 && runs.some((x) => passing.has(x.run))) return [];
   return [`verdict: an integration task's "pass" cites a passing full run of its candidate: when nothing visible is wrong, run \`mp seat ${v.info.dispatch} full-run\` and cite its runs as evidence:<id>; if the change or the local results already show a problem, hand back "rework" (or "needs-decision") without a full run`];
+}
+
+/**
+ * 4.4 (F10; review F3-7): the runs of this dispatch that are a passing full run of its candidate (none: not an
+ * integration review, or its tree cannot be read). An integration pass with no judgment of its own rests on them.
+ */
+function dispatchFullRun(ctx: ProcessContext, v: DispatchView, runs: ReadonlyArray<{ readonly run: string }>): string[] {
+  if (!integrationReview(ctx, v.card)) return [];
+  const snap = cardSnapshot(v);
+  if (snap === null || !COMMIT.test(snap)) return [];
+  let tree: string;
+  try {
+    tree = treeOf(ctx, snap);
+  } catch {
+    return [];
+  }
+  const passing = ctx.memory.read((db) => passingFullRunEvidence(db, ctx.memory.data, tree, suiteHash(ctx.fullSuite)));
+  return [...new Set(runs.map((x) => x.run).filter((e) => passing.has(e)))];
 }
 
 /** The plan task line and attempt of a Constructor dispatch's task: the flow's "dispatched" event keyed by it (execution.ts submitConstructor), or null. */
@@ -685,7 +706,11 @@ function recordsOf(ctx: ProcessContext, v: DispatchView, fields: unknown, runs: 
   if (v.card.seat === 'reviewer') {
     const card = v.card as unknown as ReviewerCard;
     const r = fields as ReviewerResult;
-    return [judgmentRecord(card, r, data.putList(citedEvidence(card, r, runs))), ...findingRecords(card, r, content, v.info.dispatch)];
+    // 4.4 (F10; review F3-7): an integration pass with no judgment of its own (each standard a person's) rests on
+    // the passing full run of its dispatch: the judgment cites it, as an integration pass always does
+    const cited: string[] = citedEvidence(card, r, runs);
+    const evidence = cited.length === 0 && r.verdict === 'pass' && r.judgments.length === 0 ? dispatchFullRun(ctx, v, runs) : cited;
+    return [judgmentRecord(card, r, data.putList(evidence)), ...findingRecords(card, r, content, v.info.dispatch)];
   }
   // 4.1.3: a blind executor's report is kept with its evidence record; the leaf is the one this hand-back files
   const report = { text: more.report, leaf: dispatchLeaf(v.info.mission, v.info.dispatch, 'report'), fields };
@@ -752,17 +777,32 @@ async function keepHandedIn(ctx: ProcessContext, data: readonly RecordedData[], 
 }
 
 /**
- * Whether the path as cited lies in the folder `dir`: its own folder is `dir` or inside it (both resolved through
- * links). Review p9-r2-5: the cited name decides, not what a link at that name points to, since the clean-up of
- * `dir` removes the name. False when either cannot be resolved.
+ * Whether the path as cited lies in the folder `dir`, by its name or by what it is: its own folder is `dir` or
+ * inside it (both resolved through links), or the file it resolves to is. The clean-up of `dir` removes the name
+ * (review p9-r2-5: a link in `dir` to a file elsewhere) and the target (review F2-4: a link elsewhere to a file in
+ * `dir`), so either one makes the checked bytes worth copying. False for a part that cannot be resolved.
  */
 function insideDir(dir: string, path: string): boolean {
-  try {
-    const rel = relative(realpathSync.native(dir), realpathSync.native(dirname(path)));
+  const within = (root: string, p: string): boolean => {
+    const rel = relative(root, p);
     return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  };
+  let root: string;
+  try {
+    root = realpathSync.native(dir);
   } catch {
     return false;
   }
+  const resolved = (p: string): string | null => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      return null;
+    }
+  };
+  const folder = resolved(dirname(path));
+  const target = resolved(path);
+  return (folder !== null && within(root, folder)) || (target !== null && within(root, target));
 }
 
 /**
@@ -852,7 +892,7 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
       // 4.4 (F16): the receipt records a fetch; mp cannot see reading, and says so
       ...unreadMustRead(((v.card['materials'] as MaterialRef[] | undefined) ?? []), reads).map((k) => `must-read page ${k} was not fetched (mp seat ${dispatch} read <material> --page <n>)`),
       ...handBackProblems(v.card, input.fields, { materialsRead: reads, runs, ...(snapFiles !== null ? { snapshot: snapFiles } : {}), ...(dataChecks !== undefined ? { data: dataChecks } : {}) }),
-      ...integrationPassProblems(ctx, v, input.fields),
+      ...integrationPassProblems(ctx, v, input.fields, runs),
       ...attemptCommandProblems(ctx, v, input.fields),
     ];
     const unique = [...new Set(problems)];

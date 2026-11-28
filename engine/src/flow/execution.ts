@@ -53,6 +53,7 @@ import {
   ev,
   eventOf,
   eventsOf,
+  failureInForce,
   idPart,
   notify,
   noticeAlertId,
@@ -649,34 +650,34 @@ async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTa
     }
     review = await takeReview(ctx, t, r.k, r.rev, view);
     if (review === null) return 'pending';
-    // 4.4 (F10): what the Reviewer could not verify, with nothing else open, goes to a decider, not back to the Constructor
-    const unverified = onlyUnverifiable(review);
-    switch (unverified ? 'needs-decision' : review.verdict) {
-      case 'pass':
-        await commit(ctx, `flow:reaccepted:${ctx.mission}:${r.rev}`, { events: [ev(ctx, lineName, 'reaccepted', `${r.k}:${r.n}`, { k: r.k, product: product.object, judgment: review.judgment })] });
-        break;
-      case 'rework':
-        // an integration review that names the dependencies at fault reopens them (D-6)
-        if (t.kind === 'integration' && (review.reopen ?? []).length > 0) await reopenFromReview(ctx, plan, t, r.k, r.rev, review, product);
-        // the new evidence does not hold: the Constructor redoes the task (the next attempt)
-        else await rework(ctx, t, r.k, review.issues, [], `rework:${r.k}:re${r.n}`);
-        break;
-      case 'needs-decision':
-        await raiseEscalation(ctx, {
-          id: `rnd.${r.rev}`,
-          source: 'reviewer-needs-decision',
-          lineage,
-          subject: `task:${t.id}`,
-          summary: `The Reviewer of task ${t.id} (attempt ${r.k}, re-review ${r.n} after an environment change) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
-          reasons: [...review.issues],
-          // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
-          options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
-          items: t.requirementItems,
-          facts: { task: t.id, attempt: r.k, product: product.object, issues: review.issues, rereview: r.n },
-          handover: { from: r.rev, objects: [product.object] },
-        });
-        break;
-    }
+  }
+  // 4.4 (F10; review F4-3): the disposition is carried out from the stored review on every pass that finds it not
+  // carried out (as a re-bound version's review is), so an interruption between the review's write and the next
+  // write leaves the question with its decider (the escalation's id is the round's), not a wait nobody can end.
+  // While attempt k stays the accepted one this step runs; a rework's commit starts attempt k + 1 and ends it.
+  // What the Reviewer could not verify, with nothing else open, goes to a decider, not back to the Constructor.
+  const unverified = onlyUnverifiable(review);
+  if (!unverified && review.verdict === 'pass') {
+    if (line.one('reaccepted', `${r.k}:${r.n}`) === null) await commit(ctx, `flow:reaccepted:${ctx.mission}:${r.rev}`, { events: [ev(ctx, lineName, 'reaccepted', `${r.k}:${r.n}`, { k: r.k, product: product.object, judgment: review.judgment })] });
+  } else if (!unverified && review.verdict === 'rework') {
+    // an integration review that names the dependencies at fault reopens them (D-6)
+    if (t.kind === 'integration' && (review.reopen ?? []).length > 0) await reopenFromReview(ctx, plan, t, r.k, r.rev, review, product);
+    // the new evidence does not hold: the Constructor redoes the task (the next attempt)
+    else await rework(ctx, t, r.k, review.issues, [], `rework:${r.k}:re${r.n}`);
+  } else {
+    await raiseEscalation(ctx, {
+      id: `rnd.${r.rev}`,
+      source: 'reviewer-needs-decision',
+      lineage,
+      subject: `task:${t.id}`,
+      summary: `The Reviewer of task ${t.id} (attempt ${r.k}, re-review ${r.n} after an environment change) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
+      reasons: [...review.issues],
+      // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
+      options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
+      items: t.requirementItems,
+      facts: { task: t.id, attempt: r.k, product: product.object, issues: review.issues, rereview: r.n },
+      handover: { from: r.rev, objects: [product.object] },
+    });
   }
   // 4.4 (F10, review p9-3): the disposition taken, when recorded and when resumed: such a review waits for its
   // decider's answer as a "needs decision" does (the hand-back keeps the verdict the Reviewer gave)
@@ -3681,8 +3682,8 @@ async function submitReviewer(
       // the objects the version's contract relies on (v51 §5.2: a judgment conforms to the contract fixed with
       // its target), which for a version recorded under an earlier plan is that plan, not the one in effect
       reliesOn: c.putList(reliedPlans(obj, eff)),
-      // 4.4 (F10, review p9-r2-1): the failing judgment of this very version that a decider's answer sent to this review
-      revokes: await failureToSupersede(ctx, t.id, product.object, task),
+      // 4.4 (F10, review p9-r2-1, F2-2): the failure in force on this version's position (a decider's answer sent it to this review)
+      revokes: await failureInForce(ctx, product.object, 'reviewer'),
       extends: null,
       evidenceUse: { fields: ['exit'], statisticalOrExternal: false },
       superseded: [],
@@ -3712,22 +3713,6 @@ async function submitReviewer(
   ctx.progressed = true;
 }
 
-/**
- * 4.4 (F10, review p9-r2-1): the judgment a new review of `target` supersedes: the task's latest review of that very
- * version, when it failed. A failing review is followed by another review of the same version only through a
- * decider's answer (a fourth answer's review sent back as "rework", an integration rework with nothing to reopen),
- * and a negation stands until a pass names it (evaluator/store.ts positionAfter). Null: the latest review of the
- * version did not fail, or there is none.
- */
-async function failureToSupersede(ctx: FlowCtx, taskId: string, target: string, current: string): Promise<string | null> {
-  const reviews = (await readLine(ctx, taskId)).all<ReviewBody>('review').filter((r) => r.body.task !== current);
-  for (const r of reviews.toReversed()) {
-    const j = await judgmentRecordOf(ctx, r.body.judgment);
-    if (j === null || j.target !== target) continue;
-    return j.verdict === 'fail' ? j.judgment : null;
-  }
-  return null;
-}
 
 /** The previous Reviewer of the task (any attempt, before this review task): its verdict, each standard it did not find met, with the reason, and its findings. */
 async function previousReviewOf(ctx: FlowCtx, line: Line, current: string): Promise<NonNullable<ReviewerCard['previousReview']> | null> {

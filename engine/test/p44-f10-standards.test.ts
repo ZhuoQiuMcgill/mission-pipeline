@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import type { MissionId } from '../src/common/ids.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
-import { commit, ev, flowCtx } from '../src/flow/context.ts';
+import { commit, ev, flowCtx, judgmentRecordOf } from '../src/flow/context.ts';
 import { acceptedProduct } from '../src/flow/execution.ts';
 import { DetailedTask, RENEW_LINE, REVIEW_NEEDED, taskCardHash, type DetailedPlanDoc, type ReviewNeededBody } from '../src/flow/plandoc.ts';
 import { recordSeatHandBack } from '../src/process/seat.ts';
@@ -374,5 +374,102 @@ describe('4.4 F10, review round 2', () => {
     assert.equal((await recordSeatHandBack(suite, d, { report: 'r', fields: fourth, advance: false })).kind, 'recorded');
     await drive(engine, ports.scheduler, withKinds(plan, { secretary: () => null }));
     assert.ok((await escalation(flowCtx(ports, M), `unv.${step}`)) !== null, 'it goes to a decider');
+  });
+});
+
+describe('4.4 F10, final review', () => {
+  const S2_UNVERIFIED = { S1: { met: 'yes' as const }, S2: { met: 'cannot-verify' as const, needed: 'the device log', evidence: [] } };
+  // the dependent cites a run of its own (as the re-bind tests' plan gives it)
+  const plan = (): DetailedPlanDoc => {
+    const p = detailedPlan(M, { extraTask: true });
+    return { ...p, tasks: p.tasks.map((t) => (t.id === 'docs' ? { ...t, interpreter: 'node', verificationCommands: [{ id: 'lint', command: 'npx markdownlint docs/parser.md' }] } : t)) };
+  };
+
+  async function stableSetup(): Promise<{ ports: World; engine: FlowEngine }> {
+    const ports = memoryPorts();
+    say(ports, SEED_TEXT);
+    await seedMission(ports, M);
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['W-1'], mode: 'stable' });
+    return { ports, engine: new FlowEngine(ports) };
+  }
+
+  /** The implementation task's reviews as `verdicts` names them by step (every other review passes). */
+  const reviewing = (verdicts: Record<string, ReviewerResult['verdict']>): Script => (t: FlowTask) => {
+    const c = t.card as unknown as ReviewerCard;
+    const v = verdicts[t.task];
+    return { handBack: v === undefined ? judge(c, 'pass') : judge(c, v, S2_UNVERIFIED) };
+  };
+
+  for (const between of [1, 2]) {
+    it(`F2-2: a rework whose only open standard cannot be verified, then ${between} undecided review${between === 1 ? '' : 's'} of the same candidate, then a pass: the pass revokes the failure in force, the product is proven and its stable dependent goes on`, async () => {
+      const { ports, engine } = await stableSetup();
+      const verdicts: Record<string, ReviewerResult['verdict']> = { 'rev.m1.impl.1': 'rework' };
+      for (let i = 1; i <= between; i++) verdicts[`rev.m1.impl.1.r${i}`] = 'needs-decision';
+      await drive(engine, ports.scheduler, withKinds(plan, {
+        reviewer: reviewing(verdicts),
+        secretary: (t: FlowTask) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'answer', { instructions: 'The device log is kept with the run.' }) }),
+      }));
+      const last = ports.scheduler.card<ReviewerCard>(`rev.m1.impl.1.r${between + 1}`);
+      assert.equal(last.binding.revokes, 'j.rev.m1.impl.1', 'the failure in force, not the latest (undecided) review');
+      assert.ok((await events(ports, { line: 'task:impl' })).some((x) => x.event === 'accepted' && x.key === '1'));
+      assert.equal((await ports.evaluator.labels([last.target])).labels[last.target], 'proven', 'the evaluator holds the pass');
+      assert.ok((await events(ports, { line: 'task:docs' })).some((x) => x.event === 'accepted'), 'the stable dependent goes on');
+    });
+  }
+
+  it('F4-2: a rework whose only open standard cannot be verified, answered, then needs-decision on the same candidate accepted with risk: the ruling revokes the failure in force and keeps the review it adopts', async () => {
+    const { ports, engine } = await stableSetup();
+    await drive(engine, ports.scheduler, withKinds(plan, {
+      reviewer: reviewing({ 'rev.m1.impl.1': 'rework', 'rev.m1.impl.1.r1': 'needs-decision' }),
+      secretary: (t: FlowTask) => {
+        const c = t.card as unknown as SecretaryCard;
+        return { handBack: c.request.id === 'unv.rev.m1.impl.1' ? secretary(c, 'answer', { instructions: 'The device log is kept with the run.' }) : secretary(c, 'accept-risk') };
+      },
+    }));
+    const ctx = flowCtx(ports, M);
+    const accepted = (await events(ports, { line: 'task:impl' })).find((x) => x.event === 'accepted' && x.key === '1');
+    assert.ok(accepted !== undefined, 'the ruling accepts the task');
+    const ruling = (await judgmentRecordOf(ctx, (accepted.body as { judgment: string }).judgment))!;
+    const adopted = (await judgmentRecordOf(ctx, 'j.rev.m1.impl.1.r1'))!;
+    assert.equal(ruling.revokes, 'j.rev.m1.impl.1', 'the failure in force, not the undecided review it adopts');
+    assert.deepEqual(ruling.evidence, adopted.evidence, 'the evidence of the review it adopts');
+    assert.deepEqual(ruling.issues, adopted.issues, 'and its answers');
+    const target = ruling.target;
+    assert.equal((await ports.evaluator.labels([target])).labels[target], 'proven', 'the evaluator holds the ruling');
+    assert.ok((await events(ports, { line: 'task:docs' })).some((x) => x.event === 'accepted'), 'the stable dependent goes on');
+  });
+
+  it('F4-3: an environment re-review that needs a decision, interrupted between its review and its escalation: the next pass raises the escalation from the stored review, and its answer starts the next round', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, happyScript(M));
+    const target = (await acceptedProduct(flowCtx(ports, M), 'impl'))!;
+    const judgment = (await ports.evaluator.deciding([target])).views[target]!.positions.find((p) => p.review === 'reviewer')!.by!;
+    const environment = ports.ctx.environment().identity;
+    const ctx = flowCtx(ports, M);
+    const body: ReviewNeededBody = { target, judgment, review: 'reviewer', environment, reason: 'the environment changed', rerun: null, passed: null };
+    await commit(ctx, 'test:f4-3:renew', { events: [ev(ctx, RENEW_LINE, REVIEW_NEEDED, `${judgment}@${environment}`, body)] });
+    const script = (answer: boolean): Script => withKinds(() => detailedPlan(M), {
+      reviewer: (t: FlowTask) => ({ handBack: t.task === 'rev.m1.impl.1.e1' ? judge(t.card as unknown as ReviewerCard, 'rework', S2_UNVERIFIED) : judge(t.card as unknown as ReviewerCard, 'pass') }),
+      secretary: (t: FlowTask) => (answer ? { handBack: secretary(t.card as unknown as SecretaryCard, 'answer', { instructions: 'The device log is kept with the run.' }) } : null),
+    });
+    // the interruption: the escalation's write fails once, after the review's write
+    const append = ports.ledger.append.bind(ports.ledger);
+    let interrupted = false;
+    ports.ledger.append = (async (op: string, entries: never) => {
+      if (!interrupted && op === `flow:escalation:${M}:rnd.rev.m1.impl.1.e1`) {
+        interrupted = true;
+        throw new Error('interrupted');
+      }
+      return append(op, entries);
+    }) as typeof ports.ledger.append;
+    await drive(engine, ports.scheduler, script(false)).catch(() => undefined);
+    assert.ok(interrupted, 'the interruption happened');
+    assert.ok((await events(ports, { line: 'task:impl' })).some((x) => x.event === 'review' && x.key === 'rev.m1.impl.1.e1'), 'the review is stored');
+    assert.equal(await escalation(flowCtx(ports, M), 'rnd.rev.m1.impl.1.e1'), null, 'its escalation is not');
+    ports.ledger.append = append;
+    await drive(engine, ports.scheduler, script(true));
+    assert.ok((await escalation(flowCtx(ports, M), 'rnd.rev.m1.impl.1.e1')) !== null, 'raised from the stored review');
+    assert.ok(ports.scheduler.tasks.has('rev.m1.impl.1.e2'), 'the answer starts the next round');
+    assert.ok((await events(ports, { line: 'task:impl' })).some((x) => x.event === 'reaccepted' && x.key === '1:2'), 'and its pass re-accepts the product');
   });
 });
