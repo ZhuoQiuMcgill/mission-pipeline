@@ -427,6 +427,11 @@ export class MemoryFlowLedger implements FlowLedgerPort {
   async missionClosed(mission: MissionId): Promise<boolean> {
     return this.memory.read((db) => (db.stmt('SELECT state FROM missions WHERE mission = ?').get(mission) as { state: string } | undefined)?.state === 'closed');
   }
+
+  async leaf(leaf: string): Promise<string | null> {
+    const r = this.memory.readLeaf(leaf);
+    return r !== null && r.status === 'ok' ? r.text : null;
+  }
 }
 
 // ---------------------------------------------------------------- the dispatch table

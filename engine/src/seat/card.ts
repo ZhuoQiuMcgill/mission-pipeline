@@ -9,7 +9,7 @@
 
 import { z } from 'zod';
 import type { MissionId, ModuleId } from '../common/ids.ts';
-import { Command, Continuation, Interface, Item, ListRefSchema, Workspace, commonCardFields, list, renderCommon } from './cards/common.ts';
+import { Command, Continuation, Interface, Item, ListRefSchema, Material, Workspace, commonCardFields, list, renderCommon, renderMaterials } from './cards/common.ts';
 import { SEAT_COMMANDS, seatCardEntry, type SeatCommand } from './cards/registry.ts';
 import { roleText } from './cards/roles.ts';
 import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
@@ -30,6 +30,11 @@ export const ConstructorCardSchema = z.object({
   interfaces: z.object({ implements: z.array(Interface), calls: z.array(Interface) }),
   /** Exclusive resources the task needs (§6.2): leased to the dispatch while it is in flight. */
   exclusive: z.array(z.string()).optional(),
+  /** 4.4 (F3): the plan's data formats and storage lists (absent: none, or a card queued before 4.4). */
+  dataFormats: z.array(z.string()).optional(),
+  storage: z.array(z.string()).optional(),
+  /** 4.4 (F3): on a rework, the previous review and the attempt's own earlier hand-back (optional reading). */
+  materials: z.array(Material).optional(),
 });
 
 export const ReviewerCardSchema = z.object({
@@ -75,6 +80,11 @@ export const ReviewerCardSchema = z.object({
       dependencies: z.array(z.object({ task: z.string().min(1), product: z.string().min(1), attempt: z.number().int().positive(), direct: z.boolean(), changedPaths: z.array(z.string()) })),
     })
     .optional(),
+  /** 4.4 (F3): the plan's data formats and storage lists (absent: none, or a card queued before 4.4). */
+  dataFormats: z.array(z.string()).optional(),
+  storage: z.array(z.string()).optional(),
+  /** 4.4 (F3, ruling E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional reading, never evidence). */
+  materials: z.array(Material).optional(),
   /** The judgment's binding inputs, fixed by the card's contract (5.2). */
   binding: z.object({
     judgment: z.string().min(1),
@@ -124,7 +134,9 @@ export function renderCard(c: SeatCard): string {
       list('Verification commands mp runs on your candidate', c.verificationCommands.map((v) => `[${v.id}] ${v.command}${v.cwd !== undefined ? ` (in ${v.cwd})` : ''}`)) +
       list('Interfaces to implement', c.interfaces.implements.map((i) => `${i.name}: ${i.definition}`)) +
       list('Interfaces to call', c.interfaces.calls.map((i) => `${i.name}: ${i.definition}`)) +
-      list('Exclusive resources leased to you', c.exclusive ?? [])
+      renderPlanData(c) +
+      list('Exclusive resources leased to you', c.exclusive ?? []) +
+      renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
     );
   }
   return (
@@ -132,6 +144,7 @@ export function renderCard(c: SeatCard): string {
     `## Target\n${c.target} (review position: ${c.review})\n\n` +
     list('Acceptance standards (answer every one)', c.standards.map((s) => `[${s.id}] ${s.text}`)) +
     list('Interfaces', c.interfaces.map((i) => `${i.name}: ${i.definition}`)) +
+    renderPlanData(c) +
     list('Changed paths in the candidate', c.candidate.changedPaths) +
     list('Verification runs mp made on this candidate (cite as evidence:<id>)', c.verificationRuns.map((r) => `[${r.evidence}] ${r.command}: ${r.summary}`)) +
     list('Declared commands you may rerun (by id)', c.declaredCommands.map((d) => `[${d.id}] ${d.command}`)) +
@@ -139,8 +152,14 @@ export function renderCard(c: SeatCard): string {
     list("The Constructor's self-reported gaps (answer every one)", c.selfReportedGaps.map((g) => `[${g.id}] ${g.text}`)) +
     list('Open issues on this version (respond to every one)', c.openIssues.map((i) => `[${i.issue}] ${i.text}`)) +
     renderPreviousReview(c) +
-    renderIntegration(c)
+    renderIntegration(c) +
+    renderMaterials(c.materials ?? [], c.materialsNotAttached ?? [])
   );
+}
+
+/** 4.4 (F3): the plan's data formats and storage (plan-level lists, short), as the Architect's cards show them. */
+function renderPlanData(c: { readonly dataFormats?: readonly string[] | undefined; readonly storage?: readonly string[] | undefined }): string {
+  return list("The plan's data formats", c.dataFormats ?? []) + list("The plan's storage", c.storage ?? []);
 }
 
 function renderPreviousReview(c: ReviewerCard): string {
@@ -279,6 +298,8 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         break;
       case 'checkout':
         lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
+        // 4.4 (F3): the accepted products a repair may reopen are the plan's state, readable at their commits
+        if (card.seat === 'architect-repair') lines.push(`\`mp seat ${dispatch} checkout --product <task>\`: the same for the accepted product of a task on the accepted list, at its commit.`);
         break;
       case 'rerun':
         lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunnableCommands(card, o).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite. It prints the result and the last lines of the output.`);

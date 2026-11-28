@@ -8,8 +8,8 @@ import { residentRecords, wordsAuthority } from '../memory/words.ts';
 import { stopCovers } from '../memory/stopTypes.ts';
 import type { ProcessContext } from './context.ts';
 import { advance } from './advance.ts';
-import { pmDispatch, pmReconcile, readNextReport, type Dispatched, type NextReport } from './pm.ts';
-import { dispatchView, seatCard, seatHandback } from './seat.ts';
+import { pmDispatchChecked, pmReconcile, readNextReport, type Dispatched, type NextReport } from './pm.ts';
+import { dispatchView, recordServed, seatCard, seatHandback } from './seat.ts';
 import { listNotices, markNotices, onlyInforms } from './notices.ts';
 import { PM_NOTICE_ACTIONS } from './noticeAudience.ts';
 import type { DecisionBody, EscalationBody } from '../flow/secretary.ts';
@@ -54,19 +54,63 @@ export function stopSecretary(ctx: ProcessContext, o: {op: string; gone?: boolea
 export function shellQuote(text: string): string { return `'${text.replace(/'/g, `'"'"'`)}'`; }
 
 export function channel(ctx: ProcessContext) {
-  const notes = new Map(residentRecords(ctx.memory, 'pm.note').map((n) => [n.id, n]));
+  // 4.4 (G8): the notes and their replacements come from one read of the records, so a note committed in between cannot hide both
+  const rows = residentRecords(ctx.memory, 'pm.note');
+  const notes = new Map(rows.map((n) => [n.id, n]));
+  const replaced = replacedNotes(rows);
   const replied = new Set(residentRecords(ctx.memory, 'sec.reply').map((r) => r.id));
   const questions = new Map(residentRecords(ctx.memory, 'sec.question').map((q) => [q.id, q]));
-  return {notes: [...notes.values()].filter((n) => !n.acknowledged), questions: residentRecords(ctx.memory, 'pm.question').filter((q) => !replied.has(q.id)), replies: residentRecords(ctx.memory, 'pm.reply').map((r) => ({...r, question: questions.get(r.id)?.text ?? '', about: questions.get(r.id)?.about ?? null}))};
+  // 4.4 (G8): a replaced note is no longer a current instruction for the Secretary
+  return {notes: [...notes.values()].filter((n) => !n.acknowledged && !replaced.has(n.id)), questions: residentRecords(ctx.memory, 'pm.question').filter((q) => !replied.has(q.id)), replies: residentRecords(ctx.memory, 'pm.reply').map((r) => ({...r, question: questions.get(r.id)?.text ?? '', about: questions.get(r.id)?.about ?? null}))};
 }
 
-export function pmNote(ctx: ProcessContext, o: {op: string; text: string; words?: string | null}): string {
+/** 4.4 (G8): each replaced note and the note that replaced it first. A 4.3 note replaces nothing. */
+function replacedNotes(rows: ReturnType<typeof residentRecords<'pm.note'>>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const n of rows) if (n.replaces !== undefined && !out.has(n.replaces)) out.set(n.replaces, n.id);
+  return out;
+}
+
+export interface NoteView {readonly id: string; readonly text: string; readonly words: string | null; readonly replaces: string | null; readonly state: 'current' | 'acknowledged' | 'replaced'; readonly replacedBy: string | null; readonly acknowledged: boolean}
+/** 4.4 (G8): every note with its state, oldest first: replaced (by a later note), acknowledged by the Secretary, or current. */
+export function pmNotes(db: Db): NoteView[] {
+  // an acknowledgement appends a copy of the note: the last record of an id is its state; one read gives both
+  const rows = residentRecords(db, 'pm.note');
+  const latest = new Map(rows.map((n) => [n.id, n]));
+  const replaced = replacedNotes(rows);
+  return [...latest.values()].map((n) => {
+    const by = replaced.get(n.id) ?? null;
+    return {id: n.id, text: n.text, words: n.words, replaces: n.replaces ?? null, state: by !== null ? 'replaced' as const : n.acknowledged ? 'acknowledged' as const : 'current' as const, replacedBy: by, acknowledged: n.acknowledged};
+  });
+}
+
+/** 4.4 (G8): the open escalations (raised, not applied) whose id a text names, as `<mission>/<id>`. A warning reads it; nothing is refused. */
+export function escalationsNamedIn(db: Db, text: string): {mission: string; escalation: string}[] {
+  const rows = db.stmt("SELECT mission, event, key FROM flow_events WHERE line = 'secretary' AND event IN ('escalation', 'applied') ORDER BY revision").all() as {mission: string; event: string; key: string}[];
+  const applied = new Set(rows.filter((r) => r.event === 'applied').map((r) => `${r.mission}/${r.key}`));
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const out: {mission: string; escalation: string}[] = [];
+  for (const r of rows) {
+    if (r.event !== 'escalation' || applied.has(`${r.mission}/${r.key}`) || out.some((o) => o.mission === r.mission && o.escalation === r.key)) continue;
+    // an id is a whole token: "rnd.4" is not named by "rnd.42"; a sentence's full stop after it still names it
+    if (new RegExp(`(?<![A-Za-z0-9_.-])${escape(r.key)}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`).test(text)) out.push({mission: r.mission, escalation: r.key});
+  }
+  return out;
+}
+
+export function pmNote(ctx: ProcessContext, o: {op: string; text: string; words?: string | null; replaces?: string | null}): string {
   requirePm(ctx.secretary);
   return ctx.memory.write({op: `note:${o.op}`, payload: o, command: 'note', filler: ctx.filler}, (tx) => {
     if (o.text.trim() === '') notAllowed('a note needs text');
     if (o.words != null && wordsEntry(tx, o.words) === null) notAllowed(`no words entry ${o.words}`);
+    if (o.replaces != null) {
+      // 4.4 (G8): a note replaces one current note; a replaced one points to its replacement
+      if (!residentRecords(tx, 'pm.note').some((n) => n.id === o.replaces)) notAllowed(`no PM note ${o.replaces}`);
+      const by = replacedNotes(residentRecords(tx, 'pm.note')).get(o.replaces);
+      if (by !== undefined) notAllowed(`${o.replaces} was already replaced by ${by}; replace ${by} instead`);
+    }
     const id = `N-${new Set(residentRecords(tx, 'pm.note').map((n) => n.id)).size + 1}`;
-    tx.append({kind: 'pm.note', id, text: o.text, words: o.words ?? null, acknowledged: false}); return id;
+    tx.append({kind: 'pm.note', id, text: o.text, words: o.words ?? null, acknowledged: false, ...(o.replaces != null ? {replaces: o.replaces} : {})}); return id;
   });
 }
 
@@ -366,7 +410,7 @@ export function currentSecretaryRound(ctx: ProcessContext, id: string) {
   return {mission: e.mission, ...secretaryRoundInputs(e.body as EscalationBody, events.filter((r) => r.mission === e.mission))};
 }
 
-export function secCard(ctx: ProcessContext, id: string): Dispatched {
+export async function secCard(ctx: ProcessContext, id: string): Promise<Dispatched> {
   const g = requireSecretary(ctx.memory, ctx.secretary);
   const round = currentSecretaryRound(ctx, id);
   const task = round.esc.task;
@@ -377,7 +421,10 @@ export function secCard(ctx: ProcessContext, id: string): Dispatched {
     const v = seatCard(ctx, existing.dispatch);
     return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: v.leaf, cardSha256: sha256(v.text), worktree: null, files: handBackFiles(existing.dispatch), prompt: ''};
   }
-  return pmDispatch(ctx, task, {filledBy: g.filler});
+  // 4.4 (F5): a command-line claim takes the checked path (repair starts checked first); this one prints the card to the Secretary, so it is served
+  const d = await pmDispatchChecked(ctx, task, {filledBy: g.filler});
+  recordServed(ctx, d);
+  return d;
 }
 
 export function secDecisionDispatch(ctx: ProcessContext, id: string): string {

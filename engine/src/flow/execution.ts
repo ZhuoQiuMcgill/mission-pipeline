@@ -61,6 +61,7 @@ import {
   type FlowCtx,
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
+import { attach, constructorClaims, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
 import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
@@ -2395,6 +2396,47 @@ function interfaceDefs(plan: DetailedPlanDoc, names: readonly string[]): Array<{
 }
 
 /**
+ * 4.4 (F3): the plan's data formats and storage lists, for the Constructor and Reviewer cards of its
+ * tasks (absent when empty): a Constructor's from the plan in effect (again at its claim, refresh.ts), a
+ * Reviewer's from the plan its target's review contract relies on.
+ */
+export function planData(plan: Pick<DetailedPlanDoc, 'dataFormats' | 'storage'> | null | undefined): { dataFormats?: string[]; storage?: string[] } {
+  if (plan === null || plan === undefined) return {};
+  return { ...((plan.dataFormats ?? []).length > 0 ? { dataFormats: [...plan.dataFormats!] } : {}), ...((plan.storage ?? []).length > 0 ? { storage: [...plan.storage!] } : {}) };
+}
+
+/**
+ * 4.4 (F3): the past a later attempt k carries on, from its task line: the Constructor task and attempt
+ * of the lineage's latest product under the current work (latestRecordedProduct), and the review that
+ * judged it. Null on a first attempt or a fresh start. Pure: the queue-time builder and the claim use it.
+ */
+export function attemptPast(events: Line['events'], k: number): { readonly constructor: string; readonly attempt: number; readonly review: string | null } | null {
+  const line = new Line(events);
+  const spec = workSpecRevision(line);
+  const p = line.all<ProductBody>('product').filter((e) => e.revision > spec && e.body.k < k).at(-1);
+  if (p === undefined) return null;
+  return { constructor: p.body.task, attempt: p.body.k, review: line.all<ReviewBody>('review').filter((r) => r.body.k === p.body.k).at(-1)?.body.task ?? null };
+}
+
+/**
+ * 4.4 (F3): the Constructor dispatch task and attempt whose candidate a Reviewer's target is (a re-bound
+ * version through the version it was re-bound from); null for an integration start with no Constructor.
+ */
+export function targetConstructor(events: Line['events'], target: string): { readonly constructor: string; readonly attempt: number } | null {
+  const line = new Line(events);
+  const seen = new Set<string>();
+  for (let at = target; !seen.has(at); ) {
+    seen.add(at);
+    const p = line.all<ProductBody>('product').find((e) => e.body.object === at);
+    if (p !== undefined) return startOnly(line, p.body) ? null : { constructor: p.body.task, attempt: p.body.k };
+    const rb = line.all<RebindBody>('rebind').find((r) => r.body.product === at);
+    if (rb === undefined) return null;
+    at = rb.body.from;
+  }
+  return null;
+}
+
+/**
  * Verbatim decisions that bear on the task: decision items, and the answers carried out on its
  * escalations under its current card (an answer on an earlier card, or on an escalation closed as
  * superseded, is history: never quoted as a decision in force).
@@ -2487,6 +2529,12 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // the Constructor's worktree is created at this commit when it is dispatched (§5.3); the write paths are the task's write scope
   const workspace = { snapshot: snap.commit, writablePaths: [...t.writeScope] };
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  // 4.4 (F3): a later attempt gets its past: the review of the attempt it carries on, and that attempt's own hand-back (optional)
+  const was = attemptPast(line.events, k);
+  const past = was === null ? [] : [
+    was.review === null ? null : await previousReviewReport(ctx, { review: was.review, attempt: was.attempt }),
+    await previousHandBack(ctx, { constructor: was.constructor, attempt: was.attempt }),
+  ];
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: await decisionQuotes(ctx, t), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(repairs.length > 0 ? { repairs } : {}),
@@ -2500,6 +2548,8 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     verificationCommands: t.verificationCommands.map((c) => ({ ...c })),
     interfaces: { implements: interfaceDefs(plan, t.implements), calls: interfaceDefs(plan, t.calls) },
     ...(t.exclusive.length > 0 ? { exclusive: [...t.exclusive] } : {}),
+    ...planData(plan),
+    ...attach(past),
   };
   await commit(ctx, `flow:dispatched:${ctx.mission}:${task}`, {
     events: [ev(ctx, taskLine(t.id), 'dispatched', task, recorded ?? { k, snapshot: snap.path, commit: snap.commit, dplan: eff.dplan, prerequisites: [...(snap.products ?? deps)], predecessor: prev?.object ?? null, ...(snap.origin !== undefined ? { origin: snap.origin } : {}) } satisfies DispatchedBody)],
@@ -2618,6 +2668,11 @@ async function submitReviewer(
   const rw = await reworkAt(ctx, t, line, k);
   const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
+  const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });
+  // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
+  const contractPlan = taskReferencePlan(await ctx.ports.ledger.events({ mission: ctx.mission }), obj?.reviews.find((r) => r.review === 'reviewer'));
+  const formats = contractPlan === undefined ? null : (await detailedPlanOf(ctx, contractPlan))?.plan;
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
@@ -2639,6 +2694,8 @@ async function submitReviewer(
     ...(previousReview !== null ? { previousReview } : {}),
     ...(integration !== undefined ? { integration } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...planData(formats),
+    ...attach([claims]),
     binding: {
       judgment: `j.${task}`,
       bases: c.putList(currentVersions(ix, reviewContractLines(ctx.mission, t, ix, obj?.reviews.find((r) => r.review === 'reviewer')))),
@@ -2727,12 +2784,21 @@ async function dependencyProducts(ctx: FlowCtx, plan: DetailedPlanDoc, t: Detail
  * review's and the repair's tracing aid): from the paths recorded with each product, through the
  * task lines' acceptances (current or earlier). A path ending in "/" or "/**" names a directory.
  */
-export async function pathOwners(ctx: FlowCtx, paths: readonly string[]): Promise<Array<{ readonly path: string; readonly owners: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly current: boolean; readonly paths: readonly string[] }> }>> {
+export async function pathOwners(ctx: FlowCtx, paths: readonly string[]): Promise<PathOwners> {
   const tasks = new Set<string>();
   for (const e of await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')) for (const t of e.body.tasks) tasks.add(t);
+  const lines = new Map<string, Line['events']>();
+  for (const id of tasks) lines.set(id, (await readLine(ctx, id)).events);
+  return ownersOfPaths(lines, paths);
+}
+
+type PathOwners = Array<{ readonly path: string; readonly owners: ReadonlyArray<{ readonly task: string; readonly attempt: number; readonly product: string; readonly current: boolean; readonly paths: readonly string[] }> }>;
+
+/** pathOwners over task lines already read (4.4, F5: the repair card's claim-time rebuild reads them from the memory). */
+export function ownersOfPaths(lines: ReadonlyMap<string, Line['events']>, paths: readonly string[]): PathOwners {
   const accepted: Array<{ task: string; attempt: number; product: string; current: boolean; changed: readonly string[] }> = [];
-  for (const id of tasks) {
-    const line = await readLine(ctx, id);
+  for (const [id, events] of lines) {
+    const line = new Line(events);
     const now = lineAcceptance(line.events).product;
     for (const a of line.all<{ k: number; product: string }>('accepted')) accepted.push({ task: id, attempt: a.body.k, product: a.body.product, current: a.body.product === now, changed: changedPathsOf(line, a.body.product) });
     for (const r of line.all<ReboundBody>('rebound')) accepted.push({ task: id, attempt: r.body.k, product: r.body.product, current: r.body.product === now, changed: changedPathsOf(line, r.body.product) });

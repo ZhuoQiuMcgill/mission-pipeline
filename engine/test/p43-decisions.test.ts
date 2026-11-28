@@ -5,7 +5,7 @@ import { flowCtx } from '../src/flow/context.ts';
 import { answerByPm, carryOut, commitCarrying, decisionFor, grantForDecision, markApplied, secretaryStep, raiseEscalation } from '../src/flow/secretary.ts';
 import { appendRecords, loopState } from '../src/memory/index.ts';
 import { builders } from './labels-fixtures.ts';
-import { dispatchView, recordSeatHandBack } from '../src/process/seat.ts';
+import { dispatchView, recordSeatHandBack, seatCard } from '../src/process/seat.ts';
 import { pmGrant, pmRequirement, pmSay, pmDispatch, pmRelease } from '../src/process/pm.ts';
 import { readAll, startAddMission, readyOf } from './process-fixtures.ts';
 import { secNext } from '../src/process/secretary.ts';
@@ -183,7 +183,8 @@ test('a PM grant on exhausted re-dispatch requeues the released seat in its appl
   try {
     await startAddMission(p.ctx, 'm1');
     const first = await readyOf(p.ctx, 'calibrator-1');
-    for (let i = 0; i < 3; i++) {const d = pmDispatch(p.ctx, first.step); await pmRelease(p.ctx, d.dispatch, 'ended');}
+    // each seat read its card before it ended (4.4, F5: an unstarted release would cost nothing)
+    for (let i = 0; i < 3; i++) {const d = pmDispatch(p.ctx, first.step); seatCard(p.ctx, d.dispatch); await pmRelease(p.ctx, d.dispatch, 'ended');}
     const id = await live43(p), ctx = secretary43(p, id);
     try {
       const next = await secNext(ctx);

@@ -16,7 +16,7 @@ import { drain } from '../src/evaluator/index.ts';
 import { cal1Pass, cal2Escalate, cal2Pass } from '../src/flow/scripted.ts';
 import { answerEscalation } from '../src/flow/secretary.ts';
 import { pmAnswer, pmDispatch, pmMission, pmNext, pmPlan, pmRelease, pmReopenExploration, pmRequirement, pmSay, pmWithdrawRequirement, type ProcessContext } from '../src/process/index.ts';
-import { dispatchView, recordEvidenceRequest, seatCheckout, seatRerun } from '../src/process/seat.ts';
+import { dispatchView, recordEvidenceRequest, seatCard, seatCheckout, seatRerun } from '../src/process/seat.ts';
 import type { CrititorCard } from '../src/seat/cards/crititor.ts';
 import type { AuthorCard } from '../src/seat/cards/researcher.ts';
 import type { StabilizerCard } from '../src/seat/cards/stabilizer.ts';
@@ -111,10 +111,11 @@ describe('mp read blocked: the blocked subtasks with their reason and next step;
     await startAddMission(p.ctx, 'm4');
     await startAddMission(p.ctx, 'm5');
     assert.equal((await cli(p.dir, ['pm', 'stop', 'stop m4', '--scope', 'mission:m4'])).code, 0);
-    // m5: Calibrator ① released three times: its re-dispatch loop is used up (WI-08)
+    // m5: Calibrator ① released three times after its seat read its card (4.4, F5): its re-dispatch loop is used up (WI-08)
     for (let i = 0; i < 3; i++) {
       const s = await readyOf(p.ctx, 'calibrator-1');
       const d = pmDispatch(p.ctx, s.step, { filledBy: 'test/scripted' });
+      seatCard(p.ctx, d.dispatch);
       const r = await pmRelease(p.ctx, d.dispatch, 'ended');
       if (r.exhausted) break;
     }
@@ -497,6 +498,7 @@ describe('review round 2: an exploration from its machine state and its product 
       const s = (await pmNext(p.ctx)).ready.find((r) => r.kind === 'secretary');
       if (s === undefined) break;
       const d = pmDispatch(p.ctx, s.step);
+      seatCard(p.ctx, d.dispatch);
       await pmRelease(p.ctx, d.dispatch, 'abandoned');
     }
     const nx = await cli(p.dir, ['pm', 'next', '--json']);

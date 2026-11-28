@@ -84,6 +84,7 @@ For `accept-risk` and reopen decisions, see Reviews and reworks.
 ## Notes and questions from the PM
 
 `mp sec next` shows notes until `mp sec ack-note <id>`; acknowledge after taking the recorded instruction into account.
+A note the PM replaced leaves that list; its replacement is a new note in its place (`mp read notes --all` shows both).
 Answer a recorded progress question with `mp sec reply <id> "<text>"`; its state becomes answered and the reply reaches the PM inbox.
 For an operational question without an escalation, record `mp sec ask-pm "<question>" [--about <notice or item id>]`.
 The PM answers `mp pm reply <id> "<text>" [--words W-n]`; `mp sec next` and `mp sec wait` show the reply and its words reference.
@@ -132,6 +133,7 @@ Harness confirmed it ended: `mp sec release <id> --ended`.
 Not confirmed: `mp sec release <id> --abandoned`; the step may be dispatched again at once, while the old worktree and leases remain until ended.
 A late hand-back is recorded and not accepted; see WI-28.
 Never use abandoned as evidence that the seat stopped.
+A release of a dispatch that had not started (no card served, nothing read, run or checked out, no refused hand-back, a clean worktree) costs no re-dispatch; three in a row on one step raise a notice (WI-28).
 
 A detached run (`mp seat <id> rerun --detach`) outlives its seat; its worker records the result against the dispatch.
 Next lists ended or lost detached runs whose dispatch is still in flight.

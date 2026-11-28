@@ -4,7 +4,7 @@
 // The words a command rests on are named as words entries (`--words W-<n>`, decision 1).
 
 import { pmLayer1 } from '../pmMemory.ts';
-import { taggedWords, wordsAuthority } from '../../memory/words.ts';
+import { tagsReportLines, taggedWords, wordsAuthority } from '../../memory/words.ts';
 import { liveSecretary } from '../../memory/resident.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
@@ -42,7 +42,7 @@ import {
   pmConstraint,
   pmWithdrawConstraint,
   pmDeliver,
-  pmDispatch,
+  pmDispatchChecked,
   pmDrain,
   pmFullRun,
   pmReopenExploration,
@@ -69,6 +69,7 @@ import {
   pmStop,
   pmWaive,
   pmWithdrawRequirement,
+  UNSTARTED_ROW_NOTICE,
   wordsText,
   type NextReport,
   type ProcessContext,
@@ -142,7 +143,7 @@ const say: Command = {
   group: 'pm',
   name: ['say'],
   summary: 'record the user\'s message verbatim as a words entry W-<n>, before anything else (§6.1; the same text again is the same entry, decision 9)',
-  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin\n       [--tag <type[@mission][:"quote"]>] … [--supersedes W-n#k,…] [--withdraw-items <ids>] [--keep-items <ids>]',
+  usage: 'mp pm say "<the message, verbatim>" | mp pm say --file <message.txt> | mp pm say --stdin\n       [--tag <type[@mission][:"quote"]>] … [--supersedes W-n#k,…] [--withdraw-items <ids>] [--keep-items <ids>]\n       (an item or constraint on the superseded entry that is not named is kept and listed; name each authorization and waiver)',
   flags: { file: 'string', stdin: 'boolean', tag: 'repeat', supersedes: 'list', 'withdraw-items': 'list', 'keep-items': 'list' },
   identity: (a) => ({ text: a.positionals.join(' '), file: flagStr(a, 'file'), stdin: flagBool(a, 'stdin'), tags: flagList(a, 'tag'), supersedes: flagList(a, 'supersedes'), withdraw: flagList(a, 'withdraw-items'), keep: flagList(a, 'keep-items') }),
   async run(c, args) {
@@ -161,9 +162,9 @@ const say: Command = {
     if (flagList(args, 'supersedes').length && !flagList(args, 'tag').length) throw usage('--supersedes requires the new message’s --tag');
     const r = pmSay(p.ctx, text, {op: c.op!, tags: flagList(args, 'tag'), supersedes: flagList(args, 'supersedes'), withdraw: flagList(args, 'withdraw-items'), keep: flagList(args, 'keep-items')});
     const stop = detectStop(text);
-    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`];
+    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`, ...tagsReportLines(r)];
     if (stop.detected) lines.push(`These words look like a stop (${stop.triggers.join(', ')}): if the user means it, at once \`mp pm stop "<the words>" --words ${r.words}\`.`);
-    return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected });
+    return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected, kept: r.kept, withdrawn: r.withdrawn });
   },
 };
 
@@ -224,7 +225,8 @@ const dispatch: Command = {
   async run(c, args) {
     const p = P(c);
     const step = positional(args, 0, 'step (mp pm next lists the ready steps)');
-    const d = pmDispatch(p.ctx, step, { filledBy: flagStr(args, 'filled-by') });
+    // 4.4 (F5): a repair step's unpinned starts are checked by the flow's resolver before its claim
+    const d = await pmDispatchChecked(p.ctx, step, { filledBy: flagStr(args, 'filled-by') });
     const lines = [
       `Dispatched ${d.dispatch}: ${d.seat} (${d.kind}) for step ${d.step} in ${d.mission}.`,
       `Card: .mission-pipeline/${d.cardLeaf} (the seat reads it with mp seat ${d.dispatch} card)`,
@@ -241,7 +243,7 @@ const dispatch: Command = {
 const release: Command = {
   group: 'pm',
   name: ['release'],
-  summary: 'release a dispatch whose seat ended without a hand-back: --ended (confirmed) or --abandoned (not confirmed) (§5.4, WI-28)',
+  summary: 'release a dispatch whose seat ended without a hand-back: --ended (confirmed) or --abandoned (not confirmed); one that had not started costs no re-dispatch (§5.4, WI-28)',
   usage: 'mp pm release <dispatch> --ended | --abandoned',
   flags: { ended: 'boolean', abandoned: 'boolean' },
   async run(c, args) {
@@ -254,6 +256,8 @@ const release: Command = {
     const lines = [
       r.released ? `${d} released (${r.how}).` : `${d} was already handed back or released: nothing changed.`,
       `Worktree: ${r.worktree === 'none' ? 'none' : r.worktree === 'removed' ? 'removed' : 'kept (released as abandoned: it stays until --ended)'}.`,
+      // 4.4 (F5)
+      ...(r.unstarted !== undefined ? [`It had not started (no card served, nothing read, run or checked out, no refused hand-back, no change in a worktree): this release costs no re-dispatch${r.unstarted >= UNSTARTED_ROW_NOTICE ? `; it is the step's ${r.unstarted}th such release in a row, and a notice says so` : ''}.`] : []),
       ...(r.requeued ? [`The step is ready again (re-dispatches ${r.attempts}/${r.allowed}).`] : []),
       ...(r.exhausted ? [`The lineage's re-dispatches are used up (${r.attempts}/${r.allowed}): the Secretary decides. ${wiLine(p, 'WI-08').join('')}`] : []),
       ...(r.notes ?? []),

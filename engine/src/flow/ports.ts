@@ -157,6 +157,8 @@ export interface FlowLedgerPort {
   missions(): Promise<readonly MissionId[]>;
   /** Whether the mission is closed (4.1 §6.7: its production steps are held; post-close work goes on). Absent: never closed. */
   missionClosed?(mission: MissionId): Promise<boolean>;
+  /** 4.4 (F3): a recorded leaf's text (a hand-back's report), or null when it is missing or was edited. Absent: no leaf is read. */
+  leaf?(leaf: string): Promise<string | null>;
 }
 
 // ---------------------------------------------------------------- the scheduler port (the dispatch table)

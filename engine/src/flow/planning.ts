@@ -46,6 +46,7 @@ import { PREVIOUS_PLAN_MATERIAL, previousPlanText, type ArchitectDecomposeCard, 
 import { normalizeCommand } from '../common/fullSuite.ts';
 import type { Calibrator1Card, Calibrator1Result, Calibrator2Card, Calibrator2Result } from '../seat/cards/calibrator.ts';
 import { calibrator1Verdict, calibrator2Verdict } from '../seat/cards/calibrator.ts';
+import { attach, feasibilityReport, returnedFeasibilityOf, type Attached } from './handbackMaterials.ts';
 import {
   basisIndex,
   binding,
@@ -1471,6 +1472,7 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   // 4.1.3 (E-2): whether the plan it revises took effect without its reviews, and whether this one's are waived
   const previousWaiver = revision && a.previous !== null ? await planReviewsWaiver(ctx, a.previous) : null;
   const nextWaiver = await planReviewsWaiver(ctx, dplan);
+  const feasReport = revision ? await returnedFeasibility(ctx, a) : null;
   const card: ArchitectDecomposeCard = {
     ...cardBase(ctx, task, {
       duties: revision
@@ -1493,8 +1495,9 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
     explorationConclusions: conclusions,
     history: { gitLog: history.gitLog, runs: [...history.runs] },
     revision: !revision ? null : { previous: a.previous, previousPlan: previous?.plan ?? null, mechanicalFailures: [...a.mechanicalFailures], feasibilityFindings: [...a.feasibilityFindings], instructions: [...a.instructions] },
-    // the previous plan in full, read page by page (a long plan would not fit in the card's body)
-    ...(revision && previous !== null ? { materials: [material(ctx, PREVIOUS_PLAN_MATERIAL, `Detailed plan ${a.previous} (the plan this revision revises, in full)`, previousPlanText(a.previous, previous.plan), true, 'plan')] } : {}),
+    // the previous plan in full, read page by page (a long plan would not fit in the card's body);
+    // 4.4 (F3): after a feasibility return, that review's report too (optional)
+    ...(revision ? attach([feasReport], { materials: previous !== null ? [material(ctx, PREVIOUS_PLAN_MATERIAL, `Detailed plan ${a.previous} (the plan this revision revises, in full)`, previousPlanText(a.previous, previous.plan), true, 'plan')] : [] }) : {}),
     output: {
       object: dplan,
       predecessor: a.previous,
@@ -1513,6 +1516,16 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
   ctx.progressed = true;
 }
 
+/**
+ * 4.4 (F3): the report of the last feasibility return a revision answers, carried through the mechanical
+ * returns after it (one read of the plan line), as a material (null: no such return).
+ */
+async function returnedFeasibility(ctx: FlowCtx, a: AttemptBody): Promise<Attached | null> {
+  if (a.previous === null) return null;
+  const r = returnedFeasibilityOf(await eventsOf(ctx, PLAN_LINE), a);
+  return r === null ? null : feasibilityReport(ctx, r);
+}
+
 async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, dplan: string, plan: DetailedPlanDoc, task: string): Promise<void> {
   const snap = await ctx.ports.scheduler.snapshot({ mission: ctx.mission, purpose: 'feasibility' });
   const history = await ctx.ports.scheduler.history(ctx.mission);
@@ -1520,6 +1533,8 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
   const obj = await objectRecord(ctx, dplan);
   if (obj === null) throw new Error(`Missing plan object ${dplan}`);
   const constraints = objectConstraints(await currentConstraints(ctx), obj);
+  // 4.4 (F3): the report of the review that returned the plan this one revises (optional)
+  const report = await returnedFeasibility(ctx, a);
   const card: ArchitectFeasibilityCard = {
     ...cardBase(ctx, task, { constraints: constraints.list, duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
     seat: 'architect-feasibility',
@@ -1530,6 +1545,7 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
     history: { gitLog: history.gitLog, runs: [...history.runs] },
     earlierFindings: [...a.feasibilityFindings],
     binding: binding(ctx, { judgment: `j.${task}`, constraints: constraints.checks, bases: currentVersions(ix, []), reliesOn: await contractReliesOn(ctx, dplan, 'feasibility', b.plan) }),
+    ...attach([report]),
   };
   await rememberReviewInputs(ctx, task, card);
   await ctx.ports.scheduler.submit({ task, lineage: planLineage(ctx.mission, b.n), mission: ctx.mission, card, priority: 100, capabilities: card.capabilities, mode: 'fast', estimateMicros: 500_000, binds: [dplan] });
