@@ -41,7 +41,10 @@ import {
   pmClose,
   pmAnswer,
   pmConstraint,
+  pmConstraintScope,
   pmWithdrawConstraint,
+  cardSizeLine,
+  type ConstraintReach,
   pmDeliver,
   pmDispatchChecked,
   pmDrain,
@@ -237,6 +240,8 @@ const dispatch: Command = {
       `Hand-back files: ${d.files.report}, ${d.files.result}`,
       // 4.4 (F16): the size of what the seat must fetch, to whoever dispatches (nothing waits on it)
       ...(d.size.mustReadPages > 0 ? [`Must-read: ${d.size.mustReadPages} page${d.size.mustReadPages === 1 ? '' : 's'}`] : []),
+      // 4.4 (G3): the card's size and its largest sections, to whoever dispatches (no notice to the PM)
+      ...(cardSizeLine(d.size) !== null ? [cardSizeLine(d.size)!] : []),
       ...d.size.warnings.map((w) => `Warning: ${w}`),
       '',
       'Start a sub-agent in your harness with exactly this prompt:',
@@ -503,8 +508,8 @@ const requirement: Command = {
   name: ['requirement'],
   summary: 'requirement items: add one quoting the user verbatim (or resting on an authorization), or withdraw one (§6.1)',
   usage:
-    'mp pm requirement add <mission> <item> --type goal|limit|authorization|acceptance|decision --text "<item>" (--quote "<verbatim>" --words W-<n> | --authorization <item>) [--restatement "<text>"] [--confirmed-by W-<n>] [--notify "<condition>"] | mp pm requirement withdraw <mission> <item> --words W-<n> [--reason "<text>"]',
-  flags: { type: 'string', text: 'string', quote: 'string', words: 'string', authorization: 'string', restatement: 'string', 'confirmed-by': 'string', notify: 'string', reason: 'string' },
+    'mp pm requirement add <mission> <item> --type goal|limit|authorization|acceptance|decision --text "<item>" (--quote "<verbatim>" --words W-<n> | --authorization <item>) [--restatement "<text>"] [--confirmed-by W-<n>] [--notify "<condition>"] [--tasks <id,...>] | mp pm requirement withdraw <mission> <item> --words W-<n> [--reason "<text>"]\n       (--tasks: a decision names the tasks it concerns and is printed as a decision on their cards only; a task whose own card links the item still lists its current text under its requirement items, which its work is bound to)',
+  flags: { type: 'string', text: 'string', quote: 'string', words: 'string', authorization: 'string', restatement: 'string', 'confirmed-by': 'string', notify: 'string', reason: 'string', tasks: 'list' },
   async run(c, args) {
     const p = P(c);
     const sub = positional(args, 0, 'add or withdraw');
@@ -535,8 +540,10 @@ const requirement: Command = {
       ...(flagStr(args, 'restatement') !== null ? { restatement: flagStr(args, 'restatement')! } : {}),
       ...(confirmed !== null ? { confirmedBy: confirmed } : {}),
       ...(flagStr(args, 'notify') !== null ? { notifyCondition: flagStr(args, 'notify')! } : {}),
+      ...given('tasks', flagList(args, 'tasks')),
     });
-    return ok(`Requirement item ${item} (${type}) of ${m} recorded as ${r.version}.`, { mission: m, item, version: r.version });
+    const tasks = flagList(args, 'tasks');
+    return ok(`Requirement item ${item} (${type}) of ${m} recorded as ${r.version}${tasks.length > 0 ? `; as a decision it is printed on the cards of ${tasks.join(', ')} only (a task whose card links the item still lists it under its requirement items)` : ''}.`, { mission: m, item, version: r.version });
   },
 };
 
@@ -659,20 +666,27 @@ function olderRepair(p: { readonly ctx: ProcessContext }, args: ParsedArgs, word
 const constraint: Command = {
   group: 'pm',
   name: ['constraint'],
-  summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope',
-  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>]   (a pattern is "**", an exact path, or "<folder>/**")\n       mp pm constraint withdraw <constraint> --words W-<n>',
-  flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string' },
+  summary: 'a long-term project constraint: an object constraint (a review duty; when unsure) or an execution instruction, with its scope; an instruction may be addressed to tasks or repairs of one mission, and then reaches those cards only',
+  usage: 'mp pm constraint add [<recording-mission>] <constraint> --kind object|instruction --text "<constraint>" [--paths <pattern,...>] [--task-types <type,...>] [--mission <m>] [--words W-<n>] [--tasks <id,...>] [--repair <R-n,...>]   (a pattern is "**", an exact path, or "<folder>/**")\n       mp pm constraint scope <constraint> [--tasks <id,...>] [--repair <R-n,...>] [--mission <m>]   (address an instruction: the same text keeps its version)\n       mp pm constraint withdraw <constraint> --words W-<n>',
+  flags: { kind: 'string', text: 'string', paths: 'list', 'task-types': 'list', mission: 'string', words: 'string', tasks: 'list', repair: 'list' },
   async run(c, args) {
     const p = P(c);
-    const action = positional(args, 0, 'add or withdraw');
+    const action = positional(args, 0, 'add, scope or withdraw');
     if (action === 'withdraw') {
       const id = positional(args, 1, 'constraint id');
       await pmWithdrawConstraint(p.ctx, { constraint: id, words: wordsArg(p.ctx, args, true)! });
       return ok(`Constraint ${id} withdrawn; its record is kept.`, { constraint: id, withdrawn: true });
     }
-    if (action !== 'add') throw usage('constraint takes add or withdraw');
     const missionScope = flagStr(args, 'mission');
     if (missionScope !== null && missionIdProblem(missionScope) !== null) throw usage(`--mission: ${missionIdProblem(missionScope)}`);
+    // 4.4 (G3): an address names tasks or repairs of one mission (absent flags: the 4.3 scope and payload)
+    const address = { ...given('tasks', flagList(args, 'tasks')), ...given('repairs', flagList(args, 'repair')) };
+    if (action === 'scope') {
+      const id = positional(args, 1, 'constraint id');
+      const r = await pmConstraintScope(p.ctx, { constraint: id, ...address, ...(missionScope !== null ? { mission: missionScope } : {}) });
+      return ok([`Constraint ${id} (${r.version}) is ${r.scopeChanged ? 'now' : 'already'} addressed to ${addressText(r.scope)} of mission ${r.scope.mission}${r.scopeChanged ? ': the same text, so the version is kept and only its scope changed' : '; nothing was written'}.`, ...reachLines('instruction', r.reach, r.scope)].join('\n'), { constraint: id, version: r.version, scope: r.scope, scopeChanged: r.scopeChanged, reach: r.reach });
+    }
+    if (action !== 'add') throw usage('constraint takes add, scope or withdraw');
     const legacy = args.positionals.length === 3;
     const m = legacy ? missionArg(args, 1) : (missionScope ?? 'project') as MissionId;
     const id = positional(args, legacy ? 2 : 1, 'constraint id');
@@ -683,18 +697,42 @@ const constraint: Command = {
     const paths = flagList(args, 'paths');
     // the words the constraint came from (optional, as `withdraw` needs them): recorded with it
     const w = wordsArg(p.ctx, args, false);
-    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(missionScope !== null ? { missionScope } : {}), ...(w !== null ? { words: w } : {}), scope: { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')] } });
-    // 4.1.3 (#36): what the scope reaches now; nothing is a warning, never a refusal
-    const reach = `${kind === 'object' ? `${r.reach.objects} current object version${r.reach.objects === 1 ? '' : 's'} and ` : ''}${r.reach.tasks.length} task${r.reach.tasks.length === 1 ? '' : 's'} of the plans in effect${r.reach.tasks.length > 0 ? ` (${r.reach.tasks.slice(0, 10).join(', ')}${r.reach.tasks.length > 10 ? ', ...' : ''})` : ''}`;
-    const none = r.reach.objects === 0 && r.reach.tasks.length === 0;
+    // 4.4 (G3): an address with no --mission takes the recording mission of the form that names one
+    const addressMission = Object.keys(address).length > 0 && missionScope === null && legacy ? m : missionScope;
+    const scope = { paths: paths.length > 0 ? [...paths] : ['**'], taskTypes: [...flagList(args, 'task-types')], ...address };
+    const r = await pmConstraint(p.ctx, { mission: m, constraint: id, kind, text, ...(addressMission !== null ? { missionScope: addressMission } : {}), ...(w !== null ? { words: w } : {}), scope });
     const lines = [
       `Constraint ${id} (${kind}) recorded as ${r.version}${w !== null ? ` on ${w}` : ''}${r.scopeChanged ? ' (the same text: the version is kept and its scope is changed)' : ''}.`,
-      `Its scope matches ${reach} now.`,
-      ...(none ? ['Warning: it matches nothing now. It reaches the cards of tasks and objects its scope covers as they appear; check the paths and task types if you expected a match.'] : []),
+      ...reachLines(kind, r.reach, { ...scope, ...(addressMission !== null ? { mission: addressMission } : {}) }),
     ];
     return ok(lines.join('\n'), { mission: m, constraint: id, version: r.version, words: w, scopeChanged: r.scopeChanged, reach: r.reach });
   },
 };
+
+/** A new option enters a payload only when it is given (4.4: a 4.3 payload stays as 4.3 hashed it). */
+function given<K extends string>(key: K, list: readonly string[]): Partial<Record<K, string[]>> {
+  return list.length > 0 ? ({ [key]: [...list] } as Record<K, string[]>) : {};
+}
+
+/** 4.4 (G3): the address of an instruction, in words. */
+function addressText(s: { readonly tasks?: readonly string[]; readonly repairs?: readonly string[] }): string {
+  return [(s.tasks ?? []).length > 0 ? `task${s.tasks!.length === 1 ? '' : 's'} ${s.tasks!.join(', ')}` : '', (s.repairs ?? []).length > 0 ? `repair${s.repairs!.length === 1 ? '' : 's'} ${s.repairs!.join(', ')}` : ''].filter((x) => x !== '').join(' and ');
+}
+
+/** What a constraint's scope reaches now (4.1.3, #36), in lines: nothing is a warning, never a refusal. 4.4 (G3): an address reaches what it names. */
+export function reachLines(kind: 'object' | 'instruction', reach: ConstraintReach, scope: { readonly mission?: string | null; readonly tasks?: readonly string[]; readonly repairs?: readonly string[] }): string[] {
+  const tasks = `${reach.tasks.length} task${reach.tasks.length === 1 ? '' : 's'}${reach.tasks.length > 0 ? ` (${reach.tasks.slice(0, 10).join(', ')}${reach.tasks.length > 10 ? ', ...' : ''})` : ''}`;
+  if ((scope.tasks ?? []).length > 0 || (scope.repairs ?? []).length > 0) {
+    const architects = reach.repairs ?? [];
+    return [
+      `It is addressed to ${addressText(scope)} of mission ${scope.mission}: it reaches the work it names (now the cards of ${tasks}${architects.length > 0 ? ` and the Architect card of repair ${architects.join(', ')}` : ''}) and no other work.`,
+      ...((reach.unknown ?? []).length > 0 ? [`Warning: mission ${scope.mission} has no ${reach.unknown!.join(', ')} now. The instruction reaches ${reach.unknown!.length === 1 ? 'it' : 'them'} when ${reach.unknown!.length === 1 ? 'it appears' : 'they appear'} (a task a repair adds, or a repair filed later); check the ids if you expected a match.`] : []),
+    ];
+  }
+  const reachText = `${kind === 'object' ? `${reach.objects} current object version${reach.objects === 1 ? '' : 's'} and ` : ''}${tasks} of the plans in effect`;
+  const none = reach.objects === 0 && reach.tasks.length === 0;
+  return [`Its scope matches ${reachText} now.`, ...(none ? ['Warning: it matches nothing now. It reaches the cards of tasks and objects its scope covers as they appear; check the paths and task types if you expected a match.'] : [])];
+}
 
 const plan: Command = {
   group: 'pm',

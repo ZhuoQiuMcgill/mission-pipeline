@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -67,7 +67,7 @@ import {
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
 import { attach, constructorClaims, pausedHandBack, previousHandBack, previousReviewReport } from './handbackMaterials.ts';
-import { DetailedTask, PLAN_LINE, RENEW_LINE, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
+import { DetailedTask, PLAN_LINE, RENEW_LINE, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, REPAIRS_LINE, REVIEW_NEEDED, SECRETARY_LINE, amendedPlan, amendedTaskIds, cardChangedBy, repairOfTask, repairRef, taskCardHash, taskIdProblems, taskLine, type DetailedPlanDoc, type RepairBody, type RepairDecidedBody, type RepairRef, type ReviewNeededBody } from './plandoc.ts';
 import { detailedPlanOf, internalError, latestEffective, planOf, standardLine, planAnswersReplan, contestedProduction, replanRoute, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { planReviewsWaiverIn } from './waivers.ts';
 import type { AppendGuard, FlowEventInput, FlowSchedulerPort, FlowTaskStatus, ProductVersion, VerificationRun } from './ports.ts';
@@ -104,14 +104,11 @@ interface ReworkBody {
   readonly after?: readonly string[];
 }
 /**
- * 4.4 (F13): the records of a repair's reopen request on the repairs line (the read of repairs shows them; the
- * states they make, and the writes that move them, are described above RequestState). Each is keyed "<repair>:<task>#<n>", n its place among the
- * request's records. Pinned: it waits for that attempt of the task to be accepted. Carried: that attempt was opened
- * with the repair's issue on its card. Not carried: the task was given up or left the plan; told to the PM.
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (plandoc.ts, beside the decision, so the
+ * cards and the read of repairs read them without this module; the states they make, and the writes that move
+ * them, are described above RequestState).
  */
-export const REOPEN_PINNED = 'reopen-pinned';
-export const REOPEN_CARRIED = 'reopen-carried';
-export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
+export { REOPEN_PINNED, REOPEN_CARRIED, REOPEN_NOT_CARRIED };
 export interface ReopenCarriedBody {
   readonly repair: string;
   readonly task: string;
@@ -192,6 +189,8 @@ interface ReviewBody {
   readonly deferred?: readonly string[];
   /** An integration review's reopen (D-6): the dependencies whose work causes the failure. */
   readonly reopen?: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly evidence?: string }>;
+  /** 4.4 (G3): the Reviewer's answer to each instruction addressed to this work (it never changes the verdict). Absent: none on the card. */
+  readonly instructions?: ReadonlyArray<{ readonly instruction: string; readonly version?: string; readonly response: 'followed' | 'not-followed' | 'unclear'; readonly reason: string }>;
 }
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
@@ -1790,18 +1789,8 @@ async function reopenFromReview(ctx: FlowCtx, plan: DetailedPlanDoc, t: Detailed
 
 /** Reopens represented by this escalation, from the kept verdicts of this task attempt. */
 function coveredReopens(ctx: FlowCtx, task: string, line: Line, e: { readonly body: EscalationBody; readonly revision: number }): string[] {
-  const esc = e.body;
-  const facts = esc.facts as { task?: string; attempt?: number; loop?: string } | undefined;
-  if (esc.source !== 'loop-exhausted' || esc.subject !== `task:${task}` || facts?.task !== task ||
-      facts.loop !== 'rework' || facts.attempt === undefined || facts.attempt > line.k || esc.lineage !== taskLineage(ctx.mission, task)) return [];
-  const attempt = facts.attempt;
-  const prefix = `exh.${esc.lineage}.${attempt}`;
-  const start = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt)?.revision ?? 0;
-  const end = line.all<ReworkBody>('rework').find((r) => r.body.k === attempt + 1)?.revision ?? Infinity;
-  return line.all<{ proceed: boolean }>('loop-verdict')
-    .filter((v) => !v.body.proceed && v.key.startsWith('reopen:') && v.revision > start && v.revision < end &&
-      (esc.id === safeId(prefix) ? v.revision < e.revision : esc.id === safeId(`${prefix}.${idPart(v.key)}`)))
-    .map((v) => v.key);
+  // 4.4 (G3, F2): one pure mapping, which the cards and `mp read repairs` read too (seat/cards/dynamic.ts)
+  return coveredReopenKeys(ctx.mission, task, line.events, e);
 }
 
 /** One reopened task's new attempt (D-6), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. A repair's: repairReopen. */
@@ -2075,16 +2064,29 @@ async function reopenRequests(ctx: FlowCtx): Promise<ReopenRequest[]> {
   return requests;
 }
 
-/** The repairs a task's work answers (D-10): the repair that added the task, and the one that reopened this attempt. */
-async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<RepairRef[]> {
-  const ids = new Set<string>();
-  const added = repairOfTask(eff.amendments, t.id);
-  if (added !== null) ids.add(added);
-  const rw = line.one<ReworkBody>('rework', String(k));
-  if (rw?.reopen?.kind === 'repair') ids.add(rw.reopen.repair);
-  if (ids.size === 0) return [];
-  const all = await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair');
-  return all.filter((r) => ids.has(r.key)).map((r) => repairRef(r.body));
+/**
+ * The repairs a task's work answers (D-10) and what was written for it: 4.4 (G3, F2) the repair that added the
+ * task, those that changed its card, and those that reopened it at this attempt or before (seat/cards/dynamic.ts
+ * repairsOfTaskWork); the instructions addressed to it or to those repairs, the Architect's notes and the answers
+ * given under its earlier cards (writtenForTask).
+ */
+async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, k: number): Promise<{ readonly repairs: RepairRef[]; readonly written: ReturnType<typeof writtenForTask> }> {
+  const repairsLine = await eventsOf(ctx, REPAIRS_LINE);
+  const ids = repairsOfTaskWork(ctx.mission, eff.amendments, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
+  const all = repairsLine.filter((e) => e.event === 'repair') as Array<{ readonly key: string; readonly body: RepairBody }>;
+  const written = writtenForTask(await currentConstraints(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), ctx.mission, t.id, ids);
+  return { repairs: all.filter((r) => ids.includes(r.key)).map((r) => repairRef(r.body)), written };
+}
+
+/** 4.4 (G3): a Reviewer's answers to the instructions addressed to its work, each with the version its claimed card showed. */
+async function instructionAnswers(ctx: FlowCtx, dispatch: string | undefined, responses: NonNullable<ReviewerResult['instruction_responses']>): Promise<NonNullable<ReviewBody['instructions']>> {
+  if (responses.length === 0) return [];
+  const claimed = dispatch === undefined ? null : await eventOf<{ spec: string }>(ctx, `dispatch:${dispatch}`, 'claimed', 'spec');
+  const card = claimed === null ? null : (JSON.parse(ctx.ports.ledger.content.get(claimed.body.spec)) as { card?: { addressed?: Array<{ id: string; version: string }> } }).card;
+  return responses.map((i) => {
+    const version = card?.addressed?.find((a) => a.id === i.instruction)?.version;
+    return { instruction: i.instruction, ...(version !== undefined ? { version } : {}), response: i.response, reason: i.reason };
+  });
 }
 
 /** A Reviewer's accepted hand-back as the task line's "review" event (null: it carries no judgment, a defect told to the PM). */
@@ -2102,7 +2104,9 @@ async function takeReview(ctx: FlowCtx, t: DetailedTask, k: number, rev: string,
   ];
   const deferred = r.issue_responses.filter((i) => i.response === 'deferred').map((i) => `issue ${i.issue} deferred to ${i.owner}: ${i.reason}`);
   const reopen = (r.reopen ?? []).map((x) => ({ task: x.task, issue: x.issue, ...(x.evidence !== undefined ? { evidence: x.evidence } : {}) }));
-  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}) };
+  // 4.4 (G3, p6-5): each answer is of the version its claimed card showed, so a later text is never credited with it
+  const answers = await instructionAnswers(ctx, view.status.handBack?.dispatch, r.instruction_responses ?? []);
+  const review: ReviewBody = { task: rev, k, verdict: r.verdict, judgment: `j.${rev}`, issues, ...(deferred.length > 0 ? { deferred } : {}), ...(reopen.length > 0 ? { reopen } : {}), ...(answers.length > 0 ? { instructions: answers } : {}) };
   for (const answer of r.issue_responses.filter((i) => i.response === 'deferred')) {
     await notify(ctx, {
       category: 'reviewer-issue-deferred',
@@ -3062,13 +3066,15 @@ async function cardConstraints(ctx: FlowCtx, t: DetailedTask, kinds: ReadonlySet
 }
 
 /** One next attempt, with the context of every grant that ensured it (the rework event stays immutable). */
-async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): Promise<ReworkBody | null> {
+async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): Promise<(ReworkBody & { readonly covered: ReadonlyArray<{ readonly issue: string; readonly source: ReopenSource }> }) | null> {
   const body = line.one<ReworkBody>('rework', String(k));
   if (body === null) return null;
   const applied = new Set((await eventsOf<{ what?: { option?: string } }>(ctx, SECRETARY_LINE, 'applied')).filter((e) => e.body.what?.option === 'grant').map((e) => e.key));
   const requests = await reopenRequests(ctx);
   const issues = [...body.issues];
   const instructions = [...body.instructions];
+  // 4.4 (p6-r2-1): the reopen requests a grant covered, so the Reviewer of the attempt sees them too
+  const reopens: Array<{ issue: string; source: ReopenSource }> = [];
   for (const e of await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation')) {
     const facts = e.body.facts as { attempt?: number; loop?: string; issues?: string[] } | undefined;
     if (!applied.has(e.key) || e.body.source !== 'loop-exhausted' || e.body.subject !== `task:${t.id}` || facts?.loop !== 'rework' || facts.attempt !== k - 1) continue;
@@ -3077,8 +3083,14 @@ async function reworkAt(ctx: FlowCtx, t: DetailedTask, line: Line, k: number): P
     const covered = requests.filter((r) => r.task === t.id && r.attempt === k - 1 && keys.includes(r.key));
     issues.push(...(facts.issues ?? []), ...covered.map((r) => r.issue));
     instructions.push(...(d?.instructions ? [d.instructions] : []), ...covered.map((r) => r.instruction));
+    for (const r of covered) if (!reopens.some((x) => x.issue === r.issue)) reopens.push({ issue: r.issue, source: r.source });
   }
-  return { ...body, issues: [...new Set(issues)], instructions: [...new Set(instructions)] };
+  return { ...body, issues: [...new Set(issues)], instructions: [...new Set(instructions)], covered: reopens };
+}
+
+/** Who reopened an attempt, in words (a Reviewer's card). */
+function reopenedBy(s: ReopenSource | undefined): string {
+  return s?.kind === 'repair' ? `repair ${s.repair}` : s?.kind === 'review' ? `the review ${s.review} of integration task ${s.integration}` : 'reopened';
 }
 
 async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc, t: DetailedTask, line: Line, k: number, task: string, deps: readonly string[]): Promise<void> {
@@ -3149,7 +3161,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   // the Constructor's worktree is created at this commit when it is dispatched (§5.3); the write paths are the task's write scope.
   // 4.4 (F4): a continuation's worktree opens on the parked commit (`start`); its candidate is still taken against the attempt's start
   const workspace = { snapshot: snap.commit, ...(paused !== null ? { start: paused.parked } : {}), writablePaths: [...t.writeScope] };
-  const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3): a later attempt gets its past: the review of the attempt it carries on, and that attempt's own hand-back (optional)
   const was = attemptPast(line.events, k);
   const past: Array<Awaited<ReturnType<typeof previousHandBack>>> = was === null ? [] : [
@@ -3164,6 +3176,7 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: withoutAnswers(await decisionQuotes(ctx, t), questions), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...written,
     seat: 'constructor',
     workspace,
     goal: t.goal,
@@ -3293,9 +3306,11 @@ async function submitReviewer(
   const startOnlyAttempt = startOnly(line, product);
   const integration = t.kind === 'integration' ? { hasConstructor: !startOnlyAttempt, dependencies: await dependencyProducts(ctx, plan, t) } : undefined;
   const rw = await reworkAt(ctx, t, line, k);
-  const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
+  // 4.4 (p6-r2-1): an attempt a grant gave a covered reopen tells its Reviewer the reopen's issue too (with no Constructor, no other card shows it)
+  const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${reopenedBy(rw.reopen)}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.`
+    : rw !== null && rw.covered.length > 0 ? ` This attempt was granted for a reopen (${[...new Set(rw.covered.map((c) => reopenedBy(c.source)))].join('; ')}): ${rw.covered.map((c) => c.issue).join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
   // 4.4 (F13): the repairs this attempt carries (each reopen opens its own attempt), judged the same way
-  const repairs = await repairsOfWork(ctx, eff, t, line, k);
+  const { repairs, written } = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
   const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });
   // 4.4 (F3): the data formats and storage of the plan the target's review contract relies on
@@ -3325,6 +3340,7 @@ async function submitReviewer(
     ...(previousReview !== null ? { previousReview } : {}),
     ...(integration !== undefined ? { integration } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...written,
     ...planData(formats),
     ...attach([claims]),
     binding: {

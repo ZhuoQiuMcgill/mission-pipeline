@@ -56,7 +56,9 @@ test('a dispatch reports its must-read pages; past mustReadWarnPages it warns wh
     const s = await liveWithEscalation(p);
     const quiet = await command43(p, ['sec', 'card', s.escalation], s.id);
     const pages = materials(p, quiet.result.dispatch).filter((m) => m.mustRead).reduce((n, m) => n + m.pages, 0);
-    assert.deepEqual({ ...quiet.result.size }, { mustReadPages: pages, mustReadWarnPages: 6, warnings: [] });
+    // 4.4 (G3) adds the card's bytes and its largest sections to the same report
+    const { mustReadPages, mustReadWarnPages, warnings } = quiet.result.size;
+    assert.deepEqual({ mustReadPages, mustReadWarnPages, warnings }, { mustReadPages: pages, mustReadWarnPages: 6, warnings: [] });
     writeConfig(p.dir, { ...defaultConfig({ targetBranch: 'main', versionCommands: [] }), mustReadWarnPages: 2 });
     const notices = () => Number((p.ctx.memory.stmt("SELECT COUNT(*) AS n FROM log WHERE kind = 'notice'").get() as { n: number }).n);
     const before = notices();

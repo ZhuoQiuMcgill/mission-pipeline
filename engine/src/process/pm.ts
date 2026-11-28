@@ -79,11 +79,11 @@ import {
 } from '../memory/index.ts';
 import { constraintLine, currentConstraints, recordItem, recordConstraint, withdrawItem, type ItemSource, type ItemType } from '../flow/requirements.ts';
 import { planInEffect, submitPmBatch } from '../flow/planning.ts';
-import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { recordRepair } from '../flow/repair.ts';
+import { constraintsForTask, forRepairArchitect, isAddressed } from '../seat/cards/dynamic.ts';
+import { recordRepair, repairsOf } from '../flow/repair.ts';
 import type { RepairKind } from '../flow/plandoc.ts';
 import { answerEscalation, answerByPm, escalation, type DecisionBody, type EscalationBody } from '../flow/secretary.ts';
-import { eventsOf, flowCtx, missionClosed } from '../flow/context.ts';
+import { basisIndex, eventsOf, flowCtx, missionClosed } from '../flow/context.ts';
 import { explorationState } from '../flow/exploration/flow.ts';
 import { pendingTasks } from '../flow/exploration/machine.ts';
 import { pmAmendAttempts, pmRerunAttempt, type AttemptsAmended, type AttemptsRerun } from './explorationAttempts.ts';
@@ -514,14 +514,47 @@ export interface Dispatched {
 export interface CardSizeReport {
   readonly mustReadPages: number;
   readonly mustReadWarnPages: number;
+  /** 4.4 (G3): the card's bytes as the seat reads it, and its largest sections (at most three, largest first). Absent on a report recorded before. */
+  readonly cardBytes?: number;
+  readonly cardWarnBytes?: number;
+  readonly largest?: ReadonlyArray<{ readonly section: string; readonly bytes: number }>;
   readonly warnings: readonly string[];
 }
 
-export function cardSizeReport(ctx: Pick<ProcessContext, 'mustReadWarnPages'>, card: Readonly<Record<string, unknown>>): CardSizeReport {
+/** 4.4 (G3): the "## " sections of a rendered card with their bytes, largest first. */
+function cardSections(text: string): Array<{ section: string; bytes: number }> {
+  const out: Array<{ section: string; bytes: number }> = [];
+  let cur: { section: string; bytes: number } | null = null;
+  for (const l of text.split('\n')) {
+    if (l.startsWith('## ')) { cur = { section: l.slice(3).replace(/\s*\(.*$/, '').trim() || l.slice(3), bytes: 0 }; out.push(cur); }
+    if (cur !== null) cur.bytes += Buffer.byteLength(l, 'utf8') + 1;
+  }
+  return out.sort((a, b) => b.bytes - a.bytes);
+}
+
+const kib = (n: number): string => `${Math.max(1, Math.round(n / 1024))} KiB`;
+
+/**
+ * 4.4 (F16, G3): what a dispatch reports of its card: the must-read pages and, with the card's text, its bytes
+ * and largest sections; a warning above `mustReadWarnPages` and above `cardWarnBytes`. To whoever dispatches.
+ */
+export function cardSizeReport(ctx: Pick<ProcessContext, 'mustReadWarnPages'> & Partial<Pick<ProcessContext, 'cardWarnBytes'>>, card: Readonly<Record<string, unknown>>, text?: string): CardSizeReport {
   const must = ((card['materials'] as MaterialRef[] | undefined) ?? []).filter((m) => m.mustRead);
   const pages = must.reduce((n, m) => n + m.pages, 0);
   const limit = ctx.mustReadWarnPages;
-  return { mustReadPages: pages, mustReadWarnPages: limit, warnings: pages > limit ? [`its must-read material is ${pages} pages, above mustReadWarnPages (${limit}): ${must.map((m) => `${m.id} ${m.pages}`).join(', ')}`] : [] };
+  const warnings = pages > limit ? [`its must-read material is ${pages} pages, above mustReadWarnPages (${limit}): ${must.map((m) => `${m.id} ${m.pages}`).join(', ')}`] : [];
+  if (text === undefined) return { mustReadPages: pages, mustReadWarnPages: limit, warnings };
+  const bytes = Buffer.byteLength(text, 'utf8');
+  const cap = ctx.cardWarnBytes ?? 64 * 1024;
+  const largest = cardSections(text).slice(0, 3);
+  if (bytes > cap) warnings.push(`its text is ${kib(bytes)}, above cardWarnBytes (${kib(cap)}); largest sections: ${largest.map((s) => `${s.section} ${kib(s.bytes)}`).join(', ')}`);
+  return { mustReadPages: pages, mustReadWarnPages: limit, cardBytes: bytes, cardWarnBytes: cap, largest, warnings };
+}
+
+/** 4.4 (G3): the size line of a dispatch's output: the card's bytes and its largest sections. */
+export function cardSizeLine(size: CardSizeReport): string | null {
+  if (size.cardBytes === undefined) return null;
+  return `Card: ${kib(size.cardBytes)}${(size.largest ?? []).length > 0 ? `; largest sections: ${size.largest!.map((s) => `${s.section} ${kib(s.bytes)}`).join(', ')}` : ''}`;
 }
 
 /** How long `mp pm dispatch` waits before it tries its write again after OVER_BUDGET: a short random delay, so a burst spreads out. */
@@ -656,7 +689,7 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
     worktree,
     files: handBackFiles(out.dispatch),
     prompt: `You are the ${title} of Mission Pipeline. Your card: \`mp seat ${out.dispatch} card\`. Use only the \`mp seat ${out.dispatch}\` commands listed there. Finish with \`mp seat ${out.dispatch} handback\`.`,
-    size: cardSizeReport(ctx, spec.card),
+    size: cardSizeReport(ctx, spec.card, card),
   };
 }
 
@@ -1121,8 +1154,10 @@ export function wordsText(ctx: ProcessContext, words: string): string {
  */
 export async function pmRequirement(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly item: string; readonly type: ItemType; readonly text: string; readonly quote?: string; readonly words?: string; readonly authorization?: string; readonly restatement?: string; readonly confirmedBy?: string; readonly notifyCondition?: string },
+  req: { readonly mission: string; readonly item: string; readonly type: ItemType; readonly text: string; readonly quote?: string; readonly words?: string; readonly authorization?: string; readonly restatement?: string; readonly confirmedBy?: string; readonly notifyCondition?: string; readonly tasks?: readonly string[] },
 ): Promise<{ readonly version: string }> {
+  // 4.4 (G3): only a decision names the tasks it concerns (a new flag: refused, nothing recorded)
+  if (req.tasks !== undefined && req.type !== 'decision') throw new ProcessError('NOT_ALLOWED', `--tasks goes with --type decision: a decision may name the tasks it concerns (this item is a ${req.type}). Nothing was recorded`);
   let source: ItemSource;
   if (req.authorization !== undefined) source = { kind: 'authorization', line: req.authorization.includes('.') ? req.authorization : `item.${req.mission}.${req.authorization}` };
   else {
@@ -1139,6 +1174,7 @@ export async function pmRequirement(
     ...(req.restatement !== undefined ? { restatement: req.restatement } : {}),
     ...(req.confirmedBy !== undefined ? { confirmedBy: req.confirmedBy } : {}),
     ...(req.notifyCondition !== undefined ? { notifyCondition: req.notifyCondition } : {}),
+    ...(req.tasks !== undefined ? { tasks: req.tasks } : {}),
   });
   await advance(ctx, req.mission as MissionId, { dispatch: null, task: null, step: 'mp pm requirement add' });
   return { version };
@@ -1310,6 +1346,10 @@ export interface ConstraintReach {
   readonly objects: number;
   /** Tasks of the plans in effect whose cards take the constraint (seat/cards/dynamic.ts constraintsForTask), as "<mission>/<task>". */
   readonly tasks: readonly string[];
+  /** 4.4 (G3): an addressed instruction: the undecided repairs whose Architect card prints it (it names the repair, or the task the repair is about). */
+  readonly repairs?: readonly string[];
+  /** 4.4 (G3): an addressed instruction: the tasks and repairs it names that its mission does not have (yet): a warning, never a refusal. */
+  readonly unknown?: readonly string[];
 }
 
 /**
@@ -1319,6 +1359,18 @@ export interface ConstraintReach {
  */
 export async function constraintReach(ctx: ProcessContext, c: { readonly kind: 'object' | 'instruction'; readonly scope: ConstraintScope }): Promise<ConstraintReach> {
   const body = { line: 'constraint.reach', version: 'reach', kind: c.kind, text: '', scope: c.scope };
+  // 4.4 (G3): an addressed instruction reaches the tasks it names and those its repairs added, changed or reopened (and their Architect)
+  if (isAddressed(body) && c.scope.mission !== undefined) {
+    const fctx = flowCtx(ctx.ports(), c.scope.mission as MissionId);
+    const named = new Set(c.scope.tasks ?? []);
+    const all = await repairsOf(fctx);
+    const repairs = all.filter((r) => (c.scope.repairs ?? []).includes(r.id));
+    for (const r of repairs) for (const t of [...r.added, ...(r.changed ?? []), ...r.reopened]) named.add(t);
+    const plan = (await planInEffect(fctx))?.plan.tasks ?? [];
+    // 4.4 (p6-8): the Architect cards that print it, by the card's own rule: undecided repairs it names, or whose task it names
+    const architects = all.filter((r) => (r.state === 'architect' || r.state === 'waiting') && forRepairArchitect(body, { repair: r.id, ...(r.about?.kind === 'task' ? { about: r.about.id } : {}) })).map((r) => r.id);
+    return { objects: 0, tasks: plan.filter((t) => named.has(t.id)).map((t) => `${c.scope.mission}/${t.id}`), repairs: architects, unknown: [...(c.scope.tasks ?? []).filter((t) => !plan.some((x) => x.id === t)), ...(c.scope.repairs ?? []).filter((r) => !all.some((x) => x.id === r))] };
+  }
   const objects = c.kind !== 'object' ? 0 : ctx.memory.read((db) => {
     const rows = db.stmt("SELECT record FROM log WHERE kind = 'object.version'").all() as Array<{ record: string }>;
     const recs = rows.map((r) => JSON.parse(r.record) as { object: string; mission: string; scope?: ObjectScope; predecessor?: string });
@@ -1340,6 +1392,7 @@ export async function pmConstraint(ctx: ProcessContext, req: { readonly mission:
   // 4.1.3 (#36): a pattern the matcher cannot read is refused at once, with the forms it reads and the nearest one
   const bad = scope.paths.flatMap((p) => { const x = constraintPatternProblem(p); return x === null ? [] : [`"${p}": ${x.problem}; the nearest form is "${x.suggestion}"`]; });
   if (bad.length > 0) throw new ProcessError('NOT_ALLOWED', `the scope's path patterns: ${bad.join('; ')}. A scope path is ${CONSTRAINT_PATTERN_FORMS}. Nothing was recorded`);
+  addressProblem(req.kind, scope);
   if (req.words !== undefined) wordsText(ctx, req.words);
   const line = constraintLine(req.constraint);
   const before = (await currentConstraints(flowCtx(ctx.ports(), req.mission as MissionId))).find((c) => c.line === line);
@@ -1355,6 +1408,80 @@ export async function pmWithdrawConstraint(ctx: ProcessContext, req: { readonly 
   wordsText(ctx, req.words);
   await withdrawConstraint(ctx.ports(), req);
   await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint withdraw' });
+}
+
+/** 4.4 (G3): an address is for an instruction, and bound to one mission (task and repair ids are the mission's). New flags: refused, nothing recorded. */
+function addressProblem(kind: 'object' | 'instruction', scope: ConstraintScope): void {
+  if (scope.tasks === undefined && scope.repairs === undefined) return;
+  if (kind !== 'instruction') throw new ProcessError('NOT_ALLOWED', 'an address (--tasks, --repair) is for an instruction: an object constraint\'s scope is a proof input, so it keeps its paths and task types. Nothing was recorded');
+  if (scope.mission === undefined) throw new ProcessError('NOT_ALLOWED', 'an address (--tasks, --repair) names tasks or repairs of one mission, and each mission numbers its repairs: give --mission <m>. Nothing was recorded');
+  for (const r of scope.repairs ?? []) if (!/^R-[1-9][0-9]*$/.test(r)) throw new ProcessError('NOT_ALLOWED', `--repair names a repair R-<n>, not ${JSON.stringify(r)}. Nothing was recorded`);
+  for (const t of scope.tasks ?? []) if (t.trim() === '') throw new ProcessError('NOT_ALLOWED', '--tasks names task ids. Nothing was recorded');
+}
+
+/**
+ * 4.4 (G3): `mp pm constraint scope <constraint> [--tasks <ids>] [--repair <R-n>] [--mission <m>]`: address an
+ * existing instruction to tasks or repairs of one mission. The same text keeps its version: one
+ * `constraint-scope` event, no new version (an address already as given writes nothing). Its paths and task
+ * types are kept. The address is what the flags give.
+ */
+export async function pmConstraintScope(ctx: ProcessContext, req: { readonly constraint: string; readonly tasks?: readonly string[]; readonly repairs?: readonly string[]; readonly mission?: string }): Promise<{ readonly version: string; readonly scope: ConstraintScope; readonly reach: ConstraintReach; readonly scopeChanged: boolean }> {
+  const line = constraintLine(req.constraint);
+  const cur = (await currentConstraints(flowCtx(ctx.ports(), (req.mission ?? 'project') as MissionId))).find((c) => c.line === line);
+  if (cur === undefined) throw new ProcessError('NOT_ALLOWED', `no constraint ${req.constraint} in force: nothing was changed`);
+  if (cur.kind !== 'instruction') throw new ProcessError('NOT_ALLOWED', `${req.constraint} is an object constraint: its scope is a proof input and takes no address. Nothing was changed`);
+  if (req.tasks === undefined && req.repairs === undefined) throw new ProcessError('NOT_ALLOWED', 'name the address: --tasks <ids> and/or --repair <R-n>');
+  const mission = req.mission ?? cur.scope.mission;
+  if (req.mission !== undefined && cur.scope.mission !== undefined && cur.scope.mission !== req.mission) throw new ProcessError('NOT_ALLOWED', `${req.constraint} is scoped to mission ${cur.scope.mission}: an address names tasks or repairs of that mission. Nothing was changed`);
+  const { tasks: _t, repairs: _r, ...rest } = cur.scope;
+  const scope: ConstraintScope = { ...rest, ...(mission !== undefined ? { mission } : {}), ...(req.tasks !== undefined ? { tasks: [...req.tasks] } : {}), ...(req.repairs !== undefined ? { repairs: [...req.repairs] } : {}) };
+  addressProblem(cur.kind, scope);
+  const version = await recordConstraint(ctx.ports(), { mission: scope.mission as MissionId, constraint: req.constraint, kind: cur.kind, text: cur.text, scope, expect: cur.version });
+  await advance(ctx, undefined, { dispatch: null, task: null, step: 'mp pm constraint scope' });
+  return { version, scope, reach: await constraintReach(ctx, { kind: cur.kind, scope }), scopeChanged: canonicalJson(cur.scope) !== canonicalJson(scope) };
+}
+
+/**
+ * 4.4 (G3): `mp sec instruct <mission> <constraint> --text … [--tasks <ids>] [--repair <R-n>] [--paths …] [--task-types …]`:
+ * an instruction of the Secretary's own, a ruling within the plan: never a proof input, never an object
+ * constraint, always of one mission. It is recorded as the Secretary's (`author`), and its id is never the
+ * PM's: an id the PM recorded is refused. The same text again with another address changes the scope only.
+ * Each write is fenced to the live generation (process/context.ts writeGuard).
+ */
+export async function secInstruct(ctx: ProcessContext, req: { readonly mission: string; readonly constraint: string; readonly text: string; readonly paths: readonly string[]; readonly taskTypes: readonly string[]; readonly tasks?: readonly string[]; readonly repairs?: readonly string[] }): Promise<{ readonly version: string; readonly reach: ConstraintReach; readonly scopeChanged: boolean }> {
+  if (ctx.secretary === null) throw new ProcessError('NOT_ALLOWED', 'mp sec instruct records an instruction as the live Secretary\'s (MP_SECRETARY); the PM\'s is mp pm constraint add');
+  if (req.text.trim() === '') throw new ProcessError('NOT_ALLOWED', '--text: the instruction');
+  const line = constraintLine(req.constraint);
+  const fctx = flowCtx(ctx.ports(), req.mission as MissionId);
+  if (!(await ctx.ports().ledger.missions()).includes(req.mission as MissionId)) throw new ProcessError('NOT_ALLOWED', `no mission ${req.mission}: nothing was recorded`);
+  const before = (await currentConstraints(fctx)).find((c) => c.line === line);
+  if (before !== undefined && (before.kind !== 'instruction' || before.author !== 'secretary')) throw new ProcessError('NOT_ALLOWED', `${req.constraint} is the PM's ${before.kind === 'object' ? 'object constraint' : 'instruction'}: the Secretary records its own under a new id. Nothing was recorded`);
+  if (before !== undefined && before.scope.mission !== req.mission) throw new ProcessError('NOT_ALLOWED', `${req.constraint} is an instruction of mission ${before.scope.mission ?? '(none)'}: nothing was recorded`);
+  const scope: ConstraintScope = { mission: req.mission, paths: req.paths.length > 0 ? [...req.paths] : ['**'], taskTypes: [...req.taskTypes], ...(req.tasks !== undefined ? { tasks: [...req.tasks] } : {}), ...(req.repairs !== undefined ? { repairs: [...req.repairs] } : {}) };
+  const bad = scope.paths.flatMap((p) => { const x = constraintPatternProblem(p); return x === null ? [] : [`"${p}": ${x.problem}; the nearest form is "${x.suggestion}"`]; });
+  if (bad.length > 0) throw new ProcessError('NOT_ALLOWED', `the scope's path patterns: ${bad.join('; ')}. A scope path is ${CONSTRAINT_PATTERN_FORMS}. Nothing was recorded`);
+  addressProblem('instruction', scope);
+  // the version checked above (or none), checked again inside the write: a PM constraint recorded meanwhile under this id is never taken over
+  const version = await recordConstraint(ctx.ports(), { mission: req.mission as MissionId, constraint: req.constraint, kind: 'instruction', text: req.text, scope, author: 'secretary', expect: before?.version ?? null });
+  const scopeChanged = before !== undefined && before.version === version && canonicalJson(before.scope) !== canonicalJson(scope);
+  return { version, reach: await constraintReach(ctx, { kind: 'instruction', scope }), scopeChanged };
+}
+
+/** 4.4 (G3): `mp sec instruct withdraw <constraint> --reason …`: the Secretary withdraws an instruction of its own (no words: it is not the user's). */
+export async function secWithdrawInstruction(ctx: ProcessContext, req: { readonly constraint: string; readonly reason: string }): Promise<{ readonly already: boolean }> {
+  if (ctx.secretary === null) throw new ProcessError('NOT_ALLOWED', 'mp sec instruct withdraw is the live Secretary\'s (MP_SECRETARY); the PM withdraws with mp pm constraint withdraw --words');
+  if (req.reason.trim() === '') throw new ProcessError('NOT_ALLOWED', '--reason: why the instruction no longer holds');
+  const line = constraintLine(req.constraint);
+  const c = (await currentConstraints(flowCtx(ctx.ports(), 'project' as MissionId))).find((x) => x.line === line);
+  if (c === undefined) {
+    // withdrawn already (a retry, or by the PM: the output says only that it is withdrawn), or never recorded
+    if ((await basisIndex(flowCtx(ctx.ports(), 'project' as MissionId))).withdrawn.has(line)) return { already: true };
+    throw new ProcessError('NOT_ALLOWED', `no instruction ${req.constraint}: nothing was withdrawn`);
+  }
+  if (c.author !== 'secretary') throw new ProcessError('NOT_ALLOWED', `${req.constraint} is the PM's: only the PM withdraws it (mp pm constraint withdraw --words). Nothing was withdrawn`);
+  // the Secretary's version checked here is the one withdrawn, checked again inside the write
+  await withdrawConstraint(ctx.ports(), { constraint: req.constraint, by: 'secretary', reason: req.reason, expect: c.version });
+  return { already: false };
 }
 
 /** `mp pm plan submit <mission> --file <plan.json> --words W-<n>...`: a PM plan batch; Calibrator ① checks it next. */

@@ -120,7 +120,10 @@ describe('4.4 G1: ask the Architect on a Constructor\'s questions', () => {
   it('a paused attempt resumes on its parked edits once the Architect\'s answer is carried out', async () => {
     const { ports, engine } = await constructorAsks(['Which escape character?'], { blocked: true });
     const id = 'cblk.con.m1.impl.1.1';
-    assert.ok((await escalation(flowCtx(ports, M), id))!.options.includes('ask-architect'));
+    const esc = (await escalation(flowCtx(ports, M), id))!;
+    assert.ok(esc.options.includes('ask-architect'));
+    // the description says what carrying its answer out does here, as the answer's own does
+    assert.match(pmOptions(esc).find((o) => o.id === 'ask-architect')!.outcome, /its answer is carried out as this escalation's answer \(the paused attempt resumes on its parked edits\)/);
     await drive(engine, ports.scheduler, withKinds({
       secretary: asksArchitect((c) => c.request.id === id),
       'architect-answer': reply({ reply: 'answer', text: 'A doubled quote escapes a quote.' }),

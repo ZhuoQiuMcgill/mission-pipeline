@@ -61,6 +61,9 @@ function says(e: EscalationBody, o: DecisionOption, re: RegExp): void {
   assert.match(pm, re, `${e.source}/${o}: ${pm}`);
   const card = secretaryOptions(e, true).find((x) => x.id === o)?.outcome;
   if (card !== undefined) assert.match(card, re, `the Secretary card: ${e.source}/${o}: ${card}`);
+  // 4.4 (G1): ask-architect is offered on a Constructor's questions, a Reviewer's needs-decision and a used-up rework loop, and on no other kind
+  const asks = e.source === 'constructor-decision' || e.source === 'reviewer-needs-decision' || (e.source === 'loop-exhausted' && (e.facts as { loop?: unknown } | undefined)?.loop === 'rework');
+  assert.equal(pmOptions(e).some((x) => x.id === 'ask-architect'), asks, `${e.source} (${e.subject}) offers ask-architect only when it is one of the three kinds`);
 }
 
 // ---------------------------------------------------------------- the decision layer and execution (scripted seats)

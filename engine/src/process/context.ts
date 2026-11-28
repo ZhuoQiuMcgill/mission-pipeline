@@ -87,6 +87,8 @@ export interface ProcessOptions {
   readonly startOnHandback?: readonly string[];
   /** 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (config.json `mustReadWarnPages`). Default 6. */
   readonly mustReadWarnPages?: number;
+  /** 4.4 (G3): above this many bytes a dispatch's card warns whoever dispatches it (config.json `cardWarnBytes`). Default 64 KiB. */
+  readonly cardWarnBytes?: number;
   /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`). Default LOOP_CAPS.rework (2). */
   readonly reworkCap?: number;
   /** 4.4 (F6, H-3): config.json `limits`; while one is passed, new Constructor steps are held. Default none. */
@@ -143,6 +145,8 @@ export interface ProcessContext {
   readonly startOnHandback: readonly string[];
   /** 4.4 (F16): the must-read pages above which a dispatch warns (config.json `mustReadWarnPages`, default 6). */
   readonly mustReadWarnPages: number;
+  /** 4.4 (G3): the card bytes above which a dispatch warns (config.json `cardWarnBytes`, default 64 KiB). */
+  readonly cardWarnBytes: number;
   /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`, default 2), read wherever the loop's state is. */
   readonly reworkCap: number;
   /** 4.4 (F6, H-3): the disk limits of config.json (empty: none). */
@@ -167,6 +171,8 @@ const DEFAULT_IDENT: Ident = { name: 'Mission Pipeline', email: 'mp@localhost' }
 
 /** 4.4 (F16): the default of config.json `mustReadWarnPages`. */
 export const MUST_READ_WARN_PAGES = 6;
+/** 4.4 (G3, the plan's F1 `cardWarnBytes`): the default of config.json `cardWarnBytes`. */
+export const CARD_WARN_BYTES = 64 * 1024;
 
 /** A context over an open memory (the caller closes the memory). */
 export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessContext {
@@ -203,6 +209,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     planReviewsWaived: o.planReviewsWaived ?? [],
     startOnHandback: o.startOnHandback ?? [],
     mustReadWarnPages: o.mustReadWarnPages ?? MUST_READ_WARN_PAGES,
+    cardWarnBytes: o.cardWarnBytes ?? CARD_WARN_BYTES,
     reworkCap: o.reworkCap ?? LOOP_CAPS.rework,
     limits: o.limits ?? {},
     diskFree(): number | null {

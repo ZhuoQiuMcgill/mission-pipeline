@@ -36,7 +36,7 @@ import { acceptedProduct } from './execution.ts';
 import { acceptedEntry } from './repair.ts';
 import { currentConstraints, currentItems } from './requirements.ts';
 import { decisionFor, escalation, escalationTask, isApplied, type DecisionBody, type EscalationBody } from './secretary.ts';
-import { constraintsForTask, planningConstraints, secretaryRoundInputs, taskDecisionQuotes, taskRequirementItems } from '../seat/cards/dynamic.ts';
+import { addressedForPlanning, addressedIndexOf, constraintsForTask, planningConstraints, secretaryRoundInputs, taskDecisionQuotes, taskRequirementItems } from '../seat/cards/dynamic.ts';
 import type { ArchitectAnswerCard, ArchitectAnswerResult } from '../seat/cards/architectAnswer.ts';
 import { ARCHITECT_ANSWER, answerKey, answersInPlace, askOf, askStanding, askTag, repliesOn, replyText, type ArchitectAnswerBody, type Ask } from './architectAnswers.ts';
 
@@ -198,6 +198,8 @@ async function submitAsk(ctx: FlowCtx, a: Ask, task: string, sec: readonly Ev[])
       constraints: planningConstraints(constraints, ctx.mission),
       decisionQuotes: taskDecisionQuotes(items, events, t, constraintsForTask(constraints, t, ctx.mission), pie.eff.dplan),
     }),
+    // 4.4 (G3): the instructions addressed to its task in full, the mission's other addressed ones as an index
+    ...(() => { const ad = addressedForPlanning(constraints, ctx.mission, { about: taskId }); return addressedIndexOf(ad.index, ad.full); })(),
     seat: 'architect-answer',
     workspace: { snapshot: snap.path, writablePaths: [] },
     escalation: { id: esc.id, source: esc.source, subject: esc.subject, summary: esc.summary, reasons: [...esc.reasons] },
