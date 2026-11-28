@@ -916,7 +916,7 @@ const verified: Command = {
   group: 'pm',
   name: ['verified'],
   summary: 'record the user\'s statement that a requirement item or a repair was checked in the field and holds: shown as the user\'s statement on those words, never as proof (no proof label changes); it closes the open items it names',
-  usage: 'mp pm verified <mission> <item-id|R-<n>> --words W-<n> [--open-items <id>[,<id>...]]   (mp read items <mission> shows it; mp read open-items <mission> lists the items)',
+  usage: 'mp pm verified <mission> <item-id|R-<n>|item:<id>|repair:<id>> --words W-<n> [--open-items <id>[,<id>...]]   (a bare id names the requirement item or the repair of that id; where both exist, say which; mp read items <mission> shows it)',
   flags: { words: 'string', 'open-items': 'list' },
   async run(c, args) {
     const p = P(c);
@@ -925,7 +925,8 @@ const verified: Command = {
     const w = wordsArg(p.ctx, args, true)!;
     const items = flagList(args, 'open-items').flatMap((x) => x.split(',')).map((x) => x.trim()).filter((x) => x !== '');
     const r = recordVerified(p.ctx, { op: c.op!, mission: m, subject, words: w, items });
-    const what = `${r.subject.startsWith('repair:') ? 'repair' : 'requirement item'} ${subject}`;
+    // the subject as the write resolved it (p10-6)
+    const what = `${r.subject.startsWith('repair:') ? 'repair' : 'requirement item'} ${r.subject.slice(r.subject.indexOf(':') + 1)}`;
     const lines = r.repeated
       ? [`The user's statement on ${w} about ${what} was recorded already: nothing new.`]
       : [

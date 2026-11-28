@@ -314,11 +314,14 @@ export function judgmentRecord(card: ReviewerCard, r: ReviewerResult, evidenceLi
     bases: card.binding.bases as ListRef,
     constraints: card.binding.constraints as ListRef,
     reliesOn: card.binding.reliesOn as ListRef,
-    issues: r.issue_responses.map((i): IssueResponse => ({
-      issue: i.issue as IssueId,
-      response: i.response,
-      ...(i.response === 'deferred' ? { owner: i.owner!, reason: sha256(deferredReasonDocument(i)) as ContentHash } : {}),
-    })),
+    issues: [
+      ...r.issue_responses.map((i): IssueResponse => ({
+        issue: i.issue as IssueId,
+        response: i.response,
+        ...(i.response === 'deferred' ? { owner: i.owner!, reason: sha256(deferredReasonDocument(i)) as ContentHash } : {}),
+      })),
+      ...takenFixes(card, r),
+    ],
     revokes: card.binding.revokes as JudgmentId | null,
     evidenceUse: card.binding.evidenceUse,
     superseded: card.binding.superseded,
@@ -326,6 +329,23 @@ export function judgmentRecord(card: ReviewerCard, r: ReviewerResult, evidenceLi
   };
   validateRecord(rec);
   return rec;
+}
+
+/**
+ * 4.4 (G5, p10-5): an open item the task took that names an issue, answered fixed: the Reviewer's answer to that
+ * issue too, so the fix tracker reads it on the accepted product (and a ruling over other risks keeps it). An
+ * explicit response to the same issue stands; each issue is answered once.
+ */
+function takenFixes(card: ReviewerCard, r: ReviewerResult): IssueResponse[] {
+  const answered = new Set(r.issue_responses.map((i) => i.issue));
+  const out: IssueResponse[] = [];
+  for (const a of r.item_responses ?? []) {
+    const issue = (card.openItems ?? []).find((i) => i.id === a.item)?.issue;
+    if (a.response !== 'fixed' || issue === undefined || answered.has(issue)) continue;
+    answered.add(issue);
+    out.push({ issue: issue as IssueId, response: 'fixed' });
+  }
+  return out;
 }
 
 /** The reason is content-addressed in the judgment and saved with the hand-back's findings. */

@@ -19,7 +19,7 @@ import { constructorDone, drive, happyScript, pmPlan, reviewer, secretary, seedM
 import type { EscalationBody } from '../src/flow/secretary.ts';
 import { appendRecords, factById } from '../src/memory/index.ts';
 import { pmClose } from '../src/process/close.ts';
-import { readItems } from '../src/process/itemsRead.ts';
+import { readItems } from '../src/cli/itemsRead.ts';
 import { closeOpenItem, listAllItems, recordVerified } from '../src/process/openItems.ts';
 import { pmRepair } from '../src/process/pm.ts';
 import { resolveSubtasks } from '../src/cli/layers.ts';
@@ -119,7 +119,7 @@ describe('4.4 G5: what is left at the cap is recorded by the program', () => {
     const iface = s.entries.find((e) => e.kind === 'task' && e.id === 'iface')!;
     assert.match(iface.label, /^accepted(,|$)/, 'an acceptance after a pass reads as before');
     const t = tree(w.ctx, buildGraph(w.ctx, { mission: M }), M).text;
-    assert.match(t, new RegExp(`accepted with its risk by the Secretary on ${esc.id.replace(/\./g, '\\.')} .*: ${items.length} of ${items.length} open item\\(s\\) it left still open`));
+    assert.match(t, new RegExp(`accepted with its risk by the Secretary on ${esc.id.replace(/\./g, '\\.')} .*: ${items.length} open \\(mp read open-items m1\\)`));
   });
 
   it('a repair names an item and its Architect gives it to a task: the task\'s cards list it, its Reviewer must answer it, and its acceptance with the item answered fixed closes it; the other stays open', async () => {
@@ -205,7 +205,7 @@ describe('4.4 G5: what is left at the cap is recorded by the program', () => {
     const r = await cli(w.dir, ['read', 'items', 'm1']);
     assert.equal(r.code, 0, r.err);
     assert.ok(r.out.includes(`the user's statement on ${words}: checked in the field and holds (the user's words, not proof)`), r.out);
-    assert.throws(() => recordVerified(w.ctx, { op: 'v-3', mission: M, subject: 'nope', words, items: [] }), /has no requirement item nope/);
+    assert.throws(() => recordVerified(w.ctx, { op: 'v-3', mission: M, subject: 'nope', words, items: [] }), /has no requirement item and no repair nope/);
   });
 
   it('mp read items: one line per requirement item and per repair, with its state; an acceptance with risk is told apart, with its open items', async () => {

@@ -218,6 +218,26 @@ export function closureText(c: NonNullable<RiskItem['closed']>): string {
   return c.how === 'fixed' ? `fixed: task ${c.task} was accepted at attempt ${c.attempt} with it answered fixed` : `on the user's words ${c.words}${c.statement !== undefined ? ` (their statement ${c.statement})` : ''}: ${c.reason}`;
 }
 
+/**
+ * 4.4 (p10-6): the subject of a statement as `item:<id>` or `repair:<id>`: an explicit spelling must name a record
+ * of that kind; a bare id must name exactly one (a requirement item and a repair may share an id such as R-1).
+ */
+function verifiedSubject(events: readonly Ev[], mission: string, given: string): string {
+  const isItem = (id: string): boolean => { const line = itemLineOf(mission, id); return line !== null && events.some((e) => e.line === REQUIREMENTS_LINE && e.event === 'item' && (e.body as { line?: string }).line === line); };
+  const isRepair = (id: string): boolean => events.some((e) => e.line === REPAIRS_LINE && e.event === 'repair' && e.key === id);
+  const explicit = /^(item|repair):(.+)$/.exec(given);
+  if (explicit !== null) {
+    const [, kind, id] = explicit as unknown as [string, 'item' | 'repair', string];
+    if (!(kind === 'item' ? isItem(id) : isRepair(id))) throw new ProcessError('NOT_READY', `mission ${mission} has no ${kind === 'item' ? 'requirement item' : 'repair'} ${id} (mp read items ${mission} lists them)`);
+    return `${kind}:${id}`;
+  }
+  const item = isItem(given);
+  const repair = isRepair(given);
+  if (item && repair) throw new ProcessError('NOT_ALLOWED', `${given} names both a requirement item and a repair of mission ${mission}: name the one the user checked, item:${given} or repair:${given}`);
+  if (!item && !repair) throw new ProcessError('NOT_READY', `mission ${mission} has no requirement item and no repair ${given} (mp read items ${mission} lists them)`);
+  return `${item ? 'item' : 'repair'}:${given}`;
+}
+
 /** The most open items one statement closes (one append takes at most 1,000 records). */
 export const ITEMS_PER_STATEMENT = 500;
 
@@ -248,27 +268,26 @@ export interface Verified {
  * statement again (the same subject and words) writes nothing and says so.
  */
 export function recordVerified(ctx: ProcessContext, req: { readonly op: string; readonly mission: string; readonly subject: string; readonly words: string; readonly items: readonly string[] }): Verified {
-  const subject = /^R-[1-9][0-9]*$/.test(req.subject) ? `repair:${req.subject}` : `item:${req.subject}`;
-  const key = `${subject}@${req.words}`;
   const items = [...new Set(req.items)].sort();
   // one append takes at most 1,000 records
   if (items.length > ITEMS_PER_STATEMENT) throw new ProcessError('NOT_ALLOWED', `one statement closes at most ${ITEMS_PER_STATEMENT} open items: record the rest with further statements on the same words (mp pm open-item close)`);
-  if (key.length > 200) throw new ProcessError('NOT_ALLOWED', `the subject ${req.subject} is too long for a statement`);
-  const body: VerifiedBody = { subject, words: req.words, items };
-  return ctx.memory.write({ op: `verified:${req.op}`, payload: { mission: req.mission, key, ...body } }, (tx) => {
+  if (req.subject.length > 160) throw new ProcessError('NOT_ALLOWED', `the subject ${req.subject} is too long for a statement`);
+  return ctx.memory.write({ op: `verified:${req.op}`, payload: { mission: req.mission, subject: req.subject, words: req.words, items } }, (tx) => {
     const events = missionEvents(tx, tx.data, req.mission);
-    const known = subject.startsWith('repair:')
-      ? events.some((e) => e.line === REPAIRS_LINE && e.event === 'repair' && e.key === req.subject)
-      : events.some((e) => e.line === REQUIREMENTS_LINE && e.event === 'item' && (e.body as { line?: string }).line === itemLineOf(req.mission, req.subject));
-    if (!known) throw new ProcessError('NOT_READY', `mission ${req.mission} has no ${subject.startsWith('repair:') ? 'repair' : 'requirement item'} ${req.subject} (mp read items ${req.mission} lists them)`);
+    // p10-6: the subject the user named, resolved against the mission's records in this write: `item:<id>` or
+    // `repair:<id>` as written; a bare id that names both is refused with the two spellings, never guessed
+    const subject = verifiedSubject(events, req.mission, req.subject);
+    const id = subject.slice(subject.indexOf(':') + 1);
+    const key = `${subject}@${req.words}`;
+    const body: VerifiedBody = { subject, words: req.words, items };
     const prior = events.find((e) => e.line === VERIFIED_LINE && e.event === VERIFIED && e.key === key)?.body as VerifiedBody | undefined;
     if (prior !== undefined) {
-      if (canonicalJson(prior) !== canonicalJson(body)) throw new ProcessError('NOT_ALLOWED', `the user's statement on ${req.words} about ${req.subject} is recorded already, naming open items ${prior.items.join(', ') || 'none'}; a statement on newer words is recorded with those`);
+      if (canonicalJson(prior) !== canonicalJson(body)) throw new ProcessError('NOT_ALLOWED', `the user's statement on ${req.words} about ${subject} is recorded already, naming open items ${prior.items.join(', ') || 'none'}; a statement on newer words is recorded with those`);
       return { mission: req.mission, subject, words: req.words, closed: [], already: [...prior.items], repeated: true };
     }
     const named = closable(events, req.mission, items);
     const open = named.filter((i) => i.closed === null);
-    const reason = `the user's statement on ${req.words}: ${req.subject} was checked in the field and holds`;
+    const reason = `the user's statement on ${req.words}: ${subject.startsWith('repair:') ? 'repair' : 'requirement item'} ${id} was checked in the field and holds`;
     appendRecords(tx, [
       { kind: 'flow.event', mission: req.mission as MissionId, line: VERIFIED_LINE, event: VERIFIED, key, body: tx.data.put(canonicalJson(body)) as ContentHash },
       ...open.map((i) => ({ kind: 'flow.event' as const, mission: req.mission as MissionId, line: OPEN_ITEMS_LINE, event: OPEN_ITEM_CLOSED, key: i.id, body: tx.data.put(canonicalJson({ id: i.id, by: 'pm', words: req.words, reason, statement: key } satisfies ItemClosedBody)) as ContentHash })),

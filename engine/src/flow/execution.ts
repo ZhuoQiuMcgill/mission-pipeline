@@ -1595,7 +1595,7 @@ async function acceptRebindWithRisk(ctx: FlowCtx, t: DetailedTask, k: number, e:
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
   const body: ReboundBody = { k, n: rb.n, product: rb.product, judgment: ruling, how: 'review', decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks };
   // 4.4 (G5): one open item per risk accepted, in the same write
-  const items = acceptanceItems(ctx, t.id, k, e.id, e.reasons);
+  const items = await acceptanceItems(ctx, t.id, k, e.id, e.reasons, risk.review);
   await commitCarrying(
     ctx,
     `flow:rebound-risk:${ctx.mission}:task:${idPart(t.id)}:${rebind}`,
@@ -1652,7 +1652,7 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   const ruling = rulingJudgmentId(e.id, by);
   const risks = e.reasons.map((x) => `accepted with its risk by ${d.by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
   // 4.4 (G5): one open item per risk accepted, in the same write
-  const items = acceptanceItems(ctx, t.id, k, e.id, e.reasons);
+  const items = await acceptanceItems(ctx, t.id, k, e.id, e.reasons, acceptedReview(line, k, Infinity));
   await commitCarrying(
     ctx,
     `flow:accepted-risk:${ctx.mission}:task:${idPart(t.id)}:${k}`,
@@ -1668,9 +1668,28 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
  * writes of their own right after it (writeItemBatches; riskItemsLeft writes on a later pass what an interruption
  * left out). Nothing else in the acceptance changes.
  */
-function acceptanceItems(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[]): { readonly first: FlowEventInput[]; readonly rest: RiskItemBody[] } {
-  const bodies = riskItemBodies(task, k, escalation, reasons);
+async function acceptanceItems(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<{ readonly first: FlowEventInput[]; readonly rest: RiskItemBody[] }> {
+  const bodies = riskItemBodies(task, k, escalation, reasons, await findingIssues(ctx, review));
   return { first: bodies.slice(0, ITEM_BATCH).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)), rest: bodies.slice(ITEM_BATCH) };
+}
+
+/**
+ * 4.4 (G5, p10-5): the issue records the findings of a review's hand-back became ("finding: <text>" → its issue id),
+ * so an item of a finding names its issue and a taking task's answer reaches the fix tracker. Empty when the
+ * hand-back cannot be read (the item then names none).
+ */
+async function findingIssues(ctx: FlowCtx, review: string | undefined): Promise<ReadonlyMap<string, string>> {
+  if (review === undefined) return new Map();
+  const hb = (await ctx.ports.scheduler.status(review))?.handBack;
+  const findings = ((hb?.result ?? null) as ReviewerResult | null)?.findings ?? [];
+  const issues = (hb?.records ?? []).flatMap((r) => (r.kind === 'issue' ? [r.issue as string] : []));
+  if (findings.length !== issues.length) return new Map();
+  return new Map(findings.map((f, i) => [`finding: ${f}`, issues[i]!]));
+}
+
+/** The review an acceptance of attempt k rests on: the one it names as adopted, else the attempt's last review before it. */
+function acceptedReview(line: Line, k: number, before: number, adopted?: string): string | undefined {
+  return adopted ?? line.all<ReviewBody>('review').filter((r) => r.body.k === k && r.revision < before).at(-1)?.key;
 }
 
 /** 4.4 (G5): open items not recorded yet, in bounded writes (an append takes at most 1,000 records), each under the operation id of its own items. */
@@ -1688,10 +1707,11 @@ async function writeItemBatches(ctx: FlowCtx, bodies: readonly RiskItemBody[], r
 
 /** 4.4 (G5): the items past the first batch of each acceptance with risk on the task's line, written when an interruption left them out (only such an acceptance is read again). */
 async function riskItemsLeft(ctx: FlowCtx, t: DetailedTask, line: Line): Promise<void> {
-  for (const e of [...line.all<{ k: number; decision?: { escalation: string; option?: string }; risks?: string[] }>('accepted'), ...line.all<ReboundBody>('rebound')]) {
+  for (const e of [...line.all<{ k: number; decision?: { escalation: string; option?: string }; risks?: string[]; review?: string }>('accepted'), ...line.all<ReboundBody & { review?: string }>('rebound')]) {
     const d = e.body.decision;
     if (d?.option !== 'accept-risk' || (e.body.risks ?? []).length <= ITEM_BATCH) continue;
-    const bodies = riskItemBodies(t.id, e.body.k, d.escalation, acceptanceReasons(e.body, d.escalation));
+    const refs = await findingIssues(ctx, acceptedReview(line, e.body.k, e.revision, e.body.review));
+    const bodies = riskItemBodies(t.id, e.body.k, d.escalation, acceptanceReasons(e.body, d.escalation), refs);
     if (bodies.length > ITEM_BATCH) await writeItemBatches(ctx, bodies.slice(ITEM_BATCH), bodies[0]!.id);
   }
 }
@@ -1753,15 +1773,17 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
     return;
   }
   const words = by === 'pm' ? (d.words ?? []).map((w) => w.id).join(',') : by === 'user' ? /\((W-[0-9]+)\)\s*$/.exec(d.reason)?.[1] : undefined;
-  const risks = review.issues.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
-  // 4.4 (G5): one open item per risk accepted, on the integration task that is accepted, in the same write
-  const items = acceptanceItems(ctx, integration, line.k, e.id, review.issues);
+  // 4.4 (G5, p10-1): the ruling accepts every reason of the escalation it decides (the dependency's reopen among them),
+  // as the other acceptances with risk quote theirs; one open item per risk, on the integration task that is accepted,
+  // in the same write. The acceptance names the review it adopts, whose attempt and answers its outcome reads.
+  const risks = e.reasons.map((x) => `accepted with its risk by ${by === 'user' ? `the user${words !== undefined ? ` (${words})` : ''}` : d.by === 'pm' ? 'the PM' : 'the Secretary'} on ${e.id}: ${x}`);
+  const items = await acceptanceItems(ctx, integration, line.k, e.id, e.reasons, review.task);
   await commitCarrying(ctx, `flow:accepted-risk:${ctx.mission}:task:${idPart(integration)}:${line.k}`,
     [
       // Adopt the reviewed product at this attempt, preserving its actual source dispatch.
       // Renewal and kept-product rebinds then read the same body as any accepted attempt.
       ev(ctx, taskLine(integration), 'product', String(line.k), { ...product, k: line.k } satisfies ProductBody),
-      ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks }),
+      ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks, review: review.task }),
       ...items.first,
     ],
     [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);

@@ -89,13 +89,16 @@ export function riskOf(reason: string): { readonly kind: RiskKind; readonly ref?
  * do not depend on when they are written (`<escalation>.r<n>`), so a write repeated writes the same records. A
  * reason that is an open item answered not fixed is that item carried, not a new one.
  */
-export function riskItemBodies(task: string, attempt: number, escalation: string, reasons: readonly string[]): RiskItemBody[] {
+export function riskItemBodies(task: string, attempt: number, escalation: string, reasons: readonly string[], findings: ReadonlyMap<string, string> = new Map()): RiskItemBody[] {
   const seen = new Set<string>();
   const out: RiskItemBody[] = [];
   for (const r of reasons) {
     if (CARRIED.test(r) || seen.has(r)) continue;
     seen.add(r);
-    out.push({ id: `${escalation}.r${out.length + 1}`, ...riskOf(r), text: r, task, attempt, escalation, why: 'risk' });
+    const kind = riskOf(r);
+    // 4.4 (p10-5): a finding names the issue record it became, when the accepted review's hand-back says which
+    const issue = kind.kind === 'finding' ? findings.get(r) : undefined;
+    out.push({ id: `${escalation}.r${out.length + 1}`, ...kind, ...(issue !== undefined ? { ref: { issue } } : {}), text: r, task, attempt, escalation, why: 'risk' });
   }
   return out;
 }
@@ -135,76 +138,176 @@ export interface RiskItem extends RiskItemBody {
   readonly answer: (ItemAnswer & { readonly task: string; readonly attempt: number }) | null;
 }
 
-/** The acceptances with risk on a mission's task lines (accepted, or a re-bound version accepted with its risk): the items each leaves. */
-export function acceptanceItems(events: readonly Ev[]): Array<{ readonly revision: number; readonly items: RiskItemBody[] }> {
-  const out: Array<{ revision: number; items: RiskItemBody[] }> = [];
-  for (const e of events) {
-    if (!e.line.startsWith('task:') || (e.event !== 'accepted' && e.event !== 'rebound')) continue;
-    const b = e.body as Decided;
-    const esc = b.decision?.escalation;
-    if (b.decision?.option !== 'accept-risk' || typeof esc !== 'string' || typeof b.k !== 'number') continue;
-    out.push({ revision: e.revision, items: riskItemBodies(e.line.slice('task:'.length), b.k, esc, acceptanceReasons(b, esc)) });
+/** A review as the outcome of an item reads it: its attempt, its answers to open items, the deferred issues it answered fixed. */
+type ReviewLike = { readonly k?: unknown; readonly items?: readonly ItemAnswer[]; readonly fixed?: readonly string[] };
+
+/** One acceptance of a task's attempt (accepted, re-bound and accepted, or accepted again), with the review it rests on. */
+interface Acceptance {
+  readonly revision: number;
+  readonly line: string;
+  readonly event: string;
+  readonly key: string;
+  readonly task: string;
+  readonly k: number;
+  /** The review of the attempt it accepts: the one it names as adopted (an integration's reviewed attempt), else the attempt's last review before it. */
+  readonly review: ReviewLike | undefined;
+  readonly body: Decided & { readonly review?: string };
+}
+
+/** Every acceptance on a mission's task lines (each with its own review). */
+function acceptancesOf(events: readonly Ev[]): Acceptance[] {
+  const lines = new Map<string, Ev[]>();
+  for (const e of events) if (e.line.startsWith('task:')) (lines.get(e.line) ?? (lines.set(e.line, []), lines.get(e.line)!)).push(e);
+  const out: Acceptance[] = [];
+  for (const [line, evs] of lines) {
+    const reviews = evs.filter((e) => e.event === 'review');
+    for (const acc of evs) {
+      if (acc.event !== 'accepted' && acc.event !== 'rebound' && acc.event !== 'reaccepted') continue;
+      const body = acc.body as Acceptance['body'];
+      if (typeof body.k !== 'number') continue;
+      const k = body.k;
+      // 4.4 (G5, p10-1): a ruling that adopts the reviewed attempt of an integration names that review
+      const adopted = typeof body.review === 'string' ? reviews.find((r) => r.key === body.review)?.body as ReviewLike | undefined : undefined;
+      const review = adopted ?? (reviews.filter((r) => (r.body as ReviewLike).k === k && r.revision < acc.revision).at(-1)?.body as ReviewLike | undefined);
+      out.push({ revision: acc.revision, line, event: acc.event, key: acc.key, task: line.slice('task:'.length), k, review, body });
+    }
   }
+  // grouped by line here; riskRecord applies them in the order of their revisions
   return out;
 }
 
+/** An acceptance with risk and the items it left: those it created (one per distinct reason), and those it carried (taken, answered not fixed). */
+export interface AcceptanceSummary {
+  readonly line: string;
+  readonly event: string;
+  readonly key: string;
+  readonly task: string;
+  readonly k: number;
+  readonly escalation: string;
+  readonly created: readonly string[];
+  readonly carried: readonly string[];
+  /** Made before 4.4: no item of it is recorded and it carried none; its sentences are all it left. */
+  readonly legacy: boolean;
+  /** How many risk sentences it stores. */
+  readonly risks: number;
+}
+
+/** The record of what was left at the caps: every item with what became of it, and every acceptance with risk with what it left. */
+export interface RiskRecord {
+  readonly items: RiskItem[];
+  readonly acceptances: AcceptanceSummary[];
+}
+
 /**
- * Every item left at a cap or deferred, of one mission's events, each with what became of it: closed (fixed
- * at an acceptance of a task whose card carried it, or on the user's words), how often it was carried, and
- * the latest answer. Pure, one pass over the events (read once, never once per item).
+ * Every item left at a cap or deferred, of one mission's events, each with what became of it, and every
+ * acceptance with risk with the items it created or carried. The acceptances and the closures on the user's
+ * words are applied in the order of their ledger revisions, each acceptance with its own review: the first
+ * closure in the record stands, and a carry is counted at the acceptance that made it. Pure, one pass over the
+ * events (read once, never once per item).
  */
-export function riskItemsOf(events: readonly Ev[]): RiskItem[] {
+export function riskRecord(events: readonly Ev[]): RiskRecord {
   const recorded = new Map<string, { body: RiskItemBody; revision: number }>();
-  const closedByWords = new Map<string, ItemClosure>();
+  const closures: Array<{ revision: number; id: string; closure: ItemClosure }> = [];
   for (const e of events) {
     if (e.line !== OPEN_ITEMS_LINE) continue;
     if (e.event === OPEN_ITEM && (e.body as { kind?: unknown }).kind !== 'question' && !recorded.has(e.key)) recorded.set(e.key, { body: e.body as RiskItemBody, revision: e.revision });
-    if (e.event === OPEN_ITEM_CLOSED && !closedByWords.has(e.key)) {
+    if (e.event === OPEN_ITEM_CLOSED) {
       const c = e.body as ItemClosedBody;
-      closedByWords.set(e.key, { how: 'words', words: c.words, reason: c.reason, ...(c.statement !== undefined ? { statement: c.statement } : {}), revision: e.revision });
+      closures.push({ revision: e.revision, id: e.key, closure: { how: 'words', words: c.words, reason: c.reason, ...(c.statement !== undefined ? { statement: c.statement } : {}), revision: e.revision } });
     }
   }
+  const accs = acceptancesOf(events);
   // the items an acceptance with risk left, recorded or not (4.3: none; 4.4: all, in its write and the batches after it)
   const all = new Map<string, { body: RiskItemBody; revision: number; recorded: boolean }>();
   for (const [id, r] of recorded) all.set(id, { ...r, recorded: true });
-  for (const a of acceptanceItems(events)) for (const b of a.items) if (!all.has(b.id)) all.set(b.id, { body: b, revision: a.revision, recorded: false });
-  // what the Reviewers answered at accepted attempts, in order, per task line
+  const withRisk = accs.filter((a) => (a.event === 'accepted' || a.event === 'rebound') && a.body.decision?.option === 'accept-risk' && typeof a.body.decision.escalation === 'string');
+  const created = new Map<Acceptance, string[]>();
+  for (const a of withRisk) {
+    const esc = a.body.decision!.escalation!;
+    const bodies = riskItemBodies(a.task, a.k, esc, acceptanceReasons(a.body, esc));
+    for (const b of bodies) if (!all.has(b.id)) all.set(b.id, { body: b, revision: a.revision, recorded: false });
+    // what it created: its recorded items (its escalation's, whatever their number), else the ones its sentences give
+    const mine = [...recorded.values()].filter((r) => r.body.escalation === esc && r.body.task === a.task).map((r) => r.body.id);
+    created.set(a, mine.length > 0 ? mine : bodies.map((b) => b.id));
+  }
+  // the timeline: acceptances and closures on the user's words, in revision order
   const outcome = new Map<string, { closed: ItemClosure | null; carried: number; answer: RiskItem['answer'] }>();
   const of = (id: string) => outcome.get(id) ?? (outcome.set(id, { closed: null, carried: 0, answer: null }), outcome.get(id)!);
-  const lines = new Map<string, Ev[]>();
-  for (const e of events) if (e.line.startsWith('task:')) (lines.get(e.line) ?? (lines.set(e.line, []), lines.get(e.line)!)).push(e);
-  for (const [line, evs] of lines) {
-    const task = line.slice('task:'.length);
-    const reviews = evs.filter((e) => e.event === 'review');
-    for (const acc of evs.filter((e) => e.event === 'accepted' || e.event === 'rebound' || e.event === 'reaccepted')) {
-      const k = (acc.body as { k?: unknown }).k;
-      if (typeof k !== 'number') continue;
-      const review = reviews.filter((r) => (r.body as { k?: unknown }).k === k && r.revision < acc.revision).at(-1)?.body as { items?: readonly ItemAnswer[]; fixed?: readonly string[] } | undefined;
-      for (const a of review?.items ?? []) {
-        const o = of(a.item);
-        o.answer = { ...a, task, attempt: k };
-        if (o.closed !== null) continue;
-        if (a.response === 'fixed') o.closed = { how: 'fixed', task, attempt: k, revision: acc.revision };
-        else o.carried += 1;
-      }
-      // a deferral: its task's later review answered the issue fixed
-      for (const issue of review?.fixed ?? []) {
-        for (const [id, x] of all) {
-          if (x.body.kind !== 'deferred' || x.body.task !== task || x.body.attempt >= k || !('issue' in (x.body.ref ?? {})) || (x.body.ref as { issue: string }).issue !== issue) continue;
-          const o = of(id);
-          if (o.closed === null) o.closed = { how: 'fixed', task, attempt: k, revision: acc.revision };
-        }
+  const carriedAt = new Map<Acceptance, string[]>();
+  const steps: Array<{ revision: number; acc?: Acceptance; closure?: { id: string; closure: ItemClosure } }> = [...accs.map((acc) => ({ revision: acc.revision, acc })), ...closures.map((c) => ({ revision: c.revision, closure: c }))].sort((a, b) => a.revision - b.revision);
+  for (const s of steps) {
+    if (s.closure !== undefined) {
+      const o = of(s.closure.id);
+      if (o.closed === null) o.closed = s.closure.closure;
+      continue;
+    }
+    const acc = s.acc!;
+    const k = typeof acc.review?.k === 'number' ? acc.review.k : acc.k;
+    const carried: string[] = [];
+    for (const a of acc.review?.items ?? []) {
+      const o = of(a.item);
+      o.answer = { ...a, task: acc.task, attempt: k };
+      if (a.response !== 'fixed') carried.push(a.item);
+      if (o.closed !== null) continue;
+      if (a.response === 'fixed') o.closed = { how: 'fixed', task: acc.task, attempt: k, revision: acc.revision };
+      else o.carried += 1;
+    }
+    carriedAt.set(acc, carried);
+    // a deferral: its task's later review answered the issue fixed
+    for (const issue of acc.review?.fixed ?? []) {
+      for (const [id, x] of all) {
+        if (x.body.kind !== 'deferred' || x.body.task !== acc.task || x.body.attempt >= k || !('issue' in (x.body.ref ?? {})) || (x.body.ref as { issue: string }).issue !== issue) continue;
+        const o = of(id);
+        if (o.closed === null) o.closed = { how: 'fixed', task: acc.task, attempt: k, revision: acc.revision };
       }
     }
   }
-  return [...all.entries()].sort((a, b) => a[1].revision - b[1].revision).map(([id, x]) => {
+  const items = [...all.entries()].sort((a, b) => a[1].revision - b[1].revision).map(([id, x]) => {
     const o = outcome.get(id);
-    const words = closedByWords.get(id) ?? null;
-    const fixed = o?.closed ?? null;
-    // the first closure in the record stands
-    const closed = words === null ? fixed : fixed === null ? words : words.revision < fixed.revision ? words : fixed;
-    return { ...x.body, revision: x.revision, recorded: x.recorded, closed, carried: o?.carried ?? 0, answer: o?.answer ?? null };
+    return { ...x.body, revision: x.revision, recorded: x.recorded, closed: o?.closed ?? null, carried: o?.carried ?? 0, answer: o?.answer ?? null };
   });
+  const acceptances = withRisk.map((a): AcceptanceSummary => {
+    const made = created.get(a) ?? [];
+    const carried = carriedAt.get(a) ?? [];
+    const legacy = carried.length === 0 && made.every((id) => all.get(id)?.recorded === false) && made.length > 0;
+    return { line: a.line, event: a.event, key: a.key, task: a.task, k: a.k, escalation: a.body.decision!.escalation!, created: made, carried, legacy, risks: (a.body.risks ?? []).length };
+  });
+  return { items, acceptances };
+}
+
+/** The items left at the caps and the deferrals, with what became of each (riskRecord's items). */
+export function riskItemsOf(events: readonly Ev[]): RiskItem[] {
+  return riskRecord(events).items;
+}
+
+/**
+ * 4.4 (G5, p10-4): what one acceptance with risk left still open: the distinct items it created or carried that
+ * are not closed; `legacy`, an acceptance made before 4.4 (what became of its sentences is not recorded).
+ */
+export function stillOpen(summary: AcceptanceSummary, items: ReadonlyMap<string, RiskItem>): { readonly open: readonly string[]; readonly legacy: boolean } {
+  const ids = [...new Set([...summary.created, ...summary.carried])];
+  return { open: ids.filter((id) => (items.get(id)?.closed ?? null) === null), legacy: summary.legacy };
+}
+
+/** The acceptance with risk a task line's event is (its line, event and key), if it is one. */
+export function acceptanceSummary(record: RiskRecord, line: string, event: string, key: string): AcceptanceSummary | undefined {
+  return record.acceptances.find((a) => a.line === line && a.event === event && a.key === key);
+}
+
+/** A task's latest acceptance with risk on an escalation (status reads the current one by its escalation). */
+export function acceptanceOf(record: RiskRecord, task: string, escalation: string): AcceptanceSummary | undefined {
+  return record.acceptances.filter((a) => a.task === task && a.escalation === escalation).at(-1);
+}
+
+/**
+ * 4.4 (G5, p10-4): how one acceptance with risk reads in status, the tree and `mp read items`: "n open" (the
+ * distinct items it created or carried that are not closed), or, made before 4.4, its sentences whose fate is not
+ * recorded. One function, so the reads never disagree.
+ */
+export function withRiskText(record: RiskRecord, a: AcceptanceSummary | undefined): string {
+  if (a === undefined) return 'what it left is not recorded';
+  const s = stillOpen(a, new Map(record.items.map((i) => [i.id, i])));
+  return s.legacy ? `${a.risks} risk(s); what became of them is not recorded` : `${s.open.length} open`;
 }
 
 /** Who took an item: the tasks of the plan in effect whose card names it, with what wrote that card (the plan, or a repair's amendment). */
@@ -261,6 +364,8 @@ export interface CardItem {
   readonly text: string;
   /** Where it was left: "task <id>, attempt <k>". */
   readonly from: string;
+  /** 4.4 (p10-5): the issue record it is about, when it names one: a "fixed" answer is the Reviewer's answer to that issue too. */
+  readonly issue?: string;
 }
 
 /** 4.4 (G5): the items a task's card names that are still open, as its cards list them (the Constructor fixes them; the Reviewer answers each). */
@@ -269,7 +374,8 @@ export function takenItems(events: readonly Ev[], names: readonly string[] | und
   const byId = new Map(riskItemsOf(events).map((i) => [i.id, i]));
   return names.flatMap((id) => {
     const i = byId.get(id);
-    return i === undefined || i.closed !== null ? [] : [{ id, kind: i.kind, text: i.text, from: `task ${i.task}, attempt ${i.attempt}` }];
+    const issue = i?.ref !== undefined && 'issue' in i.ref ? i.ref.issue : undefined;
+    return i === undefined || i.closed !== null ? [] : [{ id, kind: i.kind, text: i.text, from: `task ${i.task}, attempt ${i.attempt}`, ...(issue !== undefined ? { issue } : {}) }];
   });
 }
 

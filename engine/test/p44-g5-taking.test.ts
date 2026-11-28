@@ -138,7 +138,7 @@ describe('4.4 G5: an item is taken by a re-plan or a repair', () => {
     assert.equal(all.find((i) => i.id === first.id)!.closed?.how, 'fixed');
     assert.equal(all.find((i) => i.id === second.id)!.closed, null);
     const r = await cli(w.dir, ['read', 'repairs', 'm1']);
-    assert.ok(r.out.includes(`open item ${first.id}: taken by task impl; closed`), r.out);
+    assert.ok(r.out.includes(`open item ${first.id}: its decision gave it to task impl; closed`), r.out);
     assert.ok(r.out.includes(`open item ${second.id}: given to no task by its decision; still open`), r.out);
   });
 

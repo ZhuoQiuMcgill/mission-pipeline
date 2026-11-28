@@ -323,8 +323,8 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
     if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
     for (const [label, ts] of [['added', x.added], ['changed', x.changed], ['reopened', x.reopened]] as const) for (const t of ts) lines.push(`    ${label} ${t.task}: ${t.state}`);
-    // 4.4 (G4, G5): what became of the open items it is for
-    for (const i of x.openItems ?? []) lines.push(`    open item ${i.id}${i.named ? '' : ' (not named on the repair)'}: ${i.takenBy.length > 0 ? `taken by ${i.takenBy.map((t) => `task ${t}`).join(', ')}` : x.state === 'decided' ? 'given to no task by its decision' : 'not given to a task yet (not decided)'}${i.closed ? '; closed' : '; still open'}`);
+    // 4.4 (G4, G5): what its decision gave of the open items it is for (mp read open-items says what takes one now)
+    for (const i of x.openItems ?? []) lines.push(`    open item ${i.id}${i.named ? '' : ' (not named on the repair)'}: ${i.takenBy.length > 0 ? `its decision gave it to ${i.takenBy.map((t) => `task ${t}`).join(', ')}` : x.state === 'decided' ? 'given to no task by its decision' : 'not given to a task yet (not decided)'}${i.closed ? '; closed' : '; still open'}`);
     if (x.instructions.length > 0) lines.push(`    instructions addressed to it: ${x.instructions.join(', ')}`);
     lines.push(`    dispatches: ${x.dispatches.map((d) => `${d.dispatch} (${d.seat}, ${d.state})`).join(', ') || 'none'}${x.state === 'decided' ? `; on its tasks since its decision: ${x.taskDispatches}` : ''}`);
   }

@@ -36,7 +36,7 @@ const Question = z.object({
  * earlier acceptance with risk or deferred: where it was left and its text. Absent on a card: none (or a
  * card queued before 4.4 and not claimed).
  */
-const TakenItem = z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string(), from: z.string() });
+const TakenItem = z.object({ id: z.string().min(1), kind: z.string().min(1), text: z.string(), from: z.string(), issue: z.string().optional() });
 
 export const ConstructorCardSchema = z.object({
   ...commonCardFields,

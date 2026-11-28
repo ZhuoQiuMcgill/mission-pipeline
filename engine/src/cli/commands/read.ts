@@ -15,7 +15,7 @@ import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
 import { constraintsRead, constraintsText, repairsRead, repairsText } from '../workReads.ts';
 import { closureText, listAllItems, type RiskItemView } from '../../process/openItems.ts';
-import { itemStateLines, readItems } from '../../process/itemsRead.ts';
+import { itemStateLines, readItems } from '../itemsRead.ts';
 import { age } from '../render.ts';
 
 function P(c: RunContext): Project {

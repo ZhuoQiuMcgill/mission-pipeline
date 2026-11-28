@@ -11,7 +11,7 @@ import { materialPageCount, type MaterialRef } from './common.ts';
 import type { ReviewContract } from '../../common/records.ts';
 import type { DecidingView } from '../../evaluator/semantics.ts';
 import { answerText, openItemsOf, type OpenItem } from '../../flow/openItems.ts';
-import { riskItemsOf, type RiskItem } from '../../flow/riskItems.ts';
+import { cardItemNames, riskItemsOf, type RiskItem } from '../../flow/riskItems.ts';
 import type { EffectiveBody } from '../../flow/planning.ts';
 
 /** The plan in effect, as the flow reads it (`latestEffective`): the mission's last effective detailed plan. */
@@ -393,7 +393,12 @@ export function secretaryInputs(mission: string, e: EscalationBody, items: reado
   const taskLine = task === undefined ? [] : events.filter((x) => x.line === `task:${task.id}`);
   const openItems = task === undefined ? [] : openItemsOf(events).filter((i) => i.task === task.id);
   // 4.4 (G5): what was left at earlier caps on this task, or that it took, still open (its own block; one line each)
-  const left = task === undefined ? [] : riskItemsOf(events).filter((i) => i.closed === null && (i.task === task.id || (task.openItems ?? []).includes(i.id)));
+  // (p10-8): what the escalated attempt takes is resolved as its Constructor's and Reviewer's cards resolve it (its
+  // card's, and a repair's reopen of this work), beside what originates on the task
+  const attempt = (e.facts as { attempt?: unknown } | undefined)?.attempt;
+  const current = 1 + taskLine.filter((x) => x.event === 'rework').length;
+  const taking = task === undefined ? [] : cardItemNames(events, task, typeof attempt === 'number' ? attempt : current);
+  const left = task === undefined ? [] : riskItemsOf(events).filter((i) => i.closed === null && (i.task === task.id || taking.includes(i.id)));
   return {
     // 4.1.2 (item 7): the earlier decisions on the same line, so a ruling is not made again blind
     earlierDecisions: earlierDecisionsOf(e, events),
