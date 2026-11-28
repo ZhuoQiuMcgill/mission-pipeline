@@ -4,10 +4,11 @@ import { flagBool, flagList, flagStr, GLOBAL_FLAGS, positional } from '../args.t
 import { ok, type Command, type RunContext } from '../command.ts';
 import { refused, usage } from '../errors.ts';
 import { INSTALLED_PLUGIN } from '../init.ts';
-import { parseFiller } from '../../process/pm.ts';
+import { parseFiller, storedCard, type Dispatched } from '../../process/pm.ts';
 import { seatRead } from '../../process/seat.ts';
 import { claimSecretary, generations, notAllowed, requirePm, startSecretary, writeGeneration } from '../../memory/resident.ts';
 import { summarizeWords, tagWords, tagsReportLines, taggedWords } from '../../memory/words.ts';
+import { keepNextReport, secNextSeen, storedNextReport, type SecretaryNext } from '../../process/secretary.ts';
 import { escalationsNamedIn, pmNote, pmQuestion, pmReply, pmInbox, markInbox, secNext, secWait, secCard, secDecide, secDecisionDispatch, secQuestion, secReply, secAckNote, shellQuote, stopSecretary, type InboxBrief } from '../../process/secretary.ts';
 import { DECISION_OPTIONS, type DecisionOption } from '../../seat/cards/secretary.ts';
 import { renderNext, PM_COMMANDS } from './pm.ts';
@@ -17,14 +18,14 @@ function op(c: RunContext): string {return c.op!;}
 
 const secretary: Command = {
   group: 'pm', name: ['secretary'], summary: 'start, bind a harness handle, or retire a resident Secretary',
-  usage: 'mp pm secretary start [--replace] [--handle <id>] | handle <S-n> <handle> | stop [--gone]',
-  flags: {replace: 'boolean', handle: 'string', gone: 'boolean'},
+  usage: 'mp pm secretary start [--replace] [--handle <id>] | handle <S-n> <handle> | stop [--gone | --idle]   (--idle: no mission open, nothing in flight)',
+  flags: {replace: 'boolean', handle: 'string', gone: 'boolean', idle: 'boolean'},
   async run(c, args) {
     const p = P(c); requirePm(p.ctx.secretary);
     const sub = positional(args, 0, 'start|handle|stop');
     if (sub === 'start') {
       const g = startSecretary(p.ctx.memory, {op: op(c), name: `${p.config.projectName ?? basename(p.dir)}-Secretary`, replace: flagBool(args, 'replace'), handle: flagStr(args, 'handle')});
-      const prompt = `You are ${g.name}, the resident Secretary of Mission Pipeline. Your handbook: mp sec handbook. Run mp sec session, then loop on mp sec next / mp sec wait.`;
+      const prompt = `You are ${g.name}, the resident Secretary of Mission Pipeline. Run mp sec session first; then read your handbook (mp sec handbook) and loop on mp sec next / mp sec wait.`;
       const launch = `MP_SECRETARY=${g.generation} claude --bg -n ${shellQuote(g.name)} ${shellQuote(prompt)}`;
       return ok(`${g.generation} pending: ${g.name}. Launch it in your harness with MP_SECRETARY=${g.generation}.\n${prompt}\nClaude Code launch hint: ${launch}\nRecord the handle: mp pm secretary handle ${g.generation} <handle>`, {generation: g.generation, state: g.state, name: g.name, env: {MP_SECRETARY: g.generation}, prompt, launchHint: launch});
     }
@@ -35,7 +36,7 @@ const secretary: Command = {
       });
       return ok(`${id}: harness handle ${handle} recorded.`, {generation: id, handle});
     }
-    if (sub === 'stop') {const r = stopSecretary(p.ctx, {op: op(c), gone: flagBool(args, 'gone')}); return ok(`${r.generation} retired; the PM’s 4.2 loop is available.\n${r.stopHint}`, r);}
+    if (sub === 'stop') {const r = stopSecretary(p.ctx, {op: op(c), gone: flagBool(args, 'gone'), ...(flagBool(args, 'idle') ? {idle: true} : {})}); return ok(`${r.generation} retired; the PM’s 4.2 loop is available.\n${r.stopHint}`, r);}
     throw usage('mp pm secretary start|handle|stop');
   },
 };
@@ -49,21 +50,51 @@ const handbook: Command = {
   async run(c) {const p = P(c); const local = join(p.dir, '.mission-pipeline', 'secretary', 'SECRETARY.md'); const path = existsSync(local) ? local : join(INSTALLED_PLUGIN, 'secretary', 'SECRETARY.md'); const text = readFileSync(path, 'utf8'); return ok(text, {path, text});},
 };
 const next: Command = {
-  group: 'sec', name: ['next'], summary: 'reconcile; stops, PM exchanges, notices, ready work and dispatches', usage: 'mp sec next', flags: {}, decides: true,
-  async run(c) {const p = P(c); const r = await secNext(p.ctx); const lines = [
+  group: 'sec', name: ['next'], summary: 'reconcile; what changed since your last pass: stops, PM exchanges, notices, ready work and dispatches (--all: everything)', usage: 'mp sec next [--all] [--since <R>]', flags: {all: 'boolean', since: 'string'}, decides: true,
+  async run(c, a) {const p = P(c); const s = flagStr(a, 'since'); const since = s === null ? null : Number(s); if (since !== null && (!Number.isSafeInteger(since) || since < 0)) throw usage('--since is a nonnegative revision');
+    const [text, json] = renderSecNext(p, await secNext(p.ctx, {all: flagBool(a, 'all'), since, deferSeen: true})); return ok(text, json);},
+  // 4.4 (F8): the action records the kept report's hash (or a receipt that it was too large to keep); a retry with the same --op prints it
+  recorded: (c, r) => {const kept = keepNextReport(P(c).ctx, r.json as SecretaryNext); return 'report' in kept ? {exitCode: r.exitCode, text: `mp sec next: report ${kept.report}`, json: kept} : {exitCode: r.exitCode, text: `The report of this pass (${kept.bytes} bytes) was too large to keep for a replay; mp sec next --all prints everything.`, json: kept};},
+  replay: (c, prior) => {const j = prior.json as {report?: unknown} | null; if (typeof j?.report !== 'string') return prior; const p = P(c); const [text, json] = renderSecNext(p, storedNextReport(p.ctx, j.report)); return ok(text, json);},
+  // 4.4 (F8): only once the report is out are its notices marked delivered and the cursor moved: an interruption shows an item again, never loses it
+  afterOutput: (c, r) => {const j = r.json as Partial<SecretaryNext> | null; if (j !== null && typeof j.revision === 'number' && Array.isArray(j.notices)) secNextSeen(P(c).ctx, j as SecretaryNext);},
+};
+
+/** The text of a `mp sec next` report, and the report as its JSON. */
+function renderSecNext(p: ReturnType<typeof P>, r: SecretaryNext): [string, SecretaryNext] {
+  const e = r.earlier;
+  // 4.4 (F8): what the caller saw before is one count line each
+  const earlier = [e.notices > 0 ? `${e.notices} earlier notice(s) still open (mp sec alerts)` : '', e.replies > 0 ? `${e.replies} earlier PM repl${e.replies === 1 ? 'y' : 'ies'}` : '', e.decisions > 0 ? `${e.decisions} earlier PM or user decision(s) in effect` : '', e.closedMissionSteps > 0 ? `${e.closedMissionSteps} queued step(s) of closed missions held` : ''].filter((x) => x !== '');
+  const lines = [
     `Stops: ${r.stops.map((s) => `${s.stop} (${JSON.stringify(s.scope)})`).join(', ') || 'none'}`,
     `Unconfirmed seats: ${r.unconfirmed.map((d) => `${d.dispatch} (${d.mission}; ${d.stops.join(', ')})`).join(', ') || 'none'}`,
     ...r.notes.map((n) => `[${n.id}] PM note: ${n.text}; mp sec ack-note ${n.id}`), ...r.questions.map((q) => `[${q.id}] PM question: ${q.text}; mp sec reply ${q.id} "<answer>"`),
     ...r.replies.map((r) => `[${r.id}] PM reply to ${JSON.stringify(r.question)}${r.about ? ` (about ${r.about})` : ''}: ${r.text}${r.words ? ` (${r.words})` : ''}`),
-    ...r.decisions.map((e: any) => `[${e.mission}/${e.key}] ${e.body.by} decision in effect: ${e.body.what?.option ?? ''}`), renderNext(p, r, p.config.fillers, {resident: true}).replaceAll('mp pm ', 'mp sec '), `rev ${r.revision}`]; return ok(lines.join('\n'), r);},
-};
+    // 4.4 (F9): what waits on the user waits for the PM to record the answer (the Secretary has no answer command)
+    ...r.decisions.map((e: any) => `[${e.mission}/${e.key}] ${e.body.by} decision in effect: ${e.body.what?.option ?? ''}`), renderNext(p, r, p.config.fillers, {resident: true}).replaceAll('mp pm ', 'mp sec '),
+    ...(earlier.length > 0 ? [`Seen before (${r.since === null ? '' : `up to rev ${r.since}; `}mp sec next --all prints them): ${earlier.join('; ')}`] : []), `rev ${r.revision}`];
+  return [lines.join('\n'), r];
+}
 const wait: Command = {
-  group: 'sec', name: ['wait'], summary: 'wait for an actionable revision, checking liveness every 30 s', usage: 'mp sec wait --since <R> [--timeout <seconds>]', flags: {since: 'string', timeout: 'string'},
+  group: 'sec', name: ['wait'], summary: 'wait for a change after R that calls for the Secretary (not a seat’s claim, read or refused hand-back), reconciling every 30 s', usage: 'mp sec wait --since <R> [--timeout <seconds>]', flags: {since: 'string', timeout: 'string'},
   async run(c, a) {const since = Number(flagStr(a, 'since') ?? 'NaN'), timeout = Number(flagStr(a, 'timeout') ?? '300'); if (!Number.isSafeInteger(since) || since < 0 || !Number.isFinite(timeout) || timeout < 0) throw usage('--since is a nonnegative revision; --timeout is nonnegative seconds'); const r = await secWait(P(c).ctx, {since, timeout}); return ok([`rev ${r.revision}${r.timedOut ? ' (timeout)' : ''}${r.unconfirmed.length ? `; unconfirmed seats: ${r.unconfirmed.map((d) => d.dispatch).join(', ')}` : ''}`, ...r.replies.map((r) => `[${r.id}] PM reply: ${r.text}${r.words ? ` (${r.words})` : ''}`)].join('\n'), r);},
 };
+/** 4.4 (F16): a card and the warnings of its size report (a result recorded without one has none). */
+function cardWithWarnings(text: string, size: Dispatched['size'] | undefined): string {
+  return [text, ...(size?.warnings ?? []).map((w) => `\nWarning: this card's ${w.replace(/^its /, '')}`)].join('\n');
+}
 const card: Command = {
   group: 'sec', name: ['card'], summary: 'claim the current decision round and read its card', usage: 'mp sec card <escalation>', flags: {},
-  async run(c, a) {const r = await secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok([r.card, ...r.size.warnings.map((w) => `\nWarning: this card's ${w.replace(/^its /, '')}`)].join('\n'), r);},
+  async run(c, a) {const r = await secCard(P(c).ctx, positional(a, 0, 'escalation')); return ok(cardWithWarnings(r.card, r.size), r);},
+  // 4.4 (F17): the recorded result names the card's leaf and hash, not its text; a retry reads the leaf
+  recorded: (_c, r) => {const {card: _text, ...rest} = r.json as Dispatched; return {exitCode: r.exitCode, text: `card ${rest.cardLeaf} (sha256 ${rest.cardSha256})`, json: rest};},
+  replay: (c, prior) => {
+    const j = prior.json as Partial<Dispatched> | null;
+    if (j === null || typeof j.card === 'string' || typeof j.cardLeaf !== 'string' || typeof j.dispatch !== 'string') return prior;
+    const text = storedCard(P(c).ctx, {dispatch: j.dispatch, cardLeaf: j.cardLeaf, worktree: null, ...(typeof j.cardSha256 === 'string' ? {cardSha256: j.cardSha256} : {})});
+    // 4.4 (F16): the size warnings the first output printed come from the recorded size report
+    return ok(cardWithWarnings(text, j.size), {...j, card: text});
+  },
 };
 const read: Command = {
   group: 'sec', name: ['read'], summary: 'fetch one page of a material; the fetch is recorded against this round’s decision dispatch', usage: 'mp sec read <escalation> <material> [--page n]', flags: {page: 'string'},

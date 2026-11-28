@@ -16,7 +16,7 @@ Your one-page role is `roles/secretary.md`; this handbook is installed at `.miss
 ## Session and identity
 
 The PM launches you with `MP_SECRETARY=S-<n>`; this environment variable alone identifies you for commands, reads and the optional hook.
-Run `mp sec session` to claim that pending generation and make it live.
+Run `mp sec session` first to claim that pending generation and make it live; before it, every `mp sec` command, the handbook too, says so.
 Every `mp sec` command needs the live generation; an unknown or retired generation is refused with `NOT_ALLOWED`.
 A replacement retires your generation; stop driving when fenced.
 New claims, dispatches, releases, decisions, notes, replies and run admissions are fenced again at the write.
@@ -27,7 +27,8 @@ Your reads use your own cursor (`asked.sec`), separate from the PM's.
 
 ## The dispatch loop
 
-1. Run `mp sec next`: stops and unconfirmed seats first, then PM notes and questions, PM decisions taking effect, notices, ready steps, in-flight dispatches, ended detached runs, and `rev R`.
+1. Run `mp sec next`: what changed since your last pass: stops and unconfirmed seats first, then PM notes and questions, PM decisions taking effect, notices, ready steps, in-flight dispatches, ended detached runs, and `rev R`.
+   What you saw before is one count line each; `--all` prints everything, `--since <R>` everything after R.
 2. Handle stops first; answer PM questions, acknowledge handled notes, apply decisions and handle notices before their affected work.
 3. `mp sec dispatch <step> --filled-by "<harness>/<model>"` claims once and prints the dispatch id and card.
 4. Start a sub-agent with exactly this prompt and nothing else: "You are the <seat> of Mission Pipeline. Your card: `mp seat <id> card`. Use only the `mp seat <id>` commands listed there. Finish with `mp seat <id> handback`."
@@ -35,9 +36,9 @@ Your reads use your own cursor (`asked.sec`), separate from the PM's.
 6. With no immediate action, `mp sec wait --since R [--timeout <s>]`, then next again using the revision read.
 
 For a Secretary decision step, use your own card/read/decide lifecycle below; never spawn a one-shot Secretary.
-Wait returns at once on an actionable change after R; otherwise it waits up to 300 s by default.
-A hand-back, ready step, notice, note, question, PM decision or stop wakes it.
-Every 30 s while waiting, it checks detached workers, label batches and landing recovery too.
+Wait returns at once on a change after R that calls for you; otherwise it waits up to 300 s by default.
+A hand-back, release, queued step, PM decision or answer, note, question, reply, constraint change, stop, notice that names a WI, ended detached run or unconfirmed seat wakes it; a seat's claim, read or refused hand-back does not.
+Every 30 s while waiting, it checks detached workers, label batches and landing recovery too; these checks mark no notice delivered and move no cursor.
 Work moves while your Secretary session runs; closing the PM conversation does not end your work.
 
 Every command prints its operation id; `--op <id>` returns a completed result on retry.
@@ -94,7 +95,7 @@ The PM answers `mp pm reply <id> "<text>" [--words W-n]`; `mp sec next` and `mp 
 For example, WI-19's transform alert needs `mp sec ask-pm "Was the transform change intentional?" --about <notice id>`.
 Do not turn a question into an instruction or send routine progress messages.
 A harness wake-up never substitutes for a note, question, answer or decision in memory.
-PM commands in resident mode record and wake you without reconciling; next and wait do the operational work.
+PM commands in resident mode record without reconciling; next and wait do the operational work, and wait wakes on what calls for you.
 
 ## Stops and confirmations
 
@@ -105,6 +106,7 @@ Abandoned alone never confirms a stop; layer 0 and the PM's layer 1 retain the s
 For an adopted seat still in the PM's harness, the PM stops it and records a note; then you release it.
 The PM never releases while a generation is live.
 If you make no command within 60 s of the stop, or the user says you are gone, the PM can retire your generation with `mp pm secretary stop` and stop your harness session by handle or name.
+When no mission is open and nothing is in flight, the PM may retire you with `mp pm secretary stop --idle`.
 It can then release seats in 4.2 mode after harness confirmation.
 If seats outlive their parent in this harness, each must be stopped with the harness's own command; see the engine README's harness notes.
 Do not narrow or release a user's stop yourself; send the decision to the PM.
@@ -116,7 +118,9 @@ Read only the index `pm/wi/INDEX.md` at start; open a WI page only when a notice
 The ids and paths stay under `pm/wi/` for compatibility; you are their operator.
 An exception stops only its affected action; the default is already taken, and other work goes on.
 After handling a Secretary notice: `mp sec alerts --ack <id>`.
+A notice with no WI only informs: shown once, it needs no acknowledgement; `mp sec alerts --all` still lists it.
 Pending notices are paged independently of acknowledged history, so an old unresolved notice stays visible.
+A notice raised about a closed mission, a superseded plan or a decided escalation is born resolved: on the record (`--all`), never pending.
 PM-audience notices name the PM action and resolution condition in its inbox; do not resolve them with an operational acknowledgement.
 Calibrator ① returns or unavailability, plan-restart information, direction conclusions, routed decisions, mission ends, requested legalization results and plan-constraint gaps are for the PM.
 Every other notice category is yours by default.
@@ -146,7 +150,7 @@ Check for surviving command processes when a worker is lost; a worker on another
 
 A move or toolchain change removes no proof; earlier runs still count, marked "older environment".
 There is no automatic renew step.
-Next gives `environment-older-runs` once per environment; when the change matters, `mp sec renew` reruns the declared commands.
+Next gives `environment-older-runs` once per environment; when the change matters, `mp sec renew` reruns the declared commands of the missions that are not closed (`--mission <m>` for one, a closed one too).
 Equal results renew evidence without a seat; different results become Reviewer steps.
 A settled exploration stays settled (`exploration-older-environment`).
 When an environment change matters to its question, `mp pm reopen-exploration <mission> <exploration>` repeats its experiments and attacker check (`exploration-reopened`); decide within the plan or send a direction change to the PM.
@@ -203,12 +207,13 @@ A new plan version can retain accepted task products under unchanged cards.
 Stable mode creates re-bound versions and Reviewer steps (`kept-products-rebind-review`), holding dependents until judged.
 Fast mode keeps the old binding (`kept-product-not-rebound`), marks proof short and continues dependent work.
 Stale or missing versions in that notice mean a dependency was rebuilt rather than re-bound; a re-plan that changes the task card rebuilds it.
+One such notice stands per product and plan: a new stale set replaces it, and it closes when the product is re-bound or superseded.
 
 A revised detailed plan carries unchanged tasks over; the Architect receives the earlier plan in full.
 Structural changes are held for PM approval as described above, including changes with no accepted work.
 After approval, changed or dropped tasks can restart or stop; keep prior work in the memory.
 If a repair's added tasks were dropped, send that to the PM to record its repair again once the revision takes effect.
-A plan-constraint gap (WI-34) is a PM inbox item because both exits need the user's new words.
+A plan-constraint gap (WI-34) is a PM inbox item because both exits need the user's new words; in stable mode next lists it as held.
 Once the PM submits the plan, dispatch its checks and continuation.
 
 Config `startOnHandback` permits listed missions' tasks to start on verified hand-backs during dependency review.
@@ -243,6 +248,7 @@ No command runs at delivery; a full run is a separate PM decision, and closing r
 Legalization starts only on the user's request and consent through the PM; dispatch its Auditors, handle operational notices, and leave requested results and decisions in the PM inbox.
 
 `mp` removes dispatch scratch at hand-back or release and shared checkouts once no in-flight dispatch holds them.
+Each recorded candidate commit is held by a ref under `refs/mission-pipeline/kept/`, so `git gc` keeps accepted work before delivery; each pass also anchors a product of an open mission that has none (one from 4.3). It is no branch or tag, never pushed, and stays after landing.
 Next sweeps killed processes' leftovers for at most 1.5 s per call.
 Between missions, `mp pm clean` removes the rest and reports space freed and what it kept and why.
 Never delete under `.mission-pipeline/` by hand.

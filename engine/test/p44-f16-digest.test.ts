@@ -9,7 +9,8 @@ import { dispatchView, seatRead } from '../src/process/seat.ts';
 import { cardSizeReport, pmDispatch, pmRelease } from '../src/process/pm.ts';
 import { processContext } from '../src/process/context.ts';
 import type { MaterialRef } from '../src/seat/cards/common.ts';
-import { readyOf, type ProcessProject } from './process-fixtures.ts';
+import { runCli } from '../src/cli/main.ts';
+import { ENV_A, readyOf, type ProcessProject } from './process-fixtures.ts';
 import { project43, command43, done43, secretary43 } from './p43-fixtures.ts';
 import { constructorAsks, liveWithEscalation } from './p44-decision-fixtures.ts';
 
@@ -64,6 +65,25 @@ test('a dispatch reports its must-read pages; past mustReadWarnPages it warns wh
     assert.match(loud.result.size.warnings[0], new RegExp(`must-read material is ${pages} pages, above mustReadWarnPages \\(2\\): request 1`));
     assert.equal(notices(), before, 'the report is the dispatch output: no notice, none to the PM');
     assert.equal((await done43(p, ['pm', 'inbox'])).items.some((i: { text: string }) => /must-read/.test(i.text)), false);
+  } finally { p.cleanup(); }
+});
+
+test('a retried mp sec card with the same --op prints the card from its leaf with the same size warning', async () => {
+  const p = project43();
+  try {
+    await constructorAsks(p, ['Should add accept strings?']);
+    const s = await liveWithEscalation(p);
+    writeConfig(p.dir, { ...defaultConfig({ targetBranch: 'main', versionCommands: [] }), mustReadWarnPages: 1 });
+    const run = (args: string[]) => runCli(args, { cwd: p.dir, env: { MP_SECRETARY: s.id, MP_ROLE: 'ignored' }, process: { observe: () => ENV_A, ident: { name: 'test', email: 'test@test' } } });
+    const warning = /Warning: this card's must-read material is \d+ pages, above mustReadWarnPages \(1\)/;
+    const first = await run(['sec', 'card', s.escalation, '--op', 'card-heavy']);
+    assert.equal(first.exitCode, 0, first.stdout);
+    assert.match(first.stdout, warning);
+    // the recorded result names the card's leaf, not its text (F17): the replay reads the leaf and the recorded size report
+    const again = await run(['sec', 'card', s.escalation, '--op', 'card-heavy']);
+    assert.equal(again.exitCode, 0, again.stdout);
+    assert.match(again.stdout, warning);
+    assert.ok(again.stdout.includes(first.stdout.split('\n')[0]!), 'the same card');
   } finally { p.cleanup(); }
 });
 

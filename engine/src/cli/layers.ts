@@ -428,6 +428,13 @@ export async function resolveSubtasks(ctx: ProcessContext): Promise<Resolved> {
   // steps held (what mp pm next computes)
   for (const h of steps.held) {
     if (orphaned.has(h.step)) continue;
+    // 4.4 (F14, #54): stable production held by an uncovered object constraint: the plan's entry
+    if (h.kind === 'plan-constraint-gap') {
+      const k = key('plan', String(h.mission), h.step);
+      if (!entries.has(k)) entries.set(k, { kind: 'plan', id: h.step, mission: String(h.mission), title: `the decision layer of ${h.step}`, label: 'stable production waits', changedAt: null, changedRev: 0, blocked: null });
+      block(k, h.why, 'the PM takes a WI-34 exit with the user\'s words: the same PM plan resubmitted, or a changed one', h.wi);
+      continue;
+    }
     const next = h.why.startsWith('a stop')
       ? 'the stop is narrowed or released with the user (mp pm stop-narrow / mp pm stop-release)'
       : h.why.startsWith('mission')

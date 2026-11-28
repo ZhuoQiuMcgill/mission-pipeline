@@ -36,6 +36,8 @@ export interface CliIo {
   readonly stdin?: () => string;
   /** Tests: options for the process context (an environment observation, a clock). */
   readonly process?: ProcessOptions;
+  /** 4.4 (F8): writes the standard output and resolves once it is out; a command's afterOutput runs after it. Absent: runCli returns the output and runs afterOutput first. */
+  readonly out?: (text: string) => Promise<void>;
 }
 
 /** Something the PM should know before the command's own answer (each names its WI, or none). */

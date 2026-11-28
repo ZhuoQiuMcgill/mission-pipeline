@@ -69,7 +69,7 @@ import { checkDataFiles } from '../common/dataFile.ts';
 import { explorationCardAtHandBack } from './explorationSnapshot.ts';
 import { citedEvidence, findingRecords, judgmentRecord, type ReviewerResult, type SnapshotFiles } from '../seat/results.ts';
 import type { AcceptedHandBack, VerificationRun } from '../flow/ports.ts';
-import { productObjectId, verificationStopped } from './actions.ts';
+import { anchorCommit, productObjectId, verificationStopped } from './actions.ts';
 import type { ProcessContext } from './context.ts';
 import { ProcessError } from './errors.ts';
 import { DISPATCH_LINE, TASKS_LINE, dispatchReads, dispatchRuns, handbackDoc, type HandbackDoc, type TaskSpecDoc } from './ports.ts';
@@ -798,6 +798,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
   // 4.1.2: recorded (its files were read): tmp/<dispatch>/ goes, and the checkouts only it held
   notes.push(...dispatchOver(ctx, dispatch));
   let verification: VerificationRun[] | null = null;
+  // 4.4 (F19, #64): the recorded candidate is held by a ref, so git's garbage collection keeps it
+  if (candidate !== null) anchorCommit(ctx, v.info.mission, candidate.commit);
   if (out.accepted && entry.exportsProduct === true && candidate !== null) {
     // §5.3: the program's runs on a clean checkout of the candidate are the evidence
     const commands = ((v.card['verificationCommands'] as Array<{ id: string; command: string; cwd?: string }> | undefined) ?? []);

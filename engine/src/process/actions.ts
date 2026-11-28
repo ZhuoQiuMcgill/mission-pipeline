@@ -39,6 +39,7 @@ import { memoryProofView } from '../delivery/memoryView.ts';
 import type { DeliveryObject, DeliveryProofView } from '../delivery/proofView.ts';
 import { inWriteScope, writeScopeDocument } from '../delivery/writeScope.ts';
 import { discoverRepo, gitOid, lsTree, type RepoLayout } from '../git/objects.ts';
+import { keptRef, programRef } from '../git/refs.ts';
 import { MissingObjectsError, readTransformDescription, transformDescriptionHash, type TransformDescription } from '../git/representation.ts';
 import { appendRecords, factById, LedgerError } from '../memory/index.ts';
 import { safeId } from '../flow/context.ts';
@@ -58,6 +59,52 @@ export class ActionError extends Error {
 }
 
 export const productObjectId = (task: string): string => safeId(`prod.${task}`);
+
+/**
+ * 4.4 (F19, #64): a ref under refs/mission-pipeline/ holds a candidate commit from when it is recorded, so
+ * git's garbage collection cannot delete accepted work before delivery. Never a branch or a tag, never
+ * pushed. Best effort: created only when absent, nothing while git writes are held after a move; a
+ * failure refuses nothing.
+ */
+export function anchorCommit(ctx: ProcessContext, mission: string, commit: string): boolean {
+  try {
+    if (ctx.memory.gitHold() !== null) return false;
+    const r = ctx.git.runSync(['update-ref', '-m', `mission-pipeline: keep a candidate of ${mission}`, keptRef(mission as MissionId, commit), commit, ''], { cwd: ctx.projectDir });
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 4.4 (F19, #64): every product version of a mission that is not closed is held by its kept ref, also one
+ * recorded before 4.4 or accepted under 4.4 after a 4.3 hand-back, one whose earlier anchor write failed,
+ * and one of a memory folder copied to another clone of the repository: each reconciliation lists the
+ * mission's refs once (what the repository holds, not what the memory remembers) and creates the missing
+ * ones. One git call per mission with products, per pass. Never while git writes are held after a move.
+ */
+export function anchorProducts(ctx: ProcessContext, only?: string): void {
+  try {
+    if (ctx.memory.gitHold() !== null) return;
+    const work = ctx.memory.read((db) => {
+      const closed = new Set((db.stmt("SELECT mission FROM missions WHERE state = 'closed'").all() as Array<{ mission: string }>).map((r) => r.mission));
+      const missions = only !== undefined ? [only] : (db.stmt('SELECT DISTINCT mission FROM flow_events ORDER BY mission').all() as Array<{ mission: string }>).map((r) => r.mission);
+      return missions.filter((m) => !closed.has(m)).map((mission) => {
+        const commits = (db.stmt("SELECT json_extract(record, '$.source.commit') AS c FROM log WHERE kind = 'object.version' AND json_extract(record, '$.mission') = ? AND json_extract(record, '$.objectKind') = 'product' AND json_extract(record, '$.source.commit') IS NOT NULL ORDER BY rev").all(mission) as Array<{ c: string }>).map((r) => r.c);
+        return { mission, commits: [...new Set(commits)] };
+      });
+    });
+    for (const w of work) {
+      if (w.commits.length === 0) continue;
+      const listed = ctx.git.runSync(['for-each-ref', '--format=%(objectname)', `${programRef('kept', w.mission)}/`], { cwd: ctx.projectDir });
+      if (listed.code !== 0) continue;
+      const held = new Set(listed.stdout.toString('utf8').split('\n').map((x) => x.trim()).filter((x) => x !== ''));
+      for (const c of w.commits) if (!held.has(c)) anchorCommit(ctx, w.mission, c);
+    }
+  } catch {
+    /* best effort: tried again on the next reconciliation */
+  }
+}
 
 interface Shared {
   repo: Promise<RepoLayout> | null;
@@ -290,6 +337,8 @@ export function gitActions(ctx: ProcessContext): GitActions {
       };
       validateRecord(rec);
       ctx.memory.write({ op: `flow:product-version:${req.mission}:${object}`, payload: { object, commit: req.candidate } }, (tx) => appendRecords(tx, [rec]));
+      // 4.4 (F19, #64): a hand-back recorded before 4.4 has no anchor yet
+      anchorCommit(ctx, req.mission, req.candidate);
       return pv;
     },
 

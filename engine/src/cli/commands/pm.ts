@@ -309,15 +309,19 @@ const clean: Command = {
 const renew: Command = {
   group: 'pm',
   name: ['renew'],
-  summary: 'the PM\'s explicit tool after an environment change: rerun the declared commands of runs from older environments under this one; equal outputs renew the evidence without a seat (§6.5; never a ready step)',
-  usage: 'mp pm renew',
-  flags: {},
+  summary: 'the PM\'s explicit tool after an environment change: rerun the declared commands of runs from older environments under this one, for the missions that are not closed or the one --mission names; equal outputs renew the evidence without a seat (§6.5; never a ready step)',
+  usage: 'mp pm renew [--mission <m>]   (default: the open missions)',
+  flags: { mission: 'string' },
   decides: true,
-  async run(c) {
+  async run(c, args) {
     const p = P(c);
-    const r = await pmRenew(p.ctx);
+    const m = flagStr(args, 'mission');
+    if (m !== null && missionIdProblem(m) !== null) throw usage(`--mission: ${missionIdProblem(m)}`);
+    const r = await pmRenew(p.ctx, { mission: m });
     const lines = [
       `Environment identity: ${short(r.environment)}.`,
+      // 4.4 (F14): a renewal covers the open missions unless one is named
+      `Missions: ${r.missions.join(', ') || 'none open'}${m === null ? ' (the open ones)' : ''}.${r.leftOut > 0 ? ` ${r.leftOut} judgment(s) of other missions are left as they are (--mission <m> renews one).` : ''}`,
       ...section('Reruns', r.reruns.map((x) => `${x.original} → ${x.run}: ${x.passed ? 'passed' : 'failed'}; renewed ${x.renewed.length}${x.refused.length > 0 ? `; refused ${x.refused.map((y) => `${y.judgment} (${y.reason})`).join(', ')}` : ''}`), 'nothing to rerun'),
       ...section('Need a Reviewer (a new judgment of the same position)', r.reviews.filter((x) => !x.renewable).map((x) => `${x.judgment} on ${x.target} (${x.review})${x.reason !== null ? `: ${x.reason}` : ''}`)),
       ...section('Not rerun', r.skipped.map((x) => `${x.evidence}: ${x.why}`)),
@@ -1271,7 +1275,8 @@ const alerts: Command = {
       const r = pmAck(p.ctx, ids);
       return ok(`${r.acknowledged} notice(s) acknowledged.`, { acknowledged: r.acknowledged, ids });
     }
-    const xs = p.ctx.memory.read((db) => listNotices(db, p.ctx.memory.data, { includeAcknowledged: flagBool(args, 'all'), ...(p.ctx.secretary !== null ? {audience: 'secretary' as const} : {}) }));
+    // 4.4 (F8): for the Secretary a delivered notice that only informs is done; --all lists it
+    const xs = p.ctx.memory.read((db) => listNotices(db, p.ctx.memory.data, { includeAcknowledged: flagBool(args, 'all'), ...(p.ctx.secretary !== null ? {audience: 'secretary' as const, informOnce: !flagBool(args, 'all')} : {}) }));
     return ok(xs.length === 0 ? 'No notices.' : xs.map((n) => `[${n.state}] ${n.id}: ${clip(n.trigger, 200)}${n.wi !== null ? ` [${wiText(n.wi, p.dir)}]` : ''}`).join('\n'), { notices: xs });
   },
 };
