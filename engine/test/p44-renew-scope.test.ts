@@ -11,7 +11,7 @@ import { pmRenew } from '../src/process/index.ts';
 import { builders } from './labels-fixtures.ts';
 import { ENV_A, processProject, sh, write } from './process-fixtures.ts';
 
-test('F14: renew covers the missions that are not closed; --mission names a closed one', { skip: process.platform === 'win32' }, async () => {
+test('F14: renew covers the missions that are not closed; --mission names a closed one', async () => {
   const p = processProject();
   try {
     const first = p.git('rev-parse', 'HEAD');
@@ -25,7 +25,7 @@ test('F14: renew covers the missions that are not closed; --mission names a clos
       recordEnvironment(tx, { identity: legacy as never, parts: ENV_A });
       for (const m of ['m1', 'm2'] as MissionId[]) setMission(tx, m, 'open');
       setMission(tx, 'm2' as MissionId, 'closed');
-      const run = (id: string, candidate: string) => b.evidence(id, legacy, 'declared', { candidate, command: 'true', run: `g-${id}`, status: 'completed', exit: '0' });
+      const run = (id: string, candidate: string) => b.evidence(id, legacy, 'declared', { candidate, command: 'node -e 0', run: `g-${id}`, status: 'completed', exit: '0' });
       appendRecords(tx, [run('old-1', first), run('old-2', second)]);
       appendRecords(tx, [
         b.product('P1', { commit: first }), { ...b.product('P2', { commit: second }), mission: 'm2' } as BaseRecord,
@@ -46,7 +46,7 @@ test('F14: renew covers the missions that are not closed; --mission names a clos
   }
 });
 
-test('F14 (review p2-3): a run that judgments of two missions cite renews only the judgment of the mission covered', { skip: process.platform === 'win32' }, async () => {
+test('F14 (review p2-3): a run that judgments of two missions cite renews only the judgment of the mission covered', async () => {
   const p = processProject();
   try {
     const commit = p.git('rev-parse', 'HEAD');
@@ -56,7 +56,7 @@ test('F14 (review p2-3): a run that judgments of two missions cite renews only t
       recordEnvironment(tx, { identity: legacy as never, parts: ENV_A });
       for (const m of ['m1', 'm2'] as MissionId[]) setMission(tx, m, 'open');
       setMission(tx, 'm2' as MissionId, 'closed');
-      appendRecords(tx, [b.evidence('old-shared', legacy, 'declared', { candidate: commit, command: 'true', run: 'g-shared', status: 'completed', exit: '0' })]);
+      appendRecords(tx, [b.evidence('old-shared', legacy, 'declared', { candidate: commit, command: 'node -e 0', run: 'g-shared', status: 'completed', exit: '0' })]);
       appendRecords(tx, [
         b.product('PA', { commit }), { ...b.product('PB', { commit }), mission: 'm2' } as BaseRecord,
         b.judge('JA', 'PA', { evidence: ['old-shared'], fields: ['exit'] }), b.judge('JB', 'PB', { evidence: ['old-shared'], fields: ['exit'] }),

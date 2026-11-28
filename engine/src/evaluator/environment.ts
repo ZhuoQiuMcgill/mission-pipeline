@@ -28,10 +28,11 @@
 // them (§2.5).
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { arch, platform, release } from 'node:os';
 import { join } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
+import { readInputFile } from '../common/textInput.ts';
 import type { EnvLineId, EnvSnapshotId } from '../common/ids.ts';
 import type { BaseRecord, EnvironmentParts } from '../common/records.ts';
 import { appendFact, checkShape, intactRecord, LedgerError, LOG_COLUMNS, MEMORY_DIRNAME, type Db, type LogRow, type Memory, type WriteTx } from '../memory/index.ts';
@@ -88,7 +89,8 @@ export function readEnvironmentConfig(projectDir: string): EnvironmentConfig {
   if (!existsSync(file)) return { versionCommands: [] };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(file, 'utf8'));
+    // 4.4.1 (Windows): the one reader (a byte-order mark an editor wrote is dropped, UTF-16 decoded)
+    parsed = JSON.parse(readInputFile(file).text);
   } catch (e) {
     throw new LedgerError('BAD_REQUEST', `${file} is not valid JSON: ${(e as Error).message}`);
   }

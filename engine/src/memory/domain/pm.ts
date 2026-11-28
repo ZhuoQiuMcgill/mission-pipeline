@@ -15,6 +15,7 @@
 //   or other arguments under the same action id are OP_CONFLICT.
 
 import { canonicalJson, sha256 } from '../../common/hash.ts';
+import { occursVerbatim } from '../../common/verbatim.ts';
 import type { Revision } from '../../common/ids.ts';
 import type { UserWordsRecord } from '../../common/records.ts';
 import type { DataStore } from '../data.ts';
@@ -73,7 +74,8 @@ export function checkQuote(db: Db, data: DataStore, words: string, quote: string
   const w = wordsEntry(db, words);
   if (w === null) throw new LedgerError('RECORD_INVALID', `no words entry ${words}`);
   if (typeof quote !== 'string' || quote.trim() === '') throw new LedgerError('RECORD_INVALID', 'a quote is non-empty text');
-  if (!data.text(w.text).includes(quote)) throw new LedgerError('RECORD_INVALID', `the quote does not appear verbatim in ${w.words}`);
+  // 4.4.1 (Windows): a CRLF and an LF count as the same line break (the quote is recorded as given)
+  if (!occursVerbatim(data.text(w.text), quote)) throw new LedgerError('RECORD_INVALID', `the quote does not appear verbatim in ${w.words}`);
   return w;
 }
 

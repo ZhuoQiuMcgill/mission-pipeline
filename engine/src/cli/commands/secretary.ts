@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { onWindows, psQuote, withPowerShellNote } from '../../common/powershell.ts';
+import { readInputFile } from '../../common/textInput.ts';
 import { flagBool, flagList, flagStr, GLOBAL_FLAGS, positional } from '../args.ts';
 import { ok, type Command, type RunContext } from '../command.ts';
 import { refused, usage } from '../errors.ts';
@@ -18,6 +20,21 @@ import { answerOpenItem } from '../../process/openItems.ts';
 function P(c: RunContext) {if (c.project === null) throw usage('this command needs an initialized project'); return c.project;}
 function op(c: RunContext): string {return c.op!;}
 
+/**
+ * The Secretary's fixed launch prompt and the Claude Code launch hint (the same flags as ever). 4.4.1 (Windows): the prompt
+ * ends with how to call mp in PowerShell, and a second hint gives the PowerShell launch, which sets MP_SECRETARY for the
+ * launch only (only the launch sets it: afterwards the PM's session has the value it had before). Elsewhere both are 4.4.0's.
+ */
+export function secretaryLaunch(g: {readonly generation: string; readonly name: string}, platform: NodeJS.Platform = process.platform): {readonly prompt: string; readonly launch: string; readonly launchPowerShell: string | null} {
+  const prompt = withPowerShellNote(`You are ${g.name}, the resident Secretary of Mission Pipeline. Run mp sec session first; then read your handbook (mp sec handbook) and loop on mp sec next / mp sec wait.`, platform);
+  const launch = `MP_SECRETARY=${g.generation} claude --bg -n ${shellQuote(g.name)} ${shellQuote(prompt)}`;
+  // the value before is saved and assigned back (assigning $null removes the variable), not removed with Remove-Item: a
+  // cmdlet's defaults may be changed in a session (-WhatIf would leave the PM acting as the Secretary), and a value the
+  // caller had before is kept
+  const launchPowerShell = onWindows(platform) ? `$mpSecretaryBeforeLaunch = $env:MP_SECRETARY; try { $env:MP_SECRETARY = ${psQuote(g.generation)}; claude --bg -n ${psQuote(g.name)} ${psQuote(prompt)} } finally { $env:MP_SECRETARY = $mpSecretaryBeforeLaunch }` : null;
+  return {prompt, launch, launchPowerShell};
+}
+
 const secretary: Command = {
   group: 'pm', name: ['secretary'], summary: 'start, bind a harness handle, or retire a resident Secretary',
   usage: 'mp pm secretary start [--replace] [--handle <id>] | handle <S-n> <handle> | stop [--gone | --idle]   (--idle: no mission open, nothing in flight)',
@@ -27,9 +44,8 @@ const secretary: Command = {
     const sub = positional(args, 0, 'start|handle|stop');
     if (sub === 'start') {
       const g = startSecretary(p.ctx.memory, {op: op(c), name: `${p.config.projectName ?? basename(p.dir)}-Secretary`, replace: flagBool(args, 'replace'), handle: flagStr(args, 'handle')});
-      const prompt = `You are ${g.name}, the resident Secretary of Mission Pipeline. Run mp sec session first; then read your handbook (mp sec handbook) and loop on mp sec next / mp sec wait.`;
-      const launch = `MP_SECRETARY=${g.generation} claude --bg -n ${shellQuote(g.name)} ${shellQuote(prompt)}`;
-      return ok(`${g.generation} pending: ${g.name}. Launch it in your harness with MP_SECRETARY=${g.generation}.\n${prompt}\nClaude Code launch hint: ${launch}\nRecord the handle: mp pm secretary handle ${g.generation} <handle>`, {generation: g.generation, state: g.state, name: g.name, env: {MP_SECRETARY: g.generation}, prompt, launchHint: launch});
+      const {prompt, launch, launchPowerShell} = secretaryLaunch(g);
+      return ok(`${g.generation} pending: ${g.name}. Launch it in your harness with MP_SECRETARY=${g.generation}.\n${prompt}\nClaude Code launch hint: ${launch}${launchPowerShell !== null ? `\nClaude Code launch hint (PowerShell): ${launchPowerShell}` : ''}\nRecord the handle: mp pm secretary handle ${g.generation} <handle>`, {generation: g.generation, state: g.state, name: g.name, env: {MP_SECRETARY: g.generation}, prompt, launchHint: launch, ...(launchPowerShell !== null ? {launchHintPowerShell: launchPowerShell} : {})});
     }
     if (sub === 'handle') {
       const id = positional(args, 1, 'generation'), handle = positional(args, 2, 'handle');
@@ -148,12 +164,14 @@ const note: Command = {
   async run(c, a) {
     const p = P(c); const file = flagStr(a, 'file'), replaces = flagStr(a, 'replaces');
     if (file !== null && a.positionals.length > 0) throw usage('give the note as text or with --file, not both');
-    const text = file === null ? a.positionals.join(' ') : readFileSync(file, 'utf8');
+    // 4.4.1 (Windows): a file through the one reader (a byte-order mark dropped, UTF-16 decoded)
+    const input = file === null ? null : readInputFile(file);
+    const text = input === null ? a.positionals.join(' ') : input.text;
     // the write's payload is 4.3's when --replaces is absent
     const id = pmNote(p.ctx, {op: op(c), text, words: flagStr(a, 'words'), ...(replaces !== null ? {replaces} : {})});
     // 4.4 (G8): a note that names an open escalation warns; it is still recorded
     const named = escalationsNamedIn(p.ctx.memory, text);
-    const warnings = named.map((e) => `Warning: this note names the open escalation ${e.mission}/${e.escalation}. An answer in a note reaches no card and is not an answer record: answer it with mp pm answer ${e.mission} ${e.escalation} --option <option> --by pm|user.`);
+    const warnings = [...named.map((e) => `Warning: this note names the open escalation ${e.mission}/${e.escalation}. An answer in a note reaches no card and is not an answer record: answer it with mp pm answer ${e.mission} ${e.escalation} --option <option> --by pm|user.`), ...(input?.warning != null ? [input.warning] : [])];
     return ok([`Note ${id} recorded${replaces !== null ? `; it replaces ${replaces}, which the Secretary no longer sees as current` : ''}.`, ...warnings].join('\n'), {id, replaces, escalations: named, warnings});
   },
 };
@@ -190,7 +208,8 @@ const retag: Command = {
 };
 const summary: Command = {
   group: 'pm', name: ['summary'], summary: 'record PM prose summarizing every covered tag', usage: 'mp pm summary "<text>" --covers W-n#k[,W-m#k] [--file <file>]', flags: {covers: 'list', file: 'string'},
-  async run(c, a) {const file = flagStr(a, 'file'); const id = summarizeWords(P(c).ctx.memory, {op: op(c), text: file === null ? a.positionals.join(' ') : readFileSync(file, 'utf8'), covers: flagList(a, 'covers')}); return ok(`${id} recorded (PM summary, never the user's words).`, {id});},
+  // 4.4.1 (Windows): a file through the one reader (a byte-order mark dropped, UTF-16 decoded)
+  async run(c, a) {const file = flagStr(a, 'file'); const input = file === null ? null : readInputFile(file); const id = summarizeWords(P(c).ctx.memory, {op: op(c), text: input === null ? a.positionals.join(' ') : input.text, covers: flagList(a, 'covers')}); return ok([`${id} recorded (PM summary, never the user's words).`, ...(input?.warning != null ? [input.warning] : [])].join('\n'), {id});},
 };
 
 export const RESIDENT_PM_COMMANDS: readonly Command[] = [secretary, note, question, pmReplyCommand, inbox, tag, retag, summary];

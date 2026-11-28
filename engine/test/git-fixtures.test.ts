@@ -10,9 +10,9 @@
 import type { GitOid } from '../src/common/ids.ts';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { gitOid } from '../src/git/objects.ts';
 import { PlainGit } from '../src/git/plainGit.ts';
 
@@ -29,12 +29,69 @@ export interface Fixture {
   cleanup(): void;
 }
 
+/** The first `name` (with the PATHEXT endings on Windows) on this process's PATH, or null. */
+export function onPath(name: string, platform: NodeJS.Platform = process.platform): string | null {
+  const win = platform === 'win32';
+  const pathVar = Object.entries(process.env).find(([k]) => (win ? k.toUpperCase() : k) === 'PATH')?.[1] ?? '';
+  const exts = win ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').filter((e) => e !== '') : [''];
+  for (const dir of pathVar.split(win ? ';' : ':')) {
+    if (dir === '') continue;
+    for (const ext of exts) {
+      const p = join(dir, name + ext.toLowerCase());
+      try {
+        if (lstatSync(p).isFile()) return p;
+      } catch {
+        /* next */
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The git binary of raw fixture git: /usr/bin/git, as the fixtures always had it off Windows;
+ * on Windows (4.4.1) the git found on the real PATH (Git for Windows' launcher), since there is
+ * no /usr/bin/git there.
+ */
+export const GIT_BIN: string = process.platform === 'win32' ? (onPath('git') ?? 'git') : '/usr/bin/git';
+
+/**
+ * The PATH and system variables of the hermetic environment of raw fixture git. Off Windows it is
+ * the system's binaries only, as before. Git for Windows needs its own folder on PATH, SystemRoot
+ * (the system libraries it loads) and a temporary folder; nothing of the user's profile (HOME is
+ * the fixture's, so the user configuration is the fixture's file).
+ */
+function hermeticSystemEnv(): Record<string, string> {
+  if (process.platform !== 'win32') return { PATH: '/usr/bin:/bin' };
+  const sys = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows';
+  const tmp = tmpdir();
+  return { PATH: [dirname(GIT_BIN), join(sys, 'System32'), sys].join(';'), SystemRoot: sys, TEMP: tmp, TMP: tmp };
+}
+
+/** Off Windows: FIFOs, POSIX file modes, file names that are not UTF-8. */
+export const POSIX = process.platform !== 'win32';
+
+/** Whether this account may create a symbolic link (on Windows only with the right to, or Developer Mode). */
+export const CAN_SYMLINK: boolean = ((): boolean => {
+  const d = mkdtempSync(join(tmpdir(), 'mp-link-probe-'));
+  try {
+    writeFileSync(join(d, 't'), 't');
+    symlinkSync('t', join(d, 'l'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+})();
+export const NO_SYMLINK = 'this account cannot create symbolic links';
+
 export function makeFixture(prefix: string): Fixture {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `mp-git-${prefix}-`)));
   const home = join(root, 'home');
   mkdirSync(home);
   const env: Record<string, string> = {
-    PATH: '/usr/bin:/bin',
+    ...hermeticSystemEnv(),
     HOME: home,
     LANG: 'C.UTF-8',
     GIT_CONFIG_NOSYSTEM: '1',
@@ -47,7 +104,7 @@ export function makeFixture(prefix: string): Fixture {
   };
   const git = PlainGit.create({ env: { HOME: home, XDG_CONFIG_HOME: join(home, '.config'), GIT_CONFIG_NOSYSTEM: '1' } });
   const raw = (args: readonly string[], cwd: string, opts: { input?: string | Buffer; env?: Record<string, string> } = {}): string => {
-    const out = execFileSync('/usr/bin/git', [...args], {
+    const out = execFileSync(GIT_BIN, [...args], {
       cwd,
       env: { ...env, ...(opts.env ?? {}) },
       input: opts.input,
@@ -57,7 +114,7 @@ export function makeFixture(prefix: string): Fixture {
     return out.toString('utf8').trim();
   };
   const rawStatus = (args: readonly string[], cwd: string, opts: { env?: Record<string, string> } = {}) => {
-    const r = spawnSync('/usr/bin/git', [...args], { cwd, env: { ...env, ...(opts.env ?? {}) }, encoding: 'utf8' });
+    const r = spawnSync(GIT_BIN, [...args], { cwd, env: { ...env, ...(opts.env ?? {}) }, encoding: 'utf8' });
     return { code: r.status ?? -1, stdout: r.stdout, stderr: r.stderr };
   };
   return {
@@ -126,7 +183,7 @@ export function checkoutMain(fx: Fixture, repo: string, commit: string): void {
 }
 
 export function blobOf(fx: Fixture, repo: string, commit: string, path: string): Buffer {
-  return execFileSync('/usr/bin/git', ['cat-file', 'blob', `${commit}:${path}`], { cwd: repo, env: fx.env });
+  return execFileSync(GIT_BIN, ['cat-file', 'blob', `${commit}:${path}`], { cwd: repo, env: fx.env });
 }
 
 export type TreeContent = Map<string, Buffer | { readonly link: Buffer }>;

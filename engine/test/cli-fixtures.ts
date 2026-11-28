@@ -15,6 +15,7 @@ import { runCli } from '../src/cli/main.ts';
 import { openProcess } from '../src/process/index.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import type { MaterialRef } from '../src/seat/cards/common.ts';
+import { FIXTURE_EOL } from './memory-fixtures.ts';
 
 export const ENGINE = fileURLToPath(new URL('..', import.meta.url));
 export const MP_BIN = join(ENGINE, 'bin', 'mp.mjs');
@@ -41,6 +42,7 @@ export function gitProject(o: { files?: Record<string, string> } = {}): TestProj
   mkdirSync(dir, { recursive: true });
   const git = (...args: string[]): string => execFileSync('git', args, { cwd: dir, encoding: 'utf8', env: { ...process.env, ...GIT_ENV } }).trim();
   git('init', '-q', '-b', 'main');
+  git('config', ...FIXTURE_EOL); // the fixture's line endings, not the machine's (memory-fixtures.ts)
   write(dir, 'README.md', '# the project\n');
   write(dir, '.gitignore', '*.local\n');
   write(dir, 'package.json', '{ "name": "the-project", "private": true }\n');

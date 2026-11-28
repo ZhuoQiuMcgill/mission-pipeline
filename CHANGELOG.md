@@ -6,6 +6,46 @@ without a release.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
 
+## [4.4.1] - 2026-11-28
+
+The engine runs without error in PowerShell on Windows, and its test suite passes there. 4.4.0 was built and tested on Linux only. The commands a PM and a seat type were measured in PowerShell 7 and Windows PowerShell 5.1, and the suite was run on Windows for the first time: the defects below came of it, several of them as old as 4.3. On Linux and macOS only the pages, the card's hand-back line and the fixes below change. What stays is in `docs/design/Backlog_4.4_PostRelease.md` ("Windows and PowerShell").
+
+### Changed
+
+- On Windows the seat's fixed prompt, the Secretary's launch prompt and the optional hook's session pointer end with one sentence: in PowerShell write `mp.ps1` for `mp` (there `mp` is PowerShell's own alias of Move-ItemProperty), and `mp.cmd` called from PowerShell drops double quotes inside an argument. On Linux and macOS they are 4.4.0's, byte for byte.
+- On Windows `mp pm secretary start` prints a second launch hint, the PowerShell form, which sets `MP_SECRETARY` for the launch only and gives it back the value it had before (`launchHintPowerShell` in its JSON).
+- The seat role pages, both handbooks and the card's hand-back section give the PowerShell form beside the here-document and the `MP_SECRETARY=… claude …` launch, one line each, marked "PowerShell:" (the Researcher's page, at its 8 KB budget with its card, leaves it to the card).
+
+### Added
+
+- `plugin/bin/mp.ps1`: the PowerShell entry of the optional adapter, beside `mp` and `mp.cmd`.
+- `engine/README.md`: a section "Windows and PowerShell".
+- Tests of the Windows default git configuration (`core.autocrlf=true`) end to end, on every system: a dispatch worktree, a candidate built from a seat's edits, a stacked product, a run checkout, a delivery and a landing. The worktree shows CRLF, the stored blobs are LF, and nothing unedited reads as modified.
+
+### Fixed
+
+- A file or standard input with a UTF-8 byte-order mark (Windows PowerShell 5.1's `Set-Content -Encoding UTF8`, many editors; 5.1 pipes it twice with `$OutputEncoding = [Text.Encoding]::UTF8`) no longer records U+FEFF as the first character of the user's words, and a JSON file with one (`mp pm plan submit --file`, `--attempts`, a hand-back's result, `config.json`) is no longer refused with `Unexpected token`. A UTF-16 file with a mark (5.1's `Out-File` and `>`) is read. One reader serves every file and stdin a person or a seat hands the engine.
+- Text Windows PowerShell 5.1 pipes to `--stdin` with its default ASCII pipe has lost its characters outside ASCII to `?`, which the engine cannot restore: when the standard input begins with the byte-order mark that pipe writes and holds a `?`, the command goes on and says so in one warning line (check the recorded text, with the read that shows it, or pass the text with `--file`).
+- Bytes that are not UTF-8 (a file saved in the system code page) are read as U+FFFD as before, and the command now says so in one warning line. A NUL with no byte-order mark is refused where it was, and the refusal says the file is probably UTF-16 without a mark: save it as UTF-8.
+- A quote of the user's words (a tag, a requirement item, a repair's reason, `mp pm extend`, a stop's words) that spans a line break matches whether the words and the quote use CRLF or LF; what is recorded does not change.
+- Opening a copied project folder no longer runs `git worktree repair`: run in the copy, git 2.45 (Git for Windows) rewrote the original folder's worktree links to point into the copy. The copy's own two link files per worktree are rewritten and verified instead, and only where they physically lie inside the copy: a copy whose git folder links back to the original is held with nothing written (also 4.3).
+- On Windows a copy with a dispatch worktree no longer stays held and reported as moved on every command: the worktree links are written in git's path form, and links that 4.3 or 4.4.0 already wrote with backslashes are rewritten (also 4.3).
+- On Windows git's worktree paths (`C:/x/y`) are read in the program's form (`C:\x\y`): detaching a duplicate checkout (WI-01 option 2) no longer refuses every worktree, a dispatch worktree whose folder is gone loses its registration when removed, and the notice about external work (WI-03) no longer counts the mission's own dispatch worktrees or reads every file as changed (Git for Windows records no inode in the index) (also 4.3).
+- Storing a Git LFS object no longer fails on Windows (a directory cannot be opened for fsync there; the step is skipped, as the memory's own writes already did) (also 4.3).
+
+### Compatibility
+
+- A 4.3 or 4.4.0 memory opens with no migration; nothing is written in a new form.
+- With no byte-order mark, the text the engine reads, an operation's identity and its payload are 4.4.0's; a 4.4.0 command retried with the same `--op` replays its receipt (an operation's identity still fingerprints a file as 4.4.0 read it, a mark included).
+- What 4.4.0 recorded with a leading U+FEFF stays as it was; the same file recorded again under 4.4.1 is a new entry.
+- New JSON: `launchHintPowerShell` on Windows (`mp pm secretary start`). A command that read such an input carries the reader's warning line when there is one (in its text; a hand-back's `notes`, `mp pm note`'s `warnings`).
+- The test suite runs on Windows as on Linux. Fixture repositories set their own line endings; a test that needs a POSIX shell script as the git program, a file mode, a FIFO, `/proc`, a symbolic link the account may not create, or the executable bit is skipped on Windows with its reason. No product write went over its time budget on Windows.
+
+### Upgrade steps
+
+- An engine installed linked (`npm install -g .` in `engine/`) needs no new install: pull, and the link serves 4.4.1.
+- Run `mp docs update`: it installs the pages with their PowerShell lines. On Windows, call it `mp.ps1 docs update` in PowerShell.
+
 ## [4.4.0] - 2026-11-28
 
 The PM stays the user's anchor on long missions, and each seat gets what its part needs. Design: `docs/design/DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md` (G1 to G9; it rules) and `docs/design/DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md` (F1 to F19, as amended); what was built differently and what is left: `docs/design/Backlog_4.4_PostRelease.md`.

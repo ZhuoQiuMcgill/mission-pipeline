@@ -15,6 +15,9 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { child, childJson, kinds, project, throwsCode } from './memory-fixtures.ts';
 
+// 4.4.1 (Windows): chmod makes no folder read-only or unlistable there (file modes do not bind)
+const NO_MODES = { skip: process.platform === 'win32' ? 'file modes do not bind on Windows: chmod cannot make a folder read-only or unlistable' : false };
+
 const M = id<MissionId>('m1');
 const basis = (n: number): BaseRecord => ({ kind: 'basis.version', basisKind: 'requirement', line: id<BasisLineId>('req-a'), version: id<BasisVersionId>(`req-a.v${n}`), mission: M, scope: null });
 
@@ -316,7 +319,7 @@ test('review round 4: a break seen while the database is busy is never forgotten
   }
 });
 
-test('review round 4: a break that neither the marker nor the database could record is reported, even when the caller caught the error', () => {
+test('review round 4: a break that neither the marker nor the database could record is reported, even when the caller caught the error', NO_MODES, () => {
   const w = project({ busyTimeoutMs: 80 });
   try {
     const { m } = w;
@@ -610,7 +613,7 @@ test('review round 7 #2: every detection gets its own marker, so a recovery neve
   }
 });
 
-test('review round 7 #3: markers that cannot be listed fail closed: writes are refused, saying why', () => {
+test('review round 7 #3: markers that cannot be listed fail closed: writes are refused, saying why', NO_MODES, () => {
   const w = project({ busyTimeoutMs: 80 });
   const locks = join(w.dir, '.mission-pipeline', 'locks');
   try {

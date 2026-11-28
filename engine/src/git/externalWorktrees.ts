@@ -26,7 +26,7 @@ import type { GitOid } from '../common/ids.ts';
 import { gitOid, parseLsFiles } from './objects.ts';
 import type { GitExec, GitLocators } from './plainGit.ts';
 import { registeredWorktrees, type Occupancy } from './worktreeRecord.ts';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 export type WorktreeOrigin = 'claude' | 'codex' | 'unknown';
 
@@ -50,8 +50,9 @@ export interface ExternalWorktree {
 }
 
 /** By path and branch name only (6.6 v41): `.claude/worktrees/` is a Claude sub-agent, a `codex/` branch is Codex. */
-export function inferOrigin(path: string, branch: string | null): WorktreeOrigin {
-  if (/(^|\/)\.claude\/worktrees\//.test(path)) return 'claude';
+export function inferOrigin(path: string, branch: string | null, platform: NodeJS.Platform = process.platform): WorktreeOrigin {
+  // 4.4.1 (Windows): worktree paths are native there, with backslashes.
+  if ((platform === 'win32' ? /(^|[\\/])\.claude[\\/]worktrees[\\/]/ : /(^|\/)\.claude\/worktrees\//).test(path)) return 'claude';
   if (branch !== null && branch.startsWith('refs/heads/codex/')) return 'codex';
   return 'unknown';
 }
@@ -79,7 +80,7 @@ function mtimeMs(path: string): number | null {
   }
 }
 
-interface DebugEntry {
+export interface DebugEntry {
   readonly path: string;
   readonly mtimeSec: bigint;
   readonly mtimeNsec: bigint;
@@ -112,10 +113,15 @@ export function parseLsFilesDebug(buf: Buffer): DebugEntry[] {
   return out;
 }
 
-function statDiffers(root: string, e: DebugEntry): boolean {
+/**
+ * Whether a file's stat data differ from what the index recorded (possibly changed). 4.4.1
+ * (Windows): Git for Windows records no inode (0) while Node reports the file's id, so an inode of
+ * 0 in the index is not compared; without this every file of every worktree read as changed there.
+ */
+export function statDiffers(root: string, e: DebugEntry): boolean {
   try {
     const st = lstatSync(join(root, e.path), { bigint: true });
-    if (st.size !== e.size || st.ino !== e.ino) return true;
+    if (st.size !== e.size || (e.ino !== 0n && st.ino !== e.ino)) return true;
     const sec = st.mtimeNs / 1_000_000_000n;
     const nsec = st.mtimeNs % 1_000_000_000n;
     return sec !== e.mtimeSec || (e.mtimeNsec !== 0n && nsec !== e.mtimeNsec);
@@ -244,7 +250,8 @@ export async function externalOverlaps(
   o: { readonly commonDir: string; readonly base: GitOid; readonly targetBranch: string; readonly own: string; readonly pipelineDir: string; readonly scopes: readonly WriteScopeOf[] },
 ): Promise<ExternalOverlap[]> {
   if (o.scopes.length === 0) return [];
-  const inside = (p: string, dir: string): boolean => p === dir || p.startsWith(dir.endsWith('/') ? dir : `${dir}/`);
+  // 4.4.1 (Windows): both paths are native there (worktreeRecord.ts nativeGitPath), with `\`.
+  const inside = (p: string, dir: string): boolean => p === dir || p.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
   const target = `refs/heads/${o.targetBranch}`;
   const found: Array<{ worktree: string | null; branch: string | null; origin: WorktreeOrigin; changed: string[] }> = [];
   const worktrees = await listExternalWorktrees(git, o.commonDir, { base: o.base, mainCheckout: o.own });

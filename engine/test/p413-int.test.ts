@@ -427,7 +427,7 @@ const alive = (pid: number): boolean => {
 };
 
 describe('INT 8: P4\'s general fixes', () => {
-  test('a detached run\'s command group on its time limit: a child that ignores SIGTERM and holds none of the shell\'s output still gets the SIGKILL; the run answers once the group is gone', { skip: process.platform === 'win32' }, async () => {
+  test('a detached run\'s command group on its time limit: a child that ignores SIGTERM and holds none of the shell\'s output still gets the SIGKILL; the run answers once the group is gone', { skip: process.platform === 'win32' ? 'it ends a POSIX process group with SIGTERM and SIGKILL, which Windows does not have' : false }, async () => {
     const pidFile = join(DIR, `bg-${process.pid}.pid`);
     const runner = groupShellRunner({ graceMs: 200 });
     const out = await runner({ command: `(trap '' TERM; exec sleep 30) >/dev/null 2>&1 & echo $! > ${pidFile}; sleep 30`, cwd: DIR, timeoutMs: 300 });

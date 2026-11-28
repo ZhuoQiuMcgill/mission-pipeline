@@ -75,7 +75,7 @@ describe('2: commandShellFor', () => {
   });
 });
 
-describe('3: a bash-only construct in an experiment rerun', { skip: !existsSync('/bin/bash') }, () => {
+describe('3: a bash-only construct in an experiment rerun', { skip: existsSync('/bin/bash') ? false : 'it needs /bin/bash' }, () => {
   it("$'\\t' is a tab under /bin/bash", () => {
     const out = shellRunner({ command: "IFS=$'\\t' read -r a b <<< \"x\ty\"; printf '%s|%s' \"$a\" \"$b\"", cwd: process.cwd(), timeoutMs: 10_000, shell: '/bin/bash' });
     assert.equal(out.exitCode, 0);

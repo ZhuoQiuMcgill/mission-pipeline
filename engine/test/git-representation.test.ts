@@ -30,7 +30,8 @@ import {
   transformDescriptionHash,
   type TransformDescription,
 } from '../src/git/representation.ts';
-import { blobOf, checkoutMain, initRepo, makeFixture, rawCommit, readTreeContent, sameTreeContent, type FileSpec, type Fixture } from './git-fixtures.test.ts';
+import { fsyncDir } from '../src/common/fsx.ts';
+import { blobOf, CAN_SYMLINK, checkoutMain, initRepo, makeFixture, NO_SYMLINK, POSIX, rawCommit, readTreeContent, sameTreeContent, type FileSpec, type Fixture } from './git-fixtures.test.ts';
 
 let fx: Fixture;
 before(() => {
@@ -78,6 +79,13 @@ test('conversion units follow convert.c on hand-checked vectors', () => {
   assert.equal(identToGit(b('$Id: foo bar $\n')).toString('latin1'), '$Id$\n', 'but collapsed on add (git is asymmetric)');
   assert.equal(identToGit(b(`$Id: ${oid} $\nx $Id$`)).toString('latin1'), '$Id$\nx $Id$');
   assert.equal(identToGit(b('$Id: no\nclose $')).toString('latin1'), '$Id: no\nclose $');
+});
+
+test('4.4.1: the LFS store skips the directory fsync on Windows, where a directory cannot be opened for it', () => {
+  const missing = join(fx.root, `no-such-dir-${counter++}`);
+  assert.doesNotThrow(() => fsyncDir(missing, 'win32'), 'no directory is opened on Windows');
+  assert.throws(() => fsyncDir(missing, 'linux'), { code: 'ENOENT' }, 'elsewhere the directory is opened and synced');
+  assert.doesNotThrow(() => fsyncDir(fx.root, process.platform));
 });
 
 test('LFS pointers: canonical encoding, tolerant parsing, empty files, extensions unsupported, clean passes pointers through', () => {
@@ -144,22 +152,30 @@ test('canonicalize, then verify: LF written on an eol=crlf path and an edited id
     'link': { link: 'a.txt' },
     'gone.txt': 'bye\n',
   });
+  // 4.4.1 (Windows): git init records core.symlinks=false and core.filemode=false where the
+  // account cannot make a link and the file system keeps no executable bit; the link and the
+  // mode then follow git's rules for those settings (and the link and mode edits are not made).
+  const posixFs = s.d.symlinks && s.d.fileMode;
   try {
     const snap = dir('snap');
     const manifest = await materializeSnapshot({ git: fx.git, repo: s.layout, commit: s.base, attributes: s.ev, dest: snap });
     assert.equal(readFileSync(join(snap, 'a.txt'), 'latin1'), 'one\r\ntwo\r\n');
     const xidOld = fx.raw(['rev-parse', `${s.base}:x.id`], s.repo);
     assert.equal(readFileSync(join(snap, 'x.id'), 'latin1'), `$Id: ${xidOld} $\nline1\n`);
-    assert.equal(lstatSync(join(snap, 'run.sh')).mode & 0o777, 0o755);
-    assert.equal(readlinkSync(join(snap, 'link')), 'a.txt');
+    if (posixFs) {
+      assert.equal(lstatSync(join(snap, 'run.sh')).mode & 0o777, 0o755);
+      assert.equal(readlinkSync(join(snap, 'link')), 'a.txt');
+    } else assert.equal(readFileSync(join(snap, 'link'), 'utf8'), 'a.txt');
     assert.deepEqual(sameTreeContent(readTreeContent(s.repo), readTreeContent(snap)), [], 'snapshot equals git checkout');
 
     // The seat's edits, in worktree representation.
     writeFileSync(join(snap, 'new.txt'), 'n1\nn2\n'); // LF on an eol=crlf path: not canonical
     writeFileSync(join(snap, 'x.id'), `$Id: ${xidOld} $\nline1\nline2\n`); // edited, still carries the old id
     unlinkSync(join(snap, 'gone.txt'));
-    symlinkSync('new.txt', join(snap, 'l2'));
-    chmodSync(join(snap, 'run.sh'), 0o644);
+    if (posixFs) {
+      symlinkSync('new.txt', join(snap, 'l2'));
+      chmodSync(join(snap, 'run.sh'), 0o644);
+    }
 
     const candidateDir = dir('candidate');
     const r = await canonicalize({
@@ -176,10 +192,10 @@ test('canonicalize, then verify: LF written on an eol=crlf path and an edited id
     });
     assert.equal(r.kind, 'canonical');
     if (r.kind !== 'canonical') return;
-    assert.deepEqual(r.plan.added, ['l2', 'new.txt']);
+    assert.deepEqual(r.plan.added, posixFs ? ['l2', 'new.txt'] : ['new.txt']);
     assert.deepEqual(r.plan.modified, ['x.id']);
     assert.deepEqual(r.plan.deleted, ['gone.txt']);
-    assert.deepEqual(r.plan.modeChanged, ['run.sh']);
+    assert.deepEqual(r.plan.modeChanged, posixFs ? ['run.sh'] : []);
     assert.equal(fx.raw(['rev-parse', `${r.commit}^`], s.repo), s.base);
     // Repository representation.
     assert.equal(blobOf(fx, s.repo, r.commit, 'new.txt').toString('latin1'), 'n1\nn2\n');
@@ -187,7 +203,7 @@ test('canonicalize, then verify: LF written on an eol=crlf path and an edited id
     for (const p of ['a.txt', 'keep.bin', 'link']) {
       assert.equal(fx.raw(['rev-parse', `${r.commit}:${p}`], s.repo), fx.raw(['rev-parse', `${s.base}:${p}`], s.repo), `${p} keeps its blob`);
     }
-    assert.match(fx.raw(['ls-tree', r.commit, 'run.sh'], s.repo), /^100644 /);
+    assert.match(fx.raw(['ls-tree', r.commit, 'run.sh'], s.repo), posixFs ? /^100644 / : /^100755 /);
     // The canonical candidate differs from what the seat wrote, and equals git's checkout of the commit.
     const xidNew = fx.raw(['rev-parse', `${r.commit}:x.id`], s.repo);
     assert.notEqual(xidNew, xidOld);
@@ -357,9 +373,13 @@ test('seat snapshots: special files, nested .git, excluded paths, non-UTF-8 name
     const unchanged = await plan(f.snap, f.manifest);
     assert.equal(unchanged.ok && unchanged.plan.files.has('CLAUDE.md'), true, 'excluded paths are carried over from the base');
 
-    execFileSync('mkfifo', [join(f.snap, 'pipe')]);
-    let r = await plan(f.snap, f.manifest);
-    assert.equal(!r.ok && r.rejection.code, 'special-file');
+    let r: Awaited<ReturnType<typeof plan>>;
+    // 4.4.1 (Windows): no FIFOs there, and names are UTF-16, so neither step can be set up.
+    if (POSIX) {
+      execFileSync('mkfifo', [join(f.snap, 'pipe')]);
+      r = await plan(f.snap, f.manifest);
+      assert.equal(!r.ok && r.rejection.code, 'special-file');
+    }
 
     f = await fresh();
     mkdirSync(join(f.snap, 'sub', '.git'), { recursive: true });
@@ -371,10 +391,12 @@ test('seat snapshots: special files, nested .git, excluded paths, non-UTF-8 name
     r = await plan(f.snap, f.manifest);
     assert.equal(!r.ok && r.rejection.code, 'excluded-path-written');
 
-    f = await fresh();
-    writeFileSync(Buffer.concat([Buffer.from(f.snap + '/'), Buffer.from([0xff, 0xfe, 0x41])]), 'x');
-    r = await plan(f.snap, f.manifest);
-    assert.equal(!r.ok && r.rejection.code, 'non-utf8-path');
+    if (POSIX) {
+      f = await fresh();
+      writeFileSync(Buffer.concat([Buffer.from(f.snap + '/'), Buffer.from([0xff, 0xfe, 0x41])]), 'x');
+      r = await plan(f.snap, f.manifest);
+      assert.equal(!r.ok && r.rejection.code, 'non-utf8-path');
+    }
 
     f = await fresh();
     const other = await AttributeEvaluator.create(fx.git, s.layout, { ...s.d, autocrlf: 'true' }, fx.root);
@@ -458,7 +480,7 @@ test('review r1 #6: a same-length object with other bytes under the pointer\'s o
   }
 });
 
-test('review r1 #6: a link or a FIFO where an LFS object should be is never followed or waited on', async () => {
+test('review r1 #6: a link or a FIFO where an LFS object should be is never followed or waited on', { skip: CAN_SYMLINK ? false : NO_SYMLINK }, async () => {
   const s = await setup({ '.gitattributes': '*.bin filter=lfs diff=lfs merge=lfs -text\n', 'readme': 'r\n' });
   try {
     const content = randomBytes(2048);
@@ -475,13 +497,15 @@ test('review r1 #6: a link or a FIFO where an LFS object should be is never foll
     assert.ok(r instanceof RepresentationError && r.code === 'lfs-object-corrupt', String(r));
     assert.equal(existsSync(join(dest, 'x.bin')), false);
     assert.equal((await checkLfsObjectsPresent({ git: fx.git, repo: s.layout, commit, attributes: s.ev })).missing[0]?.problem, 'corrupt');
-    // A FIFO: refused at once instead of blocking the read.
-    unlinkSync(stored);
-    execFileSync('mkfifo', [stored]);
-    const started = Date.now();
-    const f = await materializeSnapshot({ git: fx.git, repo: s.layout, commit, attributes: s.ev, dest: dir('snap-fifo') }).catch((e: unknown) => e);
-    assert.ok(f instanceof RepresentationError && f.code === 'lfs-object-corrupt', String(f));
-    assert.ok(Date.now() - started < 5_000, 'did not wait for a writer on the FIFO');
+    // A FIFO: refused at once instead of blocking the read (there are no FIFOs on Windows).
+    if (POSIX) {
+      unlinkSync(stored);
+      execFileSync('mkfifo', [stored]);
+      const started = Date.now();
+      const f = await materializeSnapshot({ git: fx.git, repo: s.layout, commit, attributes: s.ev, dest: dir('snap-fifo') }).catch((e: unknown) => e);
+      assert.ok(f instanceof RepresentationError && f.code === 'lfs-object-corrupt', String(f));
+      assert.ok(Date.now() - started < 5_000, 'did not wait for a writer on the FIFO');
+    }
   } finally {
     s.ev.dispose();
   }

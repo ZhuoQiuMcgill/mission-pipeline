@@ -3,10 +3,11 @@
 // words and deliveries recorded directly, a git wrapper that stalls or races.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { PlainGit } from '../src/git/plainGit.ts';
-import type { GitContext } from '../src/git/workspace.ts';
+import { removeCheckout, type GitContext } from '../src/git/workspace.ts';
+import { OWNERS_DIR, ownsDir } from '../src/memory/scratch.ts';
 import assert from 'node:assert/strict';
 import { LedgerError, recordDelivery, recordWords, type LedgerErrorCode, type Memory } from '../src/memory/index.ts';
 import type { MissionId } from '../src/common/ids.ts';
@@ -51,14 +52,23 @@ export interface Fixture {
   cleanup(): void;
 }
 
-/** A project folder: a repository on `main` with file.txt (and `extra`), its memory, the plain runner. */
-export function fixture(opts: { files?: Record<string, string>; git?: PlainGit } = {}): Fixture {
+/**
+ * A project folder: a repository on `main` with file.txt (and `extra`), its memory, the plain runner.
+ * `autocrlf` (4.4.1): the repository says core.autocrlf=true in its own configuration, as Git for
+ * Windows sets it, and its files are checked out again under it (CRLF in the worktree, LF blobs).
+ */
+export function fixture(opts: { files?: Record<string, string>; git?: PlainGit; autocrlf?: boolean } = {}): Fixture {
   const p = project({ withGit: true });
   const dir = p.dir;
   if (opts.files !== undefined) {
     for (const [rel, text] of Object.entries(opts.files)) write(dir, rel, text);
     sh(dir, 'add', '-A');
     sh(dir, 'commit', '-q', '-m', 'files');
+  }
+  if (opts.autocrlf === true) {
+    sh(dir, 'config', 'core.autocrlf', 'true');
+    sh(dir, 'rm', '-r', '-q', '--cached', '.');
+    sh(dir, 'reset', '-q', '--hard');
   }
   const base = sh(dir, 'rev-parse', 'HEAD');
   const git = opts.git ?? PlainGit.create();
@@ -72,8 +82,40 @@ export function fixture(opts: { files?: Record<string, string>; git?: PlainGit }
     },
     base,
     git: (...args: string[]) => sh(dir, ...args),
-    cleanup: () => p.cleanup(),
+    cleanup: () => {
+      try {
+        removeOwnedCheckouts({ memory: p.m, git });
+      } finally {
+        p.cleanup();
+      }
+    },
   };
+}
+
+/**
+ * The checkouts this process still owns under the project's tmp/ (a checkout is owned until
+ * removeCheckout), removed as a run removes its own after use. 4.4.1 (Windows): an owner's lock
+ * file is held open, and an open file cannot be deleted there, so a test that leaves a checkout
+ * would otherwise fail at its cleanup.
+ */
+export function removeOwnedCheckouts(ctx: GitContext): void {
+  const root = join(ctx.memory.paths.locks, OWNERS_DIR);
+  const walk = (rel: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(join(root, rel));
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const sub = rel === '' ? name : join(rel, name);
+      if (name.endsWith('.lock')) {
+        const dir = join(ctx.memory.paths.tmp, sub.slice(0, -'.lock'.length));
+        if (ownsDir(ctx.memory.paths, dir)) removeCheckout(ctx, dir);
+      } else walk(sub);
+    }
+  };
+  walk('');
 }
 
 /** The maintainer's words W-<n>. */

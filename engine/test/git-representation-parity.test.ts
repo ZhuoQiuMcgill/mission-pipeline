@@ -18,7 +18,7 @@ import {
   toRepository,
   type ConversionAttributes,
 } from '../src/git/representation.ts';
-import { checkoutMain, initRepo, makeFixture, rawCommit, readTreeContent, sameTreeContent, type Fixture } from './git-fixtures.test.ts';
+import { checkoutMain, GIT_BIN, initRepo, makeFixture, rawCommit, readTreeContent, sameTreeContent, type Fixture } from './git-fixtures.test.ts';
 
 const CONTENTS: readonly string[] = [
   'a\nb\n',
@@ -133,7 +133,7 @@ test('generated blobs equal what git add stores, including the safer-autocrlf ru
     }
     fx.raw(['add', '-A'], repo);
     const staged = new Map<string, ReturnType<typeof gitOid>>();
-    for (const rec of execFileSync('/usr/bin/git', ['ls-files', '-s', '-z'], { cwd: repo, env: fx.env }).toString('utf8').split('\0')) {
+    for (const rec of execFileSync(GIT_BIN, ['ls-files', '-s', '-z'], { cwd: repo, env: fx.env }).toString('utf8').split('\0')) {
       if (rec === '') continue;
       const tab = rec.indexOf('\t');
       staged.set(rec.slice(tab + 1), gitOid(rec.slice(0, tab).split(' ')[1] as string));

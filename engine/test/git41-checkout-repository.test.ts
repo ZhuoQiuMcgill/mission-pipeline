@@ -18,8 +18,8 @@ import { PlainGit, shellQuote } from '../src/git/plainGit.ts';
 import { AttributeEvaluator, readTransformDescription } from '../src/git/representation.ts';
 import { checkoutCommit, removeCheckout, runCheckoutDir, type GitContext } from '../src/git/workspace.ts';
 import { initMemory, openMemory, type Memory } from '../src/memory/index.ts';
-import { fixture, sh, write } from './git41-fixtures.ts';
-import { tempDir } from './memory-fixtures.ts';
+import { fixture, removeOwnedCheckouts, sh, write } from './git41-fixtures.ts';
+import { FIXTURE_EOL, initFixtureRepo, tempDir } from './memory-fixtures.ts';
 
 /** git in a checkout, as a declared command runs it (the test process's environment). */
 function inCheckout(dir: string, ...args: string[]): { readonly code: number | null; readonly out: string } {
@@ -39,7 +39,7 @@ function assertOwnRepository(dir: string): void {
   assert.equal(realpathSync(ok(dir, 'rev-parse', '--absolute-git-dir')), join(realpathSync(dir), '.git'));
 }
 
-test('attribute repository init ignores a global refusing reference-transaction hook', { skip: process.platform === 'win32' }, async () => {
+test('attribute repository init ignores a global refusing reference-transaction hook', async () => {
   const f = fixture();
   const saved = process.env['GIT_CONFIG_GLOBAL'];
   const scratch = tempDir('mp-attr-refuse-');
@@ -75,7 +75,7 @@ test('attribute repository init ignores a global refusing reference-transaction 
 function cloneProject(origin: string, args: readonly string[]): { readonly dir: string; readonly ctx: GitContext; readonly m: Memory; cleanup(): void } {
   const base = tempDir('mp-clone-');
   const dir = join(base, 'project');
-  execFileSync('git', ['clone', '-q', ...args, pathToFileURL(origin).href, dir], { stdio: 'ignore' });
+  execFileSync('git', ['clone', '-q', '-c', FIXTURE_EOL.join('='), ...args, pathToFileURL(origin).href, dir], { stdio: 'ignore' });
   const git = PlainGit.create();
   initMemory(dir, { git: git.runner() });
   const m = openMemory(dir, { git: git.runner() });
@@ -85,6 +85,7 @@ function cloneProject(origin: string, args: readonly string[]): { readonly dir: 
     m,
     cleanup() {
       try {
+        removeOwnedCheckouts({ memory: m, git });
         m.close();
       } finally {
         rmSync(base, { recursive: true, force: true });
@@ -222,7 +223,7 @@ test('a SHA-256 repository: the checkout’s repository has its object format', 
   const base = tempDir('mp-sha256-');
   const dir = join(base, 'project');
   mkdirSync(dir);
-  sh(dir, 'init', '-q', '-b', 'main', '--object-format=sha256');
+  initFixtureRepo(dir, '-b', 'main', '--object-format=sha256');
   write(dir, 'a.txt', 'a\n');
   sh(dir, 'add', '-A');
   sh(dir, 'commit', '-q', '-m', 'first');
@@ -238,6 +239,7 @@ test('a SHA-256 repository: the checkout’s repository has its object format', 
     assert.equal(ok(co, 'rev-parse', 'HEAD'), head);
     assert.equal(ok(co, 'status', '--porcelain'), '');
   } finally {
+    removeOwnedCheckouts({ memory: m, git });
     m.close();
     rmSync(base, { recursive: true, force: true });
   }
@@ -263,7 +265,7 @@ test('the configuration holds a checkout path with quotes, backslashes and space
 });
 
 
-test('global hooks do not fire during setup, but declared git commands inherit them', { skip: process.platform === 'win32' }, async () => {
+test('global hooks do not fire during setup, but declared git commands inherit them', async () => {
   const f = fixture();
   const saved = process.env['GIT_CONFIG_GLOBAL'];
   try {
@@ -277,7 +279,7 @@ test('global hooks do not fire during setup, but declared git commands inherit t
       chmodSync(hook, 0o755);
     }
     const cfg = join(hooks, 'global-config');
-    writeFileSync(cfg, `[core]\n hooksPath = "${hooks}"\n`);
+    writeFileSync(cfg, `[core]\n hooksPath = ${JSON.stringify(hooks)}\n`); // a quoted value: a Windows path's backslashes escaped
     process.env['GIT_CONFIG_GLOBAL'] = cfg;
     const dir = runCheckoutDir(f.m.paths, 'hooks');
     await checkoutCommit(f.ctx, { commit: f.base, dir, repository: true });
@@ -296,7 +298,7 @@ test('global hooks do not fire during setup, but declared git commands inherit t
   }
 });
 
-test('a rejecting global reference hook cannot interrupt checkout preparation, including internal LFS conversion', { skip: process.platform === 'win32' }, async () => {
+test('a rejecting global reference hook cannot interrupt checkout preparation, including internal LFS conversion', async () => {
   const content = Buffer.from('LFS payload\n');
   const pointer = lfsClean(content);
   const f = fixture({ files: { '.gitattributes': 'blob.dat filter=lfs -text\n', 'blob.dat': pointer.blob.toString('utf8') } });
@@ -312,7 +314,7 @@ test('a rejecting global reference hook cannot interrupt checkout preparation, i
     writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' "$1" >> ${shellQuote(counter)}\nexit 1\n`);
     chmodSync(hook, 0o755);
     const cfg = join(hooks, 'global-config');
-    writeFileSync(cfg, `[core]\n hooksPath = "${hooks}"\n`);
+    writeFileSync(cfg, `[core]\n hooksPath = ${JSON.stringify(hooks)}\n`); // a quoted value: a Windows path's backslashes escaped
     process.env['GIT_CONFIG_GLOBAL'] = cfg;
     // Both paths initialize a scratch attribute repository; only a run attaches its own .git.
     const reading = runCheckoutDir(f.m.paths, 'hookless-reading');

@@ -87,7 +87,7 @@ import type { GitResult } from './plainGit.ts';
 import { assertScopeNotStopped, deriveScope, scopeStopped, storedScope, tagScope, unionWork, type WorkScope } from '../delivery/scope.ts';
 import { noticeExternalWork } from '../delivery/external.ts';
 import { shellQuote } from './plainGit.ts';
-import { linkedGitDirs, occupies, readOccupancy } from './worktreeRecord.ts';
+import { linkedGitDirs, nativeGitPath, occupies, readOccupancy } from './worktreeRecord.ts';
 import { compareToCommit, type GitContext } from './workspace.ts';
 
 /** The name of the landing lock under `.mission-pipeline/locks/`. */
@@ -252,7 +252,8 @@ export function occupantsOf(ctx: GitContext, branch: string): Occupant[] {
     first = false;
     if (fields.includes('bare')) continue;
     const branchField = fields.find((f) => f.startsWith('branch '))?.slice('branch '.length) ?? null;
-    const gitDir = main ? common : (linked.get(real(path)) ?? null);
+    // 4.4.1 (Windows): the linked roots are native (worktreeRecord.ts); so is the key looked up, also for a missing directory.
+    const gitDir = main ? common : (linked.get(real(nativeGitPath(path))) ?? null);
     const occ = gitDir === null ? { branch: branchField, rebasing: null, bisecting: null, inProgress: false } : readOccupancy(gitDir, branchField);
     if (!occupies(occ, target)) continue;
     const operation = occ.branch === target ? null : occ.rebasing === target ? 'rebase' : 'bisect';

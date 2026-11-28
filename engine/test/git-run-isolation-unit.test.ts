@@ -18,7 +18,9 @@ test('repository/object/history locators are removed, and variable names fold on
     for (const platform of ['linux', 'win32'] as const) {
       const built = PlainGit.create({ platform }).buildEnv();
       for (const n of names) assert.equal(built[n], undefined, `${platform}: ${n}`);
-      assert.equal(built['git_dir'], platform === 'win32' ? undefined : 'ordinary-linux-name');
+      // 4.4.1: on a Windows host process.env itself folds names, so git_dir there IS GIT_DIR and goes
+      // for both platform rules; only a host with case-sensitive variables keeps two of them.
+      assert.equal(built['git_dir'], platform === 'win32' || process.platform === 'win32' ? undefined : 'ordinary-linux-name');
     }
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
