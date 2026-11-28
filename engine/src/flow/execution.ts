@@ -1,6 +1,6 @@
 import { contractLines as reviewContractLines, objectConstraints as reviewObjectConstraints } from '../seat/cards/inputs.ts';
 import { constraintsForTask } from '../seat/cards/dynamic.ts';
-import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask } from '../seat/cards/dynamic.ts';
+import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, taskReferencePlan, coveredReopenKeys, repairsOfTaskWork, writtenForTask, stepsOfNotes43, noteOfHandBack } from '../seat/cards/dynamic.ts';
 // Execution (design 4.1, 4.2, 8.1, 5.3, 5.6): the tasks of the effective detailed plan become
 // Constructor and Reviewer tasks; the scheduler runs them; this module consumes their results.
 //
@@ -2265,7 +2265,17 @@ async function repairsOfWork(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, 
   const repairsLine = await eventsOf(ctx, REPAIRS_LINE);
   const ids = repairsOfTaskWork(ctx.mission, eff.amendments, t.id, line.events, await eventsOf(ctx, SECRETARY_LINE), repairsLine, k);
   const all = repairsLine.filter((e) => e.event === 'repair') as Array<{ readonly key: string; readonly body: RepairBody }>;
-  const written = writtenForTask(await currentConstraints(ctx), await ctx.ports.ledger.events({ mission: ctx.mission }), ctx.mission, t.id, ids);
+  const events = await ctx.ports.ledger.events({ mission: ctx.mission });
+  // 4.4 (G3, G4): a 4.3 decision has no note; its Architect's accepted hand-back has one (one not readable is left out)
+  const notes43 = new Map<string, string | null>();
+  for (const step of stepsOfNotes43(events, ids)) {
+    try {
+      notes43.set(step, noteOfHandBack((await ctx.ports.scheduler.status(step))?.handBack));
+    } catch {
+      notes43.set(step, null);
+    }
+  }
+  const written = writtenForTask(await currentConstraints(ctx), events, ctx.mission, t.id, ids, (step) => notes43.get(step) ?? null);
   return { repairs: all.filter((r) => ids.includes(r.key)).map((r) => repairRef(r.body)), written };
 }
 

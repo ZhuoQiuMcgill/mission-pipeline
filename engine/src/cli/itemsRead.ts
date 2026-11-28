@@ -1,7 +1,7 @@
 // 4.4 (the plan's F15, PM design G5): `mp read items <mission>`: the state of each thing the user asked for,
 // from the record alone. One line per requirement item and one per repair (under its own words), each with
 // its state (not planned, planned, in work, accepted after a passing review, accepted with risk (n open),
-// abandoned, delivered, landed), its proof and the user's statements that it was checked in the field. A
+// abandoned, delivered, landed; a repair also superseded), its proof and the user's statements that it was checked in the field. A
 // statement is shown as the user's, on those words, never as proof. Derived from links that exist: an item's
 // tasks are the tasks of the plan in effect whose card links it; a repair's are the tasks it added, changed or
 // reopened, credited to it only as `mp read repairs` credits them (cli/workReads.ts, the one function). The
@@ -19,11 +19,13 @@ import { currentDelivery, type Db } from '../memory/index.ts';
 import { missionEvents, planInEffectOf } from '../process/openItems.ts';
 import { repairsRead } from './workReads.ts';
 
-export type WorkState = 'not planned' | 'planned' | 'in work' | 'accepted after a passing review' | 'accepted with risk' | 'abandoned' | 'delivered' | 'landed';
+/** superseded (a repair's): every part done or superseded, at least one superseded (mp read repairs says by what). */
+export type WorkState = 'not planned' | 'planned' | 'in work' | 'accepted after a passing review' | 'accepted with risk' | 'abandoned' | 'delivered' | 'landed' | 'superseded';
 
 export interface TaskStateView {
   readonly task: string;
-  readonly state: 'planned' | 'in work' | 'accepted' | 'accepted with risk' | 'abandoned' | 'not in the plan in effect' | 'not done for this repair';
+  /** superseded: a repair's changed card another card replaced before it was accepted (mp read repairs). */
+  readonly state: 'planned' | 'in work' | 'accepted' | 'accepted with risk' | 'abandoned' | 'not in the plan in effect' | 'not done for this repair' | 'superseded';
   readonly product: string | null;
   /** The output's proof as the close reads it (null: not accepted). */
   readonly label: string | null;
@@ -218,15 +220,20 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
         // an acceptance, a delivery or a proof counts for this repair only when the repair read says its work is done;
         // p10-r2-3: a task the plan in effect dropped keeps that state (it is no progress)
         if (s.state === 'abandoned' || s.state === 'not in the plan in effect' || x.done) return { ...s, detail: x.state };
+        // 4.4 (v1): a changed card replaced before it was accepted gives the repair no acceptance and no proof
+        if (x.superseded !== undefined) return { task: x.task, state: 'superseded', product: null, label: null, detail: x.state };
         return { task: x.task, state: 'not done for this repair', product: null, label: null, detail: x.state };
       });
       const live = credited.filter((t) => t.state !== 'not in the plan in effect');
       const done = live.filter((t) => t.state === 'accepted' || t.state === 'accepted with risk');
+      // what is left of the repair's own work: a superseded part is neither in work nor done
+      const rest = live.filter((t) => t.state !== 'superseded');
       const state: ItemStateView['state'] = r.about?.startsWith('exploration ') === true ? 'about an exploration'
         : r.state !== 'decided' || live.length === 0 ? 'not planned'
         : r.done === true ? together(live, delivered, landed)
-        : live.some((t) => t.state === 'abandoned') ? 'abandoned'
-        : done.length > 0 || live.some((t) => (t.detail ?? '').includes('in work')) ? 'in work' : 'planned';
+        : rest.some((t) => t.state === 'abandoned') ? 'abandoned'
+        : rest.length === done.length ? 'superseded'
+        : done.length > 0 || rest.some((t) => (t.detail ?? '').includes('in work')) ? 'in work' : 'planned';
       // 4.4 (G9): a new requirement's filing says so, with its tasks that name none of its items
       const filing = r.entry === 'extend' ? { came: { filing: r.id, checked: null } } : {};
       out.push({ kind: 'repair', id: r.id, type: r.kind, text: r.text, words: r.words, state, ...openOn(record, done, lines), tasks: credited, proof: proofOf(done), verified: statements.get(`repair:${r.id}`) ?? [], ...filing, ...(r.unnamed.length > 0 ? { unnamed: [...r.unnamed] } : {}) });

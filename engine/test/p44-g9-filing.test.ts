@@ -583,3 +583,32 @@ describe('4.4 G9 with the verification follow-up of p10 (v1-4)', () => {
     assert.equal(opOf(rec!.revision), opOf(filing.revision), 'in the filing\'s write');
   });
 });
+
+describe('4.4 G9 with the verification follow-up of p6: a new requirement read beside a repair\'s parts', () => {
+  it('a new requirement whose changed card a later repair replaced before any acceptance under it reads superseded, with its items and how its work came in', async () => {
+    const { ports, engine } = await setup('fast');
+    const held: Script = (t, s) => (t.task.startsWith('con.m1.json.') ? null : happyScript(M)(t, s));
+    // a plain repair adds json; its work is held
+    await pmRepair(ports.ctx, { mission: M, words: say(ports, 'It should export JSON too.'), kind: 'missing', text: 'export JSON too' });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'json' } } : held(t, s)));
+    // a new requirement with two items changes json's card naming one of them
+    await extend(ports, [{ item: 'g2', text: 'JSON in order', quote: 'in order' }, { item: 'g3', text: 'Documented', quote: 'documented' }], 'Keep the JSON in order and keep it documented.');
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [], change: [{ ...JSON_TASK, goal: 'Export rows as JSON, in order', requirementItems: ['item.m1.g2'] }], note: 'in order' } } : held(t, s)));
+    // another repair replaces the card before any acceptance under the new requirement's
+    await pmRepair(ports.ctx, { mission: M, words: say(ports, 'The JSON export is too slow.'), kind: 'defect', text: 'too slow', about: 'json' });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [], change: [{ ...JSON_TASK, goal: 'Export rows as JSON, in order and fast', requirementItems: ['item.m1.g2'] }], note: 'faster' } } : happyScript(M)(t, s)));
+    assert.ok((await acceptedOf(ports, 'json')) !== undefined, 'accepted under the later card');
+    const read = ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1'));
+    const r2 = read.repairs.find((x) => x.id === 'R-2')!;
+    const text = repairsText({ mission: 'm1', repairs: [r2] });
+    assert.ok(text.startsWith('Repairs of mission m1: 1\n[R-2] new requirement (W-3): "in order"'), text);
+    assert.ok(text.includes('    decided; done or superseded: see R-3'), text);
+    assert.ok(text.includes('    its items: item.m1.g2, item.m1.g3; outside the set PM plan pmplan.m1.1 was checked against: item.m1.g2, item.m1.g3'), text);
+    assert.ok(text.includes('    its work passed its Architect and the mechanical checks, no plan review (D-10)'), text);
+    assert.ok(text.includes("    the Architect's note: in order"), text);
+    const lines = itemStateLines(readItems(ports.ctx, 'm1').find((v) => v.id === 'R-2')!).join('\n');
+    assert.ok(lines.startsWith('[R-2] new requirement, the user\'s words W-3: superseded'), lines);
+    const g2 = itemStateLines(readItems(ports.ctx, 'm1').find((v) => v.id === 'g2')!).join('\n');
+    assert.match(g2, /came with new requirement R-2/);
+  });
+});

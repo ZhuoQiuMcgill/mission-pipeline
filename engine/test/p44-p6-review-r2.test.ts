@@ -3,7 +3,8 @@
 //            checked inside the write: also `mp pm constraint add` with the same text and a new scope, a new
 //            version, and the PM's withdrawal
 //   p6-r2-1  a grant that covers a reopen of a task with no Constructor shows the reopen's issue on its Reviewer's
-//            card; a repair is not done when no claimed card of the accepted attempt carried its issue
+//            card; a granted attempt counts as carrying the reopen only when one of its claimed cards showed the issue
+//            (the read of a 4.3 reopen says what its record establishes: p44-p6-v1)
 //   p6-r2-3  a changed task is done when its last spec before the acceptance carries the repair, however often the
 //            repair's spec was written
 
@@ -136,7 +137,7 @@ describe('p6-r2-1: a reopen granted on a task with no Constructor (a 4.3 decisio
     assert.ok(rev.duties.includes(issue), rev.duties);
     assert.match(rev.duties, /This attempt was granted for a reopen \(repair R-1\)/);
     const r = repairs(ports)[0]!;
-    assert.match(r.reopened[0]?.state ?? '', /^reopened at attempt 2; accepted at attempt 2 \([^)]+\)$/);
+    assert.match(r.reopened[0]?.state ?? '', /^reopened under 4\.3 at attempt 2 and accepted at attempt 2 \([^)]+\)$/);
     assert.equal(r.done, true);
     // the same records with a claimed card that did not show the issue (an attempt built before this fix): not carried
     const line = await ports.ledger.events({ mission: M, line: 'task:integ' });

@@ -22,7 +22,7 @@ import type { FlowEvent } from '../../flow/ports.ts';
 import { secretaryOptions, type EscalationBody } from '../../flow/secretary.ts';
 import { ProcessError } from '../../process/errors.ts';
 import type { TaskSpecDoc } from '../../process/ports.ts';
-import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints, addressedForPlanning, planReviewInstructions, repairsOfTaskWork, writtenForTask } from './dynamic.ts';
+import { constraintsForExploration, constraintsForTask, taskDecisionQuotes, taskReferencePlan, taskRequirementItems, reviewerDecisionQuotes, reviewerItems, secretaryInputs, secretaryRoundInputs, planInEffect, productionDisputed, planningConstraints, addressedForPlanning, planReviewInstructions, repairsOfTaskWork, writtenForTask, noteOfHandBack } from './dynamic.ts';
 import { repairRef, type RepairBody } from '../../flow/plandoc.ts';
 import type { ConstructorCard, ReviewerCard } from '../card.ts';
 import type { Calibrator1Card, Calibrator2Card } from './calibrator.ts';
@@ -175,7 +175,9 @@ export function refreshDispatchCard(db: Db, data: DataStore, spec: TaskSpecDoc, 
     delete c.addressed;
     delete c.architectNotes;
     delete c.earlierAnswers;
-    Object.assign(c, writtenForTask(constraints, events, mission, t.id, ids));
+    // a 4.3 decision's note, from its Architect's accepted hand-back (one not readable is left out, never refusing the claim)
+    const note43 = readers === null ? undefined : (step: string): string | null => noteOfHandBack(readers.handBack(step));
+    Object.assign(c, writtenForTask(constraints, events, mission, t.id, ids, note43));
   };
   // 4.4 (G3, F1): an Architect's card prints the addressed instructions of the repair in hand (or its task) in full, the rest as an index
   const planningAddressed = (c: ArchitectRepairCard | ArchitectDecomposeCard | ArchitectAnswerCard, inHand: { repair?: string; about?: string }): void => {

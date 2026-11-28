@@ -216,7 +216,7 @@ const constraintsReadCmd: Command = {
 };
 // 4.4 (the plan's F13): each repair, what it did and whether it is done
 const repairsReadCmd: Command = {
-  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs and new requirements (mp pm extend): kind, words, subject and the Architect\'s note; the items each is bound to and whether the plan in effect was checked against them; a repair that added tasks and names no item; whether it was filed again (--again); the tasks each added, changed and reopened with their state (a reopen waiting for an attempt, carried out, or not carried out and why); its dispatches; and whether it is done', usage: 'mp read repairs <mission>', flags: {},
+  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs and new requirements (mp pm extend): kind, words, subject and the Architect\'s note; the items each is bound to and whether the plan in effect was checked against them; a repair that added tasks and names no item; whether it was filed again (--again, or a new requirement whose work was re-planned away); the tasks each added, changed and reopened with their state (a reopen waiting for an attempt, carried out, or not carried out and why; a changed card superseded by the repair or plan that replaced it before any acceptance under it); its dispatches; and whether it is done, or done or superseded, or which parts are open (a repair decided under 4.3: "decided under 4.3" with its parts open or not recorded)', usage: 'mp read repairs <mission>', flags: {},
   async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const r = p.ctx.memory.read((db) => repairsRead(db, p.ctx.memory.data, m)); return ok(repairsText(r), r);},
 };
 
@@ -273,7 +273,7 @@ function riskItemLine(i: RiskItemView, old: string): string {
 
 // 4.4 (the plan's F15, G5): the user's question "how far is each thing I asked for", from one read
 const itemsRead: Command = {
-  group: 'read', name: ['items'], summary: 'one line per requirement item and one per repair, with its state (not planned, planned, in work, accepted after a passing review, accepted with risk (n open), abandoned, delivered, landed), its proof label and the user\'s statements that it was checked in the field (the user\'s words, never proof); a new requirement\'s item with the filing it came with and whether the plan in effect was checked against it, each task a filing brought, and a filing\'s tasks that name no item', usage: 'mp read items <mission>', flags: {},
+  group: 'read', name: ['items'], summary: 'one line per requirement item and one per repair, with its state (not planned, planned, in work, accepted after a passing review, accepted with risk (n open), abandoned, delivered, landed; a repair: superseded, when every part is done or replaced before it was accepted), its proof label and the user\'s statements that it was checked in the field (the user\'s words, never proof); a new requirement\'s item with the filing it came with and whether the plan in effect was checked against it, each task a filing brought, and a filing\'s tasks that name no item', usage: 'mp read items <mission>', flags: {},
   async run(c, a) {
     const m = positional(a, 0, 'mission');
     const xs = readItems(P(c).ctx, m);

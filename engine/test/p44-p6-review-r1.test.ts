@@ -5,7 +5,7 @@
 //        earlier-decisions list by those words
 //   p6-3 a changed task is done only when accepted under the card this repair gave it
 //   p6-4 a reopen carried by a grant on a used-up loop (one 4.3 counted) is a reopen of the repair (card and read);
-//        "done" needs the accepted attempt's card to carry the repair's issue (the other direction is in p44-g4-repairs)
+//        the read says it was reopened under 4.3 and accepted (what its record establishes: p44-p6-v1)
 //   p6-5 a Reviewer's answer counts for the instruction version its card showed
 //   p6-6 (kept) a decision with --tasks is not printed as a decision on other tasks; a task that links it lists it
 //   p6-7 a repair Architect's question is not posted once another pass moved the repair on
@@ -138,7 +138,7 @@ describe('p6-2: a user\'s answer with words and no instructions is carried by it
 });
 
 describe('p6-3: a changed task is done only under the card this repair gave it', () => {
-  it('a re-plan that gives the task another card before its acceptance leaves the repair not done', async () => {
+  it('a re-plan that gives the task another card before its acceptance, accepted, leaves the repair not done (its part superseded)', async () => {
     let goal = 'Integrate and document the parser';
     const plan = () => { const p = detailedPlan(M, { extraTask: true }); return { ...p, tasks: p.tasks.map((t) => (t.id === 'docs' ? { ...t, goal, verificationCommands: [{ id: 'lint', command: 'npm run lint' }] } : t)) }; };
     const { ports, engine, script } = await setup(plan);
@@ -149,16 +149,17 @@ describe('p6-3: a changed task is done only under the card this repair gave it',
       'architect-repair': (t) => { const docs = (t.card as unknown as ArchitectRepairCard).plan.tasks.find((x) => x.id === 'docs')!; return { handBack: { reopen: [], add: [], change: [{ ...docs, writeScope: ['README.md'] }], note: 'the README' } }; },
       'con.m1.docs.2': () => null,
     }));
-    // a re-plan gives docs another card (its own goal and write path), and that card is accepted
+    // a re-plan gives docs another card (its own goal and write path) while the repair's attempt is still held, and that card is accepted
     goal = 'Document the parser in docs/ and in the README';
     await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests, documented' }] }), userWords: ['W-1'] });
-    await drive(engine, ports.scheduler, script());
+    await drive(engine, ports.scheduler, script({ 'con.m1.docs.2': () => null }));
     const pie = await planInEffect(flowCtx(ports, M));
     assert.equal(pie?.plan.tasks.find((t) => t.id === 'docs')?.goal, goal, 'the re-plan\'s card is in effect');
     const r = repairs(ports)[0]!;
     assert.equal(r.changed[0]?.task, 'docs');
     assert.equal(r.changed[0]?.done, false, 'accepted under another card than this repair\'s');
-    assert.match(r.changed[0]!.state, /accepted at attempt \d+ .*; its card changed since this repair/);
+    // v1: its card replaced before any acceptance under it, so neither open nor done (p44-p6-v1: accepted under it first is done)
+    assert.match(r.changed[0]!.state, /^superseded before it was accepted, by a later plan; accepted at attempt 3 /);
     assert.equal(r.done, false);
   });
 });
@@ -201,7 +202,7 @@ describe('p6-4: a reopen carried by a grant on a used-up rework loop (a 4.3 deci
     assert.deepEqual(con.architectNotes?.map((n) => n.text), ['impl writes the rows.']);
     assert.deepEqual(con.addressed?.map((a) => a.id), ['constraint.for-r1']);
     const r = repairs(ports)[0]!;
-    assert.equal(r.reopened[0]?.state, 'reopened at attempt 4; accepted at attempt 4 (prod.con.m1.impl.4)');
+    assert.equal(r.reopened[0]?.state, 'reopened under 4.3 at attempt 4 and accepted at attempt 4 (prod.con.m1.impl.4)');
     assert.equal(r.done, true);
   });
 });
