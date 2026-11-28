@@ -27,7 +27,10 @@ import { artifactLines, renderSeatCard, type ReviewerCard } from '../src/seat/ca
 import '../src/seat/cards/index.ts';
 import { addDetailedPlan, CHECK_JS, ENV_A, ENV_B, handBack, processProject, readAll, readyOf, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 import { project43 } from './p43-fixtures.ts';
-import { needsSymlink } from './link-probe.ts';
+import { CAN_SYMLINK, NO_SYMLINK } from './git-fixtures.test.ts';
+
+// 4.4.1 (Windows): a link to a file needs Developer Mode or the right to create one there
+const LINKS = { skip: CAN_SYMLINK ? false : NO_SYMLINK };
 
 const sha = (b: string | Buffer): string => createHash('sha256').update(b).digest('hex');
 
@@ -173,7 +176,7 @@ test('keeping a file is bounded and never throws: over the size or the count, a 
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
-test('keeping a file: a link to a file is not followed, recorded with why', needsSymlink(), async () => {
+test('keeping a file: a link to a file is not followed, recorded with why', LINKS, async () => {
   const { keepBudget, keepFile } = await import('../src/process/keptFiles.ts');
   const { mkdtempSync, symlinkSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -349,7 +352,7 @@ test('review F2-3: two runs of one command on one commit that named different fi
   } finally { p.cleanup(); }
 });
 
-test('review F2-4: a Reviewer\'s cited path outside its folder that is a link to a file in it: the bytes it was checked against are copied before the folder is removed', needsSymlink(), async () => {
+test('review F2-4: a Reviewer\'s cited path outside its folder that is a link to a file in it: the bytes it was checked against are copied before the folder is removed', LINKS, async () => {
   const q = project43();
   try {
     const ctx = q.ctx;
@@ -470,7 +473,7 @@ test('review p9-r2-3, p9-7 (round 2): a file there before a command is compared 
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
-test('review p9-5 (round 2): a Reviewer\'s cited path in its folder that is a link to a file elsewhere: the bytes it was checked against are copied and recorded', needsSymlink(), async () => {
+test('review p9-5 (round 2): a Reviewer\'s cited path in its folder that is a link to a file elsewhere: the bytes it was checked against are copied and recorded', LINKS, async () => {
   const q = project43();
   try {
     const ctx = q.ctx;
