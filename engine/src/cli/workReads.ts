@@ -362,7 +362,7 @@ export function repairsText(r: ReturnType<typeof repairsRead>): string {
     if (x.state === 'decided') lines.push("    its work passed its Architect and the mechanical checks, no plan review (D-10)");
     if (x.addedNoItem) lines.push('    it added tasks and names no requirement item (a lead for a spot-check: was it a new requirement? mp pm extend records one)');
     if (x.unnamed.length > 0) lines.push(`    tasks on which its Architect named none of its items (bound to none): ${x.unnamed.join(', ')}`);
-    if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? (x.entry === 'extend' ? `: the same items as new requirement ${x.filedAgain.of}, whose work is no longer in the plan in effect` : `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)`) : ''}`);
+    if (x.filedAgain !== null) lines.push(`    filed again${x.filedAgain.flag ? ' with --again' : ''}${x.filedAgain.of !== null ? (x.entry === 'extend' ? `: the same items as new requirement ${x.filedAgain.of} (a task ${x.filedAgain.of} added had left the plan in effect)` : `: the same repair as ${x.filedAgain.of} (words, kind, text and subject)`) : ''}`);
     if (x.question !== null) lines.push(`    its Architect asks the PM (${x.question.escalation}): ${clip(x.question.text, 300)}`);
     if (x.state === 'decided') lines.push(`    the Architect's note: ${x.note === null ? '(not recorded: decided before 4.4)' : x.note === '' ? '(none given)' : clip(x.note, 600)}`);
     for (const [label, ts] of [['added', x.added], ['changed', x.changed], ['reopened', x.reopened]] as const) for (const t of ts) lines.push(`    ${label} ${t.task}: ${t.state}`);

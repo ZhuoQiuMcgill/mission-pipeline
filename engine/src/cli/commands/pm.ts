@@ -678,7 +678,7 @@ const extend: Command = {
       : r.again !== undefined
       ? [
           // 4.4 (G9, p12-8): its work was re-planned away: filed again against the items as recorded
-          `New requirement filed again: ${r.repair} of ${m}, ${named}: what ${r.again} added is no longer in the plan in effect. The items stay as recorded (no new version).`,
+          `New requirement filed again: ${r.repair} of ${m}, ${named}: a task ${r.again} added for them is no longer in the plan in effect. The items stay as recorded (no new version).`,
           'An Architect step amends the plan in effect for them (the mechanical checks only; no Calibrator, no feasibility review); mp pm next lists it.',
           ...(openItems.length > 0 ? [`It names open items ${[...new Set(openItems)].sort().join(', ')}: a task its Architect gives one to takes it.`] : []),
         ]

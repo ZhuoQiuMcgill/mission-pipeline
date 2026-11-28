@@ -230,8 +230,8 @@ export interface IndexView {
   readonly basisLatest: ReadMap<BasisLineId, BasisVersionId>;
   readonly basisLineOf: ReadMap<BasisVersionId, BasisLineId>;
   readonly basisKindOf: ReadMap<BasisVersionId, string>;
-  /** 4.4 (G9): the number of item versions a requirement-set version lists (undefined: not a requirement-set version). */
-  readonly setItems: ReadMap<BasisVersionId, number>;
+  /** 4.4 (G9): the requirement-set lines some version of which listed an item (once listed, always: a later empty version does not undo it). */
+  readonly setEverListed: ReadSet<BasisLineId>;
   readonly withdrawn: ReadSet<BasisLineId>;
   readonly constraints: ReadMap<BasisLineId, ConstraintLine>;
   readonly envCurrent: ReadMap<EnvLineId, EnvSnapshotId>;
@@ -282,7 +282,7 @@ export class Index implements IndexView {
   basisLatest = new Map<BasisLineId, BasisVersionId>();
   basisLineOf = new Map<BasisVersionId, BasisLineId>();
   basisKindOf = new Map<BasisVersionId, string>();
-  setItems = new Map<BasisVersionId, number>();
+  setEverListed = new Set<BasisLineId>();
   versionsByLine = new Map<BasisLineId, Set<BasisVersionId>>();
   withdrawn = new Set<BasisLineId>();
   /** Object constraints only (v34: execution instructions are never proof obligations). */
@@ -347,7 +347,7 @@ export class Index implements IndexView {
         this.basisLineOf.set(r.version, r.line);
         this.basisRev.set(r.version, c.revision);
         this.basisKindOf.set(r.version, r.basisKind);
-        if (r.basisKind === 'requirement-set') this.setItems.set(r.version, r.snapshot.length);
+        if (r.basisKind === 'requirement-set' && r.snapshot.length > 0) this.setEverListed.add(r.line);
         addTo(this.versionsByLine, r.line, r.version);
         if (r.basisKind === 'constraint') {
           // A new content version keeps the current scope unless it states one.
@@ -763,8 +763,7 @@ export function legacyChainOutdated(ix: IndexView, target: string): boolean {
   if (obj === undefined || obj.objectKind !== 'chain-acceptance' || obj.mission === null) return false;
   const contract = obj.reviews.find((c) => c.review === 'auditor-chain');
   if (contract === undefined || contract.basisLines.some((l) => l.startsWith('reqnew.'))) return false;
-  const v = ix.basisLatest.get(`reqnew.${obj.mission}` as BasisLineId);
-  return v !== undefined && (ix.setItems.get(v) ?? 0) > 0;
+  return ix.setEverListed.has(`reqnew.${obj.mission}` as BasisLineId);
 }
 
 export function judgmentLeavesOk(ix: IndexView, info: JudgmentInfo, assumeValid: ReadonlySet<string> = EMPTY): boolean {

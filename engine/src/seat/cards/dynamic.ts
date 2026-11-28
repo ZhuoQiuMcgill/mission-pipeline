@@ -409,15 +409,20 @@ export function taskRequirementItems(items: readonly CurrentItem[], task: Pick<D
  * bases), with their text; `was`, the text the task's previous judgment was bound to, when the item changed since.
  * Every task that carries requirement items gets them, not only a new requirement's. Pure (queue time and claim).
  */
-export function reviewerItems(events: readonly FlowEvent[], bases: readonly string[], previous: readonly string[] | null): Array<{ id: string; version: string; text: string; was?: string }> {
+export function reviewerItems(events: readonly FlowEvent[], bases: readonly string[], previous: readonly string[] | null): Array<{ id: string; version: string; text: string; was?: string; withdrawn?: true }> {
   const versions = new Map<string, { line: string; text: string }>();
-  for (const e of events) if (e.line === 'requirements' && e.event === 'item') { const b = e.body as { line: string; version: string; text: string }; versions.set(b.version, b); }
+  // (p12-2) an item the binding keeps after its withdrawal (one a task carries through a filing) is shown withdrawn
+  const withdrawn = new Set<string>();
+  for (const e of events) {
+    if (e.line === 'requirements' && e.event === 'item') { const b = e.body as { line: string; version: string; text: string }; versions.set(b.version, b); }
+    if (e.line === 'requirements' && e.event === 'withdrawn') withdrawn.add((e.body as { line: string }).line);
+  }
   return bases.flatMap((v) => {
     const b = versions.get(v);
     if (b === undefined) return [];
     const before = (previous ?? []).find((p) => versions.get(p)?.line === b.line);
     const was = before !== undefined && before !== v ? versions.get(before)?.text : undefined;
-    return [{ id: b.line, version: v, text: b.text, ...(was !== undefined ? { was } : {}) }];
+    return [{ id: b.line, version: v, text: b.text, ...(was !== undefined ? { was } : {}), ...(withdrawn.has(b.line) ? { withdrawn: true as const } : {}) }];
   });
 }
 

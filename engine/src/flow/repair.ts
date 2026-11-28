@@ -293,6 +293,8 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   const term = batches.at(-1)?.body.n ?? 0;
   // the same filing again (a retry): its items recorded with the same text and words, by the latest filing that names them
   const same = existing.filter((e) => e.body.entry === 'extend' && canonicalJson(e.body.items ?? []) === canonicalJson(ids)).at(-1);
+  // (p12-8) the plan in effect as read: a filing anew rests on its work being gone from it, so its write is checked against it
+  const effectiveRead = (await eventsOf(ctx, PLAN_LINE, 'effective')).at(-1)?.revision ?? null;
   const pie = await planInEffect(ctx);
   let again: string | undefined;
   if (same !== undefined) {
@@ -319,7 +321,12 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   await commit(ctx, `flow:extend:${req.mission}:${id}`, {
     events: [...recs.events, ev(ctx, REPAIRS_LINE, 'repair', id, body)],
     records: recs.records,
-    guard: { absent: [{ mission: req.mission, line: PLAN_LINE, event: 'pm-batch', key: `b${term + 1}` }], code: 'STALE_REQUEST', message: `a PM plan version was submitted while the new requirement was being recorded: nothing was recorded; run the command again` },
+    guard: {
+      absent: [{ mission: req.mission, line: PLAN_LINE, event: 'pm-batch', key: `b${term + 1}` }],
+      ...(again !== undefined ? { latest: [{ mission: req.mission, line: PLAN_LINE, event: 'effective', revision: effectiveRead }] } : {}),
+      code: 'STALE_REQUEST',
+      message: again !== undefined ? `a PM plan version was submitted, or the plan in effect changed, while new requirement ${again} was being filed again: nothing was recorded; run the command again` : `a PM plan version was submitted while the new requirement was being recorded: nothing was recorded; run the command again`,
+    },
   });
   return { id, repeated: false, term, versions: recs.versions, ...(again !== undefined ? { again } : {}) };
 }

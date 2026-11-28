@@ -227,6 +227,10 @@ describe('4.4 G9: an item recorded by mp pm extend leaves the plan\'s check as i
     assert.equal(after[chain.object], 'not-fully-proven', 'the audit no longer covers every item in force');
     assert.equal((await ports.evaluator.ops(['legal.m1.L43'])).states['legal.m1.L43']?.allProven, false);
     for (const id of ['pmplan.m1.1', ...all]) assert.equal(after[id], 'proven', `${id} does not move`);
+    // the item withdrawn again: an item changed since the audit, so it stays out of date (as a chain that binds the set)
+    await withdrawItem(ports, { mission: M, item: 'g2', reason: 'not now' });
+    assert.equal((await labels(ports, [chain.object]))[chain.object], 'not-fully-proven', 'not current again by a later empty set');
+    assert.equal((await ports.evaluator.ops(['legal.m1.L43'])).states['legal.m1.L43']?.allProven, false);
   });
 
   it('another process submits a PM plan between the new requirement\'s read and its write: nothing is recorded; run again, it falls in the new plan\'s term', async () => {

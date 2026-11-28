@@ -1,8 +1,10 @@
 // 4.4 (G9): a new requirement's filing takes a repair's light path. One Architect step under the mechanical checks; its card
-// shows the new items and, by reference, the limit and acceptance items in force; the work is bound to the item (one item:
-// every task it adds, changes or reopens, with no action of the Architect's; several: those the Architect names; none named:
-// bound to none); the Reviewer's card shows the text of the items its judgment is bound to, and the old text after a change;
-// a filing whose every item is withdrawn before its amendment is applied ends; `mp pm repair --item` binds the same way.
+// shows the new items and, by reference, the limit and acceptance items in force; the work is bound to the item (by the
+// number of the filing's items in force when the amendment is applied: one, every task it adds, changes or reopens, with no
+// action of the Architect's; several, those the Architect names, only the filing's; none named: bound to none); the
+// Reviewer's card shows the text of the items its judgment is bound to, and the old text after a change; an item a task
+// took through a filing stays with its work, withdrawn or after an acceptance; a filing whose every item is withdrawn before
+// its amendment is applied ends; one whose work was re-planned away files again; `mp pm repair --item` binds the same way.
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -117,7 +119,7 @@ describe('4.4 G9: a new requirement\'s filing on the light path, its work bound 
     assert.equal((await labels(ports, [product]))[product], 'proven');
   });
 
-  it('one item: a reopened task\'s new attempts are bound to it until one is accepted; fast mode flags the product after a revision', async () => {
+  it('one item: a reopened task\'s new attempts are bound to it (its later attempts too: p12-3 below); fast mode flags the product after a revision', async () => {
     const { ports, engine } = await setup('fast');
     await extend(ports, [{ item: 'g2', text: 'Rows keep their order', quote: 'keep the rows in order' }], 'Please keep the rows in order.');
     await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [{ task: 'impl', issue: 'keep the rows in order' }], add: [], note: 'impl writes the rows' } } : happyScript(M)(t, s)));
@@ -355,6 +357,9 @@ describe('4.4 G9 review round 1: the item a filing gives its work stays with it'
     const product = (await acceptedOf(ports, 'json'))!;
     assert.ok((await contractOf(ports, product)).includes('item.m1.g2'), 'kept in the product\'s contract');
     assert.ok(ports.ledger.content.getList(ports.scheduler.card<ReviewerCard>('rev.m1.json.1').binding.bases as never).includes(g2), 'the queued Reviewer binding keeps its last version');
+    const rev = claimed<ReviewerCard>(ports, 'rev.m1.json.1');
+    assert.deepEqual(rev.requirementItems?.map((i) => [i.id, i.withdrawn]), [['item.m1.g2', true]], 'its card shows it withdrawn');
+    assert.ok(renderSeatCard(rev as never, { dispatch: 'D-x' }).includes('withdrawn by the user since the task took it: a decider settles the work done for it'));
     const j = (await ports.ledger.records(['judgment'])).map((c) => c.record).find((r) => r.judgment === 'j.rev.m1.json.1')!;
     assert.ok(ports.ledger.content.getList(j.bases).includes(g2), 'the judgment is bound to it');
     assert.equal((await labels(ports, [product]))[product], 'basis-withdrawn');
@@ -458,6 +463,6 @@ describe('4.4 G9 review round 1: a new requirement whose work was re-planned awa
     assert.ok(ran.some((t) => t.startsWith('arch-repair.m1.R-2')), `its Architect step: ${ran.join(', ')}`);
     assert.deepEqual((await planInEffect(flowCtx(ports, M)))?.plan.tasks.find((t) => t.id === 'json')?.requirementItems, ['item.m1.g2'], 'the work is bound to the item again');
     const read = repairsText(ports.memory.read((db) => repairsRead(db, ports.memory.data, 'm1')));
-    assert.ok(read.includes('filed again: the same items as new requirement R-1, whose work is no longer in the plan in effect'), read);
+    assert.ok(read.includes('filed again: the same items as new requirement R-1 (a task R-1 added had left the plan in effect)'), read);
   });
 });

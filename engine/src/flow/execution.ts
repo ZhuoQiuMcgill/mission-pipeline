@@ -3617,7 +3617,7 @@ async function submitReviewer(
   const bases = [...new Set([...currentVersions(ix, contract), ...contract.filter((l) => filed.has(l) && ix.withdrawn.has(l)).flatMap((l) => ix.current.get(l) ?? [])])].sort();
   const before = line.all<ReviewBody>('review').filter((r) => r.body.task !== task).at(-1);
   const beforeJ = before === undefined ? null : await judgmentRecordOf(ctx, before.body.judgment);
-  const items = reviewerItems(await ctx.ports.ledger.events({ mission: ctx.mission, line: REQUIREMENTS_LINE, event: 'item' }), bases, beforeJ === null ? null : c.getList(beforeJ.bases));
+  const items = reviewerItems(await ctx.ports.ledger.events({ mission: ctx.mission, line: REQUIREMENTS_LINE }), bases, beforeJ === null ? null : c.getList(beforeJ.bases));
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,
