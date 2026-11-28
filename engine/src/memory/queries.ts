@@ -49,7 +49,8 @@ export interface LoopState {
   readonly reason: LoopExhaustion | null;
 }
 
-export function readLoopState(s: Db, lineage: string, loop: LoopKind, failureClass: string | null = null): LoopState {
+/** `capOverride`: the attempts allowed before grants when the project sets them (4.4, F12 c: config.json `loops.rework`); absent, LOOP_CAPS. */
+export function readLoopState(s: Db, lineage: string, loop: LoopKind, failureClass: string | null = null, capOverride?: number): LoopState {
   const row = s.stmt('SELECT attempts, by_class, repeats, secretary_grants, extra, attempts_at_grant, no_progress_at FROM loops WHERE lineage = ? AND loop = ?').get(lineage, loop) as
     | { attempts: number; by_class: string; repeats: number; secretary_grants: number; extra: number; attempts_at_grant: number | null; no_progress_at: number | null }
     | undefined;
@@ -57,7 +58,7 @@ export function readLoopState(s: Db, lineage: string, loop: LoopKind, failureCla
   const attempts = Number(row?.attempts ?? 0);
   const extra = Number(row?.extra ?? 0);
   const byClass = row ? (JSON.parse(row.by_class) as Record<string, number>) : {};
-  const cap = LOOP_CAPS[loop] ?? 0;
+  const cap = capOverride ?? LOOP_CAPS[loop] ?? 0;
   const allowed = cap + extra;
   let reason: LoopExhaustion | null = null;
   if (attempts >= allowed) reason = 'cap';

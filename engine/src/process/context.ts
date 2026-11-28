@@ -12,6 +12,7 @@ import type { Ident } from '../git/objects.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import type { SnapshotFiles } from '../seat/results.ts';
 import type { SuiteCommand } from '../common/fullSuite.ts';
+import { LOOP_CAPS } from '../common/records.ts';
 import { collectCandidate, ensureWorkspace, releaseWorkspace, removeWorkspace, type Collection, type CollectRequest, type GitContext } from '../git/workspace.ts';
 import type { FlowPorts, FlowSchedulerPort } from '../flow/ports.ts';
 import { gitActions } from './actions.ts';
@@ -86,6 +87,8 @@ export interface ProcessOptions {
   readonly startOnHandback?: readonly string[];
   /** 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (config.json `mustReadWarnPages`). Default 6. */
   readonly mustReadWarnPages?: number;
+  /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`). Default LOOP_CAPS.rework (2). */
+  readonly reworkCap?: number;
 }
 
 export interface ProcessContext {
@@ -128,6 +131,8 @@ export interface ProcessContext {
   readonly startOnHandback: readonly string[];
   /** 4.4 (F16): the must-read pages above which a dispatch warns (config.json `mustReadWarnPages`, default 6). */
   readonly mustReadWarnPages: number;
+  /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`, default 2), read wherever the loop's state is. */
+  readonly reworkCap: number;
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -182,6 +187,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     planReviewsWaived: o.planReviewsWaived ?? [],
     startOnHandback: o.startOnHandback ?? [],
     mustReadWarnPages: o.mustReadWarnPages ?? MUST_READ_WARN_PAGES,
+    reworkCap: o.reworkCap ?? LOOP_CAPS.rework,
     cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);
