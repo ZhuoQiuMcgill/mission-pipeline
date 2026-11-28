@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { beginAction, endAction } from '../src/cli/project.ts';
 import { runCli } from '../src/cli/main.ts';
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
-import { pmDispatch } from '../src/process/pm.ts';
+import { pmAnswer, pmDispatch } from '../src/process/pm.ts';
 import { secNext } from '../src/process/secretary.ts';
 import { addDetailedPlan, ENV_A, readAll, readyOf, reviewerPass, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 import { command43, done43, live43, project43, secretary43 } from './p43-fixtures.ts';
@@ -112,6 +112,19 @@ test('a blocked hand-back through mp seat says what it handed in is a parked com
     assert.match(r.out, /Parked commit \(your edits so far, not a product\) [0-9a-f]{40} on base [0-9a-f]{40}: src\/add\.js/);
     assert.match(r.out, /You stopped to ask: your edits are kept as commit [0-9a-f]{40}\. It is not a product: nothing is verified or reviewed\./);
     assert.doesNotMatch(r.out, /Verification /);
+  } finally { p.cleanup(); }
+});
+
+test('p8-r2-2: mp pm answer --defer run again after its answer was recorded (an interrupted command retried) writes the same records: no conflict', async () => {
+  const p = project43();
+  try {
+    await constructorAsks(p, ['Which quote character?', 'Which licence header?']);
+    const s = await liveWithEscalation(p);
+    const req = { mission: 'm1', escalation: s.escalation, option: 'answer' as const, words: '', by: 'pm' as const, noWords: true, reason: 'the words say so', instructions: 'Double quotes.', defer: [2] };
+    await done43(p, ['pm', 'answer', 'm1', s.escalation, '--option', 'answer', '--by', 'pm', '--no-words', '--reason', req.reason, '--instructions', req.instructions, '--defer', '2', '--op', 'K']);
+    // the run the retry makes when the first was cut off before the command's receipt: the same writes again
+    await pmAnswer(p.ctx, req);
+    assert.deepEqual((await done43(p, ['read', 'open-items', 'm1'])).items.map((i: any) => [i.id, i.why]), [[`${s.escalation}.q2`, 'deferred']]);
   } finally { p.cleanup(); }
 });
 

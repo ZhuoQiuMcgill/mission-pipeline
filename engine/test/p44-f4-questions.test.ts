@@ -16,7 +16,7 @@ import { openItemsOf, taskQuestions } from '../src/flow/openItems.ts';
 import type { FlowEvent, FlowTask } from '../src/flow/ports.ts';
 import { submitPmBatch } from '../src/flow/planning.ts';
 import { architect, constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
-import { answerEscalation, escalation, raiseEscalation, secretaryOptions } from '../src/flow/secretary.ts';
+import { answerByPm, answerEscalation, deferProblems, escalation, raiseEscalation, secretaryOptions } from '../src/flow/secretary.ts';
 import { heldForQuestions } from '../src/process/questions.ts';
 import { pmDispatch, readSteps } from '../src/process/pm.ts';
 import { REDISPATCH_LOOP } from '../src/process/index.ts';
@@ -82,12 +82,13 @@ describe('4.4 F4: a Constructor stops and asks (a blocked hand-back)', () => {
     const esc = await escalation(flowCtx(ports, M), id);
     assert.ok(esc !== null, 'the pause has its own escalation, keyed by the attempt and the number of the pause');
     assert.equal(esc.source, 'constructor-decision');
-    assert.deepEqual(esc.reasons, ['Q1 (before-review): Is a header row required?', 'Q2 (later): May the output be cached later?']);
+    // review r2 (p8-7): every question of a stop to ask is needed before the work resumes, whatever its mark
+    assert.deepEqual(esc.reasons, ['Q1 (before-review): Is a header row required?', 'Q2 (before-review): May the output be cached later?']);
     assert.deepEqual(esc.options, ['answer', 'replan', 'ask-user'], 'the options of a Constructor\'s questions');
-    assert.match(secretaryOptions(esc, true).find((o) => o.id === 'answer')!.outcome, /the paused attempt resumes on its parked edits; a question it puts off \(defer, by number\) stays an open item/);
+    assert.match(secretaryOptions(esc, true).find((o) => o.id === 'answer')!.outcome, /the paused attempt resumes on its parked edits/);
     assert.deepEqual(ports.scheduler.queued().map((t) => t.task), [`sec.${id}`], 'the task waits: only the decision is queued');
-    // a "later" question is an open item from the hand-back
-    assert.deepEqual(openItemsOf(await events(ports)).map((i) => [i.id, i.why, i.answer]), [[`${id}.q2`, 'later', null]]);
+    assert.deepEqual(openItemsOf(await events(ports)), [], 'none of its questions is an open item');
+    assert.match(deferProblems(esc, 'answer', [2]) ?? '', /stopped to ask: each of its questions is needed before the work resumes/, 'nor can an answer put one off');
     // no loop counts it
     assert.equal((await ports.ledger.loop('task.m1.impl', 'rework')).attempts, 0);
     assert.equal((await ports.ledger.loop('task.m1.impl', REDISPATCH_LOOP)).attempts, 0);
@@ -110,14 +111,14 @@ describe('4.4 F4: a Constructor stops and asks (a blocked hand-back)', () => {
     assert.equal(next.workspace.start, hb.candidate.commit, 'the continuation opens its worktree on the parked commit');
     assert.equal(next.workspace.snapshot, first.workspace.snapshot, 'its candidate is taken against the attempt\'s start');
     assert.ok(next.duties.includes('stopped to ask (pause 1)'), next.duties);
-    assert.deepEqual(next.questions?.map((q) => [q.id, q.state, q.answer ?? null]), [[`${id}#1`, 'answered', 'A header row is required.'], [`${id}.q2`, 'open', null]]);
+    assert.deepEqual(next.questions?.map((q) => [q.id, q.state, q.answer ?? null]), [[`${id}#1`, 'answered', 'A header row is required.'], [`${id}#2`, 'answered', 'A header row is required.']]);
     assert.ok(next.materials?.some((m) => m.id === 'paused-handback' && !m.mustRead), 'the hand-back that stopped to ask is an optional material');
     assert.ok(renderSeatCard(next as never, { dispatch: 'D-x' }).includes(`created at commit ${hb.candidate.commit} (this attempt's edits so far`));
     const product = after.find((e) => e.event === 'product');
     assert.equal(product?.key, '1');
     assert.equal((product!.body as { task: string }).task, 'con.m1.impl.1.p1');
     assert.ok(after.some((e) => e.event === 'accepted' && e.key === '1'), 'accepted at attempt 1');
-    assert.deepEqual(review!.questions?.map((q) => [q.id, q.state]), [[`${id}#1`, 'answered'], [`${id}.q2`, 'open']], 'the Reviewer sees the questions and the answers');
+    assert.deepEqual(review!.questions?.map((q) => [q.id, q.state]), [[`${id}#1`, 'answered'], [`${id}#2`, 'answered']], 'the Reviewer sees the questions and the answers');
     assert.ok(!review!.decisionQuotes.includes('A header row is required.'), 'each answer is printed once');
     assert.equal((await ports.ledger.loop('task.m1.impl', 'rework')).attempts, 0);
     assert.equal((await ports.ledger.loop('task.m1.impl', REDISPATCH_LOOP)).attempts, 0);
@@ -257,11 +258,14 @@ describe('4.4 F4: a review waits for the answer to its Constructor\'s questions'
 
   it('the Secretary\'s deferral is checked: only with an answer to a Constructor\'s questions, by their numbers', () => {
     // a retried round appends its reason after the numbered questions
-    const card = { materials: [], options: [{ id: 'answer' }, { id: 'replan' }], authorizations: [], grantAvailable: true, request: { source: 'constructor-decision', reasons: ['Q1 (before-review): a', 'Q2 (later): b', 'The Secretary decision was not carried out: decide again.'] } } as unknown as SecretaryCard;
+    const card = { materials: [], options: [{ id: 'answer' }, { id: 'replan' }], authorizations: [], grantAvailable: true, request: { id: 'cdec.con.m1.impl.1', source: 'constructor-decision', reasons: ['Q1 (before-review): a', 'Q2 (later): b', 'The Secretary decision was not carried out: decide again.'] } } as unknown as SecretaryCard;
     const base = { classification: 'detail', authorization: null, reason: 'r', instructions: 'do', grantExtra: 0, notice: '', mayMatter: false } as const;
     assert.deepEqual(secretaryProblems(card, { ...base, option: 'answer', defer: [2] }, new Set()), []);
     assert.ok(secretaryProblems(card, { ...base, option: 'answer', defer: [3] }, new Set()).some((p) => p.startsWith('defer: name questions')));
     assert.ok(secretaryProblems(card, { ...base, option: 'replan', defer: [1] }, new Set()).some((p) => p.startsWith('defer: only')));
+    // review r2 (p8-7): a pause's questions are all needed before the work resumes
+    const pause = { ...card, request: { ...card.request, id: 'cblk.con.m1.impl.1.1' } } as SecretaryCard;
+    assert.ok(secretaryProblems(pause, { ...base, option: 'answer', defer: [1] }, new Set()).some((p) => p.startsWith('defer: a Constructor that stopped to ask')));
   });
 });
 
@@ -384,5 +388,134 @@ describe('4.4 F4, review round 1', () => {
     assert.equal(applied?.what?.option, 'superseded');
     assert.match(applied?.what?.why ?? '', /moved past attempt 1/);
     assert.ok(ports.scheduler.queued('constructor').some((t) => t.task === 'con.m1.impl.2'), 'attempt 2 goes on');
+  });
+});
+
+/** Another pass starts attempt 2 of impl just before this pass makes the write whose op starts with `prefix`; returns a function that removes the hook and says whether it ran. */
+function raceNextAttempt(w: World, prefix: string): () => boolean {
+  const append = w.ledger.append.bind(w.ledger);
+  let raced = false;
+  w.ledger.append = async (op, entries) => {
+    if (!raced && op.startsWith(prefix)) {
+      raced = true;
+      await append('test:other-pass', { events: [{ mission: M, line: 'task:impl', event: 'rework', key: '2', body: { k: 2, reason: 'respec', issues: [], instructions: ['a repair changed the card'] } }] });
+    }
+    return append(op, entries);
+  };
+  return () => {
+    w.ledger.append = append;
+    return raced;
+  };
+}
+
+describe('4.4 F4, review round 2', () => {
+  it('p8-r2-1: the answer carried out on the escalation takes precedence over an earlier answer to its open item; in the other order the item\'s answer is refused', async () => {
+    const id = 'cdec.con.m1.impl.1';
+    // order 1: the PM puts Q2 off and answers its item; the user then answers the escalation, not putting Q2 off
+    {
+      const { ports, engine } = await asks(['Which quote character?', 'Is a BOM kept?']);
+      await answerByPm(ports, { mission: M, escalation: id, option: 'answer', words: [], noWords: true, reason: 'r', instructions: 'Double quotes.', defer: [2] });
+      answerOpenItem(ports.ctx, { op: 'a1', ref: `${id}.q2`, by: 'pm', answer: 'Keep the BOM.' });
+      await answerEscalation(ports, { mission: M, escalation: id, option: 'answer', instructions: 'Drop the BOM.', words: `${SEED_TEXT} (W-1)` });
+      await drive(engine, ports.scheduler, withKinds({ secretary: () => null }));
+      const q2 = claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1').questions?.find((q) => q.id === `${id}.q2`);
+      assert.deepEqual([q2?.state, q2?.by, q2?.answer], ['answered', 'user', 'Drop the BOM.'], 'the user\'s words win');
+      const item = listOpenItems(ports.ctx, M).find((i) => i.id === `${id}.q2`)!;
+      assert.deepEqual([item.answer?.by, item.superseded?.answer], ['user', 'Keep the BOM.']);
+    }
+    // order 2: the user's answer is carried out first; the PM's answer to the item afterwards is refused
+    {
+      const { ports, engine } = await asks(['Which quote character?', 'Is a BOM kept?']);
+      await answerByPm(ports, { mission: M, escalation: id, option: 'answer', words: [], noWords: true, reason: 'r', instructions: 'Double quotes.', defer: [2] });
+      await answerEscalation(ports, { mission: M, escalation: id, option: 'answer', instructions: 'Drop the BOM.', words: `${SEED_TEXT} (W-1)` });
+      await drive(engine, ports.scheduler, withKinds({ secretary: () => null }));
+      assert.throws(() => answerOpenItem(ports.ctx, { op: 'a2', ref: `${id}.q2`, by: 'pm', answer: 'Keep the BOM.' }), /answered already by the user: Drop the BOM\./);
+      const q2 = claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1').questions?.find((q) => q.id === `${id}.q2`);
+      assert.deepEqual([q2?.by, q2?.answer], ['user', 'Drop the BOM.']);
+    }
+  });
+
+  it('p8-r2-3: the notice of a third pause comes only from a recorded pause', async () => {
+    const { ports, engine } = await setup();
+    const stops = new Set(['con.m1.impl.1', 'con.m1.impl.1.p1']);
+    await drive(engine, ports.scheduler, withKinds({
+      constructor: (t: FlowTask) => (t.task === 'con.m1.impl.1.p2' ? null : { handBack: stops.has(t.task) ? blocked([`Which separator, at ${t.task}?`]) : constructorDone() }),
+      secretary: answers((c) => c.request.id.startsWith('cblk.'), 'Use a comma.'),
+    }));
+    await ports.scheduler.run('con.m1.impl.1.p2', { handBack: blocked(['A third question?']) });
+    const done = raceNextAttempt(ports, `flow:escalation:${M}:cblk.`);
+    await engine.reconcile(M);
+    assert.ok(done(), 'the race ran');
+    assert.ok(!(await events(ports, { line: 'secretary', event: 'escalation' })).some((e) => e.key === 'cblk.con.m1.impl.1.3'), 'the third pause is not recorded');
+    assert.deepEqual(ports.ledger.notices.filter((n) => n.category === 'constructor-paused-again'), [], 'and no notice names it');
+  });
+
+  it('p8-6: a pause\'s re-plan is written only while its attempt is current; the next attempt is not blocked by it', async () => {
+    const { ports, engine } = await asks(['Which separator?'], { blocked: true });
+    const id = 'cblk.con.m1.impl.1.1';
+    await ports.scheduler.run(`sec.${id}`, { handBack: secretary(ports.scheduler.card<SecretaryCard>(`sec.${id}`), 'replan', { instructions: 'split the task' }) });
+    const done = raceNextAttempt(ports, `flow:replan-request:${M}:${id}`);
+    await engine.reconcile(M);
+    assert.ok(done(), 'the race ran');
+    assert.equal((await events(ports, { line: 'task:impl', event: 'waiting-replan' })).length, 0, 'no waiting-replan for the old attempt');
+    await drive(engine, ports.scheduler, withKinds({ constructor: () => null, secretary: () => null, 'architect-decompose': () => null }));
+    assert.equal(((await events(ports, { line: 'secretary', event: 'applied' })).find((e) => e.key === id)?.body as { what?: { option?: string } }).what?.option, 'superseded');
+    assert.ok(ports.scheduler.queued('constructor').some((t) => t.task === 'con.m1.impl.2'), 'attempt 2 goes on');
+  });
+
+  it('p8-2: a user\'s words-only answer stays on the cards after a rework (the earlier decisions), and reaches a re-review', async () => {
+    const words = `"${SEED_TEXT}" (the user's words W-1)`;
+    {
+      const { ports, engine } = await asks(['Which separator?']);
+      await answerEscalation(ports, { mission: M, escalation: 'cdec.con.m1.impl.1', option: 'answer', words: `${SEED_TEXT} (W-1)` });
+      let reviewed = false;
+      await drive(engine, ports.scheduler, withKinds({
+        constructor: (t: FlowTask) => (t.task === 'con.m1.impl.2' ? null : { handBack: constructorDone() }),
+        reviewer: (t) => {
+          const c = t.card as unknown as ReviewerCard;
+          if (!c.target.includes('impl')) return { handBack: reviewer(c, 'pass') };
+          if (reviewed) return null;
+          reviewed = true;
+          return { handBack: reviewer(c, 'rework', { failing: 'S1' }) };
+        },
+      }));
+      const d = pmDispatch(ports.ctx, 'con.m1.impl.2', { filledBy: 'test/scripted' });
+      assert.ok(claimedCard<ConstructorCard>(ports, 'con.m1.impl.2').decisionQuotes.includes(words), d.card);
+    }
+    {
+      const { ports, engine } = await setup();
+      let first = true;
+      await drive(engine, ports.scheduler, withKinds({
+        secretary: () => null,
+        reviewer: (t) => {
+          const c = t.card as unknown as ReviewerCard;
+          if (c.target.includes('impl') && first) { first = false; return { handBack: reviewer(c, 'needs-decision') }; }
+          return { handBack: reviewer(c, 'pass') };
+        },
+      }));
+      await answerEscalation(ports, { mission: M, escalation: 'rnd.rev.m1.impl.1', option: 'answer', words: `${SEED_TEXT} (W-1)` });
+      await drive(engine, ports.scheduler, happyScript(M));
+      assert.ok(claimedCard<ReviewerCard>(ports, 'rev.m1.impl.1.r1').decisionQuotes.includes(words));
+    }
+  });
+
+  it('p8-8: an answer cut in the Secretary\'s digest says so, and the task-line material holds it in full', async () => {
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds({
+      constructor: (t: FlowTask) => ({ handBack: constructorDone(t.task === 'con.m1.impl.1' ? { decisions_needed: [{ question: 'Is a BOM kept?', when: 'later' }] } : {}) }),
+      secretary: () => null,
+      reviewer: (t) => {
+        const c = t.card as unknown as ReviewerCard;
+        return { handBack: reviewer(c, c.target.includes('impl') ? 'needs-decision' : 'pass') };
+      },
+    }));
+    const long = `The BOM is dropped. ${'Reasons follow, one by one, at length. '.repeat(12)}The last qualification: keep it for UTF-16 input.`;
+    answerOpenItem(ports.ctx, { op: 'l1', ref: 'cdec.con.m1.impl.1.q1', by: 'secretary', answer: long });
+    pmDispatch(ports.ctx, 'sec.rnd.rev.m1.impl.1', { filledBy: 'test/scripted' });
+    const card = claimedCard<SecretaryCard>(ports, 'sec.rnd.rev.m1.impl.1');
+    const text = (id: string): string => ports.ledger.content.get(card.materials.find((m) => m.id === id)!.ref as never);
+    assert.match(text('current-facts'), /answered by the Secretary: The BOM is dropped\. .*… \(cut; in full: material task-line\)/);
+    const line = JSON.parse(text('task-line')) as { openItems?: Array<{ id: string; answer: { answer: string } }> };
+    assert.equal(line.openItems?.find((i) => i.id === 'cdec.con.m1.impl.1.q1')?.answer.answer, long);
   });
 });

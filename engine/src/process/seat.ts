@@ -859,7 +859,8 @@ export async function recordSeatHandBack(ctx: ProcessContext, dispatch: string, 
 /**
  * 4.4 (F4; PM design G5): the open items an accepted hand-back makes, in its own write: a Constructor's
  * questions raised as "later", and the questions a Secretary's answer puts off (`defer`). Their ids and
- * bodies are the flow's (flow/openItems.ts), so its pass writes one again only when it is missing.
+ * bodies are the flow's (flow/openItems.ts): the same deterministic records, which the fact writer keeps
+ * once. A stop to ask makes none: each of its questions is needed before the work resumes (review r2).
  */
 function questionItems(tx: WriteTx, v: DispatchView, fields: unknown): BaseRecord[] {
   const mission = v.info.mission;
@@ -868,13 +869,12 @@ function questionItems(tx: WriteTx, v: DispatchView, fields: unknown): BaseRecor
   if (v.card.seat === 'constructor') {
     const r = fields as ConstructorResult;
     const qs = constructorQuestions(r);
-    if (!qs.some((q) => q.when === 'later')) return [];
+    if (r.blocked === true || !qs.some((q) => q.when === 'later')) return [];
     const row = tx.stmt("SELECT line, body FROM flow_events WHERE mission = ? AND event = 'dispatched' AND key = ? AND line LIKE 'task:%' ORDER BY revision LIMIT 1").get(mission, v.info.task) as { line: string; body: string } | undefined;
     const k = row === undefined ? undefined : (parse(row.body) as { k?: unknown }).k;
     if (row === undefined || typeof k !== 'number') return [];
-    const paused = flowEvents(tx, { mission, line: row.line, event: 'paused', limit: 10_000 }).map((e) => ({ revision: Number(e.revision), event: e.event, key: e.key, body: parse(e.body) }));
     const task = row.line.slice('task:'.length);
-    bodies = laterItemBodies(task, k, questionsEscalationOf(mission, task, paused, v.info.task, k, r.blocked === true), qs);
+    bodies = laterItemBodies(task, k, questionsEscalationOf(mission, task, [], v.info.task, k, false), qs);
   } else if (v.card.seat === 'secretary') {
     const r = fields as { option?: unknown; defer?: unknown };
     const id = (v.card as { request?: { id?: unknown } }).request?.id;
@@ -883,9 +883,7 @@ function questionItems(tx: WriteTx, v: DispatchView, fields: unknown): BaseRecor
     if (e === undefined) return [];
     bodies = deferredItemBodies(parse(e.body) as EscalationBody, r.defer as number[]);
   }
-  return bodies
-    .filter((b) => !flowEventExists(tx, { mission, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id }))
-    .map((b) => ({ kind: 'flow.event' as const, mission, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash }));
+  return bodies.map((b) => ({ kind: 'flow.event' as const, mission, line: OPEN_ITEMS_LINE, event: OPEN_ITEM, key: b.id, body: tx.data.put(canonicalJson(b)) as ContentHash }));
 }
 
 /**

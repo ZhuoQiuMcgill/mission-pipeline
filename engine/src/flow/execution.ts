@@ -42,7 +42,7 @@ import { taskDecisionQuotes, taskRequirementItems, reviewerDecisionQuotes, taskR
 import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVersionRecord, type ReviewContract } from '../common/records.ts';
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
-import { OPEN_ITEM, OPEN_ITEMS_LINE, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -805,9 +805,9 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
     // when it is missing; questions that are all "later" raise no decision: nothing waits on them (G5)
     const qs = (product.decisions ?? []).map((text, i) => ({ text, when: product!.when?.[i] ?? 'before-review' as QuestionWhen }));
     const id = safeId(`cdec.${con}`);
-    const later = await laterItems(ctx, t.id, k, id, qs);
+    const later = laterItemBodies(t.id, k, id, qs);
     if (!qs.some((q) => q.when === 'before-review')) {
-      if (later.length > 0) await commit(ctx, `flow:later-items:${ctx.mission}:${id}`, { events: later });
+      if (await anyMissing(ctx, later)) await commit(ctx, `flow:later-items:${ctx.mission}:${id}`, { events: itemEvents(ctx, later) });
     } else await raiseEscalation(ctx, {
       id,
       source: 'constructor-decision',
@@ -819,7 +819,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       items: t.requirementItems,
       facts: { task: t.id, attempt: k, questions: product.decisions, product: product.object, ...(product.when !== undefined ? { when: product.when } : {}) },
       handover: { from: con, objects: [product.object] },
-    }, later);
+    }, itemEvents(ctx, later));
   }
 
   // the program's verification runs (the only evidence): declared runs on a clean checkout of the candidate
@@ -899,16 +899,33 @@ async function commitVerified(ctx: FlowCtx, lineName: string, k: number, object:
   }
 }
 
-/** 4.4 (F4; G5): open-item events not recorded yet (an item is recorded with the decision or hand-back that makes it; a pass writes the same one again only when it is missing). */
-async function missingItems(ctx: FlowCtx, bodies: readonly OpenItemBody[]): Promise<FlowEventInput[]> {
-  if (bodies.length === 0) return [];
-  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
-  return bodies.filter((b) => !existing.has(b.id)).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
+/**
+ * 4.4 (F4; G5): open-item events, every one of `bodies`: an item is recorded with the hand-back or the
+ * decision that makes it, and a write of the flow carries the same deterministic records again (review r2-2:
+ * the same payload on every run of one operation; the fact writer keeps one of identical records).
+ */
+function itemEvents(ctx: FlowCtx, bodies: readonly OpenItemBody[]): FlowEventInput[] {
+  return bodies.map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b));
 }
 
-/** 4.4 (F4; G5): a hand-back's "later" questions as open items (recorded with the accepted hand-back; here when missing). */
-function laterItems(ctx: FlowCtx, task: string, k: number, escalation: string, qs: ReadonlyArray<{ readonly text: string; readonly when: QuestionWhen }>): Promise<FlowEventInput[]> {
-  return missingItems(ctx, laterItemBodies(task, k, escalation, qs));
+/** Whether one of these items is not recorded yet (a write that exists only to record them is made only then). */
+async function anyMissing(ctx: FlowCtx, bodies: readonly OpenItemBody[]): Promise<boolean> {
+  if (bodies.length === 0) return false;
+  const existing = new Set((await eventsOf(ctx, OPEN_ITEMS_LINE, OPEN_ITEM)).map((x) => x.key));
+  return bodies.some((b) => !existing.has(b.id));
+}
+
+/** 4.4 (F4): told when a third pause of one attempt, or a later one, is recorded; raised from the committed pause, so it never names one that is not (review r2-3). */
+async function tellPausedAgain(ctx: FlowCtx, task: string, k: number, n: number, escalation: string): Promise<void> {
+  if (n < PAUSES_TOLD) return;
+  await notify(ctx, {
+    category: 'constructor-paused-again',
+    wi: WI.loopExhausted,
+    key: `${task}:${k}:${n}`,
+    trigger: `the Constructor of task ${task} stopped to ask for the ${n === 3 ? 'third' : `${n}th`} time in attempt ${k} (escalation ${escalation})`,
+    defaultAction: `accepted: only task ${task} waits for the decision on ${escalation}; the rest of the mission goes on. When the card itself is the cause (it is contradictory, or lacks what the seat keeps asking for), say so in the answer, or choose replan`,
+    detail: { task, attempt: k, pause: n, escalation },
+  });
 }
 
 /** 4.4 (F4): the guard of a write that pauses or resumes attempt k: it is still the task's current attempt (no next attempt was started meanwhile). */
@@ -931,19 +948,9 @@ async function pause(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, con: 
   if (hb.candidate === null) return internalError(ctx, con, `the blocked hand-back of ${con} has no parked commit`);
   const n = line.all<PausedBody>('paused').filter((p) => p.body.k === k).length + 1;
   const id = questionsEscalationOf(ctx.mission, t.id, line.events, con, k, true);
-  const qs = constructorQuestions(hb.result as ConstructorResult);
+  // review r2 (p8-7): every question of a stop to ask is needed before the work resumes, whatever its mark: none is an open item
+  const qs = constructorQuestions(hb.result as ConstructorResult).map((q) => ({ ...q, when: 'before-review' as const }));
   const parked = hb.candidate.commit;
-  // told before the write, so a crash after it cannot lose the notice (a notice is raised once by its key)
-  if (n >= PAUSES_TOLD) {
-    await notify(ctx, {
-      category: 'constructor-paused-again',
-      wi: WI.loopExhausted,
-      key: `${t.id}:${k}:${n}`,
-      trigger: `the Constructor of task ${t.id} stopped to ask for the ${n === 3 ? 'third' : `${n}th`} time in attempt ${k} (escalation ${id})`,
-      defaultAction: `accepted: only task ${t.id} waits for the decision on ${id}; the rest of the mission goes on. When the card itself is the cause (it is contradictory, or lacks what the seat keeps asking for), say so in the answer, or choose replan`,
-      detail: { task: t.id, attempt: k, pause: n, escalation: id },
-    });
-  }
   const paused: PausedBody = { k, n, step: con, dispatch: hb.dispatch, parked, escalation: id };
   await raiseEscalation(ctx, {
     id,
@@ -954,11 +961,13 @@ async function pause(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, con: 
     reasons: questionReasons(qs),
     options: ['answer', 'replan', 'ask-user'],
     items: t.requirementItems,
-    facts: { task: t.id, attempt: k, pause: n, blocked: true, parked, questions: qs.map((q) => q.text), ...(qs.some((q) => q.when === 'later') ? { when: qs.map((q) => q.when) } : {}) },
+    facts: { task: t.id, attempt: k, pause: n, blocked: true, parked, questions: qs.map((q) => q.text) },
     handover: { from: con, objects: [] },
-  }, [ev(ctx, taskLine(t.id), 'paused', `${k}#${n}`, paused), ...await laterItems(ctx, t.id, k, id, qs)],
+  }, [ev(ctx, taskLine(t.id), 'paused', `${k}#${n}`, paused)],
   // the attempt is still current inside the write: a pass that started the next attempt meanwhile wins, and nothing is paused
   { absent: [attemptCurrent(ctx, t.id, k)], code: 'STALE_REQUEST', message: `task ${t.id} moved past attempt ${k} meanwhile; its pause is not recorded (the next pass reads it again)` });
+  // only once the pause is recorded (and again by the next pass while it waits: applyTaskDecision)
+  await tellPausedAgain(ctx, t.id, k, n, id);
 }
 
 /**
@@ -971,17 +980,19 @@ async function answerQuestions(ctx: FlowCtx, t: DetailedTask, line: Line, e: Esc
   if (await isApplied(ctx, e.id)) return;
   const facts = (e.facts ?? {}) as { attempt?: number; pause?: number; blocked?: boolean };
   const k = facts.attempt ?? line.k;
-  // the items it makes are recorded with the decision and the hand-back (flow/secretary.ts, process/seat.ts); written here when missing
-  const items = await missingItems(ctx, [...laterItemBodies(t.id, k, e.id, escalationQuestions(e)), ...deferredItemBodies(e, d.defer ?? [])]);
-  const n = facts.blocked === true && typeof facts.pause === 'number' && line.k === k ? facts.pause : null;
+  const blocked = facts.blocked === true;
+  // the items it makes are recorded with the decision and the hand-back (flow/secretary.ts, process/seat.ts), and
+  // carried here again, the same records (a pause makes none: its questions are all needed before it resumes)
+  const items = blocked ? [] : itemEvents(ctx, [...laterItemBodies(t.id, k, e.id, escalationQuestions(e)), ...deferredItemBodies(e, d.defer ?? [])]);
+  const n = blocked && typeof facts.pause === 'number' && line.k === k ? facts.pause : null;
   const resume = n === null || line.one('resumed', `${k}#${n}`) !== null ? [] : [ev(ctx, taskLine(t.id), 'resumed', `${k}#${n}`, { k, n, step: resumeTask(ctx.mission, t.id, k, n), escalation: e.id } satisfies ResumedBody)];
   const carry = await carryOut(ctx, e.id, { option: 'answer' });
   const guard = carryGuard([carry])!;
   await commit(ctx, `flow:answer:${ctx.mission}:${e.id}`, {
     events: [...items, ...resume, ...carry.events],
     records: carry.records,
-    // a resume needs the attempt still current inside the write (p8-6)
-    guard: { ...guard, absent: [...guard.absent, ...(resume.length > 0 ? [{ mission: ctx.mission, line: taskLine(t.id), event: 'resumed', key: `${k}#${n}` }, attemptCurrent(ctx, t.id, k)] : [])] },
+    // every write of a pause's life needs its attempt still current inside the write (p8-6)
+    guard: { ...guard, absent: [...guard.absent, ...(resume.length > 0 ? [{ mission: ctx.mission, line: taskLine(t.id), event: 'resumed', key: `${k}#${n}` }] : []), ...(blocked ? [attemptCurrent(ctx, t.id, k)] : [])] },
   });
   await carried(ctx, [carry]);
 }
@@ -2280,11 +2291,14 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const blocking = e.source !== 'constructor-decision' || (e.facts as { blocked?: unknown } | undefined)?.blocked === true;
   // 4.4 (F4, p8-6): a pause of an attempt the task has moved past (a pass started the next attempt while another
   // wrote the pause) blocks nothing and takes no decision: it is closed. Attempts only grow, so the read is safe.
-  const pausedAt = (e.facts ?? {}) as { blocked?: unknown; attempt?: unknown };
-  if (e.source === 'constructor-decision' && pausedAt.blocked === true && typeof pausedAt.attempt === 'number' && pausedAt.attempt < line.k) {
+  const pausedAt = (e.facts ?? {}) as { blocked?: unknown; attempt?: unknown; pause?: unknown };
+  const isPause = e.source === 'constructor-decision' && pausedAt.blocked === true && typeof pausedAt.attempt === 'number';
+  if (isPause && (pausedAt.attempt as number) < line.k) {
     await commitCarrying(ctx, `flow:pause-superseded:${ctx.mission}:${e.id}`, [], [closing(ctx, [e.id], `task ${t.id} moved past attempt ${pausedAt.attempt}: the pause of that attempt is moot`)], [e.id]);
     return false;
   }
+  // review r2-3: the notice of a third pause comes from the committed pause, while it waits (raised once by its key)
+  if (isPause && typeof pausedAt.pause === 'number') await tellPausedAgain(ctx, t.id, pausedAt.attempt as number, pausedAt.pause, e.id);
   const d = await decisionFor(ctx, e.id);
   // #57: an open loop-exhausted escalation that a failed re-bind review raised before accept-risk was offered there
   // (undecided, or waiting for the PM or the user) is closed as superseded; this pass's re-bind step raises a fresh
@@ -2330,7 +2344,7 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       if (e.source === 'reviewer-needs-decision') {
         // the re-review's number and the applied mark are one append (code review r1 #13)
         const m = line.all('reanswer').filter((x) => x.key.startsWith(`${k}:`)).length;
-        await commitCarrying(ctx, `flow:reanswer:${ctx.mission}:${e.id}`, [ev(ctx, lineName, 'reanswer', `${k}:${m + 1}`, { escalation: e.id, decision: d.instructions })], [await carryOut(ctx, e.id, { option: 'answer' })]);
+        await commitCarrying(ctx, `flow:reanswer:${ctx.mission}:${e.id}`, [ev(ctx, lineName, 'reanswer', `${k}:${m + 1}`, { escalation: e.id, decision: answerText(d) })], [await carryOut(ctx, e.id, { option: 'answer' })]);
         return false;
       }
       // 4.4 (F4): what the answer puts off stays open; a pause's answer resumes the attempt
@@ -2346,7 +2360,8 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       await markApplied(ctx, e.id, { option: 'rework' });
       return false;
     case 'replan':
-      await requestReplan(ctx, eff, t, e.id, d, !reopen || line.k === k);
+      // 4.4 (p8-6): a pause's re-plan (its waiting-replan above all) is written only while its attempt is current
+      await requestReplan(ctx, eff, t, e.id, d, !reopen || line.k === k, isPause ? [attemptCurrent(ctx, t.id, k)] : []);
       return !reopen || line.k === k;
     case 'accept-risk':
       if ((e.facts as { rebind?: string } | undefined)?.rebind !== undefined) await acceptRebindWithRisk(ctx, t, k, e, d);
@@ -2376,12 +2391,13 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
  * answers it is written in the same write (planning.ts replanRoute); otherwise the waiting task tells the
  * PM what the routing waits on (tellReplanWait).
  */
-async function requestReplan(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, escalationId: string, d: DecisionBody, wait = true): Promise<void> {
+async function requestReplan(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, escalationId: string, d: DecisionBody, wait = true, also: AppendGuard['absent'] = []): Promise<void> {
   const req = { escalation: escalationId, task: t.id, instructions: d.instructions };
   const route = await replanRoute(ctx, req);
   const carry = await carryOut(ctx, escalationId, { option: 'replan' });
   const guard = carryGuard([carry]);
-  const absent = [...(guard?.absent ?? []), ...(route.kind === 'now' ? route.absent : [])];
+  // 4.4 (F4, p8-6): `also`, what must still be absent for this write (a pause's: its attempt is still current)
+  const absent = [...(guard?.absent ?? []), ...(route.kind === 'now' ? route.absent : []), ...also];
   await commit(ctx, `flow:replan-request:${ctx.mission}:${escalationId}`, {
     events: [ev(ctx, PLAN_LINE, 'replan-request', escalationId, req), ...(wait ? [ev(ctx, taskLine(t.id), 'waiting-replan', escalationId, { dplan: eff.dplan, escalation: escalationId })] : []), ...(route.kind === 'now' ? route.events : []), ...carry.events],
     records: carry.records,

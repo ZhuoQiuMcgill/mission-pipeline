@@ -43,6 +43,8 @@ export interface OpenItemAnswerBody {
 export interface OpenItem extends OpenItemBody {
   readonly revision: number;
   readonly answer: OpenItemAnswerBody | null;
+  /** 4.4 (review r2-1): an answer recorded to the item that the escalation's carried-out answer took precedence over. */
+  readonly superseded?: OpenItemAnswerBody;
 }
 
 /** An event as the flow and the claim read it. */
@@ -66,9 +68,11 @@ export function questionReasons(qs: ReadonlyArray<{ readonly text: string; reado
 }
 
 /**
- * The open items of a mission's events, each with its answer: its own (`open-item-answer`), or, for one
- * put off by a decision that was not carried out (another decider's answer carried out instead, which
- * does not put it off), the answer that was carried out.
+ * The open items of a mission's events, each with its answer. A question put off by a decision that was
+ * not carried out is answered by the escalation's answer that was carried out whenever that answer covers
+ * it (it does not put it off): the decision carried out takes precedence over an answer recorded to the
+ * item before it, in either order (the user's words win over the PM's earlier answer). Otherwise the
+ * item's own answer (`open-item-answer`); a `later` question is never covered by its escalation's answer.
  */
 export function openItemsOf(events: readonly Ev[]): OpenItem[] {
   const answers = new Map(events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM_ANSWER).map((e) => [e.key, e.body as OpenItemAnswerBody]));
@@ -76,9 +80,12 @@ export function openItemsOf(events: readonly Ev[]): OpenItem[] {
   return events.filter((e) => e.line === OPEN_ITEMS_LINE && e.event === OPEN_ITEM).map((e) => {
     const b = e.body as OpenItemBody;
     const own = answers.get(e.key) ?? null;
-    const carried = own !== null || b.why !== 'deferred' ? null : appliedAnswer(sec, b.escalation);
-    const answer: OpenItemAnswerBody | null = own ?? (carried !== null && !carried.defer.includes(b.question) ? { id: b.id, by: carried.by as OpenItemAnswerBody['by'], answer: carried.text } : null);
-    return { ...b, revision: e.revision, answer };
+    const carried = b.why !== 'deferred' ? null : appliedAnswer(sec, b.escalation);
+    if (carried !== null && !carried.defer.includes(b.question)) {
+      const answer: OpenItemAnswerBody = { id: b.id, by: carried.by as OpenItemAnswerBody['by'], answer: carried.text };
+      return { ...b, revision: e.revision, answer, ...(own !== null ? { superseded: own } : {}) };
+    }
+    return { ...b, revision: e.revision, answer: own };
   });
 }
 
@@ -132,8 +139,10 @@ export function laterItemBodies(task: string, attempt: number, escalation: strin
 /** 4.4 (F4; G5): the open items a decision puts off (`defer`): recorded with the decision, and again (the same ids and bodies) when it is carried out. */
 export function deferredItemBodies(e: Pick<EscalationBody, 'id' | 'source' | 'facts' | 'subject'>, defer: readonly number[]): OpenItemBody[] {
   const task = e.subject.startsWith('task:') ? e.subject.slice('task:'.length) : null;
-  const attempt = ((e.facts ?? {}) as { attempt?: unknown }).attempt;
-  if (task === null || typeof attempt !== 'number' || defer.length === 0) return [];
+  const facts = (e.facts ?? {}) as { attempt?: unknown; blocked?: unknown };
+  const attempt = facts.attempt;
+  // a pause's questions are all needed before the work resumes: none is put off (review r2, p8-7)
+  if (task === null || typeof attempt !== 'number' || defer.length === 0 || facts.blocked === true) return [];
   return escalationQuestions(e).filter((q) => defer.includes(q.n) && q.when !== 'later').map((q) => ({ id: openItemId(e.id, q.n), kind: 'question' as const, text: q.text, task, attempt, escalation: e.id, question: q.n, when: q.when, why: 'deferred' as const }));
 }
 

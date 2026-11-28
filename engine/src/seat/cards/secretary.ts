@@ -139,6 +139,8 @@ export function secretaryProblems(c: SecretaryCard, r: SecretaryResult, read: Re
     // the numbered questions of a 4.4 escalation (a retried round appends its reason after them); 4.3's reasons are its questions
     const questions = c.request.reasons.filter((x) => /^Q\d+ \((before-review|later)\): /.test(x)).length || c.request.reasons.length;
     if (r.option !== 'answer' || c.request.source !== 'constructor-decision') out.push('defer: only for option "answer" on a Constructor\'s questions');
+    // review r2 (p8-7): a pause's questions are all needed before the work resumes (its escalation is cblk.<step>.<n>)
+    else if (c.request.id.startsWith('cblk.')) out.push('defer: a Constructor that stopped to ask needs each of its questions answered before the work resumes: none is put off');
     else if ((r.defer ?? []).some((n) => n > questions)) out.push(`defer: name questions by their numbers, 1 to ${questions}`);
   }
   if ((r.option === 'send-back' || r.option === 'replan' || r.option === 'rework' || r.option === 'answer') && r.instructions.trim() === '') out.push(`instructions: option "${r.option}" needs the instructions`);
