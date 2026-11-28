@@ -46,7 +46,7 @@ Every command prints its operation id; `--op <id>` returns a completed result on
 A dispatch write over budget (`OVER_BUDGET`) retries once after a short wait; after two failures it says nothing was written, so retry it.
 `NOT_READY` means the step changed or must wait: read next again and use what it offers.
 Dispatch refreshes decisions, authorizations and constraints in the card; a contested fast-mode input can hold production.
-A dispatch prints its must-read pages; past config `mustReadWarnPages` (default 6) it warns you that the card is heavy. Nothing waits on it.
+A dispatch prints its must-read pages and its card's size with the largest sections; past config `mustReadWarnPages` (default 6) or `cardWarnBytes` (default 64 KiB) it warns you that the card is heavy. Nothing waits on it.
 A seat's hand-back can record a note about a write its sandbox could not make (older text: "left to the PM"); your next pass carries it out.
 
 ## Decisions
@@ -77,6 +77,12 @@ A failed old one-shot Secretary step also routes to the PM inbox; do not ask the
 The program validates the option, authority, classification, grant limit and must-reads before carrying it out.
 It writes your ruling `j.sec.<id>` with its effect; a PM answer gets `j.pm.<id>` only at application.
 Changed authority can return an escalation for a fresh round.
+
+An operating ruling you would give again and again: say it once, `mp sec instruct <mission> <id> --text "…" [--tasks <ids> | --repair <R-n>]`; it is yours, within the plan, never a proof input or a standard.
+Addressed, it reaches those tasks' cards (or the repair's Architect and the tasks it touched) and nowhere else; unaddressed, it follows `--paths` and `--task-types`.
+An instruction is not a design ruling: what the plan would have to say is the Architect's, and the user's long-term rules are the PM's constraints.
+`mp sec instruct --withdraw <id> --reason "…"` takes back one of yours; the PM's constraints are not yours to change.
+A repair Architect's question goes to the PM directly, not to you: the repair is the PM's filing on the user's words.
 
 You have one grant per lineage, for 1–2 extra attempts or rounds; after that, send it to the PM.
 A PM grant does not consume yours and is not blocked by yours being spent.
@@ -191,6 +197,9 @@ Other repairs go to the Architect: reopen responsible work, change a card with n
 Only mechanical checks apply; nothing else loses proof; accepted tasks keep their cards and a changed card starts a new attempt carrying prior work.
 A changed card also answers a waiting re-plan; `repair-decided` names a pass, and used-up returns go to WI-08.
 The reason appears on cards, in why and at close; repairs require an open mission.
+The Architect's note on a repair decision is recorded and printed on the cards of the tasks it added, changed or reopened, with the repair, on every later attempt too.
+An Architect that cannot decide hands back a question with no edit; it waits in the PM inbox (`repair-question`), and the PM's answer starts the repair's next Architect step with it on the card.
+`mp read repairs <mission>` shows each repair, its note, the tasks it touched with their state, and whether it is done.
 
 An exploration planned after others starts once they settle; its author must read their hand-offs and latest versions, its Crititor, Stabilizer and interpreter may, and blind executors do not see them.
 Without `after`, other explorations' results do not reach the seats.

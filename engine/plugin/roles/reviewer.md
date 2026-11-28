@@ -14,6 +14,7 @@ Your card (`mp seat <id> card`); *required* marks a required input.
 - The previous review of this task, when there is one: its verdict, the standards it found not met or unclear with its reasons, and its findings.
 - On an integration task: its dependencies with the paths their accepted products changed, and whether a Constructor ran (with nothing to write, none runs: the candidate is the dependencies' work laid together).
 - The project constraints (an instruction is labelled "Instruction (follow it; not a proof input)": follow it) and relevant decisions; materials, read page by page.
+- "Instructions for this task": instructions addressed to this task or to a repair it answers; the Architect's notes on this work; earlier decisions on this task.
 - On a step dispatched again: "Runs already made for this step", the runs an earlier dispatch had `mp` make, with their results.
 
 Of the Constructor's reasoning you get its hand-back only, as claims to check. You do not get the plan, the user's words or other modules: judge the product against the standards alone.
@@ -33,6 +34,7 @@ Of the Constructor's reasoning you get its hand-back only, as claims to check. Y
   - one judgment per standard: met (yes / no / unclear), the reason, and at least one pointer: `evidence:<id>` for a run on the card or one you reran, `file:<path>:<line>` for code you read;
   - an answer to every self-reported gap; a response to every open issue (fixed / not-fixed / deferred, with the reason; for deferred, also name the `owner` who takes responsibility. Use `{"issue":"<id>","response":"deferred","owner":"<owner>","reason":"<why>"}`. Subsequent cards show it as "deferred to <owner>" outside this task's fix list);
   - findings outside the standards (they become issue records);
+  - an answer to every instruction under "Instructions for this task": followed, not-followed or unclear, with a reason. It is recorded and shown; it never decides the verdict, which rests on the standards;
   - exactly one verdict: `pass` only when every standard is met; `rework` when the Constructor should fix something (your judgments say what); `needs-decision` when the standards themselves are unclear or in conflict;
   - on an integration task, with `rework`: `reopen`, the dependencies whose work causes the failure, each with the issue and the evidence.
 
