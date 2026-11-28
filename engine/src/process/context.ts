@@ -4,7 +4,7 @@
 // runs: actions.ts). A context lives for one `mp` process; nothing here runs in the background.
 
 import { requireSecretary, liveSecretary, requireDriver } from '../memory/resident.ts';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statfsSync } from 'node:fs';
 import type { Filler, Memory } from '../memory/index.ts';
 import { openMemory, type OpenOptions } from '../memory/index.ts';
 import { currentEnvironment, type CurrentEnvironment, type EnvironmentParts } from '../evaluator/index.ts';
@@ -89,6 +89,18 @@ export interface ProcessOptions {
   readonly mustReadWarnPages?: number;
   /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`). Default LOOP_CAPS.rework (2). */
   readonly reworkCap?: number;
+  /** 4.4 (F6, H-3): config.json `limits`; while one is passed, new Constructor steps are held. Default none. */
+  readonly limits?: DiskLimits;
+  /** Tests: the free bytes of the project's disk, instead of the file system's (statfs). */
+  readonly diskFree?: () => number | null;
+}
+
+/** 4.4 (F6, H-3): the disk limits a project may set; none by default. */
+export interface DiskLimits {
+  /** New Constructor steps wait while this many worktrees (or more) are on disk. */
+  readonly worktrees?: number;
+  /** New Constructor steps wait while the project's disk has fewer free bytes. */
+  readonly freeBytes?: number;
 }
 
 export interface ProcessContext {
@@ -133,6 +145,10 @@ export interface ProcessContext {
   readonly mustReadWarnPages: number;
   /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`, default 2), read wherever the loop's state is. */
   readonly reworkCap: number;
+  /** 4.4 (F6, H-3): the disk limits of config.json (empty: none). */
+  readonly limits: DiskLimits;
+  /** 4.4 (F6): the free bytes of the project's disk, or null when they cannot be read. */
+  diskFree(): number | null;
   /** The author of the commits `mp` writes; `at` (ms) fixes their date (a retry makes the same commit). */
   ident(at?: number): Ident;
   /** The committer of the delivery and candidate commits (config `commit.committer`, else the author); `at` as for ident. */
@@ -188,6 +204,16 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     startOnHandback: o.startOnHandback ?? [],
     mustReadWarnPages: o.mustReadWarnPages ?? MUST_READ_WARN_PAGES,
     reworkCap: o.reworkCap ?? LOOP_CAPS.rework,
+    limits: o.limits ?? {},
+    diskFree(): number | null {
+      if (o.diskFree !== undefined) return o.diskFree();
+      try {
+        const s = statfsSync(memory.paths.root);
+        return Number(s.bavail) * Number(s.bsize);
+      } catch {
+        return null;
+      }
+    },
     cleanupCommands: o.cleanupCommands ?? [],
     ident(at?: number): Ident {
       return dated(o.ident ?? DEFAULT_IDENT, at);

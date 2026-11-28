@@ -29,12 +29,13 @@ import type { DetailedPlanDoc, DetailedTask } from '../src/flow/plandoc.ts';
 import { noticeAudience, PM_NOTICE_ACTIONS } from '../src/process/noticeAudience.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import { answerEscalation, type EscalationBody } from '../src/flow/secretary.ts';
-import { constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
+import { constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { pmDispatch, pmNext, pmRepair, pmSay } from '../src/process/pm.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import type { ConstructorCard, ReviewerCard } from '../src/seat/card.ts';
 import '../src/seat/cards/index.ts';
 import type { ArchitectRepairCard } from '../src/seat/cards/architect.ts';
+import type { SecretaryCard } from '../src/seat/cards/secretary.ts';
 import { cli } from './cli-fixtures.ts';
 import { recordRepair, repairStep } from '../src/flow/repair.ts';
 import { recordItem } from '../src/flow/requirements.ts';
@@ -893,6 +894,36 @@ describe('4.4 F13: a reopen moves only from the state it was read in, on the pla
     assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.3');
     assert.equal(await acceptedProduct(flowCtx(w, M), 'tail'), 'prod.con.m1.tail.1', 'tail does not wait for ever');
     assert.ok((await events(w, 'task:tail', 'dispatched')).find((e) => e.body.k === 1)!.body.prerequisites.includes('prod.con.m1.impl.3'));
+    await settled(w, engine);
+  });
+});
+
+describe('4.4 F13 with F4: a reopen and a paused attempt', () => {
+  it('a reopen pinned to an attempt whose Constructor stopped to ask waits through the pause, and opens the next attempt once the resumed attempt is accepted', async () => {
+    const { w, engine, s1, s2 } = await bothClaimed();
+    assert.deepEqual(await w.scheduler.run(s1, reopenImpl('keep the header row')), []);
+    // R-1's attempt 2 stops to ask (a blocked hand-back: no product; the attempt is paused)
+    const asks: Script = (t, s) => (t.task === 'con.m1.impl.2' ? { handBack: { ...constructorDone({ done: 'read the card; stopped before choosing', decisions_needed: ['Is the header row always present?'] }), blocked: true } } : happyScript(M)(t, s));
+    await drive(engine, w.scheduler, script({ constructor: asks, secretary: () => null }));
+    assert.deepEqual((await events(w, 'task:impl', 'paused')).map((e) => e.key), ['2#1']);
+    // R-2, decided on the attempt 1 its Architect saw, waits for the paused attempt: it neither joins it nor ends it
+    assert.deepEqual(await w.scheduler.run(s2, reopenImpl('keep quoted commas in their field')), []);
+    await drive(engine, w.scheduler, script({ secretary: () => null }));
+    assert.deepEqual((await events(w, 'repairs', REOPEN_PINNED)).map((e) => [e.key, e.body.attempt]), [['R-2:impl#1', 2]]);
+    assert.ok(!w.scheduler.tasks.has('con.m1.impl.3'), 'no next attempt while attempt 2 is paused');
+    assert.deepEqual(await events(w, 'task:impl', 'resumed'), []);
+    // the answer resumes attempt 2 on its parked edits; once it is accepted, R-2 opens attempt 3
+    const answer: Script = (t) => {
+      const c = t.card as unknown as SecretaryCard;
+      return c.request.id.startsWith('cblk.') ? { handBack: secretary(c, 'answer', { instructions: 'Yes, always.' }) } : null;
+    };
+    await drive(engine, w.scheduler, script({ secretary: answer }));
+    assert.deepEqual((await events(w, 'task:impl', 'resumed')).map((e) => [e.key, e.body.step]), [['2#1', 'con.m1.impl.2.p1']]);
+    assert.ok((await events(w, 'task:impl', 'accepted')).some((e) => e.key === '2'), 'the resumed attempt is accepted');
+    const rw = (await events(w, 'task:impl', 'rework')).find((e) => e.key === '3')!.body;
+    assert.deepEqual([rw.reason, rw.reopen, rw.issues], ['reopen', { kind: 'repair', repair: 'R-2' }, ['keep quoted commas in their field']]);
+    assert.deepEqual((await events(w, 'repairs', REOPEN_CARRIED)).map((e) => [e.key, e.body.attempt]), [['R-1:impl#1', 2], ['R-2:impl#2', 3]]);
+    assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.3');
     await settled(w, engine);
   });
 });

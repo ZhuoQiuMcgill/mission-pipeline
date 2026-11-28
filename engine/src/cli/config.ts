@@ -35,6 +35,10 @@
 //                           dispatches it; default 6; it refuses nothing
 //   loops                   (4.4) { rework }: the reworks a task's rework loop allows before the
 //                           Secretary decides (6.5); default 2; a change applies to loops not used up yet
+//   limits                  (4.4) { worktrees?, freeBytes? }: while this many worktrees are on disk, or
+//                           the project's disk has fewer free bytes, new Constructor steps are held
+//                           with the reason shown (`mp read scratch` lists the space); default none;
+//                           claims at the same moment can exceed a limit by a few (it is no quota)
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -93,6 +97,8 @@ export const ConfigSchema = z
     mustReadWarnPages: z.number().int().min(1).max(10_000).optional(),
     // 4.4 (F12 c): the rework cap per lineage (6.5, LOOP_CAPS.rework); absent: 2, as in 4.3
     loops: z.object({ rework: z.number().int().min(0).max(100).optional() }).strict().optional(),
+    // 4.4 (F6, H-3): while one is passed, new Constructor steps are held with the reason shown; default none
+    limits: z.object({ worktrees: z.number().int().min(1).max(100_000).optional(), freeBytes: z.number().int().min(0).optional() }).strict().optional(),
   })
   .strict();
 

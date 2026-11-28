@@ -10,10 +10,12 @@
 //   previous-handback    a rework's Constructor card: that attempt's own hand-back
 //   feasibility-report   a revision's Architect card and the next feasibility card: the report of the
 //                        last feasibility return, carried through the mechanical returns after it
+//   paused-handback      4.4 (F4): a resumed Constructor's card: the hand-back with which its attempt
+//                        stopped to ask
 
 import type { ArchitectFeasibilityResult } from '../seat/cards/architect.ts';
 import { materialPageCount, type MaterialRef } from '../seat/cards/common.ts';
-import type { ConstructorResult, ReviewerResult } from '../seat/results.ts';
+import { constructorQuestions, type ConstructorResult, type ReviewerResult } from '../seat/results.ts';
 import type { FlowCtx } from './context.ts';
 import { PLAN_LINE } from './plandoc.ts';
 import type { AcceptedHandBack } from './ports.ts';
@@ -22,6 +24,7 @@ export const CONSTRUCTOR_CLAIMS_MATERIAL = 'constructor-claims';
 export const PREVIOUS_REVIEW_MATERIAL = 'previous-review';
 export const PREVIOUS_HANDBACK_MATERIAL = 'previous-handback';
 export const FEASIBILITY_REPORT_MATERIAL = 'feasibility-report';
+export const PAUSED_HANDBACK_MATERIAL = 'paused-handback';
 
 /** What a material is built from: an accepted hand-back and its report's text (null: not readable). */
 export interface HandBackSource {
@@ -95,6 +98,8 @@ export function attach(xs: ReadonlyArray<Attached | null>, o: { readonly materia
 
 const reportText = (s: HandBackSource): string => (s.report === null ? '(the report could not be read)' : s.report.trim() === '' ? '(empty)' : s.report.trim());
 const items = (xs: readonly string[]): string => (xs.length === 0 ? 'None.' : xs.map((x) => `- ${x}`).join('\n'));
+/** 4.4 (F4): a hand-back's questions, each with when it must be settled. */
+const questions = (r: Partial<ConstructorResult>): string[] => constructorQuestions({ decisions_needed: r.decisions_needed ?? [] }).map((q) => `${q.text} (${q.when})`);
 
 /** The Reviewer's material: the Constructor's hand-back of the attempt under review (its report, `done`, `decisions_needed`). */
 export function claimsMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly task: string; readonly attempt: number }): Attached | null {
@@ -108,7 +113,7 @@ export function claimsMaterial(put: (doc: string) => string, s: HandBackSource |
     r.done,
     '',
     '## Questions it raised (decisions_needed)',
-    items(r.decisions_needed ?? []),
+    items(questions(r)),
     '',
     '## Its report',
     reportText(s),
@@ -156,13 +161,34 @@ export function previousHandBackMaterial(put: (doc: string) => string, s: HandBa
     items(r.unfixed_problems ?? []),
     '',
     '## Questions it raised',
-    items(r.decisions_needed ?? []),
+    items(questions(r)),
     '',
     '## Its report',
     reportText(s),
     '',
   ].join('\n');
   return optional(put, PREVIOUS_HANDBACK_MATERIAL, `Your earlier hand-back (attempt ${o.attempt})`, doc, s);
+}
+
+/** 4.4 (F4): a resumed attempt's material: the hand-back with which the attempt stopped to ask (pause n). */
+export function pausedHandBackMaterial(put: (doc: string) => string, s: HandBackSource | null, o: { readonly attempt: number; readonly pause: number; readonly parked: string }): Attached | null {
+  const r = (s?.hb.result ?? null) as Partial<ConstructorResult> | null;
+  if (s === null || r === null || typeof r.done !== 'string') return null;
+  const doc = [
+    `# The hand-back with which this attempt stopped to ask (attempt ${o.attempt}, pause ${o.pause})`,
+    `Dispatch ${s.hb.dispatch}. Its edits are commit ${o.parked}, where your worktree starts.`,
+    '',
+    '## What it says it did so far',
+    r.done,
+    '',
+    '## Its questions',
+    items(questions(r)),
+    '',
+    '## Its report',
+    reportText(s),
+    '',
+  ].join('\n');
+  return optional(put, PAUSED_HANDBACK_MATERIAL, `The hand-back that stopped to ask (attempt ${o.attempt}, pause ${o.pause})`, doc, s);
 }
 
 /** A revision's material: the feasibility review that returned the plan (its findings, critical path and report). */
@@ -236,6 +262,10 @@ export async function previousReviewReport(ctx: FlowCtx, o: { readonly review: s
 
 export async function previousHandBack(ctx: FlowCtx, o: { readonly constructor: string; readonly attempt: number }): Promise<Attached | null> {
   return previousHandBackMaterial(putOf(ctx), await sourceOf(ctx, o.constructor), o);
+}
+
+export async function pausedHandBack(ctx: FlowCtx, o: { readonly constructor: string; readonly attempt: number; readonly pause: number; readonly parked: string }): Promise<Attached | null> {
+  return pausedHandBackMaterial(putOf(ctx), await sourceOf(ctx, o.constructor), o);
 }
 
 export async function feasibilityReport(ctx: FlowCtx, o: { readonly review: string; readonly dplan: string }): Promise<Attached | null> {

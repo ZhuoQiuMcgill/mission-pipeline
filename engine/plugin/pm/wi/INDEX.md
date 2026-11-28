@@ -14,7 +14,7 @@ Principles: an exception stops only the one affected action; the default action 
 - WI-05: The target branch moved: the delivery candidate is rebuilt on a new base
 - WI-06: A landing did not complete, or a landing intent is left open (A / in progress / B / C)
 - WI-07: A selected output's content changed on the delivery candidate
-- WI-08: A lineage's automatic loop is exhausted, or repeats the same failure (incl. an exploration's round budget, a reopened task or dependency given up, a re-plan that waits)
+- WI-08: A lineage's automatic loop is exhausted, or repeats the same failure (incl. an exploration's round budget, a reopened task or dependency given up, a re-plan that waits, a Constructor that keeps stopping to ask)
 - WI-13: Unsupported repository format or content transform, or git objects a step needs are missing
 - WI-16: A dependency cycle (incl. explorations whose `after` wait for each other)
 - WI-19: The transform description changed after acceptance

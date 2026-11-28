@@ -13,6 +13,7 @@ import { buildGraph, chain, resolveNodes, tree, walk } from '../tree.ts';
 import { fullRunMarkers } from '../../process/index.ts';
 import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
+import { listOpenItems } from '../../process/openItems.ts';
 
 function P(c: RunContext): Project {
   if (c.project === null) throw new CliError('NOT_INITIALIZED', 'no project', { exitCode: EXIT.NO_PROJECT });
@@ -203,4 +204,17 @@ const notesRead: Command = {
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+// 4.4 (F4; G5): what is left open and what became of it, from the record (p10 adds the items of an acceptance with risk)
+const openItemsRead: Command = {
+  group: 'read', name: ['open-items'], summary: 'a mission\'s open items: a Constructor\'s questions put off or raised as later, each with its task, its state, who answers it and its answer', usage: 'mp read open-items <mission>', flags: {},
+  async run(c, a) {
+    const m = positional(a, 0, 'mission');
+    const items = listOpenItems(P(c).ctx, m);
+    const who = (x: 'secretary' | 'pm' | 'user'): string => (x === 'pm' ? 'the PM' : x === 'user' ? 'the user' : 'the Secretary');
+    const lines = items.map((i) => `[${i.id}] ${i.kind}, task ${i.task} (attempt ${i.attempt}, ${i.why === 'later' ? 'raised as later' : 'put off by its answer'}): ${i.answer === null ? `open; ${who(i.decider)} answers it` : `answered by ${who(i.answer.by)}${i.answer.words !== undefined ? ` on ${i.answer.words}` : ''}`}\n  ${i.text}${i.answer !== null ? `\n  Answer: ${i.answer.answer}` : ''}${i.superseded !== undefined ? `\n  (the answer carried out on its escalation took precedence over ${who(i.superseded.by)}'s earlier answer: ${i.superseded.answer})` : ''}`);
+    const open = items.filter((i) => i.answer === null).length;
+    return ok(items.length === 0 ? `Mission ${m} has no open items.` : [`Open items of mission ${m}: ${open} open, ${items.length - open} answered`, ...lines].join('\n'), {mission: m, items});
+  },
+};
+
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, openItemsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
