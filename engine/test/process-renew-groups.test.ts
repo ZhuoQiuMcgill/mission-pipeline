@@ -8,13 +8,14 @@ import { pmRenew, runOnCommit, shellRunner } from '../src/process/index.ts';
 import { builders } from './labels-fixtures.ts';
 import { ENV_A, ENV_B, processProject } from './process-fixtures.ts';
 
+// 4.4.1 (Windows): written with node, so cmd.exe runs them as sh does (touch(1) and test(1) were POSIX only)
 const commands = [
-  { id: 'install', command: 'touch installed' },
-  { id: 'test', command: 'test -f installed' },
+  { id: 'install', command: `node -e "require('fs').writeFileSync('installed', '')"` },
+  { id: 'test', command: `node -e "process.exit(require('fs').existsSync('installed') ? 0 : 1)"` },
 ];
 
 for (const scenario of ['legacy', 'legacy-v1', 'legacy-uncited-setup', 'all-reused', 'v2-partial-reuse'] as const) {
-  test(`renew preserves the original group and records its pairs atomically: ${scenario}`, { skip: process.platform === 'win32' }, async () => {
+  test(`renew preserves the original group and records its pairs atomically: ${scenario}`, async () => {
     const calls: Array<{ command: string; cwd: string }> = [];
     const p = processProject({ options: { runner: (req) => {
       calls.push({ command: req.command, cwd: req.cwd });
