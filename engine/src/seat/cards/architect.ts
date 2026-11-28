@@ -21,7 +21,7 @@ import { canonicalJson } from '../../common/hash.ts';
 import { validateRecord } from '../../common/validate.ts';
 import { DetailedPlanDoc, DetailedTask, TaskProvenance, elementsOf, feasibilityRequired, planIdProblems, taskCardHash, type StoredDetailedPlan } from '../../flow/plandoc.ts';
 import { MECHANICAL_RULES } from '../../flow/mechanical.ts';
-import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, standardLine, type MaterialRef } from './common.ts';
+import { Binding, Command, Item, Material, ReadOnlyWorkspace, commonCardFields, list, materialPageCount, renderCommon, renderMaterials, standardText, type MaterialRef } from './common.ts';
 import { EMPTY_LIST } from './calibrator.ts';
 import { registerSeatCard, type SeatCardEntry } from './registry.ts';
 
@@ -317,7 +317,7 @@ export function renderArchitectFeasibility(c: ArchitectFeasibilityCard): string 
 /** 4.4 (F3): what the feasibility review judges of a task besides its line: its standards, requirement items, files to read and interface links. */
 function taskDetail(t: z.infer<typeof DetailedTask>): string {
   return (
-    `\n  standards: ${t.standards.map(standardLine).join('; ')}` +
+    `\n  standards: ${t.standards.map(standardText).join('; ')}` +
     `\n  requirement items: ${t.requirementItems.join(', ') || 'none'}` +
     `\n  files to read: ${t.readableFiles.join(', ') || 'none'}` +
     `\n  implements: ${t.implements.join(', ') || 'none'}; calls: ${t.calls.join(', ') || 'none'}`
@@ -466,6 +466,8 @@ export const ArchitectRepairCardSchema = z.object({
   revision: z.object({ mechanicalFailures: z.array(z.string()) }).nullable(),
   projectCommands: ProjectCommands.optional(),
   materials: z.array(Material).optional(),
+  /** 4.4 (G4): the questions this repair's Architect handed back with no edit, each with the answer of the PM (or the user). */
+  answers: z.array(z.object({ question: z.string(), answer: z.string(), by: z.string() })).optional(),
 });
 export type ArchitectRepairCard = z.infer<typeof ArchitectRepairCardSchema>;
 
@@ -476,13 +478,22 @@ export function repairPlanMaterial(put: (doc: string) => string, dplan: string, 
 }
 
 export const ArchitectRepairResultShape = {
-  reopen: z.array(z.object({ task: z.string().min(1).describe('A task with an accepted product, listed on the card.'), issue: z.string().min(1).describe('What its work must fix for this repair.') })).describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
+  reopen: z
+    .array(
+      z.object({
+        task: z.string().min(1).describe('A task with an accepted product, listed on the card.'),
+        issue: z.string().min(1).describe('What its work must fix for this repair.'),
+        // 4.4 (F12 b, #59)
+        after: z.array(z.string().min(1)).optional().describe('4.4: tasks this repair adds, changes or reopens whose new work this task builds on: its new attempt waits until they are accepted and starts on their work.'),
+      }),
+    )
+    .describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
   add: z.array(DetailedTask).describe('New tasks the repair needs, added to the plan in effect (fresh ids; dependsOn the existing tasks whose work they build on or whose paths they touch).'),
   change: z
     .array(DetailedTask)
     .optional()
     .describe('4.1.3: tasks of the plan in effect with no accepted product whose card the repair changes (the same id and kind; a new goal, standards, write scope, commands or dependencies). Each starts a new attempt under its new card, carrying its earlier work on. Never a task with an accepted product: reopen that one.'),
-  note: z.string().describe('Why this repair is these reopenings, changes and additions, in a few sentences.'),
+  note: z.string().describe('Why this repair is these reopenings, changes and additions, in a few sentences: it is recorded with the decision and printed on the cards of the tasks you reopen, change or add. With no reopen, add or change: your question for the PM.'),
 };
 const ArchitectRepairResultSchema = z.object(ArchitectRepairResultShape);
 export type ArchitectRepairResult = z.infer<typeof ArchitectRepairResultSchema>;
@@ -492,13 +503,14 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
   return (
     renderCommon(c) +
     `## The repair\n${c.repair.id} (${c.repair.kind}${c.repair.about !== null ? `, about ${c.repair.about}` : ''}): the user's reason, verbatim from ${c.repair.words}: "${c.repair.text}"\n\n` +
+    list('Your questions on this repair and the answers', (c.answers ?? []).map((x) => `You asked: ${x.question}\n  Answer (${x.by}): ${x.answer}`)) +
     `## The plan in effect\nDetailed plan ${c.dplan} (PM plan ${c.pmPlan}), ${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'}${(c.materials ?? []).length > 0 ? `, in full in material ${(c.materials ?? [])[0]!.id}` : ''}.\n\n` +
     list('Tasks', p.tasks.map((t) => `[${t.id}] ${t.kind}${t.module !== null ? ` of ${t.module}` : ''}: ${t.goal}; writes ${t.writeScope.join(', ') || 'nothing'}; depends on ${t.dependsOn.join(', ') || 'nothing'} (${prov(t.provenance)})`)) +
     list('PM plan elements an added task may trace to', c.elements.map((e) => `[${e.id}] (${e.kind}) ${e.text}`)) +
     list('Accepted work a repair may reopen (task: product, attempt, commit, paths it changed; read one with checkout --product <task>)', c.accepted.map((a) => `${a.task}: ${a.product} (attempt ${a.attempt}${a.commit !== undefined ? `, commit ${a.commit}` : ''}): ${a.changedPaths.join(', ') || 'no path'}`)) +
     list('Tasks with no accepted product (a repair may change their card)', p.tasks.filter((t) => !c.accepted.some((a) => a.task === t.id)).map((t) => t.id)) +
     list('Who changed the paths the repair is about', c.owners.map((o) => `${o.path}: ${o.owners.map((x) => `${x.task} (${x.product}, attempt ${x.attempt}${x.current ? '' : ', an earlier version'})`).join('; ') || 'no accepted product'}`)) +
-    '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. A task with an accepted product keeps its card. A task with no accepted product (not on the accepted list) may get a changed card under "change": the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs; it then starts a new attempt and carries its earlier work on. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect").\n\n' +
+    '## What to hand back\nReopen the tasks whose accepted work causes the problem (each with the issue its work must fix), and add a task only for work no existing task owns. A task with an accepted product keeps its card. A task with no accepted product (not on the accepted list) may get a changed card under "change": the same id and kind, with the goal, standards, write scope, commands or dependencies the repair needs; it then starts a new attempt and carries its earlier work on. An added task gets a fresh id, depends on the existing tasks whose work it builds on or whose paths it touches, and traces to the PM plan elements it serves (or "architect"). Your note is recorded with the decision and printed on the cards of those tasks. If you cannot decide without an answer, hand back no reopen, add or change, with your question as the note: it goes to the PM, and the repair\'s next card brings the answer.\n\n' +
     renderPlanningRules(c.projectCommands) +
     (c.revision !== null ? list('Mechanical check failures of your previous hand-back to fix', c.revision.mechanicalFailures) : '') +
     renderMaterials(c.materials ?? [])
@@ -508,7 +520,8 @@ export function renderArchitectRepair(c: ArchitectRepairCard): string {
 export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult): string[] {
   const out: string[] = [];
   const change = r.change ?? [];
-  if (r.reopen.length === 0 && r.add.length === 0 && change.length === 0) out.push('reopen, add, change: a repair reopens, changes or adds at least one task');
+  // 4.4 (G4): with no edit the note is the Architect's question for the PM; with neither, nothing is handed back
+  if (r.reopen.length === 0 && r.add.length === 0 && change.length === 0 && r.note.trim() === '') out.push('reopen, add, change: a repair reopens, changes or adds at least one task; if you cannot decide, hand back none of them with your question as the note');
   const accepted = new Set(c.accepted.map((a) => a.task));
   const named = r.reopen.map((x) => x.task);
   for (const t of new Set(named)) {
@@ -539,6 +552,16 @@ export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult)
     for (const e of elementsOf(t.provenance)) if (!elements.has(e)) out.push(`${where}[${t.id}].provenance: "${e}" is not an element of the PM plan`);
     for (const d of t.dependsOn) if (!existing.has(d) && !ids.includes(d)) out.push(`${where}[${t.id}].dependsOn: "${d}" is not a task of the plan in effect or of this repair`);
     if (t.estimate.basis.trim() === '') out.push(`${where}[${t.id}].estimate.basis: give the basis of the estimate`);
+  }
+  // 4.4 (F12 b): a reopen comes after other work of this repair only. Whether that closes a circle is checked once,
+  // by the flow after the hand-back, on what the scheduler itself waits for (execution.ts waitCircles, p7-4): a circle
+  // there is a mechanical failure that returns the decision to the Architect
+  const own = new Set([...ids, ...changed, ...named]);
+  for (const x of r.reopen) {
+    for (const a of x.after ?? []) {
+      if (a === x.task) out.push(`reopen[${x.task}].after: a task does not come after itself`);
+      else if (!own.has(a)) out.push(`reopen[${x.task}].after: "${a}" is not a task this repair adds, changes or reopens`);
+    }
   }
   return out;
 }

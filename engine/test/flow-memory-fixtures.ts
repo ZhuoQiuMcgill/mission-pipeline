@@ -416,7 +416,7 @@ process.on('exit', () => {
 });
 
 /** The flows' ports on a fresh project memory (no repository): the 4.1 counterpart of the 4.0 fakePorts(). */
-export function memoryPorts(o: { readonly now?: () => number } = {}): MemoryWorld {
+export function memoryPorts(o: { readonly now?: () => number; readonly reworkCap?: number } = {}): MemoryWorld {
   const base = mkdtempSync(join(tmpdir(), 'mp-flow-'));
   const dir = join(base, 'project');
   mkdirSync(dir, { recursive: true });
@@ -433,7 +433,7 @@ export function memoryPorts(o: { readonly now?: () => number } = {}): MemoryWorl
     collect: null,
     files: null,
   };
-  const ctx = processContext(memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null, ...(o.now !== undefined ? { now: o.now } : {}) });
+  const ctx = processContext(memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null, ...(o.now !== undefined ? { now: o.now } : {}), ...(o.reworkCap !== undefined ? { reworkCap: o.reworkCap } : {}) });
   const ledger = new HarnessLedger(ctx);
   const scheduler = new HarnessScheduler(ctx, knobs);
   const evaluator = new MemoryFlowEvaluator(ctx);
@@ -444,6 +444,13 @@ export function memoryPorts(o: { readonly now?: () => number } = {}): MemoryWorl
 export function anotherProcess(w: MemoryWorld, actions: FakeKnobs['actions']): ProcessContext {
   const knobs: FakeKnobs = { ...w.scheduler.knobs, actions };
   return processContext(w.memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null });
+}
+
+/** 4.4 (F12 c): the same memory read by an `mp` process whose config.json sets `loops.rework` to `cap` (its ledger reads that cap). */
+export function withReworkCap(w: MemoryWorld, cap: number): MemoryWorld {
+  const knobs = w.scheduler.knobs;
+  const ctx = processContext(w.memory, { observe: () => ENV, actions: (c) => fakeActions(c, knobs), workspaces: () => fakeWorkspaces(knobs), snapshotFiles: (commit) => knobs.files?.(commit) ?? null, reworkCap: cap });
+  return { ...w, ledger: new HarnessLedger(ctx) };
 }
 
 /** The user's words recorded as `mp pm say` does: their entry (W-<n>). */

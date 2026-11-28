@@ -33,6 +33,10 @@
 //                           committer defaults to the author
 //   mustReadWarnPages       (4.4) a dispatch whose must-read material has more pages warns whoever
 //                           dispatches it; default 6; it refuses nothing
+//   cardWarnBytes           (4.4) a dispatch whose card is larger warns whoever dispatches it, naming
+//                           its largest sections; default 65536; it refuses nothing
+//   loops                   (4.4) { rework }: the reworks a task's rework loop allows before the
+//                           Secretary decides (6.5); default 2; a change applies to loops not used up yet
 //   limits                  (4.4) { worktrees?, freeBytes? }: while this many worktrees are on disk, or
 //                           the project's disk has fewer free bytes, new Constructor steps are held
 //                           with the reason shown (`mp read scratch` lists the space); default none;
@@ -95,6 +99,10 @@ export const ConfigSchema = z
     startOnHandback: z.array(z.string().min(1).max(200)).max(200).optional(),
     // 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (the Secretary while one is live); default 6
     mustReadWarnPages: z.number().int().min(1).max(10_000).optional(),
+    // 4.4 (G3): above this many bytes a dispatch's card warns whoever dispatches it, naming its largest sections; default 65536
+    cardWarnBytes: z.number().int().min(1024).max(1_000_000_000).optional(),
+    // 4.4 (F12 c): the rework cap per lineage (6.5, LOOP_CAPS.rework); absent: 2, as in 4.3
+    loops: z.object({ rework: z.number().int().min(0).max(100).optional() }).strict().optional(),
     // 4.4 (F6, H-3): while one is passed, new Constructor steps are held with the reason shown; default none
     limits: z.object({ worktrees: z.number().int().min(1).max(100_000).optional(), freeBytes: z.number().int().min(0).optional() }).strict().optional(),
     // 4.4 (F10): above this many standards on a task the feasibility reviewer and the PM are told; default 7; it refuses nothing

@@ -44,6 +44,8 @@ export interface ItemVersionBody {
   readonly confirmedBy: string | null;
   /** For an authorization: when the user wants to be told (3.8 "告知条件"). */
   readonly notifyCondition: string | null;
+  /** 4.4 (G3): a decision item that names the tasks it concerns is printed on their cards only (absent: as 4.3). */
+  readonly tasks?: readonly string[];
 }
 
 export interface ConstraintBody {
@@ -54,7 +56,15 @@ export interface ConstraintBody {
   readonly scope: ConstraintScope;
   /** The words entry the constraint came from (4.1.2, `mp pm constraint add --words`), when given. */
   readonly words?: string;
+  /**
+   * 4.4 (G3): who recorded this version: "secretary" for `mp sec instruct` (an instruction within the plan,
+   * never a proof input). Absent: the PM's (4.3 and `mp pm constraint` write none, so their payload is 4.3's).
+   */
+  readonly author?: 'secretary';
 }
+
+/** 4.4 (G3): who recorded a constraint version (a 4.3 one is the PM's). */
+export const constraintAuthor = (c: Pick<ConstraintBody, 'author'>): 'pm' | 'secretary' => c.author ?? 'pm';
 
 export interface CurrentItem extends ItemVersionBody {
   readonly state: 'valid' | 'contested';
@@ -144,10 +154,13 @@ export async function recordItem(
     readonly restatement?: string;
     readonly confirmedBy?: string;
     readonly notifyCondition?: string;
+    /** 4.4 (G3): a decision's tasks (absent: every card, as 4.3). */
+    readonly tasks?: readonly string[];
   },
 ): Promise<string> {
   const ctx = flowCtx(ports, req.mission);
   const line = itemLine(req.mission, req.item);
+  if (req.tasks !== undefined && req.type !== 'decision') throw new Error(`only a decision item names the tasks it concerns (this one is a ${req.type}): nothing was recorded`);
   const ix = await basisIndex(ctx);
   checkKind(ix, line, 'a requirement item', ITEM_KINDS, req.mission);
   // a withdrawn line stays withdrawn (v51 3.1 states: valid, replaced, withdrawn, contested): a new version
@@ -163,8 +176,10 @@ export async function recordItem(
   }
   const prev = ix.current.get(line);
   const prevBody = (await eventsOf<ItemVersionBody>(ctx, REQUIREMENTS_LINE, 'item')).filter((e) => e.body.line === line).at(-1)?.body ?? null;
-  const identity = shortHash({ type: req.type, text: req.text, source: req.source });
-  if (prevBody !== null && prev === prevBody.version && shortHash({ type: prevBody.type, text: prevBody.text, source: prevBody.source }) === identity && !ix.withdrawn.has(line)) return prev;
+  // 4.4 (G3): the tasks of a decision are part of its version only when named, so a 4.3 item keeps its identity
+  const ident = (b: { type: ItemType; text: string; source: ItemSource; tasks?: readonly string[] | undefined }): string => shortHash({ type: b.type, text: b.text, source: b.source, ...(b.tasks !== undefined ? { tasks: b.tasks } : {}) });
+  const identity = ident(req);
+  if (prevBody !== null && prev === prevBody.version && ident(prevBody) === identity && !ix.withdrawn.has(line)) return prev;
   const n = prev === undefined ? 1 : Number(prev.slice(prev.lastIndexOf('.v') + 2)) + 1;
   const version = safeId(`${line}.v${n}`);
   const body: ItemVersionBody = {
@@ -176,6 +191,7 @@ export async function recordItem(
     restatement: req.restatement ?? null,
     confirmedBy: req.confirmedBy ?? null,
     notifyCondition: req.notifyCondition ?? null,
+    ...(req.tasks !== undefined ? { tasks: [...req.tasks] } : {}),
   };
   const items = (await currentItems(ctx)).filter((i) => i.line !== line).map((i) => ({ line: i.line, version: i.version }));
   items.push({ line, version });
@@ -215,13 +231,21 @@ export async function setContested(ctx: FlowCtx, line: string, contested: boolea
  */
 export async function recordConstraint(
   ports: FlowPorts,
-  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly words?: string },
+  req: { readonly mission: MissionId; readonly constraint: string; readonly kind: 'object' | 'instruction'; readonly text: string; readonly scope: ConstraintScope; readonly words?: string; readonly author?: 'secretary'; readonly expect?: string | null },
 ): Promise<string> {
   const ctx = flowCtx(ports, req.mission);
   const line = constraintLine(req.constraint);
   const ix = await basisIndex(ctx);
   if (ix.withdrawn.has(line)) throw new Error(`Constraint ${req.constraint} was withdrawn and stays withdrawn; use a new id.`);
+  // 4.4 (G3, p6-1): every write of a line (a new version, a scope) acts on the version read: its caller's (`expect`,
+  // null: none yet) or, without one, the one this call read below; checked again inside the write, so another
+  // writer's version (a PM replacement, an object constraint, which is a proof input) is never scoped, overwritten or taken over
+  const stale = `constraint ${req.constraint} changed since it was read (another version was recorded, or it was withdrawn): nothing was changed; run the command again`;
+  if (req.expect !== undefined && (ix.current.get(line) ?? null) !== req.expect) throw Object.assign(new Error(stale), { code: 'STALE_REQUEST' });
+  const guard = { guard: { absent: [], constraints: [{ line, version: req.expect !== undefined ? req.expect : ix.current.get(line) ?? null }], code: 'STALE_REQUEST', message: stale } };
   checkKind(ix, line, 'a project constraint', new Set(['constraint', 'instruction']), null);
+  // 4.4 (G3): an address is for an instruction, bound to one mission (an object constraint's scope is a proof input)
+  if ((req.scope.tasks !== undefined || req.scope.repairs !== undefined) && (req.kind !== 'instruction' || req.scope.mission === undefined)) throw new Error(`an address (tasks, repairs) is for an instruction of one mission: nothing was recorded`);
   const version = nextBasisVersion(ix, line, shortHash({ text: req.text, kind: req.kind }));
   if (version === null) {
     const cur = ix.current.get(line) as string;
@@ -232,13 +256,15 @@ export async function recordConstraint(
     await commit(ctx, `flow:constraint-scope:${req.mission}:${line}:${n}`, {
       events: [ev(ctx, REQUIREMENTS_LINE, 'constraint-scope', `${line}#${n}`, { line, version: cur, scope: req.scope })],
       records: [{ kind: 'constraint.scope', line: line as BasisLineId, scope: req.scope }],
+      ...guard,
     });
     return cur;
   }
-  const body: ConstraintBody = { line, version, kind: req.kind, text: req.text, scope: req.scope, ...(req.words !== undefined ? { words: req.words } : {}) };
+  const body: ConstraintBody = { line, version, kind: req.kind, text: req.text, scope: req.scope, ...(req.words !== undefined ? { words: req.words } : {}), ...(req.author !== undefined ? { author: req.author } : {}) };
   await commit(ctx, `flow:constraint:${req.mission}:${version}`, {
     events: [ev(ctx, REQUIREMENTS_LINE, 'constraint', version, body)],
     records: [{ kind: 'basis.version', basisKind: req.kind === 'object' ? 'constraint' : 'instruction', line: line as BasisLineId, version: version as BasisVersionId, mission: req.mission, scope: req.scope }],
+    ...guard,
   });
   return version;
 }

@@ -6,7 +6,7 @@ import { activeStops, appendRecords, cursor, dispatchInfo, factById, wordsEntry,
 import type { ObjectVersionRecord } from '../common/records.ts';
 import { DetailedPlanDoc, amendedPlan, latestEffectiveOf, type AmendmentEntry, type StoredDetailedPlan } from '../flow/plandoc.ts';
 import type { ItemVersionBody } from '../flow/requirements.ts';
-import { pmOptions } from '../flow/secretary.ts';
+import { DIRECT_TO_PM, pmOptions } from '../flow/secretary.ts';
 import { taskStatus } from './ports.ts';
 import { generations, liveSecretary, notAllowed, requireSecretary, requirePm, touchSecretary, writeGeneration } from '../memory/resident.ts';
 import { residentRecords, wordsAuthority } from '../memory/words.ts';
@@ -278,7 +278,7 @@ function inboxItems(ctx: ProcessContext): InboxItem[] {
     // 4.4 (F9, issue 62): listed from the moment the hand-back is recorded, before a pass writes the decision
     const handed = d === undefined ? handedBackDecision(ctx, round.esc.task) : undefined;
     const decided = d ?? handed;
-    const routed = is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || esc.source === 'plan-structure-change' || esc.source === 'plan-restarts-work';
+    const routed = is(e.mission, 'to-user', esc.id) || is(e.mission, 'pm-answer-rejected', `${esc.id}#${pmRound - 1}`) || decided?.classification === 'needs-user' || decided?.classification === 'needs-pm' || answer !== undefined || DIRECT_TO_PM.has(esc.source);
     if (!routed) continue;
     const id = `${e.mission}/${esc.id}`;
     const asked = is(e.mission, 'asked-user', esc.id);
@@ -510,7 +510,7 @@ export async function secCard(ctx: ProcessContext, id: string): Promise<Dispatch
     const claimed = allFlow(ctx).find((e) => e.line === `dispatch:${existing.dispatch}` && e.event === 'claimed' && e.key === 'spec');
     if (claimed?.body.generation !== g.generation) notAllowed(`${existing.dispatch} belongs to an earlier generation; release it --ended before claiming the current round`);
     const v = seatCard(ctx, existing.dispatch);
-    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: v.leaf, cardSha256: sha256(v.text), worktree: null, files: handBackFiles(existing.dispatch), prompt: '', size: cardSizeReport(ctx, dispatchView(ctx, existing.dispatch).card)};
+    return {dispatch: existing.dispatch, step: task, seat: 'secretary', kind: 'secretary', mission: round.mission, card: v.text, cardLeaf: v.leaf, cardSha256: sha256(v.text), worktree: null, files: handBackFiles(existing.dispatch), prompt: '', size: cardSizeReport(ctx, dispatchView(ctx, existing.dispatch).card, v.text)};
   }
   // 4.4 (F5): a command-line claim takes the checked path (repair starts checked first); this one prints the card to the Secretary, so it is served
   const d = await pmDispatchChecked(ctx, task, {filledBy: g.filler});

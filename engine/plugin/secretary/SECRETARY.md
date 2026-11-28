@@ -47,7 +47,7 @@ A dispatch write over budget (`OVER_BUDGET`) retries once after a short wait; af
 `NOT_READY` means the step changed or must wait: read next again and use what it offers.
 A held step is listed with its hold's id and reason (`holds` in the JSON); its claim is refused while the hold is in force.
 Dispatch refreshes decisions, authorizations and constraints in the card; a contested fast-mode input can hold production.
-A dispatch prints its must-read pages; past config `mustReadWarnPages` (default 6) it warns you that the card is heavy. Nothing waits on it.
+A dispatch prints its must-read pages and its card's size with the largest sections; past config `mustReadWarnPages` (default 6) or `cardWarnBytes` (default 64 KiB) it warns you that the card is heavy. Nothing waits on it.
 A seat's hand-back can record a note about a write its sandbox could not make (older text: "left to the PM"); your next pass carries it out.
 
 ## Decisions
@@ -78,6 +78,12 @@ A failed old one-shot Secretary step also routes to the PM inbox; do not ask the
 The program validates the option, authority, classification, grant limit and must-reads before carrying it out.
 It writes your ruling `j.sec.<id>` with its effect; a PM answer gets `j.pm.<id>` only at application.
 Changed authority can return an escalation for a fresh round.
+
+An operating ruling you would give again and again: say it once, `mp sec instruct <mission> <id> --text "…" [--tasks <ids> | --repair <R-n>]`; it is yours, within the plan, never a proof input or a standard.
+Addressed, it reaches those tasks' cards (or the repair's Architect and the tasks it touched) and nowhere else; unaddressed, it follows `--paths` and `--task-types`.
+An instruction is not a design ruling: what the plan would have to say is the Architect's, and the user's long-term rules are the PM's constraints.
+`mp sec instruct --withdraw <id> --reason "…"` takes back one of yours; the PM's constraints are not yours to change.
+A repair Architect's question goes to the PM directly, not to you: the repair is the PM's filing on the user's words.
 
 You have one grant per lineage, for 1–2 extra attempts or rounds; after that, send it to the PM.
 A PM grant does not consume yours and is not blocked by yours being spent.
@@ -201,8 +207,14 @@ A repair without a change form about an exploration gives its author the turn at
 In the attempts phase, runs already in flight finish; queued attempts the new method changes or drops are withdrawn; unchanged records keep counting.
 Other repairs go to the Architect: reopen responsible work, change a card with no accepted product, or add unowned work.
 Only mechanical checks apply; nothing else loses proof; accepted tasks keep their cards and a changed card starts a new attempt carrying prior work.
+A decision that changes a card another repair changed since its Architect's card was built goes back to that Architect once, as a mechanical return.
+A repair's reopen is not counted: its work gets a fresh rework loop. A reopen that may come after other work of its repair waits for it, and that repair's tasks wait while a dependency it reopens is pending.
+A reopen never joins an open attempt: a repair's reopen of a task with an attempt queued, claimed, paused (its Constructor stopped to ask) or in review waits for that attempt to be accepted (`reopen-pinned`), then opens the next attempt with its issue (`reopen-carried`); an issue on an attempt no seat took before it was superseded or accepted as it was goes on to the next. Notice `reopen-not-carried` (PM inbox): the task was given up or left the plan in effect, nothing is reopened for it, and the repair does not read as done. Only a reopen decided by 4.4 holds the other work of its repair; one decided or counted by 4.3 runs as 4.3 ran it.
 A changed card also answers a waiting re-plan; `repair-decided` names a pass, and used-up returns go to WI-08.
 The reason appears on cards, in why and at close; repairs require an open mission.
+The Architect's note on a repair decision is recorded and printed on the cards of the tasks it added, changed or reopened, with the repair, on every later attempt too.
+An Architect that cannot decide hands back a question with no edit; it waits in the PM inbox (`repair-question`), and the PM's answer starts the repair's next Architect step with it on the card.
+`mp read repairs <mission>` shows each repair, its note, whether it was filed again (`--again`), the tasks it touched with their state, and whether it is done. A reopen decided by 4.4 reads from its records: waiting for an attempt, carried out at an attempt (done once the task is accepted there or later, also after a re-plan or a further rework), or not carried out with the reason (the repair is then not done).
 
 An exploration planned after others starts once they settle; its author must read their hand-offs and latest versions, its Crititor, Stabilizer and interpreter may, and blind executors do not see them.
 Without `after`, other explorations' results do not reach the seats.
@@ -242,7 +254,7 @@ Integration never starts early; stable mode still requires proven dependencies.
 - A task's used-up rework loop, and a Reviewer's `needs-decision`, offer `accept-risk` when the attempt has a verified hand-back: the product is accepted as it is, its open findings quoted as risks, on the Secretary's, PM's or user's ruling (no Reviewer pass is written). It passes the same dependency gate as a Reviewer's pass: while a dependency is reopened or still in review, the decision waits, and it takes effect once that dependency is accepted again (WI-08).
 - A review whose only open standards the Reviewer could not verify from what it can see (`unv.<review>`) is not sent back by itself and spends no rework: `accept-risk` accepts the verified product with each such standard among its risks, with what would be needed; `rework` sends it back with your instructions; `answer` says what is missing or where it is, and the same candidate is reviewed again. A standard checked by a person is never put to the Reviewer.
 - `review-health` (only informs): after the Reviewer's filler changed, the pass share of its last 20 reviews fell under half of the share before; `mp read reviews <mission>` gives the shares per filler and per week. Nothing is held.
-- A review's reopen of a dependency with a used-up loop also offers the Secretary, PM and user `accept-risk`: the dependency keeps its accepted product, and the reviewed integration attempt is accepted as it is, with its open findings quoted as risks and no further review round. A repair's reopen does not offer this exit (WI-08). The accepted rebuild adopts the reviewed product with its original source; a later environment renewal or kept-product rebind still runs normally.
+- A review's reopen of a dependency with a used-up loop also offers the Secretary, PM and user `accept-risk`: the dependency keeps its accepted product, and the reviewed integration attempt is accepted as it is, with its open findings quoted as risks and no further review round. A repair's reopen does not offer this exit; its work's fresh loop offers `accept-risk` at its end, as for any attempt (WI-08). The accepted rebuild adopts the reviewed product with its original source; a later environment renewal or kept-product rebind still runs normally.
 - After landing (WI-04), supported eol/ident normalization applies only where both the blob and conversion are unchanged from the base. A changed blob or conversion needs the delivery's exact checkout bytes; otherwise the worktree is reported as inconsistent.
 - `accept-risk-waits`: the decision is kept and checked every pass until every dependency is accepted at the version the reviewed integration used. `accept-risk-moot`: no integration waits for that reopen any more, or another grant moved the dependency beyond the reviewed attempt; nothing is accepted and the decision is closed.
 - A decision that chose `replan` is routed to an Architect attempt in the same write when the decision layer is idle. Otherwise the task waits and you get notice `replan-waits` (WI-08), which says what the routing waits on and what to do. A repair that changes the task's card also answers it.

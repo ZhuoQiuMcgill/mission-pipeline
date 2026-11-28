@@ -431,6 +431,8 @@ export interface RepairBody {
   readonly text: string;
   /** What it is about: a task, an exploration, or the plan in effect as a whole. */
   readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null;
+  /** 4.4 (F13, p7-8): filed with `--again`: the PM operation that filed it (its retry returns this repair). Absent otherwise. */
+  readonly op?: string;
 }
 /** The Architect repair step's outcome, once its amendment passed the mechanical checks (event "decided", key the repair id). */
 export interface RepairDecidedBody {
@@ -438,11 +440,35 @@ export interface RepairDecidedBody {
   readonly dplan: string;
   readonly arch: string;
   readonly add: readonly string[];
-  /** The tasks it reopens, each at the attempt it was accepted at when the repair was decided. */
-  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string }>;
+  /**
+   * The tasks it reopens, each at the attempt it was accepted at when the repair was decided (4.4, F13: a task
+   * moved on since its Architect's card, at the attempt it was last accepted at; execution waits for its open attempt
+   * and then opens the next). 4.4 (F12 b): `after`, the tasks of the same repair it comes after (absent: none, every
+   * reopen before 4.4).
+   */
+  readonly reopen: ReadonlyArray<{ readonly task: string; readonly issue: string; readonly attempt: number; readonly product: string; readonly after?: readonly string[] }>;
   /** 4.1.3: the tasks with no accepted product whose card it changed (absent: none). */
   readonly changed?: readonly string[];
+  /** 4.4 (G3, F2): the Architect's note on its decision, printed on the cards of the tasks it added, changed or reopened (absent: a 4.3 decision). */
+  readonly note?: string;
+  /**
+   * 4.4 (F13, p7-1): its reopens are tracked requests (requested, carried out, not carried out: execution.ts): one
+   * whose task moved on waits for the open attempt and opens the next, or is told as not carried out, and an
+   * acceptance past it is reopened; only such a reopen holds other work of its repair (p7-r2-3). Absent: a decision
+   * of 4.3, whose reopen of a task that moved on and was accepted again since was left out by 4.3.
+   */
+  readonly tracked?: true;
 }
+/**
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (execution.ts writes and reads them; the
+ * cards and the read of repairs read them too, seat/cards/dynamic.ts reopenRecordState). Each is keyed
+ * "<repair>:<task>#<n>", n its place among the request's records. Pinned: it waits for that attempt of the task to be
+ * accepted. Carried: that attempt was opened with the repair's issue on its card. Not carried: the task was given up
+ * or left the plan; told to the PM.
+ */
+export const REOPEN_PINNED = 'reopen-pinned';
+export const REOPEN_CARRIED = 'reopen-carried';
+export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
 /** A repair as a card shows it (every card of the work it caused). */
 export interface RepairRef {
   readonly id: string;

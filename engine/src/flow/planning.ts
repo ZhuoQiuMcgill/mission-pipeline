@@ -1,6 +1,6 @@
 import { reviewInputVersions, objectConstraints, boundObjectConstraints, changedPlanningInputs, planningContext, type PlanningInputs, withdrawnPlanReason, standardLine } from '../seat/cards/inputs.ts';
 export { standardLine } from '../seat/cards/inputs.ts';
-import { productionDisputed, planningConstraints } from '../seat/cards/dynamic.ts';
+import { productionDisputed, planningConstraints, addressedForPlanning, addressedIndexOf, planReviewInstructions } from '../seat/cards/dynamic.ts';
 // The decision layer (design 3.1–3.10): PM plan → Calibrator ① → Architect (decomposition) →
 // program mechanical checks → feasibility review → Calibrator ② → the plan's tasks released;
 // Secretary escalations on the way; the plan grows by rounds.
@@ -798,7 +798,8 @@ async function submitCalibrator1(ctx: FlowCtx, b: PmBatchBody, batches: readonly
       ? `Re-check the PM plan in effect (${b.plan}, unchanged) against the requirement items as they are now (batch ${recheck.batch}): judge whether each focus element still holds against the changed items and the user's words; report every item the plan now leaves out or goes against; ask what only the user can decide.`
       : "Audit the direction of this PM plan batch against the user's words; report every finding; ask what only the user can decide.";
   const card: Calibrator1Card = {
-    ...cardBase(ctx, task, { duties, constraints: constraints.list }),
+    // 4.4 (G3, F1): with the instructions whose task types name "pm-plan" (never a proof input)
+    ...cardBase(ctx, task, { duties, constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'pm-plan')] }),
     seat: 'calibrator-1',
     target: b.plan,
     review: 'calibrator-1',
@@ -1483,6 +1484,8 @@ async function submitArchitect(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a: 
       // 4.1.2 (item 7): the project constraints that apply, so the plan respects them from the start
       constraints: planningConstraints(await currentConstraints(ctx), ctx.mission),
     }),
+    // 4.4 (G3, F1): the instructions addressed to tasks or repairs, as an index (each reaches only what it names)
+    ...addressedIndexOf(addressedForPlanning(await currentConstraints(ctx), ctx.mission).index),
     seat: 'architect-decompose',
     workspace: { snapshot: snap.path, writablePaths: [] },
     pmPlan: {
@@ -1538,7 +1541,8 @@ async function submitFeasibility(ctx: FlowCtx, b: PmBatchBody, a: AttemptBody, d
   // 4.4 (F3): the report of the review that returned the plan this one revises (optional)
   const report = await returnedFeasibility(ctx, a);
   const card: ArchitectFeasibilityCard = {
-    ...cardBase(ctx, task, { constraints: constraints.list, duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
+    // 4.4 (G3, F1): with the instructions whose task types name "detailed-plan" (never a proof input)
+    ...cardBase(ctx, task, { constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'detailed-plan')], duties: 'Check independently whether this detailed plan can work; report blocking findings and risks.' }),
     seat: 'architect-feasibility',
     workspace: { snapshot: snap.path, writablePaths: [] },
     target: dplan,
@@ -1610,7 +1614,7 @@ async function submitCalibrator2(ctx: FlowCtx, b: PmBatchBody, doc: PmPlanDoc, a
     material(ctx, 'authorizations', 'Authorizations (verbatim)', renderItems(items.filter((i) => i.type === 'authorization')) || '(none)', true, 'authorizations'),
   ];
   const card: Calibrator2Card = {
-    ...cardBase(ctx, task, { constraints: constraints.list, duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
+    ...cardBase(ctx, task, { constraints: [...constraints.list, ...planReviewInstructions(await currentConstraints(ctx), ctx.mission, 'detailed-plan')], duties: "Audit the Architect's supplements and the fidelity of the provenance mapping; pass or escalate." }),
     seat: 'calibrator-2',
     target: dplan,
     review: 'calibrator-2',

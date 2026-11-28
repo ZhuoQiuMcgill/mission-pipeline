@@ -91,6 +91,14 @@ export interface ConstraintScope {
   readonly mission?: string;
   readonly paths: readonly string[];
   readonly taskTypes: readonly string[];
+  /**
+   * 4.4 (G3): an instruction's address, bound to `mission` (task and repair ids are the mission's): the
+   * tasks it is for, and the repairs it is for (that repair's Architect and the tasks it added, changed or
+   * reopened). An addressed instruction reaches those cards and nowhere else; its paths and task types are
+   * kept for an engine that does not read the address. Absent (and on every object constraint): no address.
+   */
+  readonly tasks?: readonly string[];
+  readonly repairs?: readonly string[];
 }
 
 /** What a checked object covers, for matching constraint scopes. */

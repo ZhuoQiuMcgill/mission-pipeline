@@ -85,6 +85,11 @@ export const ReviewerResultShape = {
     owner: z.string().optional().describe('Required for deferred: who owns the issue next. It is shown as "deferred to <owner>", outside the task fix list.'),
   })).describe('Answer every listed issue on this version, including previously deferred issues. For deferred include both owner and reason; repeating a deferral does not require rework.'),
   findings: z.array(z.string()).describe('Problems outside the standards (they become issue records).'),
+  instruction_responses: z.array(z.object({
+    instruction: z.string().describe('An instruction id from "Instructions for this task" on the card.'),
+    response: z.enum(['followed', 'not-followed', 'unclear']),
+    reason: z.string().describe('Why, in a sentence.'),
+  })).optional().describe('4.4: one answer per instruction under "Instructions for this task" (leave it out when the card lists none). It is recorded and shown; it never changes the verdict: what must hold for a pass is a standard.'),
   verdict: z.enum(['pass', 'rework', 'needs-decision']).describe('pass: every standard you judge is met. A review whose only open standards are cannot-verify (and nothing else open) goes to a decider, not back to the Constructor: hand it back as needs-decision.'),
   reopen: z
     .array(z.object({ task: z.string().min(1).describe('A dependency listed on your card.'), issue: z.string().min(1).describe('What is wrong in its work.'), evidence: z.string().optional().describe('The run or file that shows it.') }))
@@ -287,6 +292,14 @@ function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultCont
   }
   if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes' && !byPerson.has(j.standard))) out.push(r.judgments.every((j) => j.met === 'yes' || j.met === 'cannot-verify' || byPerson.has(j.standard)) ? 'verdict: "pass" leaves a standard that cannot be verified: hand back "needs-decision"; a decider settles it' : 'verdict: "pass" leaves a standard not met or unclear');
   out.push(...reopenProblems(card, r));
+  // 4.4 (G3): every instruction addressed to this work is answered (followed or not, it blocks nothing)
+  const addressed = (card.addressed ?? []).map((a) => a.id);
+  const answered = (r.instruction_responses ?? []).map((i) => i.instruction);
+  for (const a of addressed) if (!answered.includes(a)) out.push(`instruction_responses: instruction "${a}" is not answered (followed, not-followed or unclear, with a reason)`);
+  for (const i of r.instruction_responses ?? []) {
+    if (!addressed.includes(i.instruction)) out.push(`instruction_responses: "${i.instruction}" is not under "Instructions for this task" on the card`);
+    if (i.reason.trim() === '') out.push(`instruction_responses[${i.instruction}]: give the reason`);
+  }
   return out;
 }
 

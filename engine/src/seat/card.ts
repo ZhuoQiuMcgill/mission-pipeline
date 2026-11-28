@@ -9,7 +9,7 @@
 
 import { z } from 'zod';
 import type { MissionId, ModuleId } from '../common/ids.ts';
-import { Command, Continuation, Interface, Item, ListRefSchema, Material, Standard, Workspace, commonCardFields, list, renderCommon, renderMaterials, standardCheck, standardLine } from './cards/common.ts';
+import { Command, Continuation, Interface, Item, ListRefSchema, Material, Standard, Workspace, commonCardFields, list, renderCommon, renderMaterials, standardCheck, standardText } from './cards/common.ts';
 import { SEAT_COMMANDS, seatCardEntry, type SeatCommand } from './cards/registry.ts';
 import { roleText } from './cards/roles.ts';
 import { isFullSuiteCommand, type SuiteCommand } from '../common/fullSuite.ts';
@@ -182,7 +182,7 @@ export function renderCard(c: SeatCard): string {
     return (
       renderCommon(c) +
       `## Goal\n${c.goal}\n\n` +
-      list('Acceptance standards', c.standards.map(standardLine)) +
+      list('Acceptance standards', c.standards.map(standardText)) +
       list('Requirement items', c.requirementItems.map((s) => `[${s.id}] ${s.text}`)) +
       (c.workspace.writablePaths.length > 0
         ? list('Write paths (relative to the repository root)', c.workspace.writablePaths)
@@ -202,7 +202,7 @@ export function renderCard(c: SeatCard): string {
     renderCommon(c) +
     `## Target\n${c.target} (review position: ${c.review})\n\n` +
     // 4.4 (F10): a standard a person checks is never put to the Reviewer as met or not met
-    list('Acceptance standards (answer every one)', c.standards.filter((s) => standardCheck(s) !== 'person').map(standardLine)) +
+    list('Acceptance standards (answer every one)', c.standards.filter((s) => standardCheck(s) !== 'person').map(standardText)) +
     list('Standards a person checks (not yours to judge: leave them out of your judgments)', c.standards.filter((s) => standardCheck(s) === 'person').map((s) => `[${s.id}] ${s.text}`)) +
     list('Interfaces', c.interfaces.map((i) => `${i.name}: ${i.definition}`)) +
     renderPlanData(c) +
