@@ -230,7 +230,7 @@ Tell the user what matters to their direction.
 Separate steps remain: `mp pm deliver`, `mp pm land`, `mp pm close`, on the same consent.
 
 Sort what the user says: a usability problem or a defect is a repair; a missing feature is a new requirement; a new question inside an exploration keeps the repair entry. A new exploration goes into the plan (`mp pm plan submit`).
-A new requirement, for work whose acceptance can be written in advance: `mp pm extend <mission> --words W-<n> --item <id> --text "<the item>" --quote "<verbatim>"`; several requests of the user go in one filing (repeat `--item`, `--text`, `--quote`; `--item-words` where an item has its own words).
+A new requirement, for work whose acceptance can be written in advance: `mp pm extend <mission> --words W-<n> --item <id> --text "<the item>" --quote "<verbatim>" [--type goal|acceptance|limit]`; several requests of the user go in one filing (repeat `--item`, `--text`, `--quote`; `--item-words` where an item has its own words).
 It records the items and starts the work on a repair's light path in the same write: one Architect step under the mechanical checks, no Calibrator, no feasibility review. The work is bound to the items; the reads show them apart from the plan's.
 If the user takes every item back (`mp pm requirement withdraw`) before its amendment is applied, the filing ends; afterwards, the work bound to a withdrawn item asks a decider, also when its product is made after the withdrawal.
 The same `mp pm extend` again returns the filing while some task it added, changed or reopened is in the plan in effect, and files the items again as recorded once a changed plan has dropped all of them; a retry of the same `--op` returns the filing that operation filed or returned.

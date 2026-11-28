@@ -7,8 +7,10 @@ the 4.3 rulings (`DesignDoc_PMSecretary_2026-11-06_v03.md`, F-1 to F-9), with D-
 
 4.4.0 was built in twelve work packages on one integration branch. Each package was built by one
 model and reviewed against the design by a second model in bounded rounds; each finding was fixed with
-a test that fails without the fix, or overruled with its reason. The release was then reviewed once as
-a whole. The items below were not fixed: they do not produce a wrong result in normal use, or they are
+a test that fails without the fix, or overruled with its reason. A verification then ran 4.4 on
+memories written by 4.3 (a copy of a three-week mission, and memories built with 4.3's own fixtures and
+continued under 4.4); four small follow-ups came of it. The release was then reviewed once as a whole.
+The items below were not fixed: they do not produce a wrong result in normal use, or they are
 4.3 behaviour that 4.4 leaves as it was. Under P-4 (D-1), a rare case gets detection, a safe default and
 a work-instruction line, not a new mechanism. What a user must know is in the CHANGELOG and in the
 engine README's known limitations.
@@ -44,6 +46,18 @@ engine README's known limitations.
   recorded and returned to the Secretary like the other replies, and a grant prints the latest answer
   on the next attempt's Constructor and Reviewer cards. The program grants no attempt in the decider's
   place (P-6).
+- **The binding of a new requirement's work (G9).** G9 binds every task to the item of "a filing with
+  one item", and asks the Architect to name the items on each task of a filing with several. Built: the
+  count is of the filing's items in force when its amendment is applied, so a filing of two items of
+  which the user withdrew one binds every task to the other; the Architect's card, rebuilt at its claim,
+  states the rule with those items. The binding follows what the user still wants (P-3) and what the
+  Architect was told.
+- **A withdrawn item of a new requirement (G9).** G9 says a product bound to the item "follows the
+  rules that exist". Under those rules a product made after an item's withdrawal no longer carries the
+  item. Built: an item a task took through a filing stays in its product's contract once withdrawn,
+  also for a product made after the withdrawal, so the existing "basis withdrawn" escalation puts the
+  work before a decider; an item of the plan keeps 4.3's rule. A filing exists for its items: work made
+  for an item the user took back is not accepted silently (P-3, P-7).
 - **One release.** The plan's two releases, 4.4.0 and 4.4.1, are one release, 4.4.0 (H-11).
 
 ## The PM's inbox and the user's words (`src/process/secretary.ts`, `src/memory/words.ts`, `src/flow/waivers.ts`)
@@ -77,13 +91,29 @@ engine README's known limitations.
 - After a power loss a detached worker has neither a result nor an end record, so `mp pm secretary
   stop --idle` keeps refusing. The refusal names the run; the plain `mp pm secretary stop` is the way
   through.
+- An unacknowledged PM note is printed again by every `mp sec next` pass until the Secretary
+  acknowledges it (`mp sec ack-note`): on a copy of a long mission with 19 such notes, they were most of
+  what each pass repeated. What to do: acknowledge a note once its instruction is taken into account.
+- Sizes of the reads on a long mission (a copy of a three-week mission written by 4.3): `mp read tree`
+  printed 1.6 MB in 6,117 lines, `mp read notes` (with or without `--all`) 132 KB. Both are read on
+  the user's request only; what to do: read one subject (`mp read show`, `mp read why`) instead.
 
-## Repairs and the cap (`src/flow/execution.ts`, `src/flow/repair.ts`)
+## Repairs, new requirements and the cap (`src/flow/execution.ts`, `src/flow/repair.ts`, `src/cli/workReads.ts`)
 
 - A repair decision of 4.3 interrupted between its `decided` write and its counted loop return, then
   upgraded, is carried out the 4.4 way: its reopen gets a fresh loop, and a task the repair added waits
   for the reopened attempt, where 4.3 would have let the added task start while the Secretary considered
   a grant. The wait ends when the reopened attempt is accepted. A crash window of 4.3 gets no mechanism.
+- The items a task carries through a new requirement are read from the amendment whose card the task
+  still has. A task whose filing card a plain repair changed, and that a later plan then carried over, is
+  read by the plain repair's card, so it carries no filing item. Rare; the reads show the task under the
+  plain repair.
+- In a filing with several items, a task on which the Architect named no item is bound to none: it is
+  not reviewed again when one of the items changes. The reads show it as not named (G9).
+- A repair that names no item still cannot be ended once it is filed, as in 4.3 (G9); a filing with
+  items ends when the user withdraws every item before its amendment is applied.
+- `mp read repairs` prints the bare state `architect` for a repair whose Architect step is queued or
+  in work, and `waiting` for one not yet queued.
 
 ## Questions, Architect answers and their bounds (`src/flow/execution.ts`, `src/flow/architectAsk.ts`, `src/process/pm.ts`)
 
@@ -107,6 +137,16 @@ engine README's known limitations.
 - #52: a kept product with stale prerequisites under an unchanged card has no mechanical exit; stable
   mode holds its dependents until a re-plan.
 - #56: in a continuation review, a `user-said` finding can cite only the batch's own words material.
+
+## Seen on memories written by 4.3, the same under 4.3
+
+- A task added by a repair that 4.3 decided can hand back, be verified and then be followed by no
+  product, no review and no word in any read; 4.3 does the same on the same memory. Trigger not
+  narrowed further. What to do: a repair or a re-plan that changes the task's card routes it.
+- A retry with the same `--op` of some operations 4.3 recorded (`mp pm plan submit`, `mp pm repair`,
+  `mp pm stop`) ends in `OP_CONFLICT`, under 4.3 as under 4.4; `mp pm stop-release` runs again under
+  both. The other 4.3 operations the verification retried under 4.4 replayed their receipts. What to
+  do: the first run is on the record; read what it wrote before running the command again.
 
 ## Defects of 4.3 found and not fixed
 
