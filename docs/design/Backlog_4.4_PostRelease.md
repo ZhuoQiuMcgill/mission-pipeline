@@ -1,0 +1,125 @@
+# Mission Pipeline 4.4: post-release backlog
+
+Design contract: `DesignDoc_MissionPipeline_4.4_PM_2026-11-27_v10.md` (the PM design: fixes G1 to G9,
+the principles P-1 to P-11, the rules R1 to R4), which amends `DesignDoc_MissionPipeline_4.4_2026-11-27_v04.md`
+(the repair plan: problems P1 to P17, fixes F1 to F19) and rules where the two differ. Both build on
+the 4.3 rulings (`DesignDoc_PMSecretary_2026-11-06_v03.md`, F-1 to F-9), with D-1 to D-12 and E-1 to E-5.
+
+4.4.0 was built in twelve work packages on one integration branch. Each package was built by one
+model and reviewed against the design by a second model in bounded rounds; each finding was fixed with
+a test that fails without the fix, or overruled with its reason. The release was then reviewed once as
+a whole. The items below were not fixed: they do not produce a wrong result in normal use, or they are
+4.3 behaviour that 4.4 leaves as it was. Under P-4 (D-1), a rare case gets detection, a safe default and
+a work-instruction line, not a new mechanism. What a user must know is in the CHANGELOG and in the
+engine README's known limitations.
+
+## Built differently from the design's wording
+
+- **Two reopens of one accepted attempt (the plan's F13).** F13 says a second repair's reopen joins an
+  open attempt that is not yet claimed, and is otherwise pinned to the attempt that follows. Built: it
+  is always pinned to the attempt that follows, never merged. The purpose holds: a reopen is never
+  dropped. Two review rounds found races only in the merge path, and a rare case does not get a
+  mechanism (P-4, D-1). Cost: one more attempt in a rare case.
+- **The architect-repair card at its claim (the plan's F5).** F5 says the card is rebuilt at the claim
+  as the plan-review card is. Built: it is rebuilt inside the claim with no new refusal; only when the
+  plan in effect was replaced is the claim refused, as the plan-review card's is, and the flow rebuilds
+  the step.
+- **Notices about operating detail (the plan's F10 and F16).** They name notices to the PM about the
+  health of the review seat and the size of a card and of its must-read material. Built: these go to
+  the Secretary's loop (`review-health` only informs the Secretary; the sizes are a warning printed to
+  whoever dispatches), as the PM design keeps operating detail away from the PM. The warning about many
+  standards on a task goes to the PM and the feasibility reviewer, as the plan says (`many-standards`).
+- **A decision item that names its tasks (G3).** A task whose own card links the item still shows it
+  under its requirement items, because a seat reads what its work is bound to (E-4); `--tasks` limits
+  only where a decision recorded after the plan is printed as a decision.
+- **A disk limit (G6).** Claims at the same moment can pass `limits.worktrees` or `limits.freeBytes`
+  by a few; the next claim is held. It guards against worktrees piling up and is not a quota.
+- **The evidence rule at a renewal (F10, with E-4 as the PM design applies it).** A judgment that rests
+  only on data outside the commit, citing no run, is not sent to a new review when the environment
+  changes, as in 4.1.3 for explorations: a renewal finds judgments through the runs they cite. A
+  judgment that rests on files a run kept is renewed mechanically only when the rerun wrote each of them
+  again with the same sha256; otherwise it gets a new review.
+- **An Architect's answer on a used-up rework loop (G1).** G1 records an answer on the escalation that
+  asked, as its answer. A used-up loop has no answer that continues the work, so there the answer is
+  recorded and returned to the Secretary like the other replies, and a grant prints the latest answer
+  on the next attempt's Constructor and Reviewer cards. The program grants no attempt in the decider's
+  place (P-6).
+- **One release.** The plan's two releases, 4.4.0 and 4.4.1, are one release, 4.4.0 (H-11).
+
+## The PM's inbox and the user's words (`src/process/secretary.ts`, `src/memory/words.ts`, `src/flow/waivers.ts`)
+
+- The inbox brief marks an authorization the decision cited when that item was revised since, not when
+  it was withdrawn since (a supersession's `--withdraw-items`): the brief then shows it as it was
+  decided. The PM decides on the words it cites itself, and an answer whose words lost force is
+  rejected at application. What to do: read the item (`mp read show requirement`, `mp read from W-n`)
+  before relying on an authorization a brief names.
+- A withdrawal of a mission's plan-review waiver on the user's words (`mp pm waive … --withdraw --words
+  W-n`) is not linked to those words by `mp read from W-n` when the configuration key alone had waived
+  the reviews: there is no waiver node to link it to. The withdrawal is recorded and applies; only the
+  read misses it.
+- The planner treats a withdrawal of a mission-wide plan-review waiver as covering every plan (4.3),
+  also a withdrawal of scope alone. So when a supersession withdraws a mission-wide waiver and keeps a
+  waiver for one plan, that plan runs its ordinary reviews: the safe side. The reads say "kept, but the
+  planner does not apply it". Whether a withdrawal of scope alone should leave a waiver for one plan
+  applied is a later decision.
+
+## The loop and housekeeping (`src/process/secretary.ts`, `src/process/actions.ts`, `src/evaluator/renew.ts`)
+
+- A crash between an acceptance and the next reconciliation leaves that product's commit without a
+  kept ref until the next pass, which anchors it. Nothing to do.
+- `mp sec wait --since R` can miss a release or a detached worker's end that lands after its pass read
+  the detached runs, until its time-out or its next periodic check (every 30 s). The periodic check is
+  the safe default.
+- `mp sec renew` without `--mission` can still renew a judgment wholly of a closed mission when it
+  cites a run whose candidate belongs to an open mission, and a mission literally named `project`
+  reads as one whose mission cannot be told. Both need a proof unit's own mission, which the reads do
+  not carry.
+- After a power loss a detached worker has neither a result nor an end record, so `mp pm secretary
+  stop --idle` keeps refusing. The refusal names the run; the plain `mp pm secretary stop` is the way
+  through.
+
+## Repairs and the cap (`src/flow/execution.ts`, `src/flow/repair.ts`)
+
+- A repair decision of 4.3 interrupted between its `decided` write and its counted loop return, then
+  upgraded, is carried out the 4.4 way: its reopen gets a fresh loop, and a task the repair added waits
+  for the reopened attempt, where 4.3 would have let the added task start while the Secretary considered
+  a grant. The wait ends when the reopened attempt is accepted. A crash window of 4.3 gets no mechanism.
+
+## Questions, Architect answers and their bounds (`src/flow/execution.ts`, `src/flow/architectAsk.ts`, `src/process/pm.ts`)
+
+- When a repair or a re-plan replaces a task's card while another process's pass raises that task's
+  used-up loop escalation in the same window, the escalation is raised on the old card. The next pass
+  closes it; an Architect's reply recorded before then belongs to the old card.
+- A detailed plan in effect that amendments made larger than one stored data value cannot be attached
+  again as the plan material of an Architect's answer card at its claim; the claim keeps the queued
+  card's plan material.
+- Bounds of one read, far beyond any field record: a mission with more than 10,000 PM answers (an early
+  Reviewer referral whose PM ask lies beyond them reads as waiting on the user); an attempt paused more
+  than 10,000 times (a pause id is reused); a 4.3 product first adopted after a task's 10,000th
+  acceptance (its renewal review stays held). Nothing to do.
+
+## Holds (`src/process/holds.ts`)
+
+- A hold window that repeats daily is not in 4.4: such a hold is placed by hand each day (G6).
+
+## Not in 4.4
+
+- #52: a kept product with stale prerequisites under an unchanged card has no mechanical exit; stable
+  mode holds its dependents until a re-plan.
+- #56: in a continuation review, a `user-said` finding can cite only the batch's own words material.
+
+## Defects of 4.3 found and not fixed
+
+- **`restart` never restarts a step.** `src/flow/failures.ts` offers `restart` for a failed seat only
+  when its hand-back did not come after a stop, while the scheduler's restart (`src/process/ports.ts`,
+  `HarnessScheduler.restart`) restarts only a hand-back that came after one. So whenever `restart` is
+  offered, the restart is refused and the question goes back to the PM: "cannot be restarted as it is".
+  4.4 makes the option's description say so (`test/p44-option-effects.test.ts` pins it). A fix has to
+  settle which hand-backs a restart may take, and whether `restart` is offered for a hand-back after a
+  stop once the stop is released.
+- **A waiver granted under an authorization outlives it.** The planner goes on applying a plan-review
+  waiver granted under an authorization item after that item was withdrawn (`src/flow/waivers.ts`: the
+  item is not checked). 4.4's accounting of the user's words asks the PM about such a waiver by name
+  when the authorization's words are superseded or re-tagged; a plain `mp pm requirement withdraw` of
+  the authorization does not ask. What to do: withdraw the waiver as well
+  (`mp pm waive <mission> plan-reviews --withdraw --words W-n`).
