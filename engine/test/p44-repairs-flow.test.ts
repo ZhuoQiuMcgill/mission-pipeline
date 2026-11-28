@@ -15,7 +15,7 @@ import { acceptedProduct, MERGED_DUTIES, REOPEN_MERGED, REOPEN_NOT_CARRIED, REOP
 import type { DetailedTask } from '../src/flow/plandoc.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import { answerEscalation, type EscalationBody } from '../src/flow/secretary.ts';
-import { constructorDone, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
+import { constructorDone, detailedPlan, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { pmDispatch, pmNext, pmRepair, pmSay } from '../src/process/pm.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import type { ConstructorCard, ReviewerCard } from '../src/seat/card.ts';
@@ -23,6 +23,7 @@ import '../src/seat/cards/index.ts';
 import type { ArchitectRepairCard } from '../src/seat/cards/architect.ts';
 import { cli } from './cli-fixtures.ts';
 import { recordRepair } from '../src/flow/repair.ts';
+import { recordItem } from '../src/flow/requirements.ts';
 import { attack, hand, M as XM, submit, world as xworld } from './flow-exploration-fixtures.ts';
 import { memoryPorts, say } from './flow-memory-fixtures.ts';
 import { command43, project43 } from './p43-fixtures.ts';
@@ -146,6 +147,30 @@ describe('4.4 F12 (b): a reopen may wait for other work of the same repair (#59)
     assert.match(w.scheduler.card<ConstructorCard>('con.m1.impl.2').duties, /This attempt starts once hdr is accepted for the same repair, on its new work\./);
     for (const t of ['iface', 'impl', 'hdr']) assert.ok(await acceptedProduct(flowCtx(w, M), t), t);
     await settled(w, engine);
+  });
+
+  it('a later re-plan that keeps the card re-binds the reopened product against the work it came after too (stable mode)', async () => {
+    const w = memoryPorts();
+    say(w, SEED_TEXT);
+    await seedMission(w, M);
+    await submitPmBatch(w, { mission: M, plan: pmPlan(M), userWords: ['W-1'], changedItems: ['g1', 's1', 'a1'] });
+    const engine = new FlowEngine(w);
+    await drive(engine, w.scheduler, script());
+    await repair(w, 'quoted headers are split');
+    const hdr = task({ id: 'hdr' });
+    await drive(engine, w.scheduler, script({ 'architect-repair': () => ({ handBack: { reopen: [{ task: 'impl', issue: 'read headers through hdr', after: ['hdr'] }], add: [hdr], note: 'impl reads headers through hdr' } }) }));
+    assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.2');
+    // a later decision takes the plan's proof away; the next PM plan version maps it, and its detailed plan keeps every card, hdr's too
+    const words = say(w, 'Once it has parsed a file, keep the parser read-only.');
+    await recordItem(w, { mission: M, item: 'd1', type: 'decision', text: 'The parser is read-only once it has parsed a file', source: { kind: 'words', words, quote: 'keep the parser read-only' } });
+    const next = pmPlan(M, { elements: [{ ...pmPlan(M).elements[0]!, text: 'A CSV parser library, read-only once it has parsed a file', items: ['g1', 'd1'] }, pmPlan(M).elements[1]!] });
+    await submitPmBatch(w, { mission: M, plan: next, userWords: [words], changedItems: ['d1'] });
+    const plan = detailedPlan(M);
+    await drive(engine, w.scheduler, happyScript(M, () => ({ ...plan, tasks: [...plan.tasks, hdr] })));
+    assert.equal((await planInEffect(flowCtx(w, M)))?.eff.dplan, 'dplan.m1.2.1');
+    assert.ok(!w.ledger.notices.some((n) => n.category === 'kept-product-not-rebound' && (n.detail as { task?: string }).task === 'impl'), JSON.stringify(w.ledger.notices.filter((n) => n.category === 'kept-product-not-rebound')));
+    assert.deepEqual((await events(w, 'task:impl', 'rebind')).map((e) => [e.body.from, e.body.dplan]), [['prod.con.m1.impl.2', 'dplan.m1.2.1']], 'impl is re-bound to the new plan');
+    assert.equal(await acceptedProduct(flowCtx(w, M), 'impl'), 'prod.con.m1.impl.2.b1');
   });
 
   it("a task of the repair waits while a dependency the same repair reopens is pending (a 4.3 reopen waiting at its used-up loop)", async () => {
