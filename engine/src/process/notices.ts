@@ -58,12 +58,17 @@ export function listNotices(db: Db, data: { text(h: string): string }, o: { read
       const rec = JSON.parse(r.record) as { alert?: string; notice?: string; category?: string; wi?: string; body: string; trigger?: string; defaultAction?: string };
       let body: Record<string, unknown> = {};
       try {
-        body = JSON.parse(data.text(rec.body)) as Record<string, unknown>;
+        // a body stored as null reads as an empty one
+        body = (JSON.parse(data.text(rec.body)) ?? {}) as Record<string, unknown>;
       } catch {
         /* the hash stands in */
       }
-      const detail = body['detail'] as Record<string, unknown> | undefined;
-      if (detail !== undefined && typeof detail['handoff'] === 'string' && detail['decision'] === undefined) {try {detail['decision'] = (JSON.parse(data.text(detail['handoff'])) as {decision?: unknown}).decision;} catch { /* legacy handoff unavailable */ }}
+      // 4.4: a notice stored without a detail (null) has none to complete: only an object detail is read
+      const detail = body['detail'];
+      if (detail !== null && typeof detail === 'object') {
+        const d = detail as Record<string, unknown>;
+        if (typeof d['handoff'] === 'string' && d['decision'] === undefined) {try {d['decision'] = (JSON.parse(data.text(d['handoff'])) as {decision?: unknown}).decision;} catch { /* legacy handoff unavailable */ }}
+      }
       const raw = r.kind === 'alert' ? String(rec.alert) : String(rec.notice);
       return {
         id: noticeId(r.kind, raw),

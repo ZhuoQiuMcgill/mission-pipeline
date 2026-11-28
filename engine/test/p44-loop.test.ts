@@ -256,3 +256,20 @@ test('F8 (review p2-8): a detached run that records its result wakes wait; a for
     } finally {sec.memory.close();}
   } finally {p.cleanup();}
 });
+
+test('a notice stored without a detail (null), or with a null body, is read by mp read status, mp pm inbox and mp sec next', async () => {
+  const p = project43();
+  try {
+    const id = await live43(p);
+    const raise = (alert: string, category: string, body: unknown) => p.ctx.memory.write({}, (tx) => {raiseAlert(tx, {alert: alert as AlertId, category, wi: 'WI-20', body: tx.data.put(JSON.stringify(body)) as ContentHash});});
+    raise('n-pm-null', 'needs-user-decision', {mission: 'm1', trigger: 'a question for the user', detail: null});
+    raise('n-sec-null', 'operational-check', {mission: 'm1', trigger: 'a check needs a look', detail: null});
+    raise('n-body-null', 'operational-check', null);
+    assert.match(JSON.stringify(await done43(p, ['read','status'])), /n-pm-null/);
+    assert.match(JSON.stringify(await done43(p, ['pm','inbox'])), /n-pm-null/);
+    const next = await done43(p, ['sec','next'], id);
+    assert.ok(next.notices.some((n: any) => n.id === 'n-sec-null'));
+    assert.ok(next.notices.some((n: any) => n.id === 'n-body-null'));
+    assert.match(await text43(p, ['sec','next','--all'], id), /a check needs a look/);
+  } finally {p.cleanup();}
+});
