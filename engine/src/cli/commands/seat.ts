@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { dispatchOver, parseFiller, seatCard, seatCheckout, seatFullRun, seatHandback, seatOwners, seatRead, seatRequestEvidence, seatRerun, seatRerunDetached, seatRerunWorker, seatWait, WAIT_DEFAULT_SECONDS, withInputWarnings, type FullRunMarker, type HandBackAnswer, type RerunResult, type WorkerMessage } from '../../process/index.ts';
-import { decodeInput } from '../../common/textInput.ts';
+import { decodeInput, inputWarning } from '../../common/textInput.ts';
 import { artifactLines } from '../../seat/card.ts';
 import { LedgerError } from '../../memory/index.ts';
 import { flagBool, flagStr, positional, type ParsedArgs } from '../args.ts';
@@ -263,10 +263,10 @@ export function splitStdinDocument(doc: string, json: string | null): { readonly
   return { report: report === '' ? doc : `${report}\n`, json: last[1]! };
 }
 
-function stdinFiles(c: RunContext, dispatch: string, args: ParsedArgs, names: { readonly doc: string; readonly json: string; readonly jsonFlag: string }): { readonly doc: string; readonly json: string; readonly warning: string | null } {
+function stdinFiles(c: RunContext, dispatch: string, args: ParsedArgs, names: { readonly doc: string; readonly json: string; readonly jsonFlag: string; readonly files: string }): { readonly doc: string; readonly json: string; readonly warning: string | null } {
   if (c.io.stdin === undefined) throw usage('--stdin: no standard input');
   // 4.4.1 (Windows): the one reader (a byte-order mark dropped, UTF-16 decoded); the files are written as UTF-8
-  const input = decodeInput(c.io.stdin(), 'the standard input');
+  const input = decodeInput(c.io.stdin(), 'the standard input', { stdin: true });
   const text = input.text;
   if (text.trim() === '') throw usage('--stdin: the standard input is empty (your report, with the fields as its last ```json block)');
   const split = splitStdinDocument(text, flagStr(args, names.jsonFlag));
@@ -277,7 +277,7 @@ function stdinFiles(c: RunContext, dispatch: string, args: ParsedArgs, names: { 
   const json = join(dir, names.json);
   writeFileSync(doc, split.report);
   writeFileSync(json, split.json);
-  return { doc, json, warning: input.warning };
+  return { doc, json, warning: inputWarning(input, { file: names.files }) };
 }
 
 const handback: Command = {
@@ -295,7 +295,7 @@ const handback: Command = {
     let warning: string | null = null;
     if (flagBool(args, 'stdin')) {
       if (report !== null || result !== null) throw usage('--stdin or --report/--result, not both');
-      const files = stdinFiles(c, d, args, { doc: 'report.md', json: 'result.json', jsonFlag: 'result-json' });
+      const files = stdinFiles(c, d, args, { doc: 'report.md', json: 'result.json', jsonFlag: 'result-json', files: 'the files --report and --result' });
       report = files.doc;
       result = files.json;
       warning = files.warning;
@@ -326,7 +326,7 @@ const requestEvidence: Command = {
     let warning: string | null = null;
     if (flagBool(args, 'stdin')) {
       if (request !== null || notes !== null) throw usage('--stdin or --request/--notes, not both');
-      const files = stdinFiles(c, d, args, { doc: 'notes.md', json: 'request.json', jsonFlag: 'request-json' });
+      const files = stdinFiles(c, d, args, { doc: 'notes.md', json: 'request.json', jsonFlag: 'request-json', files: 'the files --request and --notes' });
       notes = files.doc;
       request = files.json;
       warning = files.warning;

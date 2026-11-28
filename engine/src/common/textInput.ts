@@ -8,7 +8,10 @@
 //   - bytes that are not UTF-8 are read as U+FFFD, as before, and the command says so in one warning
 //     line (no new refusal, R2);
 //   - a NUL with no byte-order mark is kept as it is: where it was refused it still is, and the
-//     refusal says what to do (the file is probably UTF-16 without a mark).
+//     refusal says what to do (the file is probably UTF-16 without a mark);
+//   - the standard input that began with a mark (how Windows PowerShell 5.1 pipes to a program) and
+//     holds a "?" may have lost its characters outside ASCII to "?" (5.1 pipes ASCII unless
+//     $OutputEncoding is UTF-8): the engine cannot restore them; the command goes on and says so.
 // With no byte-order mark the text is exactly what 4.4.0 read (Buffer#toString('utf8')). Line ends are
 // never changed. Not for what the engine wrote itself, git content, kept evidence or run output:
 // those are bytes.
@@ -18,13 +21,17 @@ import { readFileSync } from 'node:fs';
 
 export interface InputText {
   readonly text: string;
+  /** How the input is named in a warning ("the file msg.txt", "the standard input"). */
+  readonly what: string;
   /** The byte-order mark the input began with (dropped from the text), or null. */
   readonly bom: 'utf-8' | 'utf-16le' | 'utf-16be' | null;
   /** Bytes that are not valid in the input's encoding were read as U+FFFD. */
   readonly invalid: boolean;
   /** NUL characters in an input with no byte-order mark (probably UTF-16 without one). */
   readonly nul: boolean;
-  /** The one warning line a command that goes on prints, or null. */
+  /** The standard input began with a byte-order mark and holds a "?": what Windows PowerShell 5.1's ASCII pipe leaves of other characters. */
+  readonly markedPipe: boolean;
+  /** The one warning line a command that goes on prints, or null (inputWarning names more when the command knows it). */
   readonly warning: string | null;
 }
 
@@ -58,10 +65,23 @@ export function nulNote(t: InputText, what: string): string {
 }
 
 /**
- * The text of an input as the engine reads it. `what` names it in the warning ("the file msg.txt",
- * "the standard input"). A string (a caller that read it already, a test) is taken as it is.
+ * The one warning line of an input, or null. For the standard input that came through a marked pipe,
+ * `read` names the read that shows the recorded text (when the command knows its id) and `file` the
+ * command's file form (default `--file`).
  */
-export function decodeInput(input: string | Uint8Array, what: string): InputText {
+export function inputWarning(t: Pick<InputText, 'what' | 'bom' | 'invalid' | 'nul' | 'markedPipe'>, o: { readonly read?: string; readonly file?: string } = {}): string | null {
+  if (t.invalid) return `Warning: ${t.what} holds bytes that are not ${t.bom === null || t.bom === 'utf-8' ? 'UTF-8' : 'UTF-16'}; they are shown as U+FFFD. Save it as UTF-8 and run the command again.`;
+  if (t.nul) return `Warning: ${nulHint(t.what)}.`;
+  if (t.markedPipe) return `Warning: ${t.what} came through a pipe that marks it the way Windows PowerShell 5.1 does, and it holds "?": that shell replaces characters outside ASCII with "?" unless $OutputEncoding is UTF-8. Check the recorded text${o.read !== undefined ? ` (${o.read})` : ''}, or pass the text with ${o.file ?? '--file'}.`;
+  return null;
+}
+
+/**
+ * The text of an input as the engine reads it. `what` names it in the warning ("the file msg.txt",
+ * "the standard input"); `stdin`: it came on the standard input. A string (a caller that read it
+ * already, a test) is taken as it is.
+ */
+export function decodeInput(input: string | Uint8Array, what: string, o: { readonly stdin?: boolean } = {}): InputText {
   let text: string;
   let bom: InputText['bom'] = null;
   let invalid = false;
@@ -85,15 +105,12 @@ export function decodeInput(input: string | Uint8Array, what: string): InputText
       invalid = !isUtf8(b);
     }
     // Windows PowerShell 5.1 writes the mark twice to a program's stdin ($OutputEncoding = UTF8): a mark repeated at the start is a mark too
-    if (bom !== null) text = text.replace(/^﻿+/, '');
+    if (bom !== null) text = text.replace(/^\uFEFF+/, '');
   }
   const nul = bom === null && text.includes('\u0000');
-  const warning = invalid
-    ? `Warning: ${what} holds bytes that are not ${bom === null || bom === 'utf-8' ? 'UTF-8' : 'UTF-16'}; they are shown as U+FFFD. Save it as UTF-8 and run the command again.`
-    : nul
-      ? `Warning: ${nulHint(what)}.`
-      : null;
-  return { text, bom, invalid, nul, warning };
+  const markedPipe = o.stdin === true && bom !== null && text.includes('?');
+  const t = { text, what, bom, invalid, nul, markedPipe };
+  return { ...t, warning: inputWarning(t) };
 }
 
 /** A file a person or a seat names, read whole (errors as readFileSync throws them). */

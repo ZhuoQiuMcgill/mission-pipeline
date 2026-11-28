@@ -19,5 +19,5 @@ export function withPowerShellNote(text: string, platform: NodeJS.Platform = pro
 
 /** A PowerShell single-quoted string: each single quote (PowerShell also reads the typographic ones as quotes) doubled. */
 export function psQuote(text: string): string {
-  return `'${text.replace(/['‘’‚‛]/g, (q) => q + q)}'`;
+  return `'${text.replace(/['\u2018\u2019\u201A\u201B]/g, (q) => q + q)}'`;
 }

@@ -9,7 +9,7 @@ import { liveSecretary } from '../../memory/resident.ts';
 import { answerOutcome } from '../../process/decisions.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { sha256 } from '../../common/hash.ts';
-import { decodeInput, nulHint, nulNote, readInputFile, type InputText } from '../../common/textInput.ts';
+import { decodeInput, inputWarning, nulHint, nulNote, readInputFile, type InputText } from '../../common/textInput.ts';
 import { occursVerbatim } from '../../common/verbatim.ts';
 import type { MissionId, ObjectVersionId, ProofUnitId, StopId } from '../../common/ids.ts';
 import { ITEM_ID, missionIdProblem } from '../../common/ids.ts';
@@ -163,7 +163,7 @@ const say: Command = {
     if (file !== null) text = (input = readInputFile(file)).text;
     else if (flagBool(args, 'stdin')) {
       if (c.io.stdin === undefined) throw usage('--stdin: no standard input');
-      text = (input = decodeInput(c.io.stdin(), 'the standard input')).text;
+      text = (input = decodeInput(c.io.stdin(), 'the standard input', { stdin: true })).text;
     } else {
       if (args.positionals.length === 0) throw usage('the user\'s message, verbatim (or --file <file>, --stdin)');
       text = args.positionals.join(' ');
@@ -174,7 +174,9 @@ const say: Command = {
     if (input?.nul === true) throw refused('BAD_REQUEST', `${nulHint(file !== null ? `the file ${file}` : 'the standard input')} (a words entry is text without NUL); nothing was recorded`);
     const r = pmSay(p.ctx, text, {op: c.op!, tags: flagList(args, 'tag'), supersedes: flagList(args, 'supersedes'), withdraw: flagList(args, 'withdraw-items'), keep: flagList(args, 'keep-items')});
     const stop = detectStop(text);
-    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`, ...(input?.warning != null ? [input.warning] : []), ...tagsReportLines(r)];
+    // 4.4.1: the reader's warning line; after a marked pipe (Windows PowerShell 5.1) it names the read that shows what was recorded
+    const warning = input === null ? null : inputWarning(input, { read: `mp read show words ${r.words}` });
+    const lines = [r.repeated ? `Already recorded as ${r.words} (the same text as the latest entry).` : `Recorded as ${r.words}.`, ...(warning !== null ? [warning] : []), ...tagsReportLines(r)];
     if (stop.detected) lines.push(`These words look like a stop (${stop.triggers.join(', ')}): if the user means it, at once \`mp pm stop "<the words>" --words ${r.words}\`.`);
     return ok(lines.join('\n'), { words: r.words, repeated: r.repeated, looksLikeStop: stop.detected, kept: r.kept, withdrawn: r.withdrawn });
   },
