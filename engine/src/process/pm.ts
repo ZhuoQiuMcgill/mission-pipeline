@@ -103,7 +103,7 @@ import { ProcessError } from './errors.ts';
 import { labelView } from './labelView.ts';
 import { listNotices, markNotices, type PmNotice } from './notices.ts';
 import { DISPATCH_LINE, REDISPATCH_LOOP, handbackDoc, raiseNotice, taskStatus, type TaskSpecDoc } from './ports.ts';
-import { recordedGroup, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
+import { ownDeclaredFiles, recordedGroup, renewalGroupKey, runCwd, runOnCommit, type DeclaredCommand, type RecordedRun } from './runs.ts';
 import { keptArtifactsOf } from './keptFiles.ts';
 import { fullRunLine, heldByClose } from './close.ts';
 import { authorizationInForce, fullRunStatus } from './fullRuns.ts';
@@ -114,6 +114,7 @@ import { assertScopeNotStopped, deriveScope, type WorkScope } from '../delivery/
 import { cardForSeat, noticeOlderEnvironment } from './environmentLabels.ts';
 import { claimExplorationStep, explorationSeat } from './explorationSnapshot.ts';
 import { heldByPredecessors } from './explorationAfter.ts';
+import { heldByEndedFiling } from './filingHold.ts';
 import { heldForQuestions, openQuestionHolds } from './questions.ts';
 import { materialLeaf } from './seat.ts';
 import { currentHandUp, pmRoundOf, reopenedAt } from '../flow/architectAnswers.ts';
@@ -338,6 +339,12 @@ export function readSteps(ctx: ProcessContext, o: { readonly afters?: AfterCheck
       const after = heldByPredecessors(db, ctx.memory.data, spec);
       if (after !== null) {
         hold({ why: after, wi: null });
+        continue;
+      }
+      // 4.4 (G9, final review F4-4): a filing the user took back (every item withdrawn, or ended) asks nobody
+      const takenBack = heldByEndedFiling(db, ctx.memory.data, spec);
+      if (takenBack !== null) {
+        hold({ why: takenBack, wi: null });
         continue;
       }
       // 4.4 (F4): a review waits for the answer to its Constructor's questions; a hold on it is named beside,
@@ -635,6 +642,9 @@ function driver_pmDispatch(ctx: ProcessContext, step: string, o: { readonly fill
       // an exploration planned after others waits until they settled (explorationAfter.ts), checked in the same write
       const after = heldByPredecessors(tx, tx.data, spec);
       if (after !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${after}`);
+      // 4.4 (G9, final review F4-4): a filing taken back after the step was listed: checked in the claim's own write
+      const takenBack = heldByEndedFiling(tx, tx.data, spec);
+      if (takenBack !== null) throw new ProcessError('NOT_READY', `step ${step} is held: ${takenBack}`);
       // 4.4 (G6, F6): a hold in force, or a disk limit passed, holds a new dispatch: checked in the same write
       // review p5-3: an unpinned acceptance counts only while the product production validated is still the current one
       const hold = heldByHolds(holdsInForce(tx, tx.data, ctx.now(), o.afters), disk, { task: step, mission: task.mission, lineage: spec.lineage }, spec, ctx.secretary !== null ? 'sec' : 'pm');
@@ -951,7 +961,8 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
       skipped.push({ evidence: cand.evidence, why: 'the run recorded no candidate or command: a Reviewer judges again' });
       continue;
     }
-    const key = canonicalJson([cand.candidate, rec.fields['group'] === undefined ? ['run', rec.fields['run'] ?? rec.evidence] : ['group', rec.fields['group']]]);
+    // review F2-3: the files the group's commands name are part of it (a run never lends another its declarations)
+    const key = renewalGroupKey(cand.candidate, rec);
     const group = groups.get(key) ?? [];
     group.push(cand);
     groups.set(key, group);
@@ -987,11 +998,12 @@ async function driver_pmRenew(ctx: ProcessContext, o: { readonly mission?: strin
       // each file the original run's command named: the same sha256, written by the rerun's command (an origin not
       // established or unknown does not show it), or absent both times. An original file with no recorded hash
       // (too large to keep), or an original run whose kept files are not on the record, cannot be shown: a new review
+      // (review F2-3: the files that original run's own record names, not the first original's)
       const lostFiles = (tx: WriteTx, cand: (typeof originals)[number], x: RecordedRun): string[] => {
-        const declared = source.find((cmd) => cmd.command === cand.command && (cmd.cwd ?? '.') === cand.cwd && (cmd.artifacts ?? []).length > 0);
-        if (declared === undefined) return [];
+        const declared = ownDeclaredFiles(byEvidence.get(cand.evidence)!, cand.command!, cand.cwd, (h) => ctx.memory.data.text(h));
+        if (declared.length === 0) return [];
         const was = keptArtifactsOf(tx, tx.data, cand.evidence);
-        if (was === null) return [...declared.artifacts!];
+        if (was === null) return [...declared];
         const now = x.artifacts ?? keptArtifactsOf(tx, tx.data, x.evidence) ?? [];
         const absent = (a: { readonly why?: string | undefined } | undefined): boolean => a?.why === 'the run did not write it';
         return was.filter((a) => {

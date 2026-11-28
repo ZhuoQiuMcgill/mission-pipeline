@@ -559,6 +559,31 @@ describe('option effects: plan escalations', () => {
     assert.ok(grants(w, 'mechanical-return').length === 1);
     assert.equal(attempt, 3, 'the repair\'s Architect amended again after the grant');
   });
+
+  // 4.4 (G4; the final review, F4-4): a repair's Architect asks before it decides; the question goes to the PM alone
+  test('repair-question / answer', async () => {
+    const { w, engine } = await scripted('fast');
+    await drive(engine, w.scheduler, happyScript(M));
+    const words = say(w, 'The output loses the header row.');
+    await recordRepair(w, { mission: M, words, kind: 'defect', text: 'loses the header row', about: { kind: 'task', id: 'impl' } });
+    const cards: Array<{ answers?: Array<{ question: string; answer: string; by: string }> }> = [];
+    const architectRepair: Script = (t) => {
+      cards.push(t.card as never);
+      return { handBack: cards.length === 1 ? { reopen: [], add: [], change: [], note: 'Keep the header also for an empty file?' } : { reopen: [{ task: 'impl', issue: 'keep the header row' }], add: [], change: [], note: 'impl keeps it' } };
+    };
+    await drive(engine, w.scheduler, withKinds({ 'architect-repair': architectRepair }));
+    const esc = await ofSource(w, 'repair-question');
+    assert.ok(esc.subject === 'repair:R-1');
+    assert.deepEqual(pmOptions(esc).map((o) => o.id), ['answer'], 'its one option');
+    says(esc, 'answer', /the repair's next Architect step/);
+    await answerByPm(w, { mission: M, escalation: esc.id, option: 'answer', words: [], noWords: true, reason: 'the user wants it', instructions: 'Yes: keep it for an empty file too.' });
+    await drive(engine, w.scheduler, withKinds({ 'architect-repair': architectRepair }));
+    assert.equal(cards.length, 2, 'the repair\'s next Architect step');
+    assert.deepEqual(cards[1]?.answers?.map((a) => [a.question, a.answer, a.by]), [['Keep the header also for an empty file?', 'Yes: keep it for an empty file too.', 'pm']]);
+    const attempts = (await events<{ reason: string }>(w, { line: 'repairs', event: 'attempt' })).map((e) => e.body.reason);
+    assert.deepEqual(attempts, ['initial', 'answered'], 'the answer opens its next attempt, not counted as a return');
+    assert.ok((await events(w, { line: 'repairs', event: 'decided' })).length === 1, 'and the repair is decided on it');
+  });
 });
 
 // ---------------------------------------------------------------- explorations (exploration/step.ts, in the flow engine's step)
