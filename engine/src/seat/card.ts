@@ -68,8 +68,11 @@ export const RunArtifact = z.object({
   size: z.number().int().nonnegative().optional(),
   kept: z.string().optional(),
   why: z.string().optional(),
-  /** Review p9-7: the file was there before the command ran and is unchanged: that the command wrote it is not established. */
-  origin: z.literal('not-established').optional(),
+  /**
+   * Review p9-7: the file was there before the command ran and is unchanged: that the command wrote it is not
+   * established. Review p9-r2-3: unknown, it was there before and the two states cannot be compared.
+   */
+  origin: z.enum(['not-established', 'unknown']).optional(),
 });
 export type RunArtifactT = z.infer<typeof RunArtifact>;
 
@@ -226,8 +229,16 @@ function renderQuestions(qs: ReadonlyArray<z.infer<typeof Question>>): string {
 
 /** 4.4 (F10): the files a run kept, one line each under its run: where the copy is, or why there is none. */
 export function artifactLines(artifacts: readonly RunArtifactT[]): string {
-  // review p9-7: a file that was there before the command and is unchanged is not called written by it
-  return artifacts.map((a) => `\n  ${a.origin === 'not-established' ? 'file there after it, unchanged from before it ran (that it wrote it is not established)' : 'file it wrote'}: ${a.path}${a.kept !== undefined ? ` (sha256 ${a.sha256 ?? '?'}, ${a.size ?? '?'} bytes), kept at ${a.kept}` : `: not kept (${a.why ?? 'no reason recorded'})`}`).join('');
+  // review p9-7, p9-r2-3: a file is called written by the command only when the record shows it; one not kept is attributed to none
+  const what = (a: RunArtifactT): string =>
+    a.kept === undefined
+      ? 'file it names, not kept'
+      : a.origin === 'not-established'
+        ? 'file there after it, unchanged from before it ran (that it wrote it is not established)'
+        : a.origin === 'unknown'
+          ? 'file there after it (it was there before, and whether it wrote it is unknown)'
+          : 'file it wrote';
+  return artifacts.map((a) => `\n  ${what(a)}: ${a.path}${a.kept !== undefined ? ` (sha256 ${a.sha256 ?? '?'}, ${a.size ?? '?'} bytes), kept at ${a.kept}` : ` (${a.why ?? 'no reason recorded'})`}`).join('');
 }
 
 /** 4.4 (F10, E-4): the files outside the commit the Constructor handed in, with the attempt that handed each in. */

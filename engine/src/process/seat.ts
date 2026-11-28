@@ -31,7 +31,7 @@
 import { liveSecretary, requireSecretary } from '../memory/resident.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { canonicalJson, sha256 } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
 import { idPart } from '../common/ids.ts';
@@ -496,14 +496,15 @@ function integrationPassProblems(ctx: ProcessContext, v: DispatchView, fields: u
   if (!integrationReview(ctx, v.card)) return [];
   const r = fields as { verdict?: unknown; judgments?: Array<{ standard?: unknown; met?: unknown; evidence?: unknown }> } | null;
   if (r === null || typeof r !== 'object' || r.verdict !== 'pass') return [];
-  // 4.4 (F10, PM design §7; review p9-1): the pass rests on its full run, a declared run, and the proof contract cannot
-  // admit one judgment on both a run and data outside the commit (a judgment of outside data cites sampling runs only):
-  // such a standard goes to a decider through the fourth answer, its pointers kept; no rule is bent
-  const both = (Array.isArray(r.judgments) ? r.judgments : []).filter((j) => {
+  // 4.4 (F10, PM design §7; review p9-1, round 2): the pass rests on its full run, a declared run, and the hand-back
+  // becomes one judgment for every standard; the proof contract cannot admit one judgment on both a declared run and
+  // data outside the commit (a judgment of outside data cites sampling runs only). So each standard that rests on
+  // outside data goes to a decider through the fourth answer, its pointers kept; no rule is bent
+  const outside = (Array.isArray(r.judgments) ? r.judgments : []).filter((j) => {
     const ev = Array.isArray(j?.evidence) ? j.evidence.filter((e): e is string => typeof e === 'string') : [];
-    return j?.met === 'yes' && ev.some((e) => e.startsWith('data:')) && ev.some((e) => e.startsWith('evidence:'));
+    return j?.met === 'yes' && ev.some((e) => e.startsWith('data:'));
   });
-  if (both.length > 0) return both.map((j) => `judgments[${String(j.standard)}]: an integration pass rests on its full run, and one judgment cannot rest on a run and on data outside the commit together: answer this standard "cannot-verify" (keep both pointers, say in "needed" what would settle it) and hand back "needs-decision"; a decider settles it`);
+  if (outside.length > 0) return outside.map((j) => `judgments[${String(j.standard)}]: an integration pass rests on its full run, and the hand-back is one judgment, which cannot rest on a run and on data outside the commit together: answer this standard "cannot-verify" (keep its pointers, say in "needed" what would settle it) and hand back "needs-decision"; a decider settles it`);
   const snap = cardSnapshot(v);
   if (snap === null || !COMMIT.test(snap)) return [];
   const cited = new Set((Array.isArray(r.judgments) ? r.judgments : []).flatMap((j) => (Array.isArray(j?.evidence) ? j.evidence : [])).filter((e): e is string => typeof e === 'string' && e.startsWith('evidence:')).map((e) => e.slice('evidence:'.length)));
@@ -747,11 +748,15 @@ async function keepHandedIn(ctx: ProcessContext, data: readonly RecordedData[], 
   return out;
 }
 
-/** Whether `path` is inside the folder `dir` (both resolved through links); false when either cannot be resolved. */
+/**
+ * Whether the path as cited lies in the folder `dir`: its own folder is `dir` or inside it (both resolved through
+ * links). Review p9-r2-5: the cited name decides, not what a link at that name points to, since the clean-up of
+ * `dir` removes the name. False when either cannot be resolved.
+ */
 function insideDir(dir: string, path: string): boolean {
   try {
-    const rel = relative(realpathSync.native(dir), realpathSync.native(path));
-    return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+    const rel = relative(realpathSync.native(dir), realpathSync.native(dirname(path)));
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
   } catch {
     return false;
   }

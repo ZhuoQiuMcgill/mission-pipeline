@@ -2970,7 +2970,8 @@ async function submitReviewer(
       // the objects the version's contract relies on (v51 §5.2: a judgment conforms to the contract fixed with
       // its target), which for a version recorded under an earlier plan is that plan, not the one in effect
       reliesOn: c.putList(reliedPlans(obj, eff)),
-      revokes: null,
+      // 4.4 (F10, review p9-r2-1): the failing judgment of this very version that a decider's answer sent to this review
+      revokes: await failureToSupersede(ctx, t.id, product.object, task),
       extends: null,
       evidenceUse: { fields: ['exit'], statisticalOrExternal: false },
       superseded: [],
@@ -2998,6 +2999,23 @@ async function submitReviewer(
             : { from: product.task, objects: [product.object], step: `the candidate of task ${t.id}, attempt ${k}` },
   });
   ctx.progressed = true;
+}
+
+/**
+ * 4.4 (F10, review p9-r2-1): the judgment a new review of `target` supersedes: the task's latest review of that very
+ * version, when it failed. A failing review is followed by another review of the same version only through a
+ * decider's answer (a fourth answer's review sent back as "rework", an integration rework with nothing to reopen),
+ * and a negation stands until a pass names it (evaluator/store.ts positionAfter). Null: the latest review of the
+ * version did not fail, or there is none.
+ */
+async function failureToSupersede(ctx: FlowCtx, taskId: string, target: string, current: string): Promise<string | null> {
+  const reviews = (await readLine(ctx, taskId)).all<ReviewBody>('review').filter((r) => r.body.task !== current);
+  for (const r of reviews.toReversed()) {
+    const j = await judgmentRecordOf(ctx, r.body.judgment);
+    if (j === null || j.target !== target) continue;
+    return j.verdict === 'fail' ? j.judgment : null;
+  }
+  return null;
 }
 
 /** The previous Reviewer of the task (any attempt, before this review task): its verdict, each standard it did not find met, with the reason, and its findings. */

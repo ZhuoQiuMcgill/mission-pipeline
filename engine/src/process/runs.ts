@@ -235,6 +235,26 @@ export function normalizeCwd(cwd: string | undefined | null): string {
   return n;
 }
 
+/** 4.4 (F10, review p9-r2-2): the evidence field naming, by content hash, the files each command of the run's group names. */
+export const GROUP_FILES_FIELD = 'groupFiles';
+
+/**
+ * The command group a recorded run belongs to (its `group` field), each command with the files it names: from
+ * `groupFiles` (a data value, by index), or inline in the group (a record of the first 4.4 builds). Null: the
+ * record names no group (the caller rebuilds it from the log, as 4.3 does); undefined entries are refused there.
+ */
+export function recordedGroup(fields: Readonly<Record<string, string>>, text: (hash: string) => string): Array<Omit<DeclaredCommand, 'id'>> | null {
+  if (fields['group'] === undefined) return null;
+  const group = JSON.parse(fields['group']) as Array<Omit<DeclaredCommand, 'id'>>;
+  const ref = fields[GROUP_FILES_FIELD];
+  if (ref === undefined || !Array.isArray(group)) return group;
+  const files = JSON.parse(text(ref)) as unknown[];
+  return group.map((cmd, i) => {
+    const f = Array.isArray(files) ? files[i] : undefined;
+    return Array.isArray(f) && f.length > 0 ? { ...cmd, artifacts: f as string[] } : cmd;
+  });
+}
+
 /** The working directory a recorded run ran in ("." when it recorded none). */
 export function runCwd(fields: Readonly<Record<string, string>>): string {
   return Object.hasOwn(fields, CWD_FIELD) ? fields[CWD_FIELD]! : '.';
@@ -478,8 +498,8 @@ function summaryLeaf(o: { readonly run: string; readonly mission: string; readon
     lines.push(`- Evidence: ${r.evidence}${r.reused ? ' (reused; execution only as setup)' : ''}`, `- Result: ${r.passed ? 'passed' : 'failed'}; ${r.summary}`, `- Output sha256: ${r.fields['output'] ?? ''} (${r.tail !== '' ? 'its last lines are below; ' : ''}the whole output is not kept)`);
     const tests = Object.entries(r.fields).filter(([k]) => k.startsWith('test:'));
     if (tests.length > 0) lines.push('- Tests:', ...tests.map(([k, v]) => `  - ${k.slice(5)}: ${v}`));
-    // 4.4 (F10): the files the command wrote that mp kept
-    if (r.artifacts !== undefined && !r.reused) lines.push('- Files it names:', ...r.artifacts.map((a) => `  - ${a.path}: ${a.kept !== undefined ? `kept at ${a.kept} (sha256 ${a.sha256}, ${a.size} bytes)` : `not kept (${a.why})`}${a.origin === 'not-established' ? '; it was there before the command ran and is unchanged: that the command wrote it is not established' : ''}`));
+    // 4.4 (F10): the files the command names, as mp kept them (review p9-r2-3: what the record cannot establish is said so)
+    if (r.artifacts !== undefined && !r.reused) lines.push('- Files it names:', ...r.artifacts.map((a) => `  - ${a.path}: ${a.kept !== undefined ? `kept at ${a.kept} (sha256 ${a.sha256}, ${a.size} bytes)` : `not kept (${a.why})`}${a.kept === undefined ? '' : a.origin === 'not-established' ? '; it was there before the command ran and is unchanged: that the command wrote it is not established' : a.origin === 'unknown' ? '; it was there before the command ran, and whether the command wrote it is unknown' : ''}`));
     // a failing command's last lines, a failing setup's, and a rerun's whether it passed or failed (4.1.3)
     if (r.tail !== '') lines.push('', 'Last lines of the output:', '', fence(r.tail), r.tail, fence(r.tail));
     lines.push('');
@@ -591,8 +611,10 @@ async function executeRuns(
   const executed: RecordedRun[] = [];
   const records: EvidenceRecord[] = [];
   const staged = new Map<string, RecordedRun>();
-  // 4.4 (F10, review p9-2): a command's named files are part of its group, so a renewal reruns it with them (absent: the 4.3 group)
-  const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true, ...((c.artifacts ?? []).length > 0 ? { artifacts: [...c.artifacts!] } : {}) })));
+  const group = canonicalJson(req.commands.map((c) => ({ command: c.command, cwd: normalizeCwd(c.cwd), sampled: c.sampled === true, network: c.network === true })));
+  // 4.4 (F10, review p9-2, p9-r2-2): the commands' named files, stored once by content hash and named from each
+  // evidence record (`groupFiles`), so a renewal reruns them with their files; absent: no command names any (4.3's group)
+  const named = req.commands.some((c) => (c.artifacts ?? []).length > 0) ? ctx.memory.data.put(canonicalJson(req.commands.map((c) => [...(c.artifacts ?? [])]))) : null;
   let cleanup: readonly CleanupFailure[] = [];
   // 4.4 (F10): the kept files of this run share one bound
   const budget = keepBudget();
@@ -625,7 +647,7 @@ async function executeRuns(
         executed.push({ ...prior, command: c, reused: true, ...(setupFailure === undefined ? {} : { setupFailure, tail: tail(out.output, req.tail ?? LOCAL_TAIL) }) });
         continue;
       }
-      const fields = fieldsOf(out, { ...(req.fields ?? {}), group, [RUN_FIELD.method]: RUN_METHOD, [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: c.command, [CWD_FIELD]: rel, commandId: c.id.slice(0, 200), run, purpose: req.purpose.slice(0, 200) });
+      const fields = fieldsOf(out, { ...(req.fields ?? {}), group, ...(named !== null ? { [GROUP_FILES_FIELD]: named } : {}), [RUN_FIELD.method]: RUN_METHOD, [RUN_FIELD.candidate]: req.commit, [RUN_FIELD.command]: c.command, [CWD_FIELD]: rel, commandId: c.id.slice(0, 200), run, purpose: req.purpose.slice(0, 200) });
       const evidence = req.evidenceId?.(run, c) ?? (runClass === 'sampling' ? sampleRunId(`${run}.${idPart(c.id)}`) : `${run}.${idPart(c.id)}`);
       const rec: EvidenceRecord = { kind: 'evidence', evidence: evidence as EvidenceId, envLine: ENV_LINE, envSnapshot: env.identity as EnvSnapshotId, runClass, fields };
       validateRecord(rec);

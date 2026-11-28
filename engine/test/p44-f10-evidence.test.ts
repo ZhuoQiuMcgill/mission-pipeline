@@ -13,15 +13,17 @@ import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
+import { canonicalJson } from '../src/common/hash.ts';
 import { cal1Pass, cal2Pass } from '../src/flow/scripted.ts';
 import { renewalCandidates } from '../src/evaluator/index.ts';
 import { flowEvents, dispatchInfo } from '../src/memory/index.ts';
 import { pmDispatch, pmRenew, recordSeatHandBack, seatHandback, seatRerun, sweepTmp } from '../src/process/index.ts';
+import { recordedGroup, runOnCommit } from '../src/process/runs.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import { handbackDoc } from '../src/process/ports.ts';
-import { renderSeatCard, type ReviewerCard } from '../src/seat/card.ts';
+import { artifactLines, renderSeatCard, type ReviewerCard } from '../src/seat/card.ts';
 import '../src/seat/cards/index.ts';
-import { addDetailedPlan, CHECK_JS, ENV_A, ENV_B, handBack, readAll, readyOf, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
+import { addDetailedPlan, CHECK_JS, ENV_A, ENV_B, handBack, processProject, readAll, readyOf, startAddMission, step, write, type ProcessProject } from './process-fixtures.ts';
 import { project43 } from './p43-fixtures.ts';
 
 const sha = (b: string | Buffer): string => createHash('sha256').update(b).digest('hex');
@@ -194,7 +196,7 @@ test('review p9-2: after an environment change, a pass on a run whose command na
       if (renews) assert.deepEqual(rerun.renewed, [judgment], 'the same files: renewed as before');
       else {
         assert.deepEqual(rerun.renewed, []);
-        assert.match(rerun.refused.find((f) => f.judgment === judgment)!.reason, /^it did not write check\.log as the original run did \(missing, or another sha256\): a new review$/);
+        assert.match(rerun.refused.find((f) => f.judgment === judgment)!.reason, /^the record does not show that it repeated check\.log as the original run kept it \(missing, another sha256, no recorded hash, or not shown to be written by it\): a new review$/);
         const needed = p.ctx.memory.read((db) => flowEvents(db, { mission: 'm1' as never, line: 'renew', event: 'review-needed' }));
         assert.ok(needed.some((e) => e.key.startsWith(`${judgment}@`)), 'the existing re-review path takes it');
       }
@@ -262,4 +264,107 @@ test('review p9-5, p9-6: a Reviewer\'s cited file in its own folder is copied be
     assert.ok(existsSync(join(rdir, 'big.bin')), 'a file that could not be copied keeps the folder');
     assert.ok(rv.kind === 'recorded' && rv.keepScratch === true && rv.notes.some((n) => n.includes(`.mission-pipeline/tmp/${rd.dispatch}/ is left in place: ${join(rdir, 'big.bin')} could not be copied`)), JSON.stringify(rv));
   } finally { p.cleanup(); }
+});
+
+test('review p9-2 (round 2): a renewal is mechanical only when the record shows the rerun repeated the file: no recorded hash, or a file not shown to be written by the command, goes to a new review', async () => {
+  for (const [command, file] of [['truncate -s 70M big.bin', 'big.bin'], ['node src/check.js', 'README.md']] as const) {
+    const p = project43();
+    try {
+      const { judgment } = await reviewedOnRun(p, artifactPlan([{ id: 'check', command, artifacts: [file] }]));
+      p.reopen(ENV_B).environment();
+      const r = await pmRenew(p.ctx, { mission: 'm1' });
+      const rerun = r.reruns.find((x) => x.refused.some((f) => f.judgment === judgment));
+      assert.ok(rerun !== undefined && rerun.renewed.length === 0, JSON.stringify(r));
+      assert.match(rerun.refused.find((f) => f.judgment === judgment)!.reason, new RegExp(`^the record does not show that it repeated ${file.replace('.', '\\.')} as the original run kept it`));
+    } finally { p.cleanup(); }
+  }
+});
+
+test('review p9-r2-2: the named files of a run are stored once and named from each evidence record; renewal reads them and the inline form of earlier records', async () => {
+  const p = processProject();
+  try {
+    const ctx = p.ctx;
+    const commit = p.git('rev-parse', 'HEAD').trim();
+    const long = (i: number, j: number): string => `out/${String(i).padStart(2, '0')}-${String(j).padStart(2, '0')}-${'x'.repeat(88)}.txt`;
+    const commands = Array.from({ length: 50 }, (_, i) => ({ id: `c${i}`, command: `true ${i}`, artifacts: Array.from({ length: 20 }, (_, j) => long(i, j)) }));
+    const r = await runOnCommit(ctx, { mission: 'm1', commit, commands, purpose: 'many named files', declaration: { by: 'mp', checkout: 'clean', declared: true } });
+    assert.equal(r.runs.length, 50, 'every command is recorded: the write stays within its limit');
+    const fields = r.runs[0]!.fields;
+    assert.ok(fields['groupFiles'] !== undefined && !fields['group']!.includes('artifacts'), 'the group stays the 4.3 form; its files are named by hash');
+    const g = recordedGroup(fields, (h) => ctx.memory.data.text(h))!;
+    assert.deepEqual(g[7]!.artifacts, commands[7]!.artifacts);
+    assert.ok(g.every((c, i) => c.command === `true ${i}`));
+    // an earlier record carried its files inline in the group
+    const inline = { group: JSON.stringify([{ command: 'a', cwd: '.', sampled: false, network: false, artifacts: ['x.log'] }]) };
+    assert.deepEqual(recordedGroup(inline, () => '')![0]!.artifacts, ['x.log']);
+    // a group whose commands name no file is 4.3's: no reference
+    const plain = await runOnCommit(ctx, { mission: 'm1', commit, commands: [{ id: 'p', command: 'true plain' }], purpose: 'plain', declaration: { by: 'mp', checkout: 'clean', declared: true } });
+    assert.equal(plain.runs[0]!.fields['groupFiles'], undefined);
+    assert.equal(plain.runs[0]!.fields['group'], canonicalJson([{ command: 'true plain', cwd: '.', sampled: false, network: false }]), 'the group of 4.3');
+  } finally { p.cleanup(); }
+});
+
+test('review p9-r2-3, p9-7 (round 2): a file there before a command is compared by its size when it is too large to hash; unknown when the sizes match; a file not kept is attributed to no command', async () => {
+  const { keepBudget, keepArtifacts, artifactStates } = await import('../src/process/keptFiles.ts');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const base = mkdtempSync(join(tmpdir(), 'mp-keep2-'));
+  try {
+    const root = join(base, 'memory');
+    const dir = join(base, 'checkout');
+    mkdirSync(root);
+    mkdirSync(dir);
+    const big = 65 * 1024 * 1024;
+    writeFileSync(join(dir, 'report.bin'), '');
+    truncateSync(join(dir, 'report.bin'), big);
+    writeFileSync(join(dir, 'same.bin'), '');
+    truncateSync(join(dir, 'same.bin'), big);
+    const before = await artifactStates(dir, ['report.bin', 'same.bin']);
+    // the command replaces the large report by a short one, and rewrites the other with the same size
+    writeFileSync(join(dir, 'report.bin'), 'short report\n');
+    writeFileSync(join(dir, 'same.bin'), Buffer.alloc(big, 1));
+    const kept = await keepArtifacts(root, dir, ['report.bin', 'same.bin'], keepBudget(), before);
+    assert.equal(kept[0]!.origin, undefined, 'a size change is a change: written by it');
+    assert.ok(kept[0]!.kept !== undefined);
+    assert.equal(kept[1]!.origin, 'unknown', 'the same size and no hashes to compare: unknown');
+    const lines = artifactLines(kept);
+    assert.ok(lines.includes('\n  file it wrote: report.bin'), lines);
+    assert.ok(lines.includes('\n  file it names, not kept: same.bin ('), lines);
+    // the run's budget used up: a later command's file is not kept, and is not called written by it
+    const spent = keepBudget();
+    spent.files = 0;
+    writeFileSync(join(dir, 'late.txt'), 'late\n');
+    const late = await keepArtifacts(root, dir, ['late.txt'], spent, await artifactStates(dir, []));
+    assert.match(late[0]!.why ?? '', /^more than 20 files/);
+    assert.ok(artifactLines(late).includes('\n  file it names, not kept: late.txt (more than 20 files'), artifactLines(late));
+    assert.ok(!artifactLines(late).includes('file it wrote'));
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('review p9-5 (round 2): a Reviewer\'s cited path in its folder that is a link to a file elsewhere: the bytes it was checked against are copied and recorded', async () => {
+  const q = project43();
+  try {
+    const ctx = q.ctx;
+    const con = await toConstructor(q);
+    assert.equal((await handBack(ctx, con, constructorFields([]))).kind, 'recorded');
+    const r = await readyOf(ctx, 'reviewer');
+    const rd = pmDispatch(ctx, r.step);
+    readAll(ctx, rd.dispatch);
+    const { mkdtempSync, symlinkSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const outside = mkdtempSync(join(tmpdir(), 'mp-link-'));
+    writeFileSync(join(outside, 'measure.log'), 'latency 9 ms\n');
+    const rdir = join(ctx.memory.paths.tmp, rd.dispatch);
+    mkdirSync(rdir, { recursive: true });
+    symlinkSync(join(outside, 'measure.log'), join(rdir, 'measure.log'));
+    const cited = `data:${join(rdir, 'measure.log')}#sha256=${sha('latency 9 ms\n')}&size=13`;
+    const card = dispatchView(ctx, rd.dispatch).card as unknown as ReviewerCard;
+    const fields = { judgments: [{ standard: 'S1', met: 'yes', reason: 'measured', evidence: [`evidence:${card.verificationRuns[0]!.evidence}`, cited] }], gap_responses: [], issue_responses: [], findings: [], verdict: 'pass' };
+    const rv = await recordSeatHandBack(ctx, rd.dispatch, { report: '# r\n', fields, advance: false });
+    assert.equal(rv.kind, 'recorded', JSON.stringify(rv));
+    const doc = ctx.memory.read((db) => handbackDoc(ctx.memory.data, dispatchInfo(db, rd.dispatch)!))!;
+    assert.equal(doc.data?.[0]?.kept, `files/${sha('latency 9 ms\n')}`);
+    assert.equal(readFileSync(join(ctx.memory.paths.root, 'files', sha('latency 9 ms\n')), 'utf8'), 'latency 9 ms\n', 'the bytes checked are the bytes kept');
+    assert.ok(!existsSync(rdir), 'the clean-up removed the cited name; its bytes are kept');
+  } finally { q.cleanup(); }
 });

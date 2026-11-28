@@ -48,11 +48,13 @@ function artifactPath(dir: string, p: string): string | null {
 }
 
 /**
- * 4.4 (F10, review p9-7): the named files as they are before a command runs (commands of one run share a
- * checkout): a file's sha256, "present" when it is there but too large to hash, or absent.
+ * 4.4 (F10, review p9-7, p9-r2-3): a named file as it is before a command runs (commands of one run share a
+ * checkout): absent, or present with its size, and its sha256 when it is small enough to hash.
  */
-export async function artifactStates(dir: string, paths: readonly string[]): Promise<ReadonlyMap<string, string | null>> {
-  const out = new Map<string, string | null>();
+export type ArtifactState = { readonly size: number; readonly sha256: string | null } | null;
+
+export async function artifactStates(dir: string, paths: readonly string[]): Promise<ReadonlyMap<string, ArtifactState>> {
+  const out = new Map<string, ArtifactState>();
   for (const p of new Set(paths)) {
     const abs = artifactPath(dir, p);
     const st = abs === null ? null : await fsp.lstat(abs).catch(() => null);
@@ -61,22 +63,35 @@ export async function artifactStates(dir: string, paths: readonly string[]): Pro
       continue;
     }
     if (st.size > KEEP_FILE_BYTES) {
-      out.set(p, 'present');
+      out.set(p, { size: st.size, sha256: null });
       continue;
     }
     const c = await checkDataFile(abs, { kind: 'full' });
-    out.set(p, c.state === 'ok' ? c.sha256 : 'present');
+    out.set(p, { size: st.size, sha256: c.state === 'ok' ? c.sha256 : null });
   }
   return out;
+}
+
+/**
+ * Review p9-r2-3: whether a command wrote a named file, from its state before and after: written (absent
+ * before, or another sha256 or another size after), not established (there before with the same sha256), or
+ * unknown (there before with the same size, and no two hashes to compare).
+ */
+function originOf(was: ArtifactState, after: { readonly size?: number | undefined; readonly sha256?: string | undefined }): 'written' | 'not-established' | 'unknown' {
+  if (was === null) return 'written';
+  if (after.size !== undefined && after.size !== was.size) return 'written';
+  if (was.sha256 !== null && after.sha256 !== undefined) return was.sha256 === after.sha256 ? 'not-established' : 'written';
+  return 'unknown';
 }
 
 /**
  * 4.4 (F10): keep the files a declared command names as its artifacts, from the checkout `dir` it ran in,
  * before the checkout is removed. A path that is not a plain relative path of the checkout is not read.
  * Review p9-7: `before`, the files as they were before the command ran; one that was there and is unchanged
- * is kept with its origin marked not established (an earlier command, or the commit, may have written it).
+ * is kept with its origin marked not established (an earlier command, or the commit, may have written it), and
+ * one whose change cannot be told (p9-r2-3) is marked unknown. A file not kept is attributed to no command.
  */
-export async function keepArtifacts(root: string, dir: string, paths: readonly string[], budget: KeepBudget, before?: ReadonlyMap<string, string | null>): Promise<RunArtifactT[]> {
+export async function keepArtifacts(root: string, dir: string, paths: readonly string[], budget: KeepBudget, before?: ReadonlyMap<string, ArtifactState>): Promise<RunArtifactT[]> {
   const out: RunArtifactT[] = [];
   for (const p of [...new Set(paths)]) {
     const abs = artifactPath(dir, p);
@@ -85,9 +100,8 @@ export async function keepArtifacts(root: string, dir: string, paths: readonly s
       continue;
     }
     const k = await keepFile(root, abs, budget);
-    const was = before?.get(p) ?? null;
-    const unchanged = was !== null && (was === 'present' || ('sha256' in k && k.sha256 === was));
-    const origin = unchanged ? { origin: 'not-established' as const } : {};
+    const o = before === undefined ? 'written' : originOf(before.get(p) ?? null, k);
+    const origin = o === 'written' ? {} : { origin: o };
     out.push('kept' in k ? { path: p, sha256: k.sha256, size: k.size, kept: `.mission-pipeline/${k.kept}`, ...origin } : { path: p, ...(k.sha256 !== undefined ? { sha256: k.sha256 } : {}), ...(k.size !== undefined ? { size: k.size } : {}), why: k.why === 'no such file' ? 'the run did not write it' : k.why, ...origin });
   }
   return out;
@@ -127,7 +141,9 @@ const CHUNK = 1024 * 1024;
 /**
  * Copy `src` (a regular file, never followed through a link) into the kept files of the memory folder
  * `root`, hashing it as it is copied. `expect`: the sha256 the record names (a handed-in file, checked
- * before): a copy of other content is dropped. Never throws.
+ * before): a copy of other content is dropped. Review p9-r2-5: a cited path that is a link is followed, as
+ * its check followed it: the bytes it was checked against are the bytes copied (`expect` proves it).
+ * Never throws.
  */
 export async function keepFile(root: string, src: string, budget: KeepBudget, expect?: { readonly sha256: string; readonly size: number }): Promise<KeepOutcome> {
   let fh: fsp.FileHandle | null = null;
@@ -137,12 +153,14 @@ export async function keepFile(root: string, src: string, budget: KeepBudget, ex
   try {
     const st = await fsp.lstat(src).catch(() => null);
     if (st === null) return { why: 'no such file' };
-    if (st.isSymbolicLink()) return { why: 'it is a link, not a regular file' };
-    if (!st.isFile()) return { why: 'it is not a regular file' };
-    if (budget.files <= 0) return { why: `more than ${KEEP_FILES} files: only the first ${KEEP_FILES} are kept`, size: st.size };
-    if (st.size > KEEP_FILE_BYTES) return { why: `${st.size} bytes, over the ${KEEP_FILE_BYTES / (1024 * 1024)} MiB a kept file may have`, size: st.size };
-    if (st.size > budget.bytes) return { why: `the files kept together would pass ${KEEP_TOTAL_BYTES / (1024 * 1024)} MiB`, size: st.size };
-    fh = await fsp.open(src, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    if (st.isSymbolicLink() && expect === undefined) return { why: 'it is a link, not a regular file' };
+    const target = st.isSymbolicLink() ? await fsp.stat(src).catch(() => null) : st;
+    if (target === null) return { why: 'no such file' };
+    if (!target.isFile()) return { why: 'it is not a regular file' };
+    if (budget.files <= 0) return { why: `more than ${KEEP_FILES} files: only the first ${KEEP_FILES} are kept`, size: target.size };
+    if (target.size > KEEP_FILE_BYTES) return { why: `${target.size} bytes, over the ${KEEP_FILE_BYTES / (1024 * 1024)} MiB a kept file may have`, size: target.size };
+    if (target.size > budget.bytes) return { why: `the files kept together would pass ${KEEP_TOTAL_BYTES / (1024 * 1024)} MiB`, size: target.size };
+    fh = await fsp.open(src, constants.O_RDONLY | (st.isSymbolicLink() ? 0 : (constants.O_NOFOLLOW ?? 0)) | (constants.O_NONBLOCK ?? 0));
     if (!(await fh.stat()).isFile()) return { why: 'it is not a regular file' };
     await fsp.mkdir(dir, { recursive: true });
     out = await fsp.open(tmp, 'wx');

@@ -305,7 +305,7 @@ describe('4.4 F10, review round 1', () => {
     const both = { judgments: [{ standard: 'S1', met: 'yes' as const, reason: 'the run and the simulator agree', evidence: [`evidence:${run}`, pointer] }], gap_responses: card.selfReportedGaps.map((g) => ({ gap: g.id, response: 'noted' })), issue_responses: [], findings: [], verdict: 'pass' as const };
     const refused = await recordSeatHandBack(suite, d, { report: 'r', fields: both, advance: false });
     assert.equal(refused.kind, 'refused');
-    assert.ok(refused.kind === 'refused' && refused.problems.some((x) => x.startsWith('judgments[S1]: an integration pass rests on its full run, and one judgment cannot rest on a run and on data outside the commit together: answer this standard "cannot-verify"')), JSON.stringify(refused));
+    assert.ok(refused.kind === 'refused' && refused.problems.some((x) => x.startsWith('judgments[S1]: an integration pass rests on its full run, and the hand-back is one judgment, which cannot rest on a run and on data outside the commit together: answer this standard "cannot-verify"')), JSON.stringify(refused));
     // the fourth answer keeps both pointers and goes to a decider; no pass is recorded
     const fourth = { ...both, judgments: [{ ...both.judgments[0]!, met: 'cannot-verify' as const, needed: 'a full run that writes the simulator log' }], verdict: 'needs-decision' as const };
     const a = await recordSeatHandBack(suite, d, { report: 'r', fields: fourth, advance: false });
@@ -314,5 +314,63 @@ describe('4.4 F10, review round 1', () => {
     const e = await escalation(flowCtx(ports, M), `unv.${step}`);
     assert.ok(e !== null && e.reasons[0]!.startsWith('[S1] cannot be verified: the run and the simulator agree; needed: a full run that writes the simulator log'), JSON.stringify(e));
     assert.ok(!(await events(ports, { line: 'task:docs' })).some((x) => x.event === 'accepted'), 'no pass is recorded');
+  });
+});
+
+describe('4.4 F10, review round 2', () => {
+  const S2_UNVERIFIED = { S1: { met: 'yes' as const }, S2: { met: 'cannot-verify' as const, needed: 'the device log', evidence: [] } };
+
+  async function stableSetup(): Promise<{ ports: World; engine: FlowEngine }> {
+    const ports = memoryPorts();
+    say(ports, SEED_TEXT);
+    await seedMission(ports, M);
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M), userWords: ['W-1'], mode: 'stable' });
+    return { ports, engine: new FlowEngine(ports) };
+  }
+
+  it('p9-r2-1: a rework whose only open standard cannot be verified, answered, then passed: the pass names the failure it supersedes, the product is proven and its stable dependent goes on', async () => {
+    const { ports, engine } = await stableSetup();
+    // the dependent cites a run of its own (as the re-bind tests' plan gives it)
+    const plan = (): DetailedPlanDoc => {
+      const p = detailedPlan(M, { extraTask: true });
+      return { ...p, tasks: p.tasks.map((t) => (t.id === 'docs' ? { ...t, interpreter: 'node', verificationCommands: [{ id: 'lint', command: 'npx markdownlint docs/parser.md' }] } : t)) };
+    };
+    await drive(engine, ports.scheduler, withKinds(plan, {
+      reviewer: (t: FlowTask) => ({ handBack: t.task === 'rev.m1.impl.1' ? judge(t.card as unknown as ReviewerCard, 'rework', S2_UNVERIFIED) : judge(t.card as unknown as ReviewerCard, 'pass') }),
+      secretary: (t: FlowTask) => ({ handBack: secretary(t.card as unknown as SecretaryCard, 'answer', { instructions: 'The device log is kept with the run.' }) }),
+    }));
+    assert.ok((await escalation(flowCtx(ports, M), 'unv.rev.m1.impl.1')) !== null);
+    const follow = ports.scheduler.card<ReviewerCard>('rev.m1.impl.1.r1');
+    assert.equal(follow.binding.revokes, 'j.rev.m1.impl.1', 'the follow-up review names the failing judgment it supersedes');
+    assert.equal(ports.scheduler.card<ReviewerCard>('rev.m1.impl.1').binding.revokes, null, 'a first review names none');
+    assert.ok((await events(ports, { line: 'task:impl' })).some((x) => x.event === 'accepted' && x.key === '1'));
+    assert.equal((await ports.evaluator.labels([follow.target])).labels[follow.target], 'proven', 'the evaluator holds the pass, not the earlier failure');
+    assert.ok((await events(ports, { line: 'task:docs' })).some((x) => x.event === 'accepted'), 'the stable dependent goes on');
+  });
+
+  it('p9-1 (round 2): on an integration pass, a standard that rests only on data outside the commit also goes to a decider: the hand-back is one judgment', async () => {
+    const plan = (): DetailedPlanDoc => {
+      const p = detailedPlan(M, { extraTask: true });
+      return { ...p, tasks: p.tasks.map((t) => (t.id === 'docs' ? { ...t, standards: [{ id: 'S1', text: 'A README exists' }, { id: 'S2', text: 'The simulator agrees' }] } : t)) };
+    };
+    const { ports, engine } = await setup();
+    await drive(engine, ports.scheduler, withKinds(plan, { reviewer: (t: FlowTask) => (t.task.startsWith('rev.m1.docs.') ? null : { handBack: judge(t.card as unknown as ReviewerCard, 'pass') }) }));
+    const step = 'rev.m1.docs.1';
+    const card = ports.scheduler.card<ReviewerCard>(step);
+    const d = ports.scheduler.dispatchOf(step);
+    const run = ports.scheduler.rerun(d, 'npm test');
+    const dir = mkdtempSync(join(tmpdir(), 'mp-p9-1b-'));
+    writeFileSync(join(dir, 'sim.log'), 'ok\n');
+    const pointer = `data:${join(dir, 'sim.log')}#sha256=${createHash('sha256').update('ok\n').digest('hex')}&size=3`;
+    const suite = { ...ports.ctx, fullSuite: [{ id: 'all', command: 'npm run all' }] } as ProcessContext;
+    const gaps = card.selfReportedGaps.map((g) => ({ gap: g.id, response: 'noted' }));
+    const split = { judgments: [{ standard: 'S1', met: 'yes' as const, reason: 'the run', evidence: [`evidence:${run}`] }, { standard: 'S2', met: 'yes' as const, reason: 'the simulator log', evidence: [pointer] }], gap_responses: gaps, issue_responses: [], findings: [], verdict: 'pass' as const };
+    const refused = await recordSeatHandBack(suite, d, { report: 'r', fields: split, advance: false });
+    assert.ok(refused.kind === 'refused', JSON.stringify(refused));
+    assert.deepEqual(refused.problems.filter((x) => x.includes('an integration pass rests on its full run')).map((x) => x.slice(0, 15)), ['judgments[S2]: '], 'S2, which rests only on outside data');
+    const fourth = { ...split, judgments: [split.judgments[0]!, { ...split.judgments[1]!, met: 'cannot-verify' as const, needed: 'a full run that writes the log' }], verdict: 'needs-decision' as const };
+    assert.equal((await recordSeatHandBack(suite, d, { report: 'r', fields: fourth, advance: false })).kind, 'recorded');
+    await drive(engine, ports.scheduler, withKinds(plan, { secretary: () => null }));
+    assert.ok((await escalation(flowCtx(ports, M), `unv.${step}`)) !== null, 'it goes to a decider');
   });
 });
