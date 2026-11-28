@@ -699,3 +699,33 @@ describe('final review F4-4: a filing taken back asks nobody', () => {
     assert.equal((await ports.ledger.events<{ source: string }>({ mission: M, line: 'secretary', event: 'escalation' })).filter((e) => e.body.source === 'repair-question').length, 0, 'nor on the next pass');
   });
 });
+
+describe('closing confirmation C-4: a task the plan dropped gives a requirement item no unrelated proof', () => {
+  it('X filed and json reopened for it; attempt 2 needs a decision; another repair changes json\'s card without X; attempt 3 passes; a re-plan drops json: X has no proof and reads no accepted work bound to it, json named as dropped', async () => {
+    const { ports, engine } = await setup('fast');
+    await pmRepair(ports.ctx, { mission: M, words: say(ports, 'It should export JSON too.'), kind: 'missing', text: 'export JSON too' });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [JSON_TASK], note: 'json' } } : happyScript(M)(t, s)));
+    assert.ok((await acceptedOf(ports, 'json')) !== undefined, 'json accepted');
+    await extend(ports, [{ item: 'g2', text: 'Rows keep their order', quote: 'keep the rows in order' }], 'Please keep the rows in order.');
+    await drive(engine, ports.scheduler, (t, s) => {
+      if (t.card.seat === 'architect-repair') return { handBack: { reopen: [{ task: 'json', issue: 'keep the rows in order' }], add: [], note: 'json writes the rows' } };
+      if (t.task === 'rev.m1.json.2') return { handBack: reviewer(t.card as never, 'needs-decision') };
+      if (t.card.seat === 'secretary') return null;
+      return happyScript(M)(t, s);
+    });
+    await pmRepair(ports.ctx, { mission: M, words: say(ports, 'The JSON export is too slow.'), kind: 'defect', text: 'too slow', about: 'json' });
+    const json = (await planInEffect(flowCtx(ports, M)))!.plan.tasks.find((t) => t.id === 'json')!;
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' ? { handBack: { reopen: [], add: [], change: [{ ...json, goal: `${json.goal}, fast` }], note: 'faster' } } : t.card.seat === 'secretary' ? null : happyScript(M)(t, s)));
+    const accepted = (await ports.ledger.events<{ k: number; product: string }>({ mission: M, line: 'task:json', event: 'accepted' })).at(-1)!;
+    assert.equal(accepted.body.k, 3, 'attempt 3 passed');
+    // a re-plan without json, while attempt 3's proof is current
+    await submitPmBatch(ports, { mission: M, plan: pmPlan(M, { elements: [pmPlan(M).elements[0]!, { ...pmPlan(M).elements[1]!, text: 'Covered by unit tests only' }] }), userWords: ['W-1'] });
+    await drive(engine, ports.scheduler, (t, s) => (t.card.seat === 'architect-repair' || t.card.seat === 'secretary' ? null : happyScript(M)(t, s)));
+    assert.ok(!(await planInEffect(flowCtx(ports, M)))!.plan.tasks.some((t) => t.id === 'json'), 'json dropped');
+    const g2 = readItems(ports.ctx, 'm1').find((v) => v.id === 'g2')!;
+    assert.equal(g2.proof, null, 'no proof from attempt 3\'s product, whose review was not bound to X');
+    assert.equal(g2.state, 'no accepted work bound to it');
+    const lines = itemStateLines(g2).join('\n');
+    assert.ok(lines.includes('json (dropped from the plan in effect, with no accepted work bound to it:') && lines.includes('no accepted work of task json is bound to it, though that task was meant to carry it'), lines);
+  });
+});

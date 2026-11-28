@@ -232,8 +232,14 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
         if (rr === undefined) return [];
         const s = taskStateOf(x.task, lines, inPlan.has(x.task), proof);
         const came = `reopened by ${what(x.repair)} ${x.repair}`;
-        if (s.state === 'abandoned' || s.state === 'not in the plan in effect') return [{ ...s, detail: rr.state, came }];
+        if (s.state === 'abandoned') return [{ ...s, detail: rr.state, came }];
         const c = rr.credited;
+        // (closing confirmation C-4) a task the plan in effect dropped keeps that state; it gives the item a proof only from
+        // the credited product whose fixed review contract binds the item, never from its latest product
+        if (s.state === 'not in the plan in effect') {
+          if (rr.done && c !== undefined && binds(c.product, line)) return [{ ...s, product: c.product, label: proof(c.product), detail: rr.state, came, attempt: c.attempt, risk: c.risk }];
+          return [{ task: x.task, state: 'not bound to it', product: null, label: null, detail: `dropped from the plan in effect, with no accepted work bound to it: ${rr.state}`, came }];
+        }
         if (rr.done && c !== undefined) return [binds(c.product, line) ? { task: x.task, state: c.risk !== null ? 'accepted with risk' : 'accepted', product: c.product, label: proof(c.product), detail: rr.state, came, attempt: c.attempt, risk: c.risk } : unbound({ ...s, came }, c.product, c.attempt)];
         if (rr.superseded !== undefined) return [{ task: x.task, state: 'superseded', product: null, label: null, detail: rr.state, came }];
         return [{ task: x.task, state: 'not done for this repair', product: null, label: null, detail: rr.state, came }];
