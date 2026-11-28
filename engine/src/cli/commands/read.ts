@@ -13,6 +13,7 @@ import { buildGraph, chain, resolveNodes, tree, walk } from '../tree.ts';
 import { fullRunMarkers } from '../../process/index.ts';
 import { fullRunLines } from './seat.ts';
 import { pmNotes } from '../../process/secretary.ts';
+import { constraintsRead, constraintsText, repairsRead, repairsText } from '../workReads.ts';
 import { closureText, listAllItems, type RiskItemView } from '../../process/openItems.ts';
 import { itemStateLines, readItems } from '../../process/itemsRead.ts';
 import { age } from '../render.ts';
@@ -206,6 +207,17 @@ const notesRead: Command = {
   },
 };
 
+// 4.4 (G3): who wrote each constraint and what it reaches, so a PM that writes for tasks again can be seen
+const constraintsReadCmd: Command = {
+  group: 'read', name: ['constraints'], summary: 'the constraints in force for a mission, each with its author (PM or Secretary) and its address or scope; --reach adds the task cards each reaches, its size and the Reviewers\' answers', usage: 'mp read constraints <mission> [--reach]', flags: {reach: 'boolean'},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const reach = flagBool(a, 'reach'); const r = p.ctx.memory.read((db) => constraintsRead(db, p.ctx.memory.data, m, reach)); return ok(constraintsText(r, reach), r);},
+};
+// 4.4 (the plan's F13): each repair, what it did and whether it is done
+const repairsReadCmd: Command = {
+  group: 'read', name: ['repairs'], summary: 'a mission\'s repairs: kind, words, subject and the Architect\'s note; whether it was filed again (--again); the tasks each added, changed and reopened with their state (a reopen waiting for an attempt, carried out, or not carried out and why); its dispatches; and whether it is done', usage: 'mp read repairs <mission>', flags: {},
+  async run(c, a) {const p = P(c); const m = positional(a, 0, 'mission'); const r = p.ctx.memory.read((db) => repairsRead(db, p.ctx.memory.data, m)); return ok(repairsText(r), r);},
+};
+
 // 4.4 (F4; G5): what is left open and what became of it, from the record: the questions put off, and what
 // was left at the cap (an acceptance with risk's items, a Reviewer's deferrals, the risk sentences of 4.3)
 const openItemsRead: Command = {
@@ -256,4 +268,4 @@ const itemsRead: Command = {
   },
 };
 
-export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, openItemsRead, itemsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];
+export const READ_COMMANDS: readonly Command[] = [secretaryRead, wordsRead, notesRead, constraintsReadCmd, repairsReadCmd, openItemsRead, itemsRead, status, blocked, showCmd, leaf, why, from, chainCmd, treeCmd, fullRuns];

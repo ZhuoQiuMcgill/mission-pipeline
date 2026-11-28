@@ -31,7 +31,8 @@ import { canonicalJson } from '../common/hash.ts';
 import type { BasisLineId, BasisVersionId, MissionId } from '../common/ids.ts';
 import type { BaseRecord } from '../common/records.ts';
 import { repairPlanMaterial, type ArchitectRepairCard, type ArchitectRepairResult } from '../seat/cards/architect.ts';
-import { planningConstraints } from '../seat/cards/dynamic.ts';
+import { addressedForPlanning, addressedIndexOf, planningConstraints } from '../seat/cards/dynamic.ts';
+import { answerText } from './openItems.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, missionClosed, nextBasisVersion, notify, objectRecord, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
@@ -41,7 +42,7 @@ import { detailedPlanOf, explorationState, planInEffect, pmPlanDoc, projectComma
 import { acceptedProduct, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
 import type { FlowPorts } from './ports.ts';
 import { currentConstraints } from './requirements.ts';
-import { grantForDecision, grantedAttempt, decisionFor, escalateToUser, isApplied, markApplied, raiseEscalation } from './secretary.ts';
+import { carryOut, closing, commitCarrying, grantForDecision, grantedAttempt, decisionFor, escalateToUser, isApplied, markApplied, openEscalations, raiseEscalation, REPAIR_QUESTION_TO_PM } from './secretary.ts';
 import { recordExplorationRerun } from './exploration/flow.ts';
 import { ATTEMPT_RERUN, ATTEMPTS_AMENDED, RESNAPSHOTTED, type AttemptRerunBody, type AttemptsAmendedBody, type ConsumedBody, type ResnapshotBody, type Role } from './exploration/machine.ts';
 import { WI } from './wi.ts';
@@ -51,10 +52,15 @@ interface RepairAttemptBody {
   readonly k: number;
   /** The plan in effect it amends. */
   readonly dplan: string;
-  readonly reason: 'initial' | 'mechanical' | 'plan-changed' | 'granted';
+  /** 4.4 (G4): "answered": the attempt after the PM answered the Architect's question (not counted on any loop). */
+  readonly reason: 'initial' | 'mechanical' | 'plan-changed' | 'granted' | 'answered';
   readonly mechanicalFailures: readonly string[];
+  /** 4.4 (G4): the question the Architect handed back with no edit, and the answer that came back on this attempt's card. */
+  readonly answered?: { readonly escalation: string; readonly question: string; readonly answer: string; readonly by: string };
 }
 
+/** 4.4 (G4): the escalation of a repair Architect's question (one per Architect attempt). */
+export const repairQuestionId = (task: string): string => safeId(`ask.${task}`);
 /**
  * 4.4 (F13, p7-8): `mp pm repair … --again --op K` returned the same repair still in work: K is recorded against it
  * (line "repairs", key the hash of K), so a retry of K returns that repair, also once it was decided.
@@ -294,7 +300,11 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   // a new plan took effect since the step started: the repair amends that one (not counted)
   if (a.dplan !== eff.dplan) {
     if ((await ctx.ports.scheduler.status(task))?.state === 'queued') await ctx.ports.scheduler.cancel(task);
-    return newAttempt(ctx, r.id, { k: a.k + 1, dplan: eff.dplan, reason: 'plan-changed', mechanicalFailures: [] });
+    const next: RepairAttemptBody = { k: a.k + 1, dplan: eff.dplan, reason: 'plan-changed', mechanicalFailures: [] };
+    // 4.4 (G4): a question the Architect asked on the earlier plan closes with it, in the same write: the next step decides on the plan in effect
+    const asked = (await openEscalations(ctx, `repair:${r.id}`)).filter((e) => e.source === 'repair-question').map((e) => e.id);
+    if (asked.length === 0) return newAttempt(ctx, r.id, next);
+    return commitCarrying(ctx, `flow:repair-attempt:${ctx.mission}:${r.id}:${next.k}`, [ev(ctx, REPAIRS_LINE, 'attempt', `${r.id}#${next.k}`, next)], [closing(ctx, asked, `a new plan took effect (${eff.dplan}): repair ${r.id}'s Architect decides again on it`)], asked);
   }
   const lineage = repairLineage(ctx.mission, r.id);
   const view = await taskView(ctx, task);
@@ -307,6 +317,8 @@ async function oneRepair(ctx: FlowCtx, r: RepairBody): Promise<void> {
   const result = view.result as ArchitectRepairResult;
   const added = result.add;
   const change = result.change ?? [];
+  // 4.4 (G4): a hand-back with no edit is the Architect's question; the repair waits undecided for the PM's answer
+  if (result.reopen.length === 0 && added.length === 0 && change.length === 0) return askPm(ctx, r, a, task, result.note);
   // the mechanical checks only (D-10): the plan in effect with the changed cards (4.1.3), plus the added tasks.
   // 4.4 (F13, p7-5, p7-4): kept per plan in effect (its revision) and per repairs decided (the latest one's revision),
   // so a decision retried on a plan another repair amended since, or after another repair was decided, is checked
@@ -386,6 +398,46 @@ async function unseenCards(ctx: FlowCtx, view: Extract<Awaited<ReturnType<typeof
     out.push(`add[${t.id}]: task id "${t.id}" was added to the plan in effect after your card was built${by !== null ? ` (by repair ${by})` : ''}: use a fresh id, or change that task's card`);
   }
   return out;
+}
+
+/**
+ * 4.4 (G4): the repair's Architect could not decide and handed back its question with no edit. The repair is
+ * the PM's filing on the user's words, so the question goes to the PM's inbox (no Secretary step); the repair
+ * stays undecided. When the PM (or the user) answers with "answer", the answer is carried out in the same write
+ * as the repair's next Architect attempt, whose card carries the question and the answer.
+ */
+async function askPm(ctx: FlowCtx, r: RepairBody, a: RepairAttemptBody, task: string, question: string): Promise<void> {
+  const id = repairQuestionId(task);
+  const short = question.replace(/\s+/g, ' ').trim();
+  // 4.4 (G4, p6-7): posted only while this attempt is the repair's latest and its plan is the one in effect, checked
+  // inside the write: another pass that moved the repair on (a new plan, its next attempt) leaves no orphan question
+  const effective = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).at(-1);
+  if (effective === undefined || effective.body.dplan !== a.dplan) return;
+  const guard = {
+    absent: [{ mission: ctx.mission, line: REPAIRS_LINE, event: 'attempt', key: `${r.id}#${a.k + 1}` }],
+    latest: [{ mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: effective.revision }],
+    code: 'STALE_REQUEST',
+    message: `repair ${r.id} moved on (a new plan, or its next Architect attempt) while its Architect's question was being posted: nothing was posted`,
+  };
+  await raiseEscalation(ctx, {
+    id,
+    source: 'repair-question',
+    lineage: repairLineage(ctx.mission, r.id),
+    subject: `repair:${r.id}`,
+    // the question in full is its reason (mp read show escalation prints it); the summary is bounded
+    summary: `Repair ${r.id}'s Architect asks before it decides (attempt ${a.k}): ${short.length <= 1000 ? short : `${short.slice(0, 999)}…`}`,
+    reasons: [question],
+    options: ['answer'],
+    facts: { repair: r.id, task, attempt: a.k },
+    handover: { from: task, objects: [] },
+  }, [], guard);
+  // raised by an earlier pass that stopped before handing it over: hand it over now (idempotent)
+  if (!(await isApplied(ctx, id))) await escalateToUser(ctx, id, REPAIR_QUESTION_TO_PM, null);
+  const d = await decisionFor(ctx, id);
+  if (d === null || d.option !== 'answer' || (await isApplied(ctx, id))) return;
+  // a user's answer recorded with words and no instructions carries those words (answerText)
+  const next: RepairAttemptBody = { k: a.k + 1, dplan: a.dplan, reason: 'answered', mechanicalFailures: [], answered: { escalation: id, question, answer: answerText(d), by: d.by } };
+  await commitCarrying(ctx, `flow:repair-attempt:${ctx.mission}:${r.id}:${next.k}`, [ev(ctx, REPAIRS_LINE, 'attempt', `${r.id}#${next.k}`, next)], [await carryOut(ctx, id, { option: 'answer' })]);
 }
 
 /** A mechanical failure returns the step to the Architect (mechanical-return loop); used up: WI-08 and the Secretary. */
@@ -476,8 +528,10 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
     if ((await acceptedProduct(ctx, c.id)) !== null || !plan.tasks.some((t) => t.id === c.id)) skipped.push(c.id);
     else changed.push(c);
   }
+  // 4.4 (G3, F2): the Architect's note is recorded with its decision (also an empty one, so a read tells it from a
+  // 4.3 decision, which has none); the cards of the tasks it added, changed or reopened print it
   // 4.4 (F13, p7-1): `tracked` tells this decision's reopens from those of 4.3 by the record, not by where the task is
-  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), ...(reopen.length > 0 ? { tracked: true as const } : {}) };
+  const body: RepairDecidedBody = { repair: r.id, dplan: eff.dplan, arch: task, add: added.map((t) => t.id), reopen, ...(changed.length > 0 ? { changed: changed.map((t) => t.id) } : {}), ...(reopen.length > 0 ? { tracked: true as const } : {}), note: result.note.trim() };
   const events = [ev(ctx, REPAIRS_LINE, 'decided', r.id, body)];
   const records: BaseRecord[] = [];
   if (added.length > 0 || changed.length > 0) {
@@ -545,11 +599,18 @@ async function submitArchitectRepair(ctx: FlowCtx, r: RepairBody, a: RepairAttem
   // the owners of the paths the repair is about: a task's accepted change, else none
   const about = r.about?.kind === 'task' ? accepted.find((x) => x.task === r.about!.id)?.changedPaths ?? [] : [];
   const owners = (await pathOwners(ctx, about)).map((o) => ({ path: o.path, owners: o.owners.map((x) => ({ task: x.task, product: x.product, attempt: x.attempt, current: x.current })) }));
+  const constraints = await currentConstraints(ctx);
+  // 4.4 (G3, F1): the instructions addressed to this repair or to the task it is about in full, the rest as an index
+  const addressed = addressedForPlanning(constraints, ctx.mission, { repair: r.id, ...(r.about?.kind === 'task' ? { about: r.about.id } : {}) });
+  // 4.4 (G4): the questions this repair's Architect asked, and the answers that came back
+  const answers = (await attemptsOf(ctx, r.id)).flatMap((x) => (x.answered !== undefined ? [{ question: x.answered.question, answer: x.answered.answer, by: x.answered.by }] : []));
   const card: ArchitectRepairCard = {
     ...cardBase(ctx, task, {
       duties: `Turn repair ${r.id} into the least work that fixes it: reopen the tasks whose accepted work causes it, change the card of a task with no accepted product when the repair is about its card, and add tasks only for work no existing task owns. A task with an accepted product keeps its card. Only the program's mechanical checks follow (no Calibrator, no feasibility review).`,
-      constraints: planningConstraints(await currentConstraints(ctx), ctx.mission),
+      constraints: planningConstraints(constraints, ctx.mission),
     }),
+    ...addressedIndexOf(addressed.index, addressed.full),
+    ...(answers.length > 0 ? { answers } : {}),
     repairs: [repairRef(r)],
     seat: 'architect-repair',
     workspace: { snapshot: snap.path, writablePaths: [] },

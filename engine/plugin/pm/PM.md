@@ -29,7 +29,7 @@ Read this core, then `mp pm session --filled-by "<harness>/<model>"`.
 Layer 1 lists principles, project decisions and constraints in force; each open mission's plan, requirement items and decisions; your inbox, unconfirmed seats, what waits on the user, and status layer 0.
 It is bounded to 8 KiB, with principles first, newest confirmed first.
 After them one line always counts your inbox items; inbox entries and unconfirmed seats follow as they fit, then the rest.
-Constraints whose missions are all closed take no line.
+Of constraints it lists your unaddressed ones; the Secretary's instructions, addressed instructions and constraints whose missions are all closed take no line (`mp read constraints <mission>` lists them).
 Overflow is counted with a command to read it; read all principles in force before any PM-class decision and consolidate when asked.
 Read `mp pm inbox` and handle the PM actions it names.
 While a Secretary is live, your commands record changes and wake it; your commands and reads do no operational recovery or reconciliation.
@@ -161,6 +161,12 @@ The command prints its current reach; zero matches warns but still records, so c
 An instruction with `**` and no task types reaches every task, even one with no write paths; it is not a proof input.
 `--task-types exploration` covers its author, interpreter, Crititor and Stabilizer; a seat name narrows it.
 A blind executor receives only instructions naming its seat (`researcher-reader`, `constructor-experiment`); keep expected results out of them.
+`--task-types pm-plan` reaches Calibrator ①; `detailed-plan` reaches Calibrator ② and the feasibility review.
+Your constraints carry the user's long-term rules; text for one task is the Secretary's (`mp sec instruct`) or the Architect's (its notes).
+When the user said it about one task or one repair, address it: `--tasks <ids>` or `--repair <R-n>` with `--mission <m>`; it then reaches those cards only, and blocks nothing if not followed.
+That another path failed gives you no authority you did not have (F-3).
+`mp pm constraint scope <id> --tasks <ids> | --repair <R-n>` addresses an existing instruction with no new version.
+A decision for some tasks only: `mp pm requirement add … --type decision --tasks <ids>`.
 
 Write the PM plan at results level; mark each element "the user said" or "PM addition".
 `mp pm plan template <mission> --file plan.json` gives a valid skeleton with requirement items and field notes.
@@ -227,6 +233,10 @@ Choose the kind; the text must occur verbatim in the words; the mission must be 
 The same repair (words, kind, text, subject) returns the one recorded; when that one was decided and the problem is back, add `--again` to file it anew.
 A repair's reopen of a task gets a fresh rework loop (`loops.rework` in config.json, default 2); at its end accept-risk is offered as for any attempt. A task with an open attempt is reopened once that attempt is accepted. Notice `reopen-not-carried`: the task was given up or left the plan, so tell the user what was not done, and file it again on their words (`--again`) or re-plan.
 An exploration's author answers a question; the Architect routes other repairs under mechanical checks, without Calibrator or feasibility review.
+File what the user said and stop there: the scope of a repair is its Architect's, and its note reaches every task the repair touches.
+If the quoted sentence is not enough, record more of the user's words, or address an instruction to the repair (`--repair R-<n>`).
+A repair's Architect that cannot decide asks you through the inbox; answer with `mp pm answer <mission> <id> --option answer --instructions "…"`; its next step decides.
+`mp read repairs <mission>`: each repair, its note, whether it was filed again, the tasks it touched and whether it is done. A reopen reads as waiting for an attempt, carried out, or not carried out with the reason; a repair with a reopen not carried out is not done.
 A user's decision about a registered method takes effect directly, with no round or review: add `--attempts <attempts.json> [--answers R-<n>]`, `--rerun <attempt-id>[,...]` or `--resnapshot`.
 The Secretary handbook holds the operational limits and recovery for these forms.
 Carry out the user's decision on their words; never send it through a review or refuse it for form.
@@ -240,6 +250,7 @@ What takes the disk: `mp read scratch`; config `limits: { worktrees, freeBytes }
 "The details of X": `mp read show <kind> <id>`, only X; evidence: `mp read leaf <id>`.
 "Why was this done?": `mp read why <id>`; what rests on it: `mp read from <id>`; one dispatch: `mp read chain <dispatch>`; a mission: `mp read tree <mission>`.
 `mp read from W-<n>` also lists the constraints, waivers and notes that cite the entry.
+`mp read constraints <mission> --reach`: each constraint's author, address, size and the cards it reaches.
 "Did the data behind this conclusion change?": `mp read show evidence <id> --check-data` (or show dispatch); it says unchanged, changed or missing and writes nothing.
 The evidence remains a record of what was read; a rerun follows the user's decision.
 For progress details beyond the read, use `mp pm ask-secretary`.

@@ -67,6 +67,11 @@ export const ReviewerResultShape = {
     owner: z.string().optional().describe('Required for deferred: who owns the issue next. It is shown as "deferred to <owner>", outside the task fix list.'),
   })).describe('Answer every listed issue on this version, including previously deferred issues. For deferred include both owner and reason; repeating a deferral does not require rework.'),
   findings: z.array(z.string()).describe('Problems outside the standards (they become issue records).'),
+  instruction_responses: z.array(z.object({
+    instruction: z.string().describe('An instruction id from "Instructions for this task" on the card.'),
+    response: z.enum(['followed', 'not-followed', 'unclear']),
+    reason: z.string().describe('Why, in a sentence.'),
+  })).optional().describe('4.4: one answer per instruction under "Instructions for this task" (leave it out when the card lists none). It is recorded and shown; it never changes the verdict: what must hold for a pass is a standard.'),
   // 4.4 (G5): the open items the task took, each answered; one not fixed goes back with the review's issues
   item_responses: z
     .array(z.object({ item: z.string().min(1), response: z.enum(['fixed', 'not-fixed', 'unclear']), reason: z.string() }))
@@ -245,14 +250,22 @@ function reviewerProblems(card: ReviewerCard, r: ReviewerResult, ctx: ResultCont
   if (r.verdict === 'pass' && r.judgments.some((j) => j.met !== 'yes')) out.push('verdict: "pass" leaves a standard not met or unclear');
   // 4.4 (G5): every open item on the card is answered once (a card without the list asks for none)
   const items = (card.openItems ?? []).map((i) => i.id);
-  const answered = (r.item_responses ?? []).map((i) => i.item);
-  for (const i of items) if (!answered.includes(i)) out.push(`item_responses: open item "${i}" has no answer (fixed, not-fixed or unclear)`);
-  for (const i of new Set(answered)) {
+  const itemAnswers = (r.item_responses ?? []).map((i) => i.item);
+  for (const i of items) if (!itemAnswers.includes(i)) out.push(`item_responses: open item "${i}" has no answer (fixed, not-fixed or unclear)`);
+  for (const i of new Set(itemAnswers)) {
     if (!items.includes(i)) out.push(`item_responses: "${i}" is not an open item on the card`);
-    else if (answered.filter((x) => x === i).length > 1) out.push(`item_responses: open item "${i}" is answered more than once`);
+    else if (itemAnswers.filter((x) => x === i).length > 1) out.push(`item_responses: open item "${i}" is answered more than once`);
   }
   for (const i of r.item_responses ?? []) if (i.response !== 'fixed' && i.reason.trim() === '') out.push(`item_responses: give the reason open item "${i.item}" is ${i.response}`);
   out.push(...reopenProblems(card, r));
+  // 4.4 (G3): every instruction addressed to this work is answered (followed or not, it blocks nothing)
+  const addressed = (card.addressed ?? []).map((a) => a.id);
+  const answered = (r.instruction_responses ?? []).map((i) => i.instruction);
+  for (const a of addressed) if (!answered.includes(a)) out.push(`instruction_responses: instruction "${a}" is not answered (followed, not-followed or unclear, with a reason)`);
+  for (const i of r.instruction_responses ?? []) {
+    if (!addressed.includes(i.instruction)) out.push(`instruction_responses: "${i.instruction}" is not under "Instructions for this task" on the card`);
+    if (i.reason.trim() === '') out.push(`instruction_responses[${i.instruction}]: give the reason`);
+  }
   return out;
 }
 
