@@ -88,6 +88,8 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
     output: { object: 'dplan.m1.1.1', predecessor: null, path: 'plans/m1', calibrator2: { basisLines: [], reliesOn: [] }, feasibility: { basisLines: [], reliesOn: [] } },
   },
   'architect-repair': { ...base('arch-repair.m1.R-1.1'), seat: 'architect-repair', workspace: { snapshot: COMMIT, writablePaths: [] }, repair: { id: 'R-1', kind: 'defect', text: 'the header row is dropped', words: 'W-2', about: 'task impl' }, dplan: 'dplan.m1.1.1', pmPlan: 'pmplan.m1.1', elements: [{ id: 'e1', kind: 'deliverable', text: 'a parser' }], plan: PLAN, accepted: [{ task: 'impl', product: 'prod.con.m1.impl.1', attempt: 1, changedPaths: ['src/a.ts'] }], owners: [{ path: 'src/a.ts', owners: [{ task: 'impl', product: 'prod.con.m1.impl.1', attempt: 1, current: true }] }], history: { gitLog: '', runs: [] }, revision: null, materials: [MAT] },
+  // 4.4 (G1): the Architect asked a question of design
+  'architect-answer': { ...base('arch-ask.m1.cdec.x.s0'), seat: 'architect-answer', workspace: { snapshot: COMMIT, writablePaths: [] }, escalation: { id: 'cdec.x', source: 'constructor-decision', subject: 'task:impl', summary: 'a question', reasons: ['Q1 (before-review): which?'] }, asked: { by: 'secretary', round: 0, instructions: 'Say which.', reason: 'design' }, taskCard: TASK, attempt: 1, dplan: 'dplan.m1.1.1', requirementItems: [{ id: 'item.m1.g1', text: 'An add function' }], accepted: [], earlier: [], tasks: [], materials: [MAT] },
   'architect-feasibility': { ...base('feas.m1.1.1'), seat: 'architect-feasibility', workspace: { snapshot: COMMIT, writablePaths: [] }, target: 'dplan.m1.1.1', review: 'feasibility', plan: PLAN, history: { gitLog: '', runs: [] }, earlierFindings: [], binding: BINDING },
   secretary: {
     ...base('sec.x'),
@@ -246,6 +248,8 @@ describe('cards: every kind renders the 4.1 way (§5.2, §14)', () => {
     assert.deepEqual(cmds('researcher-author'), ['card', 'checkout', 'request-evidence', 'handback']);
     // 4.1.2: a repair's Architect step may ask which accepted products changed a path
     assert.deepEqual(cmds('architect-repair'), ['card', 'read', 'checkout', 'owners', 'handback']);
+    // 4.4 (G1): an Architect asked a question reads the project (and its task's accepted product); it asks no owners
+    assert.deepEqual(cmds('architect-answer'), ['card', 'read', 'checkout', 'handback']);
   });
 
   it('a card never names a host path; a continuation names the previous task, not a session', () => {

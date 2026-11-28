@@ -240,7 +240,7 @@ export function renderCard(c: SeatCard): string {
   );
 }
 
-const WHO: Readonly<Record<string, string>> = { secretary: 'the Secretary', pm: 'the PM', user: 'the user' };
+const WHO: Readonly<Record<string, string>> = { secretary: 'the Secretary', pm: 'the PM', user: 'the user', architect: 'the Architect' };
 
 /** 4.4 (G5): one open item the task took. */
 const takenLine = (i: z.infer<typeof TakenItem>): string => `[${i.id}] ${i.kind}, left at ${i.from}: ${i.text}`;
@@ -431,8 +431,9 @@ function commandLines(card: { readonly seat: string } & Readonly<Record<string, 
         break;
       case 'checkout':
         lines.push(`\`mp seat ${dispatch} checkout\`: prints the path of a read-only directory holding ${ws?.snapshot !== undefined ? `commit ${ws.snapshot}` : 'the commit this card names'}; read the project there. Other seats reading the same commit share it: never write there.`);
-        // 4.4 (F3): the accepted products a repair may reopen are the plan's state, readable at their commits
-        if (card.seat === 'architect-repair') lines.push(`\`mp seat ${dispatch} checkout --product <task>\`: the same for the accepted product of a task on the accepted list, at its commit.`);
+        // 4.4 (F3): the accepted products a repair may reopen are the plan's state, readable at their commits;
+        // 4.4 (G1): an Architect asked a question reads the task's accepted product the same way
+        if (card.seat === 'architect-repair' || (card.seat === 'architect-answer' && ((card['accepted'] as readonly unknown[] | undefined) ?? []).length > 0)) lines.push(`\`mp seat ${dispatch} checkout --product <task>\`: the same for the accepted product of a task on the accepted list, at its commit.`);
         break;
       case 'rerun':
         lines.push(`\`mp seat ${dispatch} rerun <command-id>\`: \`mp\` runs a declared command (ids: ${rerunnableCommands(card, o).map((x) => x.id).join(', ')}) on a clean checkout; every rerun executes and gets a new run id, which you may cite. It prints the result and the last lines of the output.`);

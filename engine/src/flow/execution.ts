@@ -669,7 +669,8 @@ async function rereviewResult(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTa
           subject: `task:${t.id}`,
           summary: `The Reviewer of task ${t.id} (attempt ${r.k}, re-review ${r.n} after an environment change) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
           reasons: [...review.issues],
-          options: ['answer', 'rework', 'replan', 'ask-user'],
+          // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
+          options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
           items: t.requirementItems,
           facts: { task: t.id, attempt: r.k, product: product.object, issues: review.issues, rereview: r.n },
           handover: { from: r.rev, objects: [product.object] },
@@ -916,7 +917,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
       subject: `task:${t.id}`,
       summary: `The Constructor of task ${t.id} (attempt ${k}) raised questions that need a decision.${qs.some((q) => q.when === 'before-review') ? ' Its review waits for the answer to the before-review ones.' : ''}`,
       reasons: questionReasons(qs),
-      options: ['answer', 'replan', 'ask-user'],
+      options: ['answer', 'ask-architect', 'replan', 'ask-user'],
       items: t.requirementItems,
       facts: { task: t.id, attempt: k, questions: product.decisions, product: product.object, ...(product.when !== undefined ? { when: product.when } : {}) },
       handover: { from: con, objects: [product.object] },
@@ -1063,7 +1064,7 @@ async function pause(ctx: FlowCtx, t: DetailedTask, line: Line, k: number, con: 
     subject: `task:${t.id}`,
     summary: `The Constructor of task ${t.id} stopped to ask (attempt ${k}, pause ${n}): nothing is handed in yet. Its edits are parked at commit ${parked}; an answer resumes the attempt on them.`,
     reasons: questionReasons(qs),
-    options: ['answer', 'replan', 'ask-user'],
+    options: ['answer', 'ask-architect', 'replan', 'ask-user'],
     items: t.requirementItems,
     facts: { task: t.id, attempt: k, pause: n, blocked: true, parked, questions: qs.map((q) => q.text) },
     handover: { from: con, objects: [] },
@@ -1118,7 +1119,7 @@ async function reviewerNeedsDecision(ctx: FlowCtx, t: DetailedTask, k: number, r
     subject: `task:${t.id}`,
     summary: why === null ? `The Reviewer of task ${t.id} (attempt ${k}) needs a decision: the standards are unclear or in conflict.` : `The Reviewer of task ${t.id} (attempt ${k}) needs a decision: ${why}.`,
     reasons: [...review.issues],
-    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'replan', ...accept, 'ask-user'] : ['answer', 'rework', 'replan', ...accept, 'ask-user'],
+    options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'ask-architect', 'replan', ...accept, 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', ...accept, 'ask-user'],
     ...(risk !== null ? { position: { target: risk.product, review: 'reviewer', revokes: risk.judgment } } : {}),
     items: t.requirementItems,
     facts: { task: t.id, attempt: k, product: product.object, issues: review.issues },
@@ -1148,7 +1149,8 @@ async function reviewerUnverifiable(ctx: FlowCtx, t: DetailedTask, k: number, re
     subject: `task:${t.id}`,
     summary: `The Reviewer of task ${t.id} (attempt ${k}) could not verify ${standards.join(', ')} from what it can see, and nothing else is open: a decider settles it; it is not sent back to the Constructor by itself.`,
     reasons: [...review.issues, ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
-    // review p9-8: `answer` (what is missing, or where it is: the same candidate is reviewed again) stays, as on every Reviewer's "needs decision"
+    // review p9-8: `answer` (what is missing, or where it is: the same candidate is reviewed again) stays, as on every Reviewer's "needs decision";
+    // 4.4 (G1): not ask-architect: what could not be verified is a question of evidence, not of design
     options: startOnly(await readLine(ctx, t.id), product) ? ['answer', 'replan', ...accept, 'ask-user'] : ['answer', 'rework', 'replan', ...accept, 'ask-user'],
     ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
     ...(offered !== null ? { position: { target: offered.product, review: 'reviewer', revokes: offered.judgment } } : {}),
@@ -2687,7 +2689,8 @@ async function rebindReview(
         subject: `task:${t.id}`,
         summary: `The Reviewer of task ${t.id} (attempt ${k}, its product re-bound to ${b.dplan}) needs a decision: ${unverified ? `it could not verify ${(review.unverifiable ?? []).map((u) => u.standard).join(', ')} from what it can see, and nothing else is open` : 'the standards are unclear or in conflict'}.`,
         reasons: [...review.issues],
-        options: ['answer', 'rework', 'replan', 'ask-user'],
+        // 4.4 (G1 with F10): what could not be verified is a question of evidence, not of design: no ask-architect
+        options: unverified ? ['answer', 'rework', 'replan', 'ask-user'] : ['answer', 'ask-architect', 'rework', 'replan', 'ask-user'],
         items: t.requirementItems,
         facts: { task: t.id, attempt: k, product: b.product, issues: review.issues, rebind: b.n },
         handover: { from: rev, objects: [b.product] },
@@ -2903,7 +2906,7 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
     subject: `task:${t.id}`,
     summary: `Task ${t.id}: the reworks${freshOf?.kind === 'repair' ? ` of repair ${freshOf.repair}'s reopen` : ''} are used up (${v.attempts}/${v.allowed}${v.reason === 'no-progress' ? ', the same issues twice in a row' : ''}).`,
     reasons: [...issues, ...(reopenRisk?.review.issues ?? []), ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
-    options: ['grant', 'replan', ...(offered !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
+    options: ['grant', 'ask-architect', 'replan', ...(offered !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
     ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
     ...(offered !== null ? { position: { target: offered.product, review: 'reviewer', revokes: offered.judgment } } : {}),
     items: t.requirementItems,
@@ -2984,6 +2987,8 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       }
       const next = line.one<ReworkBody>('rework', String(k + 1));
       if (next === null) await grantedAttempt(ctx, g, { op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage: loopLineage, loop: 'rework', signature: `granted:${e.id}` });
+      // 4.4 (G1, review p11-3): an Architect's answer on this loop reaches the granted attempt's cards as a decision of the
+      // task (seat/cards/dynamic.ts carriedAnswer: both roles, at queue time and at the claim), not through this rework body
       const body: ReworkBody = { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...await deferredInstructions(ctx, line, k)] };
       const carry = await carryOut(ctx, e.id, { option: 'grant' }, g.records);
       await commit(ctx, `flow:rework:${ctx.mission}:${e.id}:apply-grant`, {
@@ -3017,6 +3022,10 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
       // 4.4 (p8-6): a pause's re-plan (its waiting-replan above all) is written only while its attempt is current
       await requestReplan(ctx, eff, t, e.id, d, !reopen || line.k === k, isPause ? [attemptCurrent(ctx, t.id, k)] : []);
       return !reopen || line.k === k;
+    case 'ask-architect':
+      // 4.4 (G1): the Architect's step answers it (flow/architectAsk.ts); meanwhile the task waits as for any decision, and
+      // its answer, once recorded, is read here as an answer (decisionFor)
+      return blocking;
     case 'accept-risk':
       if ((e.facts as { rebind?: string } | undefined)?.rebind !== undefined) await acceptRebindWithRisk(ctx, t, k, e, d);
       else if (line.one('accepted', String(k)) !== null) await acceptReopenWithRisk(ctx, plan, t, k, e, d);

@@ -22,7 +22,7 @@ import { RENEW_LINE, REVIEW_NEEDED, type DetailedPlanDoc, type ReviewNeededBody 
 import { submitPmBatch } from '../src/flow/planning.ts';
 import type { FlowEvaluatorPort } from '../src/flow/ports.ts';
 import { recordConstraint, recordItem } from '../src/flow/requirements.ts';
-import { answerEscalation, raiseEscalation } from '../src/flow/secretary.ts';
+import { answerEscalation, escalation, raiseEscalation } from '../src/flow/secretary.ts';
 import { cal1Fail, detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { gitActions } from '../src/process/actions.ts';
 import { dispatchView } from '../src/process/seat.ts';
@@ -510,6 +510,19 @@ describe('rebind regressions: seat authority, lineage, cancellation and deferred
       }
     });
   }
+
+  it('4.4 (G1 with F10): a re-bind review\'s needs-decision offers ask-architect; one whose only open standard could not be verified does not', async () => {
+    for (const unverified of [false, true]) {
+      const { ports, engine, base } = await waitingRebind();
+      const card = ports.scheduler.card<ReviewerCard>('rev.m1.iface.1.b1');
+      const r = reviewer(card, unverified ? 'pass' : 'needs-decision');
+      const handBack = unverified ? { ...r, verdict: 'needs-decision' as const, judgments: r.judgments.map((j, i) => (i === 0 ? { ...j, met: 'cannot-verify' as const, needed: 'the device log', evidence: [] } : j)) } : r;
+      assert.deepEqual(await ports.scheduler.run(card.task, { handBack }), []);
+      await drive(engine, ports.scheduler, (t, s) => t.card.seat === 'secretary' || t.card.seat === 'reviewer' ? null : base(t, s));
+      const e = (await escalation(flowCtx(ports, M), 'rnd.rev.m1.iface.1.b1'))!;
+      assert.equal(e.options.includes('ask-architect'), !unverified, JSON.stringify([unverified, e.summary, e.options]));
+    }
+  });
 
   it('needs-decision waits for the Secretary and its answer starts a second review of the same .b version', async () => {
     const { ports, engine, base } = await waitingRebind();

@@ -281,6 +281,8 @@ describe('4.4 F10, review round 1', () => {
     }));
     const e = (await escalation(flowCtx(ports, M), 'rnd.rev.m1.impl.1.e1'))!;
     assert.match(e.summary, /could not verify S2 from what it can see, and nothing else is open/);
+    // 4.4 (G1 with F10): a question of evidence, not of design: the Architect is not offered (p11)
+    assert.deepEqual(e.options, ['answer', 'rework', 'replan', 'ask-user']);
     const line = await events(ports, { line: 'task:impl' });
     assert.ok(!line.some((x) => x.event === 'rework'), 'not sent back to the Constructor');
     assert.ok(ports.scheduler.tasks.has('rev.m1.impl.1.e2'), 'the answer starts the next round on the same request');
