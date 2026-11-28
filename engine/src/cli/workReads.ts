@@ -398,7 +398,8 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       return missing.length === 0 ? x : { task: x.task, state: `${x.state}; its review there was not bound to ${missing.join(', ')}: no accepted work is bound to ${missing.length === 1 ? 'it' : 'them'}`, done: false };
     };
     // 4.4 (final review F3-1): an added task is credited with an accepted attempt under the card this repair added (the
-    // first card the task ran under that plan, or one with its hash); one under a later card never counts for it
+    // first card the task ran under that plan, or a card with its hash, under a later plan too: a plan that drops the
+    // task and takes it back with the same card); one under another card never counts for it
     const added = (body?.add ?? []).map((t): RepairTaskState => {
       const line = lineOf(s, t);
       const st = taskState(line);
@@ -406,7 +407,7 @@ export function repairsRead(db: Db, data: DataStore, mission: string): { mission
       const hash = card === undefined ? null : taskCardHash(card);
       const specs = line.filter((x) => x.event === 'spec');
       const first = specs.find((x) => x.revision > decidedRev);
-      const carries = (x: FlowEvent): boolean => { const b = x.body as { dplan?: string; hash?: string; repair?: string }; return (b.repair === undefined || b.repair === r.id) && b.dplan === body!.dplan && (b.hash === hash || x === first); };
+      const carries = (x: FlowEvent): boolean => { const b = x.body as { dplan?: string; hash?: string; repair?: string }; return (b.repair === undefined || b.repair === r.id) && ((hash !== null && b.hash === hash) || (x === first && b.dplan === body!.dplan)); };
       const credit = creditOf(line, (k) => { const sp = specOfAttempt(line, k); return sp !== undefined && carries(sp); });
       const from = specs.filter((x) => x.revision > decidedRev && carries(x)).at(-1)?.revision ?? decidedRev;
       const replacedBy = specs.filter((x) => x.revision > from && !carries(x)).map((x) => cardSourceOf(s.events, x, t, r.id, body!.dplan) ?? 'a later plan').at(0) ?? null;
