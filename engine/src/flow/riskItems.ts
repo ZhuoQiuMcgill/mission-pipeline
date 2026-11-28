@@ -68,7 +68,7 @@ export interface ItemAnswer {
 
 /** The review line of an item answered not fixed or unclear: it joins the review's issues, and an acceptance with risk carries the item instead of writing a new one. */
 export const itemIssueLine = (a: ItemAnswer): string => `open item ${a.item} ${a.response === 'unclear' ? 'unclear' : 'not fixed'}: ${a.reason}`;
-const CARRIED = /^open item \S+ (not fixed|unclear): /;
+const CARRIED = /^open item (\S+) (not fixed|unclear): /;
 
 const STANDARD = /^\[([^\]]+)\] (not met|unclear): /;
 const ISSUE = /^issue (\S+) not fixed: /;
@@ -87,13 +87,15 @@ export function riskOf(reason: string): { readonly kind: RiskKind; readonly ref?
 /**
  * The open items an acceptance with risk of `task` at `attempt` writes, one per distinct reason, with ids that
  * do not depend on when they are written (`<escalation>.r<n>`), so a write repeated writes the same records. A
- * reason that is an open item answered not fixed is that item carried, not a new one.
+ * reason that is an open item the accepted review answered not fixed (`carried`) is that item carried, not a new
+ * one; any other reason, whatever its form (p10-1: a sentence that only looks like one), is an item.
  */
-export function riskItemBodies(task: string, attempt: number, escalation: string, reasons: readonly string[], findings: ReadonlyMap<string, string> = new Map()): RiskItemBody[] {
+export function riskItemBodies(task: string, attempt: number, escalation: string, reasons: readonly string[], findings: ReadonlyMap<string, string> = new Map(), carried: ReadonlySet<string> = new Set()): RiskItemBody[] {
   const seen = new Set<string>();
   const out: RiskItemBody[] = [];
   for (const r of reasons) {
-    if (CARRIED.test(r) || seen.has(r)) continue;
+    const c = CARRIED.exec(r);
+    if ((c !== null && carried.has(c[1]!)) || seen.has(r)) continue;
     seen.add(r);
     const kind = riskOf(r);
     // 4.4 (p10-5): a finding names the issue record it became, when the accepted review's hand-back says which
@@ -124,7 +126,8 @@ type Ev = { readonly revision: number; readonly line: string; readonly event: st
 type Decided = { readonly decision?: { readonly escalation?: string; readonly option?: string }; readonly risks?: readonly string[]; readonly k?: number };
 
 export type ItemClosure =
-  | { readonly how: 'fixed'; readonly task: string; readonly attempt: number; readonly revision: number }
+  /** `judgment`: the judgment of the review that answered it fixed (the fix tracker reads it). */
+  | { readonly how: 'fixed'; readonly task: string; readonly attempt: number; readonly revision: number; readonly judgment?: string }
   | { readonly how: 'words'; readonly words: string; readonly reason: string; readonly statement?: string; readonly revision: number };
 
 export interface RiskItem extends RiskItemBody {
@@ -139,7 +142,12 @@ export interface RiskItem extends RiskItemBody {
 }
 
 /** A review as the outcome of an item reads it: its attempt, its answers to open items, the deferred issues it answered fixed. */
-type ReviewLike = { readonly k?: unknown; readonly items?: readonly ItemAnswer[]; readonly fixed?: readonly string[] };
+type ReviewLike = { readonly k?: unknown; readonly judgment?: string; readonly items?: readonly ItemAnswer[]; readonly fixed?: readonly string[] };
+
+/** The items a review answered not fixed or unclear: an acceptance resting on it carries them (p10-1: only those). */
+export function carriedBy(review: { readonly items?: readonly ItemAnswer[] } | undefined): Set<string> {
+  return new Set((review?.items ?? []).filter((a) => a.response !== 'fixed').map((a) => a.item));
+}
 
 /** One acceptance of a task's attempt (accepted, re-bound and accepted, or accepted again), with the review it rests on. */
 interface Acceptance {
@@ -224,11 +232,12 @@ export function riskRecord(events: readonly Ev[]): RiskRecord {
   const created = new Map<Acceptance, string[]>();
   for (const a of withRisk) {
     const esc = a.body.decision!.escalation!;
-    const bodies = riskItemBodies(a.task, a.k, esc, acceptanceReasons(a.body, esc));
+    const bodies = riskItemBodies(a.task, a.k, esc, acceptanceReasons(a.body, esc), new Map(), carriedBy(a.review));
     for (const b of bodies) if (!all.has(b.id)) all.set(b.id, { body: b, revision: a.revision, recorded: false });
-    // what it created: its recorded items (its escalation's, whatever their number), else the ones its sentences give
+    // what it created: its recorded items (its escalation's) and the ones its sentences give (p10-r2-2: a batch an
+    // interruption left out is still among them)
     const mine = [...recorded.values()].filter((r) => r.body.escalation === esc && r.body.task === a.task).map((r) => r.body.id);
-    created.set(a, mine.length > 0 ? mine : bodies.map((b) => b.id));
+    created.set(a, [...new Set([...mine, ...bodies.map((b) => b.id)])]);
   }
   // the timeline: acceptances and closures on the user's words, in revision order
   const outcome = new Map<string, { closed: ItemClosure | null; carried: number; answer: RiskItem['answer'] }>();
@@ -249,7 +258,7 @@ export function riskRecord(events: readonly Ev[]): RiskRecord {
       o.answer = { ...a, task: acc.task, attempt: k };
       if (a.response !== 'fixed') carried.push(a.item);
       if (o.closed !== null) continue;
-      if (a.response === 'fixed') o.closed = { how: 'fixed', task: acc.task, attempt: k, revision: acc.revision };
+      if (a.response === 'fixed') o.closed = { how: 'fixed', task: acc.task, attempt: k, revision: acc.revision, ...(typeof acc.review?.judgment === 'string' ? { judgment: acc.review.judgment } : {}) };
       else o.carried += 1;
     }
     carriedAt.set(acc, carried);
@@ -258,7 +267,7 @@ export function riskRecord(events: readonly Ev[]): RiskRecord {
       for (const [id, x] of all) {
         if (x.body.kind !== 'deferred' || x.body.task !== acc.task || x.body.attempt >= k || !('issue' in (x.body.ref ?? {})) || (x.body.ref as { issue: string }).issue !== issue) continue;
         const o = of(id);
-        if (o.closed === null) o.closed = { how: 'fixed', task: acc.task, attempt: k, revision: acc.revision };
+        if (o.closed === null) o.closed = { how: 'fixed', task: acc.task, attempt: k, revision: acc.revision, ...(typeof acc.review?.judgment === 'string' ? { judgment: acc.review.judgment } : {}) };
       }
     }
   }
@@ -307,7 +316,8 @@ export function acceptanceOf(record: RiskRecord, task: string, escalation: strin
 export function withRiskText(record: RiskRecord, a: AcceptanceSummary | undefined): string {
   if (a === undefined) return 'what it left is not recorded';
   const s = stillOpen(a, new Map(record.items.map((i) => [i.id, i])));
-  return s.legacy ? `${a.risks} risk(s); what became of them is not recorded` : `${s.open.length} open`;
+  // p10-r2-1: of a 4.3 acceptance only the sentences no closure resolved are of unknown fate
+  return s.legacy && s.open.length > 0 ? `${s.open.length} risk(s); what became of them is not recorded` : `${s.open.length} open`;
 }
 
 /** Who took an item: the tasks of the plan in effect whose card names it, with what wrote that card (the plan, or a repair's amendment). */
@@ -369,15 +379,51 @@ export interface CardItem {
 }
 
 /** 4.4 (G5): the items a task's card names that are still open, as its cards list them (the Constructor fixes them; the Reviewer answers each). */
-export function takenItems(events: readonly Ev[], names: readonly string[] | undefined): CardItem[] {
+export function takenItems(events: readonly Ev[], names: readonly string[] | undefined, issueOf: (i: RiskItem) => string | undefined = itemIssue): CardItem[] {
   if (names === undefined || names.length === 0) return [];
   const byId = new Map(riskItemsOf(events).map((i) => [i.id, i]));
   return names.flatMap((id) => {
     const i = byId.get(id);
-    const issue = i?.ref !== undefined && 'issue' in i.ref ? i.ref.issue : undefined;
+    const issue = i === undefined ? undefined : issueOf(i);
     return i === undefined || i.closed !== null ? [] : [{ id, kind: i.kind, text: i.text, from: `task ${i.task}, attempt ${i.attempt}`, ...(issue !== undefined ? { issue } : {}) }];
   });
 }
+
+/** The issue an item is about, as its record names it. */
+export const itemIssue = (i: Pick<RiskItemBody, 'ref'>): string | undefined => (i.ref !== undefined && 'issue' in i.ref ? i.ref.issue : undefined);
+
+/** An issue record as the resolver of a finding reads it: its id, the versions it was observed on, the finding's words. */
+export interface IssueNote {
+  readonly issue: string;
+  readonly observedOn: readonly string[];
+  readonly text: string | null;
+}
+
+/**
+ * 4.4 (G5, p10-5): the issue an item is about: the one its record names, else (a finding of an acceptance made
+ * before 4.4, whose record names none) the one issue record of that finding's words observed on the product the
+ * acceptance accepted. Undefined when it cannot be recovered: a "fixed" answer then reaches no fix tracker, and the
+ * read says so.
+ */
+export function issueResolver(events: readonly Ev[], notes: readonly IssueNote[]): (i: RiskItem) => string | undefined {
+  const products = new Map<string, string>();
+  for (const e of events) {
+    if (!e.line.startsWith('task:') || (e.event !== 'accepted' && e.event !== 'rebound')) continue;
+    const b = e.body as Decided & { product?: unknown };
+    if (typeof b.decision?.escalation === 'string' && typeof b.product === 'string') products.set(`${e.line}\n${b.decision.escalation}`, b.product);
+  }
+  return (i) => {
+    const own = itemIssue(i);
+    if (own !== undefined || i.kind !== 'finding' || i.escalation === undefined) return own;
+    const product = products.get(`task:${i.task}\n${i.escalation}`);
+    const words = i.text.slice('finding: '.length);
+    const hits = product === undefined ? [] : notes.filter((n) => n.text === words && n.observedOn.includes(product));
+    return hits.length === 1 ? hits[0]!.issue : undefined;
+  };
+}
+
+/** Whether an item has an issue the fix tracker could be told of (an issue-backed item: a finding, an issue not fixed, a deferral). */
+export const issueBacked = (i: Pick<RiskItemBody, 'kind' | 'ref'>): boolean => i.kind === 'finding' || i.kind === 'deferred' || itemIssue(i) !== undefined;
 
 /** Whether an id names an item of the mission (recorded, or a sentence of an acceptance with risk). */
 export function itemIds(events: readonly Ev[]): Set<string> {

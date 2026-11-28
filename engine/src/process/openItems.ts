@@ -10,11 +10,11 @@
 
 import { canonicalJson } from '../common/hash.ts';
 import type { ContentHash, MissionId } from '../common/ids.ts';
-import type { ObjectVersionRecord } from '../common/records.ts';
+import type { IssueRecord, ListRef, ObjectVersionRecord } from '../common/records.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, OPEN_ITEM_ANSWER, itemDecider, openItemsOf, type OpenItem, type OpenItemAnswerBody } from '../flow/openItems.ts';
-import { OPEN_ITEM_CLOSED, VERIFIED, VERIFIED_LINE, reopenTakers, riskItemsOf, takersOf, type ItemClosedBody, type RiskItem, type Taker, type VerifiedBody } from '../flow/riskItems.ts';
+import { OPEN_ITEM_CLOSED, VERIFIED, VERIFIED_LINE, issueBacked, issueResolver, itemIssue, reopenTakers, riskItemsOf, takersOf, type IssueNote, type ItemClosedBody, type RiskItem, type Taker, type VerifiedBody } from '../flow/riskItems.ts';
 import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REQUIREMENTS_LINE, amendedPlan, type AmendmentEntry, type RepairBody, type StoredDetailedPlan } from '../flow/plandoc.ts';
-import { appendRecords, factById, flowEventExists, flowEvents, flowMissions, type Db } from '../memory/index.ts';
+import { appendRecords, factById, flowEventExists, flowEvents, flowMissions, recordsByKind, type Db } from '../memory/index.ts';
 import { requireSecretary } from '../memory/resident.ts';
 import { itemLine } from '../flow/requirements.ts';
 import type { EscalationBody } from '../flow/secretary.ts';
@@ -41,6 +41,8 @@ export interface RiskItemView extends RiskItem {
   readonly takenBy: readonly Taker[];
   /** The repairs filed for it (`mp pm repair --open-items`). */
   readonly namedBy: readonly string[];
+  /** 4.4 (p10-5): an issue-backed item closed fixed: whether the closing judgment told the fix tracker (absent: not such an item). */
+  readonly trackerTold?: boolean;
 }
 
 type Ev = { revision: number; line: string; event: string; key: string; body: unknown };
@@ -91,7 +93,10 @@ function questionViews(db: Db, data: { text(h: string): string }, mission: strin
 }
 
 /** 4.4 (G5): the items left at the cap or deferred, with what took them, read from events already read. */
-export function riskViews(db: Db, data: { text(h: string): string }, mission: string, events: readonly Ev[]): RiskItemView[] {
+/** What the reads of items need of the data table: documents and lists. */
+type ItemData = { text(h: string): string; getList(r: ListRef): string[] };
+
+export function riskViews(db: Db, data: ItemData, mission: string, events: readonly Ev[]): RiskItemView[] {
   const items = riskItemsOf(events);
   if (items.length === 0) return [];
   const eff = planInEffectOf(db, data, events);
@@ -105,7 +110,37 @@ export function riskViews(db: Db, data: { text(h: string): string }, mission: st
     for (const id of r.openItems ?? []) named.set(id, [...(named.get(id) ?? []), r.id]);
   }
   const times = timesOf(db, items.map((i) => i.revision));
-  return items.map((i) => ({ ...i, mission, at: times.get(i.revision) ?? null, takenBy: takers.get(i.id) ?? [], namedBy: named.get(i.id) ?? [] }));
+  // 4.4 (p10-5): whether the fix tracker was told: an issue-backed item closed fixed names its issue, and the closing
+  // judgment answered that issue fixed (a finding of a 4.3 acceptance whose issue record cannot be found was not)
+  const fixedBacked = items.filter((i) => i.closed?.how === 'fixed' && issueBacked(i));
+  const issueOf = fixedBacked.some((i) => itemIssue(i) === undefined) ? issueResolver(events, issueNotes(db, data)) : itemIssue;
+  const told = (i: RiskItem): boolean | undefined => {
+    if (i.closed?.how !== 'fixed' || !issueBacked(i)) return undefined;
+    const issue = issueOf(i);
+    const j = i.closed.judgment === undefined ? undefined : factById(db, 'judgment', i.closed.judgment)?.record as { issues?: ReadonlyArray<{ issue: string; response: string }> } | undefined;
+    return issue !== undefined && (j?.issues ?? []).some((x) => x.issue === issue && x.response === 'fixed');
+  };
+  return items.map((i) => {
+    const t = told(i);
+    return { ...i, mission, at: times.get(i.revision) ?? null, takenBy: takers.get(i.id) ?? [], namedBy: named.get(i.id) ?? [], ...(t !== undefined ? { trackerTold: t } : {}) };
+  });
+}
+
+/** The mission's issue records as a finding's resolver reads them (its id, the versions it was observed on, its words). */
+function issueNotes(db: Db, data: ItemData): IssueNote[] {
+  const out: IssueNote[] = [];
+  for (let after = 0; ; ) {
+    const page = recordsByKind(db, { kinds: ['issue'], after, limit: 1000 });
+    for (const r of page) {
+      const rec = r.record as IssueRecord;
+      let text: string | null = null;
+      try { if (rec.text !== undefined) text = (JSON.parse(data.text(rec.text)) as { text?: string }).text ?? null; } catch { /* not readable */ }
+      out.push({ issue: rec.issue as string, observedOn: data.getList(rec.observedOn), text });
+    }
+    if (page.length < 1000) break;
+    after = Number(page.at(-1)!.revision);
+  }
+  return out;
 }
 
 /** `mp read open-items <mission>`: the questions left open (p8) and what was left at the cap, oldest first (one snapshot). */
@@ -119,7 +154,7 @@ export function listAllItems(ctx: ProcessContext, mission: string): { readonly q
 }
 
 /** Both kinds of item from events already read (a read or a write that has them). */
-export function listOpenItemsIn(db: Db, data: { text(h: string): string }, mission: string, events: readonly Ev[]): { readonly questions: OpenItemView[]; readonly items: RiskItemView[] } {
+export function listOpenItemsIn(db: Db, data: ItemData, mission: string, events: readonly Ev[]): { readonly questions: OpenItemView[]; readonly items: RiskItemView[] } {
   const qs = questionViews(db, data, mission, events);
   const times = timesOf(db, qs.map((q) => q.revision));
   return { questions: qs.map((q) => ({ ...q, at: times.get(q.revision) ?? null })), items: riskViews(db, data, mission, events) };

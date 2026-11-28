@@ -111,7 +111,8 @@ function openOn(record: RiskRecord, tasks: readonly TaskStateView[], lines: Read
     const a = esc === null ? undefined : acceptanceOf(record, t.task, esc);
     if (a === undefined) continue;
     const s = stillOpen(a, byId);
-    if (s.legacy) notRecorded += a.risks;
+    // p10-r2-1: only the 4.3 sentences no closure resolved are of unknown fate
+    if (s.legacy) notRecorded += s.open.length;
     else for (const id of s.open) open.add(id);
   }
   return { open: open.size, notRecorded };
@@ -134,10 +135,11 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
     const dd = cur === null ? null : deliveryDocument(data, cur);
     const delivered = new Set((dd?.entries ?? []).map((e) => e.id));
     const notFullyProven = new Map((dd?.notFullyProven ?? []).map((n) => [n.id, n.reasons]));
+    // p10-2 (round 2): both, as the close shows them: the current label, and the delivery's own result beside it
     const proof = (p: string): string => {
+      const label = labels[p] ?? 'not labelled yet';
       const nfp = notFullyProven.get(p);
-      if (nfp !== undefined && delivered.has(p)) return `not fully proven on the delivered tree (${nfp.join(', ') || 'no reason recorded'})`;
-      return labels[p] ?? 'not labelled yet';
+      return nfp !== undefined && delivered.has(p) ? `${label}; delivered as not fully proven on the delivered tree (${nfp.join(', ') || 'no reason recorded'})` : label;
     };
     const landed = cur !== null && landedOf(db, mission, cur.delivery);
     const record = riskRecord(events);
@@ -168,16 +170,18 @@ export function readItems(ctx: ProcessContext, mission: string): ItemStateView[]
     for (const r of repairsRead(db, data, mission).repairs) {
       const credited = [...r.added, ...r.changed, ...r.reopened].map((x): TaskStateView => {
         const s = taskStateOf(x.task, lines, inPlan.has(x.task), proof);
-        // an acceptance, a delivery or a proof counts for this repair only when the repair read says its work is done
-        if (s.state === 'abandoned' || x.done) return { ...s, detail: x.state };
+        // an acceptance, a delivery or a proof counts for this repair only when the repair read says its work is done;
+        // p10-r2-3: a task the plan in effect dropped keeps that state (it is no progress)
+        if (s.state === 'abandoned' || s.state === 'not in the plan in effect' || x.done) return { ...s, detail: x.state };
         return { task: x.task, state: 'not done for this repair', product: null, label: null, detail: x.state };
       });
-      const done = credited.filter((t) => t.state === 'accepted' || t.state === 'accepted with risk');
+      const live = credited.filter((t) => t.state !== 'not in the plan in effect');
+      const done = live.filter((t) => t.state === 'accepted' || t.state === 'accepted with risk');
       const state: ItemStateView['state'] = r.about?.startsWith('exploration ') === true ? 'about an exploration'
-        : r.state !== 'decided' || credited.length === 0 ? 'not planned'
-        : r.done === true ? together(credited, delivered, landed)
-        : credited.some((t) => t.state === 'abandoned') ? 'abandoned'
-        : done.length > 0 || credited.some((t) => (t.detail ?? '').includes('in work')) ? 'in work' : 'planned';
+        : r.state !== 'decided' || live.length === 0 ? 'not planned'
+        : r.done === true ? together(live, delivered, landed)
+        : live.some((t) => t.state === 'abandoned') ? 'abandoned'
+        : done.length > 0 || live.some((t) => (t.detail ?? '').includes('in work')) ? 'in work' : 'planned';
       out.push({ kind: 'repair', id: r.id, type: r.kind, text: r.text, words: r.words, state, ...openOn(record, done, lines), tasks: credited, proof: proofOf(done), verified: statements.get(`repair:${r.id}`) ?? [] });
     }
     return out;

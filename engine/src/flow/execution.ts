@@ -43,7 +43,7 @@ import { type IssueRecord, type IssueResponse, type ObjectScope, type ObjectVers
 import type { ConstructorCard, ReviewerCard } from '../seat/card.ts';
 import { constructorQuestions, type ConstructorResult, type QuestionWhen, type ReviewerResult } from '../seat/results.ts';
 import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText, cardQuestions, deferredItemBodies, escalationQuestions, laterItemBodies, questionReasons, taskQuestions, withoutAnswers, type OpenItemBody } from './openItems.ts';
-import { ITEM_BATCH, acceptanceReasons, cardItemNames, deferredItemBody, itemIssueLine, riskItemBodies, takenItems, type ItemAnswer, type RiskItemBody } from './riskItems.ts';
+import { ITEM_BATCH, acceptanceReasons, cardItemNames, carriedBy, deferredItemBody, issueResolver, itemIssue, itemIssueLine, riskItemBodies, riskItemsOf, takenItems, type IssueNote, type ItemAnswer, type RiskItem, type RiskItemBody } from './riskItems.ts';
 import {
   basisIndex,
   cardBase,
@@ -1669,8 +1669,18 @@ async function acceptWithRisk(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
  * left out). Nothing else in the acceptance changes.
  */
 async function acceptanceItems(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<{ readonly first: FlowEventInput[]; readonly rest: RiskItemBody[] }> {
-  const bodies = riskItemBodies(task, k, escalation, reasons, await findingIssues(ctx, review));
+  const bodies = await itemBodiesOf(ctx, task, k, escalation, reasons, review);
   return { first: bodies.slice(0, ITEM_BATCH).map((b) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, b.id, b)), rest: bodies.slice(ITEM_BATCH) };
+}
+
+/**
+ * The items of an acceptance with risk resting on `review` (a review of the task's line): one per reason, the issue
+ * each finding became, and (p10-1) no new item only for an item that review answered not fixed (it is carried).
+ * The writer and the later pass that completes its batches derive them alike; riskRecord reads them the same way.
+ */
+async function itemBodiesOf(ctx: FlowCtx, task: string, k: number, escalation: string, reasons: readonly string[], review: string | undefined): Promise<RiskItemBody[]> {
+  const body = review === undefined ? undefined : (await eventOf<ReviewBody>(ctx, taskLine(task), 'review', review))?.body;
+  return riskItemBodies(task, k, escalation, reasons, await findingIssues(ctx, review), carriedBy(body));
 }
 
 /**
@@ -1685,6 +1695,23 @@ async function findingIssues(ctx: FlowCtx, review: string | undefined): Promise<
   const issues = (hb?.records ?? []).flatMap((r) => (r.kind === 'issue' ? [r.issue as string] : []));
   if (findings.length !== issues.length) return new Map();
   return new Map(findings.map((f, i) => [`finding: ${f}`, issues[i]!]));
+}
+
+/**
+ * 4.4 (G5, p10-5): how a card finds the issue each item it lists is about: the item's own record, else (a finding of
+ * an acceptance made before 4.4) the issue record of those words on the product accepted. The issue records are read
+ * only when a listed item needs them.
+ */
+async function cardIssues(ctx: FlowCtx, events: Parameters<typeof riskItemsOf>[0], names: readonly string[]): Promise<(i: RiskItem) => string | undefined> {
+  if (!riskItemsOf(events).some((i) => names.includes(i.id) && i.kind === 'finding' && itemIssue(i) === undefined)) return itemIssue;
+  const c = ctx.ports.ledger.content;
+  const notes: IssueNote[] = (await ctx.ports.ledger.records(['issue'])).map(({ record }) => {
+    const r = record as IssueRecord;
+    let text: string | null = null;
+    try { if (r.text !== undefined) text = (JSON.parse(c.get(r.text)) as { text?: string }).text ?? null; } catch { /* the words are not readable: not this finding's */ }
+    return { issue: r.issue as string, observedOn: c.getList(r.observedOn), text };
+  });
+  return issueResolver(events, notes);
 }
 
 /** The review an acceptance of attempt k rests on: the one it names as adopted, else the attempt's last review before it. */
@@ -1710,8 +1737,7 @@ async function riskItemsLeft(ctx: FlowCtx, t: DetailedTask, line: Line): Promise
   for (const e of [...line.all<{ k: number; decision?: { escalation: string; option?: string }; risks?: string[]; review?: string }>('accepted'), ...line.all<ReboundBody & { review?: string }>('rebound')]) {
     const d = e.body.decision;
     if (d?.option !== 'accept-risk' || (e.body.risks ?? []).length <= ITEM_BATCH) continue;
-    const refs = await findingIssues(ctx, acceptedReview(line, e.body.k, e.revision, e.body.review));
-    const bodies = riskItemBodies(t.id, e.body.k, d.escalation, acceptanceReasons(e.body, d.escalation), refs);
+    const bodies = await itemBodiesOf(ctx, t.id, e.body.k, d.escalation, acceptanceReasons(e.body, d.escalation), acceptedReview(line, e.body.k, e.revision, e.body.review));
     if (bodies.length > ITEM_BATCH) await writeItemBatches(ctx, bodies.slice(ITEM_BATCH), bodies[0]!.id);
   }
 }
@@ -1786,7 +1812,8 @@ async function acceptReopenWithRisk(ctx: FlowCtx, plan: DetailedPlanDoc, depende
       ev(ctx, taskLine(integration), 'accepted', String(line.k), { k: line.k, product: product.object, judgment: rulingJudgmentId(e.id, by), decision: { escalation: e.id, option: 'accept-risk', by: d.by, ...(words !== undefined ? { words } : {}) }, risks, review: review.task }),
       ...items.first,
     ],
-    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...review.issues] })]);
+    // p10-1 (round 2): the decision's receipt names every reason it accepted, as the acceptance does
+    [await carryOut(ctx, e.id, { option: 'accept-risk', risks: [...e.reasons] })]);
   await writeItemBatches(ctx, items.rest);
 }
 
@@ -3267,7 +3294,8 @@ async function submitConstructor(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
   const questions = taskQuestions(missionEvents, t.id, k);
   // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open
-  const openItems = takenItems(missionEvents, cardItemNames(missionEvents, t, k));
+  const names = cardItemNames(missionEvents, t, k);
+  const openItems = takenItems(missionEvents, names, await cardIssues(ctx, missionEvents, names));
   const card: ConstructorCard = {
     ...cardBase(ctx, task, { module: t.module, duties, decisionQuotes: withoutAnswers(await decisionQuotes(ctx, t), questions), constraints: await cardConstraints(ctx, t, new Set(['object', 'instruction'])) }),
     ...(questions.length > 0 ? { questions: cardQuestions(questions) } : {}),
@@ -3417,7 +3445,8 @@ async function submitReviewer(
   const missionEvents = await ctx.ports.ledger.events({ mission: ctx.mission });
   const questions = taskQuestions(missionEvents, t.id, product.k);
   // 4.4 (G5): the open items the task's card (or a repair's reopen of this work) takes, still open: the Reviewer answers each
-  const openItems = takenItems(missionEvents, cardItemNames(missionEvents, t, product.k));
+  const names = cardItemNames(missionEvents, t, product.k);
+  const openItems = takenItems(missionEvents, names, await cardIssues(ctx, missionEvents, names));
   const card: ReviewerCard = {
     ...cardBase(ctx, task, {
       module: t.module,

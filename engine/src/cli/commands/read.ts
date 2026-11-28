@@ -245,7 +245,9 @@ const openItemsRead: Command = {
 /** 4.4 (G5): one item left at the cap, from its record: where it was left, its state, and what took it. */
 function riskItemLine(i: RiskItemView, old: string): string {
   const left = i.why === 'deferred' ? `deferred by its Reviewer ${i.review ?? ''}`.trimEnd() : `accepted with risk on ${i.escalation}`;
-  const state = i.closed !== null ? `closed, ${closureText(i.closed)}` : !i.recorded ? 'not recorded as an item (an acceptance with risk made before 4.4): what became of it is not recorded' : 'open';
+  // p10-5: a fix that did not reach the fix tracker is said so (the issue of a 4.3 finding could not be recovered)
+  const tracker = i.trackerTold === false ? ' (the fix tracker was not told: the issue this item is about could not be found)' : '';
+  const state = i.closed !== null ? `closed, ${closureText(i.closed)}${tracker}` : !i.recorded ? 'not recorded as an item (an acceptance with risk made before 4.4): what became of it is not recorded' : 'open';
   const took = i.takenBy.length > 0 ? `; taken by ${i.takenBy.map((t) => `task ${t.task} (${t.by})`).join(', ')}` : i.closed === null ? '; taken by no task' : '';
   const named = i.namedBy.length > 0 ? `; named by repair ${i.namedBy.join(', ')}` : '';
   const answer = i.answer !== null && i.closed?.how !== 'fixed' ? `\n  At the acceptance of task ${i.answer.task} (attempt ${i.answer.attempt}) its Reviewer answered it ${i.answer.response}: ${i.answer.reason}` : '';

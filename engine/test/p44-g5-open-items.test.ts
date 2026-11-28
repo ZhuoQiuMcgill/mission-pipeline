@@ -269,9 +269,13 @@ describe('4.4 G5: deferrals, and the record of 4.3', () => {
     assert.ok(listAllItems(w.ctx, M).items.find((i) => i.id === 'exh.old.1.r1')!.closed !== null);
   });
 
-  it('riskItemBodies: one item per distinct reason, every form kept (an unknown form is a fix); a carried item is not a new one', () => {
-    const b = riskItemBodies('t', 2, 'e', ['[S1] unclear: why', 'finding: x', 'finding: x', 'a program run did not pass on the product: test (1 failed; evidence ev1)', 'open item e0.r1 not fixed: still', 'the standard S3 cannot be verified from what is visible']);
+  it('riskItemBodies: one item per distinct reason, every form kept (an unknown form is a fix); an item the accepted review answered not fixed is carried, not a new one', () => {
+    const reasons = ['[S1] unclear: why', 'finding: x', 'finding: x', 'a program run did not pass on the product: test (1 failed; evidence ev1)', 'open item e0.r1 not fixed: still', 'the standard S3 cannot be verified from what is visible'];
+    const b = riskItemBodies('t', 2, 'e', reasons, new Map(), new Set(['e0.r1']));
     assert.deepEqual(b.map((x) => [x.id, x.kind]), [['e.r1', 'fix'], ['e.r2', 'finding'], ['e.r3', 'run'], ['e.r4', 'fix']]);
+    // p10-1 (round 2): the same words where the review answered no such item are a reason like any other: an item
+    const free = riskItemBodies('t', 2, 'e', reasons);
+    assert.deepEqual(free.map((x) => x.text), [reasons[0], reasons[1], reasons[3], reasons[4], reasons[5]]);
     assert.deepEqual(riskItemsOf([]), []);
   });
 });

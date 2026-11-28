@@ -15,8 +15,11 @@ import { acceptanceOf, riskRecord, withRiskText, type RiskItemBody } from '../sr
 import { answerEscalation, type EscalationBody } from '../src/flow/secretary.ts';
 import { detailedPlan, drive, happyScript, pmPlan, reviewer, secretary, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
 import { readItems } from '../src/cli/itemsRead.ts';
-import { factById } from '../src/memory/index.ts';
-import { recordVerified } from '../src/process/openItems.ts';
+import { appendRecords, factById } from '../src/memory/index.ts';
+import { closeOpenItem, listAllItems, recordVerified } from '../src/process/openItems.ts';
+import { canonicalJson } from '../src/common/hash.ts';
+import type { ContentHash } from '../src/common/ids.ts';
+import type { IssueRecord } from '../src/common/records.ts';
 import { pmRepair } from '../src/process/pm.ts';
 import type { ReviewerCard } from '../src/seat/card.ts';
 import '../src/seat/cards/index.ts';
@@ -52,31 +55,50 @@ const acceptsRisk: Script = (t) => {
   return c.request.source === 'loop-exhausted' && c.options.some((o) => o.id === 'accept-risk') ? { handBack: secretary(c, 'accept-risk') } : null;
 };
 
+/**
+ * An integration review reopens impl (whose loop is used up) with `issue`; the user accepts the reviewed
+ * integration with its risk: the ruling adopts the reviewed attempt (package 4.1.3's scenario).
+ */
+async function integrationRuling(issue: string) {
+  const plan = () => { const p = detailedPlan(M); return { ...p, tasks: [...p.tasks, { ...p.tasks[1]!, id: 'integ', kind: 'integration' as const, module: null, writeScope: [], implements: [], calls: [], dependsOn: ['impl'], provenance: { planElements: ['e1', 'e2'] } }] }; };
+  const { w, engine, script } = await world(plan);
+  let n = 0;
+  let granted = false;
+  await drive(engine, w.scheduler, script({
+    reviewer: (t) => { const c = t.card as unknown as ReviewerCard; return c.target.includes('integ') ? null : { handBack: reviewer(c, c.target.includes('impl') ? 'rework' : 'pass', { findings: [`dependency finding ${++n}`] }) }; },
+    secretary: (t) => { const c = t.card as unknown as SecretaryCard; if (!granted) { granted = true; return { handBack: secretary(c, 'grant', { grantExtra: 1 }) }; } return { handBack: secretary(c, 'accept-risk', { classification: 'important-within-authority', notice: 'accept the dependency risk' }) }; },
+  }));
+  await drive(engine, w.scheduler, script({ reviewer: (t) => { const c = t.card as unknown as ReviewerCard; return c.target.includes('integ') ? { handBack: { ...reviewer(c, 'rework', { findings: ['quoted integration finding'] }), reopen: [{ task: 'impl', issue }] } } : { handBack: reviewer(c, 'pass') }; }, secretary: () => null }));
+  const esc = (await events<EscalationBody>(w, 'secretary', 'escalation')).map((e) => e.body).filter((e) => e.source === 'loop-exhausted').at(-1)!;
+  const words = say(w, 'Accept the integration with the remaining finding as a risk.');
+  await answerEscalation(w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept it as it is. (${words})` });
+  await drive(engine, w.scheduler, script({ secretary: () => null }));
+  assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'));
+  const accepted = (await events<any>(w, 'task:integ', 'accepted'))[0]!.body;
+  const applied = (await events<any>(w, 'secretary', 'applied')).find((e) => e.key === esc.id)!.body;
+  const items = (await events<RiskItemBody>(w, OPEN_ITEMS_LINE, OPEN_ITEM)).map((e) => e.body).filter((b) => b.escalation === esc.id);
+  return { w, esc, accepted, applied, items };
+}
+
 describe('4.4 G5, review round 1', () => {
   it('p10-1: an integration ruling that adopts the reviewed attempt quotes every reason of its escalation, has an item for the dependency\'s reopen, names the review it adopted, and closes by that review\'s answers', async () => {
-    // the integration's plan, as package 4.1.3's tests build it
-    const plan = () => { const p = detailedPlan(M); return { ...p, tasks: [...p.tasks, { ...p.tasks[1]!, id: 'integ', kind: 'integration' as const, module: null, writeScope: [], implements: [], calls: [], dependsOn: ['impl'], provenance: { planElements: ['e1', 'e2'] } }] }; };
-    const { w, engine, script } = await world(plan);
-    let n = 0;
-    let granted = false;
-    await drive(engine, w.scheduler, script({
-      reviewer: (t) => { const c = t.card as unknown as ReviewerCard; return c.target.includes('integ') ? null : { handBack: reviewer(c, c.target.includes('impl') ? 'rework' : 'pass', { findings: [`dependency finding ${++n}`] }) }; },
-      secretary: (t) => { const c = t.card as unknown as SecretaryCard; if (!granted) { granted = true; return { handBack: secretary(c, 'grant', { grantExtra: 1 }) }; } return { handBack: secretary(c, 'accept-risk', { classification: 'important-within-authority', notice: 'accept the dependency risk' }) }; },
-    }));
-    await drive(engine, w.scheduler, script({ reviewer: (t) => { const c = t.card as unknown as ReviewerCard; return c.target.includes('integ') ? { handBack: { ...reviewer(c, 'rework', { findings: ['quoted integration finding'] }), reopen: [{ task: 'impl', issue: 'dependency is slow' }] } } : { handBack: reviewer(c, 'pass') }; }, secretary: () => null }));
-    const esc = (await events<EscalationBody>(w, 'secretary', 'escalation')).map((e) => e.body).filter((e) => e.source === 'loop-exhausted').at(-1)!;
-    const words = say(w, 'Accept the integration with the remaining finding as a risk.');
-    await answerEscalation(w, { mission: M, escalation: esc.id, option: 'accept-risk', words: `Accept it as it is. (${words})` });
-    await drive(engine, w.scheduler, script({ secretary: () => null }));
-    assert.ok(await acceptedProduct(flowCtx(w, M), 'integ'));
-    const accepted = (await events<any>(w, 'task:integ', 'accepted'))[0]!.body;
+    const { w, esc, accepted, applied, items } = await integrationRuling('dependency is slow');
     const review = (await events<any>(w, 'task:integ', 'review'))[0]!;
     assert.equal(accepted.review, review.key, 'the acceptance names the review it adopted');
     assert.ok(esc.reasons.includes('dependency is slow'));
     assert.ok(accepted.risks.some((r: string) => r.endsWith(': dependency is slow')), 'the dependency\'s reopen is among the risks accepted');
-    const items = (await events<RiskItemBody>(w, OPEN_ITEMS_LINE, OPEN_ITEM)).map((e) => e.body).filter((b) => b.escalation === esc.id);
     assert.deepEqual(items.map((b) => b.text), esc.reasons, 'one item per reason of the escalation');
     assert.ok(items.every((b) => b.task === 'integ' && b.attempt === accepted.k));
+    // round 2: the decision's receipt names every reason too
+    assert.deepEqual(applied.what.risks, esc.reasons, 'the applied decision names the dependency\'s reopen');
+  });
+
+  it('p10-1 (round 2): a reason in the words of a carried item that the accepted review never answered is an item like any other, and the receipt names it', async () => {
+    const issue = 'open item e0.r9 not fixed: timeout';
+    const { esc, applied, items } = await integrationRuling(issue);
+    assert.ok(esc.reasons.includes(issue));
+    assert.ok(items.some((b) => b.text === issue), `an item for "${issue}": ${JSON.stringify(items.map((b) => b.text))}`);
+    assert.ok(applied.what.risks.includes(issue));
   });
 
   it('p10-1: the outcome of an adopted review: its answer "fixed" closes the item, credited to that review\'s attempt', () => {
@@ -249,5 +271,90 @@ describe('4.4 G5, review round 1: p10-3', () => {
     assert.equal(row2.state, 'accepted after a passing review');
     const repairs = (await import('../src/cli/workReads.ts')).repairsRead(w.memory, w.memory.data, M).repairs;
     assert.deepEqual(repairs.map((r) => [r.id, r.done]), [[r1, false], [r2, true]], 'the repair read says the same');
+  });
+});
+
+/** An acceptance with risk as 4.3 recorded it (its sentences, no item) on a task line, in one write. */
+function accepted43(w: World, taskId: string, escalation: string, product: string, reasons: readonly string[]): void {
+  const risks = reasons.map((r) => `accepted with its risk by the Secretary on ${escalation}: ${r}`);
+  w.memory.write({}, (tx) => appendRecords(tx, [{ kind: 'flow.event', mission: M, line: `task:${taskId}`, event: 'accepted', key: '1', body: tx.data.put(canonicalJson({ k: 1, product, judgment: `j.sec.${escalation}`, decision: { escalation, option: 'accept-risk', by: 'secretary' }, risks })) as ContentHash }]));
+}
+/** A delivery recorded with its document (a recorded delivery's row, as the delivery side writes it). */
+function delivered(w: World, entries: readonly string[], notFullyProven: readonly string[]): void {
+  const doc = w.memory.data.put(JSON.stringify({ version: 'mp41-delivery/1', root: '.', entries: entries.map((id) => ({ id, unit: null, label: 'proven' })), proof: { notFullyProven: notFullyProven.map((id) => ({ id, reasons: [{ kind: 'content-changed' }] })) }, tree: null, words: null }));
+  const head = Number(w.memory.head());
+  w.memory.maintenance((tx) => { tx.stmt("INSERT INTO deliveries (mission, delivery, state, commit_id, base, ref, target, manifest, seq, recorded_rev, withdrawn_reason, updated_at, description) VALUES (?, 'D1', 'recorded', ?, ?, 'refs/x', 'main', ?, 1, ?, NULL, 0, NULL)").run(M, 'c'.repeat(40), 'b'.repeat(40), doc, head); });
+}
+
+describe('4.4 G5, review round 2', () => {
+  it('p10-2: a delivered output whose delivery recorded content-changed reads with both, the current label and the delivery\'s result, as the close shows them; while the evaluator recomputes, "recomputing" stays visible beside it', async () => {
+    const { w, engine, script } = await world();
+    await drive(engine, w.scheduler, script());
+    delivered(w, ['prod.con.m1.iface.1', 'prod.con.m1.impl.1'], ['prod.con.m1.impl.1']);
+    const g1 = readItems(w.ctx, M).find((x) => x.id === 'g1')!;
+    assert.equal(g1.state, 'delivered');
+    assert.equal(g1.tasks.find((t) => t.task === 'impl')!.label, 'proven; delivered as not fully proven on the delivered tree (content-changed)');
+    w.memory.maintenance((tx) => { tx.stmt('INSERT OR IGNORE INTO lbl_work (node, queued, dirty, phase, cursor) VALUES (?, 1, 0, 1, NULL)').run('t:prod.con.m1.impl.1'); });
+    assert.equal(readItems(w.ctx, M).find((x) => x.id === 'g1')!.tasks.find((t) => t.task === 'impl')!.label, 'recomputing; delivered as not fully proven on the delivered tree (content-changed)');
+  });
+
+  it('p10-5: a finding of a 4.3 acceptance, taken by a repair\'s task: its issue is recovered from the 4.3 record, the Reviewer\'s "fixed" reaches the judgment; where it cannot be recovered, the read says the fix tracker was not told', async () => {
+    const { w, engine, script } = await world();
+    await drive(engine, w.scheduler, script());
+    const product = 'prod.con.m1.impl.1';
+    // the 4.3 record: the finding's issue record, observed on the product the acceptance accepted
+    const doc = w.memory.data.put(JSON.stringify({ format: 'mp4.finding.v1', text: 'quoted newlines are lost', launch: 'D-9', target: product, review: 'reviewer', module: 'parser' }));
+    const issue = `finding:${doc}`;
+    w.memory.write({}, (tx) => appendRecords(tx, [{ kind: 'issue', issue: issue as never, module: 'parser' as never, observedOn: tx.data.putList([product]), text: doc as never } satisfies IssueRecord]));
+    accepted43(w, 'old', 'exh.old.1', product, ['finding: quoted newlines are lost', 'finding: no such record']);
+    const [found, lost] = ['exh.old.1.r1', 'exh.old.1.r2'];
+    const words = say(w, 'Trying it: quoted newlines still vanish.');
+    const filed = await pmRepair(w.ctx, { mission: M, words, kind: 'defect', text: 'quoted newlines still vanish', openItems: [found, lost] });
+    await drive(engine, w.scheduler, script({
+      'architect-repair': (t) => ((t.card as unknown as ArchitectRepairCard).repair.id === filed.repair ? { handBack: { reopen: [], add: [task({ id: 'fix', dependsOn: ['impl'], openItems: [found, lost] })], note: 'fix takes them' } } : null),
+      reviewer: (t) => ({ handBack: reviewer(t.card as unknown as ReviewerCard, 'pass') }),
+    }));
+    const card = w.scheduler.card<ReviewerCard>('rev.m1.fix.1');
+    assert.deepEqual(card.openItems?.map((i) => [i.id, i.issue]), [[found, issue], [lost, undefined]], 'the issue is recovered where the 4.3 record has it');
+    const judgment = factById(w.memory, 'judgment', 'j.rev.m1.fix.1')!.record as unknown as { issues: Array<{ issue: string; response: string }> };
+    assert.deepEqual(judgment.issues.filter((i) => i.issue === issue).map((i) => i.response), ['fixed']);
+    const views = listAllItems(w.ctx, M).items;
+    assert.deepEqual([found, lost].map((id) => [views.find((i) => i.id === id)!.closed?.how, views.find((i) => i.id === id)!.trackerTold]), [['fixed', true], ['fixed', false]]);
+    const { cli } = await import('./cli-fixtures.ts');
+    const r = await cli(w.dir, ['read', 'open-items', 'm1']);
+    assert.ok(r.out.includes(`[${lost}] finding, task old (attempt 1, accepted with risk on exh.old.1): closed, fixed: task fix was accepted at attempt 1 with it answered fixed (the fix tracker was not told: the issue this item is about could not be found)`), r.out);
+  });
+
+  it('p10-r2-1: a risk of a 4.3 acceptance closed on the user\'s words no longer counts as of unknown fate in mp read items', async () => {
+    const { w, engine, script } = await world();
+    const holdImpl: Script = (t, s) => (t.task.startsWith('con.m1.impl.') ? null : script()(t, s));
+    await drive(engine, w.scheduler, holdImpl);
+    accepted43(w, 'impl', 'exh.task.m1.impl.1', 'prod.old.impl', ['[S1] not met: slow', 'finding: no docs']);
+    const row = () => readItems(w.ctx, M).find((x) => x.id === 'g1')!;
+    assert.deepEqual([row().state, row().notRecorded, row().open], ['accepted with risk', 2, 0]);
+    closeOpenItem(w.ctx, { op: 'c1', ref: 'exh.task.m1.impl.1.r1', words: say(w, 'The speed does not matter.'), reason: 'speed does not matter' });
+    assert.equal(row().notRecorded, 1, 'only the sentence no closure resolved');
+  });
+
+  it('p10-r2-2: an acceptance whose later batch an interruption left out counts its items from its reasons and its record together', () => {
+    const r = riskRecord([
+      item(1, 'e1.r1', 'b'), item(1, 'e1.r2', 'b'),
+      ev(2, 'task:b', 'accepted', '1', { k: 1, product: 'pb', judgment: 'j.sec.e1', decision: { escalation: 'e1', option: 'accept-risk', by: 'secretary' }, risks: ['[S1] not met: e1.r1', '[S1] not met: e1.r2', 'finding: the third'].map((x) => `accepted with its risk by the Secretary on e1: ${x}`) }),
+    ]);
+    assert.equal(withRiskText(r, acceptanceOf(r, 'b', 'e1')), '3 open');
+  });
+
+  it('p10-r2-3: a repair whose only task a new plan dropped before it was accepted reads "not planned", not "in work"', async () => {
+    const { w, engine, script } = await world();
+    await drive(engine, w.scheduler, script());
+    const filed = await pmRepair(w.ctx, { mission: M, words: say(w, 'Trying it: it needs a trim.'), kind: 'defect', text: 'it needs a trim' });
+    const held: Script = (t, s) => (t.task.startsWith('con.m1.trim.') ? null : script({ 'architect-repair': () => ({ handBack: { reopen: [], add: [task({ id: 'trim', dependsOn: ['impl'] })], note: 'trim' } }) })(t, s));
+    await drive(engine, w.scheduler, held);
+    assert.equal(readItems(w.ctx, M).find((x) => x.kind === 'repair' && x.id === filed.repair)!.state, 'in work');
+    await submitPmBatch(w, { mission: M, plan: pmPlan(M, { elements: [{ ...pmPlan(M).elements[0]!, text: 'A CSV parser library that trims' }, pmPlan(M).elements[1]!] }), userWords: ['W-1'] });
+    await drive(engine, w.scheduler, held);
+    const row = readItems(w.ctx, M).find((x) => x.kind === 'repair' && x.id === filed.repair)!;
+    assert.deepEqual(row.tasks.map((t) => [t.task, t.state]), [['trim', 'not in the plan in effect']]);
+    assert.equal(row.state, 'not planned');
   });
 });
