@@ -117,25 +117,37 @@ export function secAckNote(ctx: ProcessContext, o: {op: string; id: string}): vo
  * option with what it does, the requirement items and words entries the work rests on (by id), and the
  * escalation's reasons shortened, with the read that gives the rest. Nothing in it is checked.
  */
-export interface InboxBrief {readonly by: string | null; readonly notice: string; readonly reason: string; readonly handedOver?: string; readonly options: readonly {id: string; outcome: string}[]; readonly items: readonly string[]; readonly words: readonly string[]; readonly reasons: readonly string[]; readonly more: string}
+export interface InboxBrief {readonly by: string | null; readonly notice: string; readonly reason: string; readonly handedOver?: string; readonly options: readonly {id: string; outcome: string}[]; readonly items: readonly string[]; readonly words: readonly string[]; readonly revised?: readonly CitedVersion[]; readonly reasons: readonly string[]; readonly more: string}
 export interface InboxItem {id: string; kind: 'decision' | 'notice' | 'question' | 'reply'; mission: string | null; text: string; state: string; action: string; resolution: string; round?: number; options?: readonly string[]; facts?: unknown; about?: string | null; acknowledgeable?: boolean; brief?: InboxBrief}
 function allFlow(ctx: ProcessContext) {
   return (ctx.memory.stmt('SELECT mission, line, event, key, body, revision AS rev FROM flow_events ORDER BY revision').all() as {mission: string; line: string; event: string; key: string; body: string; rev: number}[]).map((e) => ({...e, revision: Number(e.rev), mission: e.mission as MissionId, body: JSON.parse(ctx.memory.data.text(e.body)) as any}));
 }
 type FlowRow = ReturnType<typeof allFlow>[number];
 
-/** 4.4 (F9, issue 62): a Secretary decision handed back before any pass recorded it, read from its accepted hand-back. */
-function handedBackDecision(ctx: ProcessContext, task: string): SecretaryResult | undefined {
+type Decided = {notice: string; reason: string; authorization?: string | null; inputs?: readonly {line: string; version: string}[]};
+
+/**
+ * 4.4 (F9, issue 62): a Secretary decision handed back before any pass recorded it, read from its accepted
+ * hand-back, with the versions its card was claimed with (what a pass records as the decision's inputs).
+ */
+function handedBackDecision(ctx: ProcessContext, task: string): (SecretaryResult & {inputs?: readonly {line: string; version: string}[]}) | undefined {
   const s = taskStatus(ctx.memory, ctx.memory.data, task);
-  return s?.state === 'done' && s.handBack !== null ? s.handBack.result as SecretaryResult : undefined;
+  if (s?.state !== 'done' || s.handBack === null) return undefined;
+  const claimed = flowEvents(ctx.memory, {mission: dispatchInfo(ctx.memory, s.handBack.dispatch)!.mission, line: `dispatch:${s.handBack.dispatch}`, event: 'claimed'})[0];
+  const spec = claimed === undefined ? null : JSON.parse(ctx.memory.data.text((JSON.parse(ctx.memory.data.text(claimed.body)) as {spec: string}).spec)) as {card?: {contextItems?: {line: string; version: string}[]}};
+  return {...(s.handBack.result as SecretaryResult), ...(spec?.card?.contextItems !== undefined ? {inputs: spec.card.contextItems} : {})};
 }
+
+/** An authorization the decision cites, at the version it was decided on, and the version in force now when it differs. */
+export interface CitedVersion {readonly line: string; readonly decided: string; readonly current: string | null}
 
 /**
  * 4.4 (G2): the requirement items an escalation's work rests on (its own, its task's in the plan in effect,
- * the authorization the decision cites, and the authorizations they rest on) and their words entries.
+ * the authorization the decision cites, and the authorizations they rest on) and their words entries. A cited
+ * authorization counts at the version the decision recorded, and at its current one too when it was revised.
  */
-function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationBody, plans: Map<string, DetailedPlanDoc | null>, cited: readonly string[]): {items: string[]; words: string[]} {
-  const items = new Set([...(esc.items ?? []), ...cited]);
+function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationBody, plans: Map<string, DetailedPlanDoc | null>, cited: readonly {line: string; version: string | null}[]): {items: string[]; words: string[]; revised: CitedVersion[]} {
+  const items = new Set([...(esc.items ?? []), ...cited.map((c) => c.line)]);
   const taskId = esc.subject.startsWith('task:') ? esc.subject.slice('task:'.length) : null;
   const dplan = taskId === null ? undefined : mine.filter((e) => e.line === `task:${taskId}` && e.event === 'spec').at(-1)?.body.dplan as string | undefined;
   if (dplan !== undefined && !plans.has(dplan)) {
@@ -144,23 +156,33 @@ function restsOn(ctx: ProcessContext, mine: readonly FlowRow[], esc: EscalationB
   }
   for (const line of (dplan === undefined ? null : plans.get(dplan))?.tasks.find((t) => t.id === taskId)?.requirementItems ?? []) items.add(line);
   const latest = new Map<string, ItemVersionBody>();
-  for (const e of mine) if (e.line === 'requirements' && e.event === 'item') latest.set((e.body as ItemVersionBody).line, e.body as ItemVersionBody);
+  const byVersion = new Map<string, ItemVersionBody>();
+  for (const e of mine) if (e.line === 'requirements' && e.event === 'item') {latest.set((e.body as ItemVersionBody).line, e.body as ItemVersionBody); byVersion.set((e.body as ItemVersionBody).version, e.body as ItemVersionBody);}
   const words = new Set<string>();
-  for (const line of [...items]) {
-    const s = latest.get(line)?.source;
+  const wordsOf = (s: ItemVersionBody['source'] | undefined): void => {
     if (s?.kind === 'authorization') {items.add(s.line); const a = latest.get(s.line)?.source; if (a?.kind === 'words') words.add(a.words);}
     else if (s?.kind === 'words') words.add(s.words);
+  };
+  // the version the decision rested on first (its words entry stays named after a revision), then the current one
+  const revised: CitedVersion[] = [];
+  for (const c of cited) {
+    if (c.version === null) continue;
+    wordsOf(byVersion.get(c.version)?.source);
+    const now = latest.get(c.line);
+    if (now?.version !== c.version) revised.push({line: c.line, decided: c.version, current: now?.version ?? null});
   }
-  return {items: [...items], words: [...words]};
+  for (const line of [...items]) wordsOf(latest.get(line)?.source);
+  return {items: [...items], words: [...words], revised};
 }
 
 const clip = (s: string, n: number): string => { const t = s.replace(/\s+/g, ' ').trim(); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
 
-function inboxBrief(ctx: ProcessContext, mission: string, mine: readonly FlowRow[], esc: EscalationBody, decided: {notice: string; reason: string; authorization?: string | null} | undefined, by: string | null, plans: Map<string, DetailedPlanDoc | null>, handedOver: string | null): InboxBrief {
-  // the hand-back and the decision event carry the same `authorization` field: one rule for both
-  const rest = restsOn(ctx, mine, esc, plans, typeof decided?.authorization === 'string' ? [decided.authorization] : []);
+function inboxBrief(ctx: ProcessContext, mission: string, mine: readonly FlowRow[], esc: EscalationBody, decided: Decided | undefined, by: string | null, plans: Map<string, DetailedPlanDoc | null>, handedOver: string | null): InboxBrief {
+  // the hand-back and the decision event carry the same `authorization` field, and the versions it was decided on: one rule for both
+  const auth = typeof decided?.authorization === 'string' ? decided.authorization : null;
+  const rest = restsOn(ctx, mine, esc, plans, auth === null ? [] : [{line: auth, version: decided?.inputs?.find((i) => i.line === auth)?.version ?? null}]);
   const shown = esc.reasons.slice(0, 5).map((r) => clip(r, 200));
-  return {by, notice: decided?.notice ?? '', reason: decided?.reason ?? '', ...(handedOver !== null ? {handedOver} : {}), options: pmOptions(esc), items: rest.items, words: rest.words, reasons: esc.reasons.length > shown.length ? [...shown, `(${esc.reasons.length - shown.length} more)`] : shown, more: `mp read show escalation ${mission}/${esc.id}`};
+  return {by, notice: decided?.notice ?? '', reason: decided?.reason ?? '', ...(handedOver !== null ? {handedOver} : {}), options: pmOptions(esc), items: rest.items, words: rest.words, ...(rest.revised.length > 0 ? {revised: rest.revised} : {}), reasons: esc.reasons.length > shown.length ? [...shown, `(${esc.reasons.length - shown.length} more)`] : shown, more: `mp read show escalation ${mission}/${esc.id}`};
 }
 
 /** The PM inbox, read in one snapshot of the memory (4.4: its items and their briefs never mix two states). */

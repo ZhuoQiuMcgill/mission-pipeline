@@ -23,26 +23,30 @@ function secretaryEvent(db: Db, data: Texts, mission: string, event: string, key
 }
 
 /**
- * 4.4 (F9): what became of an answer `mp pm answer` just recorded, read from the escalation's applied event:
- * its decider and answer round name the answer that was carried out, or the closure that ended it.
+ * 4.4 (F9): what became of the answer `mp pm answer` just recorded: `round` is the PM answer round that
+ * command wrote (null for the user's answer). "applied" only when the applied record is of this very answer
+ * (its decider, its round, its option) and its recorded effect is the one asked for; anything else is said as
+ * the record has it, with the read that shows it. Never inferred from the command.
  */
-export function answerOutcome(db: Db, data: Texts, o: { readonly mission: string; readonly escalation: string; readonly by: 'pm' | 'user'; readonly resident: boolean }): { readonly applied: boolean; readonly text: string } {
-  const last = (event: string) => (db.stmt('SELECT key, body FROM flow_events WHERE mission = ? AND line = ? AND event = ? ORDER BY revision').all(o.mission, SECRETARY_LINE, event) as { key: string; body: string }[]).filter((r) => r.key === o.escalation || r.key.startsWith(`${o.escalation}#`)).at(-1);
-  const parse = (r: { body: string } | undefined) => (r === undefined ? null : (JSON.parse(data.text(r.body)) as Record<string, any>));
-  const mine = parse(last(o.by === 'pm' ? 'pm-answer' : 'user-answer'));
-  const round = typeof mine?.['answerRound'] === 'number' ? (mine['answerRound'] as number) : null;
+export function answerOutcome(db: Db, data: Texts, o: { readonly mission: string; readonly escalation: string; readonly by: 'pm' | 'user'; readonly round: number | null; readonly option: string; readonly resident: boolean }): { readonly applied: boolean; readonly text: string } {
+  const read = `mp read show decision ${o.mission}/${o.escalation}`;
+  const rejected = o.by === 'pm' && o.round !== null && secretaryEvent(db, data, o.mission, 'pm-answer-rejected', `${o.escalation}#${o.round}`) !== null;
+  const ours = rejected ? `round ${String(o.round)} was rejected, the words it rested on changed; ` : '';
   const applied = secretaryEvent(db, data, o.mission, 'applied', o.escalation);
   if (applied !== null) {
-    const what = (applied['what'] ?? {}) as { option?: unknown; why?: unknown };
-    if (what.option === 'superseded') return { applied: false, text: `not carried out: escalation ${o.escalation} was closed (${typeof what.why === 'string' ? what.why : 'the work it was about changed'})` };
+    const what = (applied['what'] ?? {}) as { option?: unknown; why?: unknown; moot?: unknown; restarted?: unknown };
+    if (what.option === 'superseded') return { applied: false, text: `not carried out: ${ours}escalation ${o.escalation} was closed (${typeof what.why === 'string' ? what.why : 'the work it was about changed'}); ${read}` };
     const by = applied['by'];
-    if (by === o.by && (o.by === 'user' || applied['answerRound'] === round)) return { applied: true, text: 'applied' };
-    const winner = by === 'user' ? secretaryEvent(db, data, o.mission, 'user-answer', o.escalation) : by === 'pm' ? secretaryEvent(db, data, o.mission, 'pm-answer', `${o.escalation}#${String(applied['answerRound'])}`) : null;
-    const option = String(what.option ?? winner?.['option'] ?? 'its option');
+    // what was carried out: the applied record's option (a restart records what it restarted)
+    const effect = typeof what.option === 'string' ? what.option : what.restarted !== undefined ? 'restart' : null;
+    const same = effect !== null && (effect === o.option || (isAskOption(effect) && isAskOption(o.option)));
+    const mine = by === o.by && (o.by === 'user' || applied['answerRound'] === o.round) && same;
+    if (mine && what.moot !== true) return { applied: true, text: 'applied' };
+    if (mine) return { applied: false, text: `carried out as moot: ${o.option} had nothing left to act on when it was applied (its notice says why); ${read}` };
     const who = by === 'user' ? 'the user\'s answer' : by === 'pm' ? `the PM's answer of round ${String(applied['answerRound'])}` : 'the Secretary\'s decision';
-    return { applied: false, text: `not carried out: ${who} (${option}) was carried out instead` };
+    return { applied: false, text: `not carried out: ${ours}${who} (${effect ?? 'its option'}${what.moot === true ? ', moot' : ''}) was carried out instead; ${read}` };
   }
-  if (o.by === 'pm' && round !== null && secretaryEvent(db, data, o.mission, 'pm-answer-rejected', `${o.escalation}#${round}`) !== null) return { applied: false, text: `not carried out: the words it rested on changed; the inbox asks again in round ${round + 1}` };
+  if (rejected) return { applied: false, text: `not carried out: ${ours}the inbox asks again in round ${String((o.round ?? 0) + 1)}; ${read}` };
   const userFirst = o.by === 'pm' && secretaryEvent(db, data, o.mission, 'user-answer', o.escalation) !== null ? '; the user\'s answer, recorded too, takes precedence' : '';
   return { applied: false, text: `${o.resident ? 'the Secretary’s next pass applies it' : 'the flow applies it when its work can move (mp pm next)'}${userFirst}` };
 }

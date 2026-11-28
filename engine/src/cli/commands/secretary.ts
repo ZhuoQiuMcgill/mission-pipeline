@@ -98,6 +98,7 @@ function briefLines(b: InboxBrief): string[] {
     ...(b.handedOver !== undefined ? [`  Handed to you by the flow: ${indent(b.handedOver)}`] : []),
     ...(b.options.length > 0 ? ['  Options:', ...b.options.map((o) => `    ${o.id}: ${o.outcome}`)] : []),
     `  Rests on: items ${b.items.join(', ') || 'none named'}; words ${b.words.join(', ') || 'none named'}`,
+    ...(b.revised ?? []).map((r) => `  The decision cites ${r.line} as ${r.decided}; ${r.current === null ? 'it is withdrawn since' : `it is ${r.current} now`} (the words of both are named above)`),
     ...(b.reasons.length > 0 ? [`  The escalation's reasons, shortened (in full: ${b.more}):`, ...b.reasons.map((r) => `    - ${r}`)] : []),
   ];
 }

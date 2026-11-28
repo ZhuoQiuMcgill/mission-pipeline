@@ -8,8 +8,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { runCli } from '../src/cli/main.ts';
 import type { MissionId } from '../src/common/ids.ts';
-import { answerEscalation } from '../src/flow/secretary.ts';
+import { flowCtx } from '../src/flow/context.ts';
+import { answerEscalation, decisionFor, markApplied, raiseEscalation } from '../src/flow/secretary.ts';
 import { openProcess } from '../src/process/context.ts';
+import { answerOutcome } from '../src/process/decisions.ts';
 import { pmDispatch, pmRelease } from '../src/process/pm.ts';
 import { ENV_A, handBack, readAll, startAddMission, readyOf, type ProcessProject } from './process-fixtures.ts';
 import { secNext, stopSecretary } from '../src/process/secretary.ts';
@@ -211,9 +213,44 @@ test('review p1-3: mp pm answer names the answer that was carried out: a user an
     const w = await done43(p, ['pm', 'say', 'Two more tries are fine', '--tag', 'decision@m1']);
     const out = await text43(p, ['pm', 'answer', 'm1', esc, '--by', 'pm', '--words', w.words, '--reason', 'the words allow it', '--option', 'grant', '--extra', '2']);
     assert.doesNotMatch(out, /; applied\./);
-    assert.match(out, /not carried out: the user's answer \(grant\) was carried out instead/);
+    assert.match(out, new RegExp(`not carried out: the user's answer \\(grant\\) was carried out instead; mp read show decision m1/${esc}`));
     assert.equal((p.ctx.memory.stmt("SELECT COUNT(*) AS n FROM flow_events WHERE line = 'secretary' AND event = 'applied' AND key = ?").get(esc) as { n: number }).n, 1);
   } finally { p.cleanup(); }
+});
+
+test('review round 2, p1-3: the outcome is of this very answer: a rejected round does not take the credit of the round that replaced it, and a moot application is not "applied"', async () => {
+  const p = project43();
+  try {
+    await escalation43(p);
+    const id = await live43(p);
+    const old = await done43(p, ['pm', 'say', 'Favor the simple choice', '--tag', 'decision@m1']);
+    const first = await done43(p, ['pm', 'answer', 'm1', 'choice', '--by', 'pm', '--words', old.words, '--reason', 'supported', '--option', 'accept']);
+    assert.equal(first.round, 1);
+    await done43(p, ['pm', 'say', 'Favor another choice', '--tag', 'decision@m1', '--supersedes', `${old.words}#1`]);
+    const sec = secretary43(p, id);
+    try {
+      assert.equal(await decisionFor(flowCtx(sec.ports(), 'm1' as MissionId), 'choice'), null, 'round 1 is rejected: its words changed');
+      // another process records round 2, and the Secretary applies it, before the first command printed
+      await done43(p, ['pm', 'answer', 'm1', 'choice', '--by', 'pm', '--no-words', '--reason', 'minor', '--option', 'answer', '--instructions', 'simply']);
+      await markApplied(flowCtx(sec.ports(), 'm1' as MissionId), 'choice', { option: 'answer' });
+    } finally { sec.memory.close(); }
+    const r = p.ctx.memory.read((db) => answerOutcome(db, p.ctx.memory.data, { mission: 'm1', escalation: 'choice', by: 'pm', round: 1, option: 'accept', resident: true }));
+    assert.equal(r.applied, false);
+    assert.match(r.text, /round 1 was rejected, the words it rested on changed; the PM's answer of round 2 \(answer\) was carried out instead; mp read show decision m1\/choice/);
+  } finally { p.cleanup(); }
+  const q = project43();
+  try {
+    await done43(q, ['pm', 'mission', 'open', 'm1']);
+    await raiseEscalation(flowCtx(q.ctx.ports(), 'm1' as MissionId), { id: 'risk', source: 'reviewer-needs-decision', lineage: 'L', subject: 'task:t', summary: 'accept the attempt with its findings?', reasons: ['a finding'], options: ['accept-risk', 'ask-user'] });
+    const id = await live43(q);
+    const a = await done43(q, ['pm', 'answer', 'm1', 'risk', '--by', 'pm', '--no-words', '--reason', 'minor', '--option', 'accept-risk']);
+    const sec = secretary43(q, id);
+    // a grant on a dependency made the acceptance moot: the flow records it applied as moot (execution.ts)
+    try { await markApplied(flowCtx(sec.ports(), 'm1' as MissionId), 'risk', { option: 'accept-risk', moot: true }); } finally { sec.memory.close(); }
+    const r = q.ctx.memory.read((db) => answerOutcome(db, q.ctx.memory.data, { mission: 'm1', escalation: 'risk', by: 'pm', round: a.round, option: 'accept-risk', resident: true }));
+    assert.equal(r.applied, false);
+    assert.match(r.text, /carried out as moot: accept-risk had nothing left to act on/);
+  } finally { q.cleanup(); }
 });
 
 test('review p1-5: a decision queued under a live Secretary and claimed by the PM after it retired gets the seat commands', async () => {

@@ -43,7 +43,7 @@ test('the inbox item carries the brief: the notice in full, its reason, the opti
     const out = await text43(p, ['pm', 'inbox']);
     assert.ok(out.includes(`The Secretary's notice:\n    ${NOTICE.split('\n').join('\n    ')}`), out);
     assert.match(out, /Its reason: this changes what the user gets/);
-    assert.match(out, /Options:\n {4}answer: your answer goes to the seat as a decision; the work goes on\n {4}replan: the Architect decomposes again/);
+    assert.match(out, /Options:\n {4}answer: the answer is recorded as the decision and goes to the next cards of the work; the work goes on\n {4}replan: the task waits while the Architect re-plans it with the instructions/);
     assert.match(out, /Rests on: items item\.m1\.g1; words W-1/);
     assert.ok(out.includes(`The escalation's reasons, shortened (in full: mp read show escalation m1/${s.escalation}):`), out);
     assert.match(out, /- Q1\?\n {4}- Q2\?/);
@@ -111,8 +111,35 @@ test('review p1-6: the brief names the authorization the Secretary cited and its
       const item = (await done43(p, ['pm', 'inbox'])).items.find((i: any) => i.id === `m1/${s.escalation}`);
       assert.ok(item.brief.items.includes('item.m1.a2'), `${way}: ${JSON.stringify(item.brief.items)}`);
       assert.ok(item.brief.words.includes(w.words), `${way}: ${JSON.stringify(item.brief.words)}`);
+      // round 2: the item is revised after the decision, on other words: the words the decision relied on stay named, and both versions are said
+      const w2 = await done43(p, ['pm', 'say', 'Error types and messages are yours', '--tag', 'decision@m1']);
+      await done43(p, ['pm', 'requirement', 'add', 'm1', 'a2', '--type', 'authorization', '--text', 'error types and messages are the PM\'s', '--quote', 'Error types and messages are yours', '--words', w2.words]);
+      const after = (await done43(p, ['pm', 'inbox'])).items.find((i: any) => i.id === `m1/${s.escalation}`);
+      assert.ok(after.brief.words.includes(w.words), `${way}: the decided version's words stay: ${JSON.stringify(after.brief.words)}`);
+      assert.ok(after.brief.words.includes(w2.words), `${way}: the current version's words: ${JSON.stringify(after.brief.words)}`);
+      assert.deepEqual(after.brief.revised, [{ line: 'item.m1.a2', decided: 'item.m1.a2.v1', current: 'item.m1.a2.v2' }]);
+      assert.match(await text43(p, ['pm', 'inbox']), /The decision cites item\.m1\.a2 as item\.m1\.a2\.v1; it is item\.m1\.a2\.v2 now/);
     } finally { p.cleanup(); }
   }
+});
+
+test('review round 2, p1-7: the count of other tags and its read come before the principles, and a replay cut at the receipt limit says so and names the read', async () => {
+  const p = project43();
+  try {
+    const s = await sentToPm(p);
+    const long = `Keep every public name stable. ${'Each caller depends on it in some way that we cannot see from here. '.repeat(250)}END-OF-PRINCIPLE`;
+    assert.ok(long.length > 17_000);
+    await done43(p, ['pm', 'say', long, '--tag', 'principle']);
+    await done43(p, ['pm', 'say', 'Prefer clear errors over silent coercion', '--tag', 'decision@m1']);
+    const args = ['pm', 'answer', 'm1', s.escalation, '--by', 'pm', '--no-words', '--reason', 'minor', '--option', 'answer', '--instructions', 'numbers only', '--op', 'long-answer'];
+    const fresh = await text43(p, args);
+    assert.ok(fresh.includes('END-OF-PRINCIPLE'), 'the fresh output keeps the principle whole');
+    assert.ok(fresh.indexOf('Other tags in force for m1: 1') < fresh.indexOf('Principles in force:'));
+    const replay = await text43(p, args);
+    assert.match(replay, /Other tags in force for m1: 1 \(mp read words --in-force lists them\)/, 'the count survives the cut');
+    assert.doesNotMatch(replay, /END-OF-PRINCIPLE/);
+    assert.match(replay, /cut here: the receipt keeps the first 16000 characters of the output; mp read words --tag principle --in-force lists every principle in force/);
+  } finally { p.cleanup(); }
 });
 
 test('review p1-2: each option says what the flow does for that kind of escalation, on the inbox and on the Secretary card', async () => {
@@ -126,29 +153,14 @@ test('review p1-2: each option says what the flow does for that kind of escalati
     const out = await text43(p, ['pm', 'inbox']);
     assert.match(out, /replan: the exploration ends without a conclusion/);
     assert.match(out, /send-back: the exploration goes on in the direction the instructions give, within the rounds left/);
-    assert.match(out, /grant: the exploration gets 1 or 2 more rounds.*a PM grant does not use the Secretary's/);
-    assert.doesNotMatch(out, /Architect decomposes again|Architect revises the plan/, 'no plan option text for an exploration stop');
+    // round 2: the PM's grant needs --extra (answerByPm refuses it without); the user's default and the Secretary's limit are told apart
+    assert.match(out, /grant: the exploration gets the rounds granted; .*\(the PM names the number with --extra \(required\), a user's answer without --extra grants 2; a PM grant does not use the Secretary's\)/);
+    assert.doesNotMatch(out, /Architect decomposes again|Architect revises the plan|re-plans it/, 'no plan option text for an exploration stop');
     const card = secretaryOptions((await escalation(ctx, 'stop'))!, true);
     assert.match(card.find((o) => o.id === 'replan')!.outcome, /ends without a conclusion/);
+    assert.match(card.find((o) => o.id === 'grant')!.outcome, /your one grant on this lineage, 1 or 2/);
+    // every kind of escalation and every option it offers is carried out to its effect in test/p44-option-effects.test.ts
   } finally { p.cleanup(); }
-  // every kind of escalation whose options do something else than the general text says
-  const esc = (o: Partial<EscalationBody>): EscalationBody => ({ id: 'x', task: 'sec.x', source: 'constructor-decision', lineage: 'L', subject: 'task:t', summary: 's', reasons: [], options: [], ...o } as EscalationBody);
-  const outcome = (e: EscalationBody, id: string) => pmOptions(e).find((o) => o.id === id)?.outcome ?? '';
-  const routing = esc({ source: 'exploration-budget', subject: 'exploration:e1', options: ['replan', 'ask-user'], facts: { outcome: 'no-conclusion', stop: 'budget' } });
-  assert.match(outcome(routing, 'replan'), /the PM is told to re-plan the part that waited for it with the user/);
-  assert.match(outcome(esc({ source: 'exploration-budget', subject: 'exploration:e1', options: ['accept', 'ask-user'], facts: { outcome: 'conclusion' } }), 'accept'), /the Architect plans the part that waited for it/);
-  const direction = esc({ source: 'exploration-direction', subject: 'exploration:e1', options: ['answer', 'send-back', 'abandon', 'ask-user'], facts: { finding: 'f1', wi: 'WI-33' } });
-  assert.match(outcome(direction, 'send-back'), /the direction changes/);
-  assert.match(outcome(direction, 'abandon'), /the exploration ends without a conclusion/);
-  assert.match(outcome(esc({ source: 'exploration-direction', subject: 'exploration:e1', options: ['answer', 'send-back', 'accept-risk', 'ask-user'], facts: { finding: 'f1' } }), 'accept-risk'), /residual risk/);
-  assert.match(outcome(esc({ source: 'exploration-direction', subject: 'exploration:e1', options: ['answer', 'ask-user'], facts: { questions: ['q'] } }), 'answer'), /author and the attacker/);
-  assert.match(outcome(esc({ source: 'needs-disposition', subject: 'exploration:e1', options: ['restart', 'abandon', 'ask-user'], facts: { role: 'author' } }), 'restart'), /given-up turn runs again/);
-  assert.match(outcome(esc({ source: 'feasibility-unresolved', subject: 'plan:pmplan.m1.1', options: ['accept-risk', 'send-back', 'ask-user'] }), 'send-back'), /one more feasibility return, which needs a grant/);
-  assert.match(outcome(esc({ source: 'order-change', subject: 'plan:pmplan.m1.1', options: ['accept', 'send-back', 'ask-user'] }), 'accept'), /changed order stands/);
-  assert.match(outcome(esc({ source: 'loop-exhausted', subject: 'plan:pmplan.m1.1', options: ['grant', 'ask-user'], facts: { loop: 'mechanical-return' } }), 'grant'), /the Architect gets more returns/);
-  assert.match(outcome(esc({ source: 'loop-exhausted', subject: 'audit:L1', options: ['grant', 'abandon', 'ask-user'], facts: { loop: 'quarantine-restart' } }), 'abandon'), /not legalized/);
-  // the general text still holds where the flow does what it says: a task's re-plan is the Architect's
-  assert.match(outcome(esc({ source: 'constructor-decision', options: ['answer', 'replan', 'ask-user'] }), 'replan'), /the Architect decomposes again/);
 });
 
 test('compatibility: a decision recorded in the 4.3 shape (needs-user, ask-user) reads with its brief, and an escalation with no task names no items', async () => {

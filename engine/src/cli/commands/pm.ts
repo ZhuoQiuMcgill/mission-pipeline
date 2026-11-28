@@ -793,20 +793,20 @@ const answer: Command = {
     if (n !== undefined && (!Number.isSafeInteger(n) || n < 1)) throw usage('--extra is a positive integer');
     const ins = flagStr(args, 'instructions');
     const findings = (flagStr(args, 'findings') ?? '').split(',').map((f) => f.trim()).filter((f) => f !== '');
-    await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
-    // 4.4 (F9): say what happened; while a Secretary is live a PM command records and does not reconcile
+    const recorded = await pmAnswer(p.ctx, { mission: m, escalation: esc, option: option as DecisionOption, words: w, by, noWords: flagBool(args, 'no-words'), reason: flagStr(args, 'reason') ?? '', ...(ins !== null ? { instructions: ins } : {}), ...(n !== undefined ? { grantExtra: n } : {}), ...(findings.length > 0 ? { findings } : {}) });
+    // 4.4 (F9): say what happened to this very answer (its round and option), read from the applied record
     const resident = liveSecretary(p.ctx.memory) !== null;
-    // the applied event's decider and answer round say whose answer was carried out (a user answer wins before application)
-    const effect = p.ctx.memory.read((db) => answerOutcome(db, p.ctx.memory.data, { mission: m, escalation: esc, by, resident }));
+    const effect = p.ctx.memory.read((db) => answerOutcome(db, p.ctx.memory.data, { mission: m, escalation: esc, by, round: recorded.round, option, resident }));
     // 4.4 (G2): the principles in force, each in full (a principle is never cut), and a count of every other tag in force with the read that lists them
     const inForce = by === 'pm' ? taggedWords(p.ctx.memory, p.ctx.memory.data).flatMap((entry) => entry.tags.filter((t) => t.inForce && (t.mission === null || t.mission === m)).map((t) => ({ id: t.id, type: t.type, text: t.quote ?? entry.text }))) : [];
     const principles = inForce.filter((t) => t.type === 'principle').map((t) => `[${t.id}] ${t.text.trim().split('\n').join('\n  ')}`);
     const otherTags = inForce.filter((t) => t.type !== 'principle').length;
+    // the count and its read come before the principles, so a receipt cut at its limit keeps them
     const lines = [
       `${by === 'pm' ? 'The PM’s' : 'The user’s'} answer to ${esc} recorded (${option}, ${w || 'no words'}); ${effect.text}.`,
-      ...(by === 'pm' ? [...(principles.length > 0 ? ['Principles in force:', ...principles.map((x) => `- ${x}`)] : ['Principles in force: none']), `Other tags in force for ${m}: ${otherTags} (mp read words --in-force lists them)`] : []),
+      ...(by === 'pm' ? [`Other tags in force for ${m}: ${otherTags} (mp read words --in-force lists them)`, ...(principles.length > 0 ? ['Principles in force:', ...principles.map((x) => `- ${x}`)] : ['Principles in force: none'])] : []),
     ];
-    return ok(lines.join('\n'), { mission: m, escalation: esc, option, words: w, by, applied: effect.applied, resident, ...(by === 'pm' ? { principles, otherTags } : {}) });
+    return { ...ok(lines.join('\n'), { mission: m, escalation: esc, option, words: w, by, round: recorded.round, applied: effect.applied, resident, ...(by === 'pm' ? { principles, otherTags } : {}) }), cutNote: 'mp read words --tag principle --in-force lists every principle in force' };
   },
 };
 

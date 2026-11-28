@@ -215,7 +215,12 @@ export interface Recorded {
   readonly exitCode: number;
   readonly text: string;
   readonly json: unknown;
+  /** 4.4: named after the "cut" mark when the stored text is cut at the receipt's limit. Never stored itself. */
+  readonly cutNote?: string;
 }
+
+/** The characters of a command's text a receipt keeps (a replay prints at most these). */
+export const RECEIPT_TEXT_LIMIT = 16_000;
 
 /** The arguments as an action records them: long strings by their hash (an action's arguments are at most 256 KiB). */
 export function actionArgs(x: unknown): unknown {
@@ -253,7 +258,8 @@ export function beginAction(memory: Memory, a: { readonly op: string; readonly c
 
 /** End a PM action with its result (best effort: the command's own records are already committed). */
 export function endAction(memory: Memory, a: { readonly op: string; readonly command: string; readonly args: unknown; readonly wi?: string | null; readonly stop?: boolean }, r: Recorded, failed: boolean): void {
-  const bounded = (s: string): string => (s.length <= 16_000 ? s : `${s.slice(0, 16_000)}…`);
+  // 4.4: a cut text says that it was cut, and names the read for the rest where the command gives one
+  const bounded = (s: string): string => (s.length <= RECEIPT_TEXT_LIMIT ? s : `${s.slice(0, RECEIPT_TEXT_LIMIT)}…\n(cut here: the receipt keeps the first ${RECEIPT_TEXT_LIMIT} characters of the output${r.cutNote !== undefined ? `; ${r.cutNote}` : ''})`);
   const json = JSON.stringify(r.json ?? null);
   const result = { exitCode: r.exitCode, text: bounded(r.text), json: json.length <= 64_000 ? r.json : { truncated: true } };
   try {
