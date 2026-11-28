@@ -32,11 +32,11 @@ import type { BasisLineId, BasisVersionId, MissionId } from '../common/ids.ts';
 import type { BaseRecord } from '../common/records.ts';
 import { repairItemsBlock, repairPlanMaterial, type ArchitectRepairCard, type ArchitectRepairResult } from '../seat/cards/architect.ts';
 import { addressedForPlanning, addressedIndexOf, planningConstraints } from '../seat/cards/dynamic.ts';
-import { answerText } from './openItems.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE, answerText } from './openItems.ts';
 import { basisIndex, cardBase, commit, countedReturn, ev, eventOf, eventsOf, flowCtx, idPart, missionClosed, nextBasisVersion, notify, objectRecord, safeId, shortHash, taskView, tellOnce, type FlowCtx } from './context.ts';
 import { handleFailure } from './failures.ts';
 import { mechanicalCheck, type MechanicalResult } from './mechanical.ts';
-import { itemIds, riskItemsOf, takenItems } from './riskItems.ts';
+import { itemIds, recordOnAct, riskItemsOf, takenItems } from './riskItems.ts';
 import { DetailedPlanDoc, PLAN_LINE, REPAIRS_LINE, REPAIR_ENDED, REPAIR_KINDS, REQUIREMENTS_LINE, amendedPlan, amendedTaskIds, cardChangedBy, explorationLine, repairOfTask, repairRef, taskCardHash, taskLine, type AmendmentEntry, type DetailedTask, type RepairBody, type RepairDecidedBody, type RepairEndedBody, type RepairKind, type RepairRef } from './plandoc.ts';
 import { detailedPlanOf, explorationState, planInEffect, pmPlanDoc, projectCommandsOf, standardLine, REPLAN_ANSWERED, type EffectiveBody } from './planning.ts';
 import { acceptedProduct, lineAcceptance, pathOwners, REOPEN_NOT_CARRIED, waitCircles, type ReopenNotCarriedBody } from './execution.ts';
@@ -251,7 +251,9 @@ export async function recordRepair(
   }
   if (pie === null) throw new Error(`mission ${req.mission} has no detailed plan in effect: a repair amends the plan in effect (plan the work with mp pm plan submit first)`);
   if (req.about?.kind === 'task' && !pie.plan.tasks.some((t) => t.id === req.about!.id)) throw new Error(`task ${req.about.id} is not a task of the plan in effect (${pie.eff.dplan})`);
-  await commit(ctx, `flow:repair:${req.mission}:${id}`, { events: [event] });
+  // v1-4: a risk sentence of an acceptance made before 4.4 that the repair names is recorded in its write
+  const acted = items.length === 0 ? [] : recordOnAct(await ctx.ports.ledger.events({ mission: ctx.mission }), items).map((x) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.id, x));
+  await commit(ctx, `flow:repair:${req.mission}:${id}`, { events: [event, ...acted] });
   return { id, repeated: false, ...again };
 }
 
@@ -357,8 +359,10 @@ export async function recordExtension(ports: FlowPorts, req: { readonly mission:
   const body: RepairBody = { id, words: first.words, kind: 'missing', text: first.quote, about: null, ...(open.length > 0 ? { openItems: open } : {}), items: ids, entry: 'extend' };
   // (p12-r2-2) which filing the operation created, in the same write
   const opEvent = req.op === undefined ? [] : [ev(ctx, REPAIRS_LINE, EXTEND_OP, opKey!, { op: req.op, repair: id, created: true, ...(again !== undefined ? { again } : {}) } satisfies ExtendOpBody)];
+  // v1-4 (merged from p10): a risk sentence of an acceptance made before 4.4 that the filing names is recorded in its write, as a repair's
+  const acted = open.length === 0 ? [] : recordOnAct(await ctx.ports.ledger.events({ mission: ctx.mission }), open).map((x) => ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.id, x));
   await commit(ctx, `flow:extend:${req.mission}:${id}`, {
-    events: [...recs.events, ev(ctx, REPAIRS_LINE, 'repair', id, body), ...opEvent],
+    events: [...recs.events, ev(ctx, REPAIRS_LINE, 'repair', id, body), ...opEvent, ...acted],
     records: recs.records,
     guard: {
       absent: [{ mission: req.mission, line: PLAN_LINE, event: 'pm-batch', key: `b${term + 1}` }],
@@ -768,6 +772,10 @@ async function decide(ctx: FlowCtx, r: RepairBody, task: string, eff: EffectiveB
   // 4.4 (F13): a reopen that cannot be carried out is recorded with the decision (the first record of its request), so
   // the repair does not read as done; the PM's notice follows from the record (execution, reopenNotices)
   for (const x of notCarried) events.push(ev(ctx, REPAIRS_LINE, REOPEN_NOT_CARRIED, `${r.id}:${x.task}#1`, { repair: r.id, task: x.task, attempt: x.attempt, why: x.why } satisfies ReopenNotCarriedBody));
+  // v1-4: a risk sentence of an acceptance made before 4.4 that the decision gives to a task (a reopen's, an added or
+  // changed card's) is recorded in its write
+  const given = [...reopen.flatMap((x) => x.openItems ?? []), ...[...added, ...changed].flatMap((t) => t.openItems ?? [])];
+  if (given.length > 0) for (const x of recordOnAct(await ctx.ports.ledger.events({ mission: ctx.mission }), given)) events.push(ev(ctx, OPEN_ITEMS_LINE, OPEN_ITEM, x.id, x));
   // 4.4 (F13, p7-4): checked in the write: the plan in effect is still the one whose cards the decision was compared
   // with, and no other repair was decided since its waits were checked (a reopen-only decision leaves the plan as it
   // is, and its waits could close a circle with these), and (p7-r3-1) each task recorded as not carried out still has

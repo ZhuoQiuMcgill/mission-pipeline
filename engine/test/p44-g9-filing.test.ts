@@ -8,14 +8,14 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { MissionId } from '../src/common/ids.ts';
+import type { ContentHash, MissionId } from '../src/common/ids.ts';
 import { basisIndex, flowCtx } from '../src/flow/context.ts';
 import { FlowEngine } from '../src/flow/engine.ts';
 import { planInEffect, submitPmBatch } from '../src/flow/planning.ts';
 import type { DetailedPlanDoc, DetailedTask } from '../src/flow/plandoc.ts';
 import { withdrawItem } from '../src/flow/requirements.ts';
 import { detailedPlan, drive, happyScript, pmPlan, reviewer, seedMission, SEED_TEXT, type Script } from '../src/flow/scripted.ts';
-import { listDispatches } from '../src/memory/index.ts';
+import { appendRecords, listDispatches } from '../src/memory/index.ts';
 import { pmExtend, pmRepair, pmRequirement } from '../src/process/pm.ts';
 import { dispatchView } from '../src/process/seat.ts';
 import { renderSeatCard, type ConstructorCard, type ReviewerCard } from '../src/seat/card.ts';
@@ -26,6 +26,8 @@ import { itemStateLines, readItems } from '../src/cli/itemsRead.ts';
 import { listAllItems, recordVerified } from '../src/process/openItems.ts';
 import { repairsRead, repairsText } from '../src/cli/workReads.ts';
 import { memoryPorts, say } from './flow-memory-fixtures.ts';
+import { canonicalJson } from '../src/common/hash.ts';
+import { OPEN_ITEM, OPEN_ITEMS_LINE } from '../src/flow/openItems.ts';
 
 const M = 'm1' as MissionId;
 type World = ReturnType<typeof memoryPorts>;
@@ -565,5 +567,19 @@ describe('4.4 G9 review round 2: what a filing gave a task, for as long as its c
     const k3 = await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K3' });
     assert.deepEqual([k3.repair, k3.repeated, k3.again], ['R-2', false, 'R-1'], 'another operation files anew');
     assert.deepEqual((await pmExtend(ports.ctx, { mission: M, items: [item], op: 'K3' })).repair, 'R-2');
+  });
+});
+
+describe('4.4 G9 with the verification follow-up of p10 (v1-4)', () => {
+  it('mp pm extend --open-items naming a risk sentence of an acceptance made before 4.4 records it in the filing\'s write, as a repair does', async () => {
+    const { ports } = await setup('fast');
+    // an acceptance with risk as 4.3 wrote it: its sentences, no item
+    ports.memory.write({}, (tx) => appendRecords(tx, [{ kind: 'flow.event', mission: M, line: 'task:old', event: 'accepted', key: '1', body: tx.data.put(canonicalJson({ k: 1, product: 'prod.old', judgment: 'j.sec.exh.old.1', decision: { escalation: 'exh.old.1', option: 'accept-risk', by: 'secretary' }, risks: ['accepted with its risk by the Secretary on exh.old.1: [S1] not met: slow'] })) as ContentHash }]));
+    const r = await pmExtend(ports.ctx, { mission: M, items: [{ item: 'g2', type: 'goal', text: 'Fast export', quote: 'export fast', words: say(ports, 'Please export fast.') }], openItems: ['exh.old.1.r1'] });
+    const rec = (await ports.ledger.events<{ before44?: boolean }>({ mission: M, line: OPEN_ITEMS_LINE, event: OPEN_ITEM })).find((e) => e.key === 'exh.old.1.r1');
+    assert.equal(rec?.body.before44, true, 'recorded when the filing acted on it');
+    const filing = (await ports.ledger.events({ mission: M, line: 'repairs', event: 'repair' })).find((e) => e.key === r.repair)!;
+    const opOf = (rev: number): string => (ports.memory.stmt('SELECT op FROM log WHERE rev = ?').get(rev) as { op: string }).op;
+    assert.equal(opOf(rec!.revision), opOf(filing.revision), 'in the filing\'s write');
   });
 });

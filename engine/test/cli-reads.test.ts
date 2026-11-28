@@ -121,12 +121,13 @@ describe('the tree reads show the decision in effect and contested requirement i
     await step(ctx, 'calibrator-1', (c) => cal1Fail(c, 'e1', 'ask-user'));
     const contested = await cli(p.dir, ['read', 'show', 'requirement', 'item.m3.g1', '--json']);
     assert.equal(contested.code, 0, contested.err);
-    assert.equal(contested.json.result.items[0].node.state, 'contested');
+    // 4.4 (G7): the fixture's words have no tags, and the read says so
+    assert.equal(contested.json.result.items[0].node.state, 'contested; rests on untyped words (not tagged yet)');
     const w2 = pmSay(ctx, 'Yes, an add function is what I want.').words;
     await pmPlan(ctx, { mission: 'm3', plan: addPlan('m3', 'W-1'), words: ['W-1', w2] });
     await step(ctx, 'calibrator-1', (c) => cal1Pass(c));
     const settled = await cli(p.dir, ['read', 'show', 'requirement', 'item.m3.g1', '--json']);
-    assert.equal(settled.json.result.items[0].node.state, 'in force');
+    assert.equal(settled.json.result.items[0].node.state, 'in force; rests on untyped words (not tagged yet)');
   });
 
   it('a Secretary\'s ask-user answered by the user: the user\'s option is in effect, linked to their words entry; the ask-user is history', async () => {
