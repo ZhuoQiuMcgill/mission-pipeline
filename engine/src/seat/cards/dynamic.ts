@@ -1,6 +1,6 @@
 import type { CurrentItem, ConstraintBody, ItemVersionBody } from '../../flow/requirements.ts';
 import type { FlowEvent } from '../../flow/ports.ts';
-import { elementsOf, repairOfTask, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, type AmendmentEntry, type DetailedTask, type RepairDecidedBody } from '../../flow/plandoc.ts';
+import { elementsOf, REOPEN_CARRIED, REOPEN_NOT_CARRIED, REOPEN_PINNED, type CardAmendment, type DetailedTask, type RepairDecidedBody } from '../../flow/plandoc.ts';
 import type { DecisionBody, EscalationBody } from '../../flow/secretary.ts';
 import { scopesOverlap } from '../../flow/mechanical.ts';
 import { xid } from '../../flow/exploration/definition.ts';
@@ -247,16 +247,38 @@ export function repairReopensCarried(
  * 4.4 (G3, F2): the repairs a task's work answers: the repair that added the task (every attempt), every repair
  * whose amendment changed its card, and every repair whose reopen a card of the task carried at this attempt or
  * before (repairReopensCarried: the reopened attempt and every later one, a granted reopen too). 4.3 showed the
- * adding repair and this attempt's own reopen only.
+ * adding repair and this attempt's own reopen only. The amendments are those that gave the card it has
+ * (plandoc.ts cardAmendments: also of an earlier plan whose card a later plan keeps, F3-6).
  */
-export function repairsOfTaskWork(mission: string, amendments: readonly AmendmentEntry[] | undefined, task: string, line: readonly LineEvent[], secretary: readonly LineEvent[], repairs: readonly LineEvent[], k: number): string[] {
+export function repairsOfTaskWork(mission: string, card: readonly CardAmendment[], task: string, line: readonly LineEvent[], secretary: readonly LineEvent[], repairs: readonly LineEvent[], k: number): string[] {
   const ids: string[] = [];
   const add = (r: string): void => { if (!ids.includes(r)) ids.push(r); };
-  const added = repairOfTask(amendments, task);
-  if (added !== null) add(added);
-  for (const a of amendments ?? []) if ((a.changed ?? []).some((t) => t.id === task)) add(a.repair);
+  for (const a of card) if (a.added) add(a.repair);
+  for (const a of card) if (!a.added) add(a.repair);
   for (const c of repairReopensCarried(mission, task, line, secretary, repairs)) if (c.attempt <= k) add(c.repair);
   return ids;
+}
+
+/**
+ * 4.4 (p6-r2-1, F1-3): the reopens of repairs that a grant on a used-up rework loop covered for attempt k of a task
+ * (the attempt the grant gave them), each with its issue as its decision records it: what a card of that attempt
+ * shows, whatever version queued its step (the attempt's own reopen is on its card already). From
+ * repairReopensCarried, the one reader of a repair's reopens.
+ */
+export function grantedRepairReopens(mission: string, task: string, line: readonly LineEvent[], secretary: readonly LineEvent[], repairs: readonly LineEvent[], k: number): Array<{ readonly repair: string; readonly issue: string }> {
+  const own = (line.find((e) => e.event === 'rework' && e.key === String(k))?.body as { reopen?: { kind?: string; repair?: string } } | undefined)?.reopen;
+  return repairReopensCarried(mission, task, line, secretary, repairs).filter((c) => c.attempt === k && !(own?.kind === 'repair' && own.repair === c.repair)).flatMap((c) => {
+    const d = repairs.find((e) => e.event === 'decided' && (e.body as RepairDecidedBody).repair === c.repair)?.body as RepairDecidedBody | undefined;
+    const issue = d?.reopen.find((x) => x.task === task)?.issue;
+    return issue === undefined ? [] : [{ repair: c.repair, issue }];
+  });
+}
+
+/** 4.4 (p6-r2-1, F1-3): the sentence the duties of a granted attempt's card carry for the reopens the grant covered (`by`: who reopened, in words). */
+export function grantedReopenLine(covered: ReadonlyArray<{ readonly by: string; readonly issue: string }>, seat: 'constructor' | 'reviewer'): string {
+  if (covered.length === 0) return '';
+  const head = ` This attempt was granted for a reopen (${[...new Set(covered.map((c) => c.by))].join('; ')}): ${covered.map((c) => c.issue).join('; ')}.`;
+  return seat === 'reviewer' ? `${head} Judge whether it is fixed too; if it is not, say so as a finding.` : `${head} Fix it in your task's work too.`;
 }
 
 /**
