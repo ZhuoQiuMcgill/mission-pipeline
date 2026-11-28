@@ -154,10 +154,10 @@ describe('p6 with p7: a reopen 4.4 decided is done by its records', () => {
     assert.deepEqual((await events(ports, 'repairs', 'decided'))[0]!.body.reopen, [], 'not in the decision\'s reopens');
     assert.deepEqual((await events(ports, 'repairs', REOPEN_NOT_CARRIED)).map((e) => e.key), ['R-1:impl#1']);
     const r = repair(ports, 'R-1');
-    assert.deepEqual(r.reopened, [{ task: 'impl', state: 'the reopen was not carried out: the task was given up; given up', done: false }]);
+    assert.deepEqual(r.reopened, [{ task: 'impl', state: 'the reopen was not carried out: the task was given up; given up', done: false, notCarried: true }]);
     assert.equal(r.done, false);
     const text = repairsText(read(ports));
-    assert.ok(text.includes('decided; not done') && text.includes('    reopened impl: the reopen was not carried out: the task was given up; given up'), text);
+    assert.ok(text.includes('\n    decided; not carried out: reopened impl\n') && text.includes('    reopened impl: the reopen was not carried out: the task was given up; given up'), text);
   });
 
   it('a reopen 4.3 decided and counted (no record) reads what its record establishes: reopened under 4.3 and accepted at a later attempt', async () => {

@@ -138,7 +138,7 @@ describe('p6-2: a user\'s answer with words and no instructions is carried by it
 });
 
 describe('p6-3: a changed task is done only under the card this repair gave it', () => {
-  it('a re-plan that gives the task another card before its acceptance leaves the repair not done', async () => {
+  it('a re-plan that gives the task another card, accepted, leaves the repair not done (its part superseded)', async () => {
     let goal = 'Integrate and document the parser';
     const plan = () => { const p = detailedPlan(M, { extraTask: true }); return { ...p, tasks: p.tasks.map((t) => (t.id === 'docs' ? { ...t, goal, verificationCommands: [{ id: 'lint', command: 'npm run lint' }] } : t)) }; };
     const { ports, engine, script } = await setup(plan);
@@ -158,7 +158,8 @@ describe('p6-3: a changed task is done only under the card this repair gave it',
     const r = repairs(ports)[0]!;
     assert.equal(r.changed[0]?.task, 'docs');
     assert.equal(r.changed[0]?.done, false, 'accepted under another card than this repair\'s');
-    assert.match(r.changed[0]!.state, /accepted at attempt \d+ .*; its card changed since this repair/);
+    // v1: its card replaced, so neither open nor done (p44-p6-v1); attempt 2 was accepted under it before the re-plan
+    assert.match(r.changed[0]!.state, /^accepted under this repair's card at attempt 2, then superseded by a later plan; accepted at attempt 3 /);
     assert.equal(r.done, false);
   });
 });
