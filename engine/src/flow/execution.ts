@@ -61,6 +61,7 @@ import {
   taskView,
   missionClosed,
   judgmentRecordOf,
+  tellOnce,
   type FlowCtx,
 } from './context.ts';
 import { handleFailure, type FailureOutcome } from './failures.ts';
@@ -92,6 +93,45 @@ interface ReworkBody {
   readonly issues: readonly string[];
   readonly instructions: readonly string[];
   readonly reopen?: ReopenSource;
+  /**
+   * 4.4 (F12 a): a repair's reopen is new work on the user's words: the lineage its fresh rework loop is
+   * counted on (reworkLineage), for this attempt and the reworks that follow it until one is accepted.
+   * Absent (every rework before 4.4, and any other): the task's own loop.
+   */
+  readonly loop?: string;
+  /** 4.4 (F12 b): the tasks of the same repair this reopened attempt comes after: its gate waits for them, and its start holds their work. */
+  readonly after?: readonly string[];
+}
+/**
+ * 4.4 (F13): the records of a repair's reopen request on the repairs line (the read of repairs shows them; the
+ * states they make, and the writes that move them, are described above RequestState). Each is keyed "<repair>:<task>#<n>", n its place among the
+ * request's records. Pinned: it waits for that attempt of the task to be accepted. Carried: that attempt was opened
+ * with the repair's issue on its card. Not carried: the task was given up or left the plan; told to the PM.
+ */
+export const REOPEN_PINNED = 'reopen-pinned';
+export const REOPEN_CARRIED = 'reopen-carried';
+export const REOPEN_NOT_CARRIED = 'reopen-not-carried';
+export interface ReopenCarriedBody {
+  readonly repair: string;
+  readonly task: string;
+  /** The attempt it opened. */
+  readonly attempt: number;
+  /** The attempt it waited for. */
+  readonly from: number;
+}
+export interface ReopenPinnedBody {
+  readonly repair: string;
+  readonly task: string;
+  /** The attempt it waits for now. */
+  readonly attempt: number;
+  readonly from: number;
+}
+export interface ReopenNotCarriedBody {
+  readonly repair: string;
+  readonly task: string;
+  /** The task's attempt when it was found not possible. */
+  readonly attempt: number;
+  readonly why: string;
 }
 /** An integration review's reopen (task line event "reopen", key the integration's attempt): the decision record; each named task's new attempt follows it (carryReopens). */
 interface ReopenBody {
@@ -155,6 +195,23 @@ interface ReviewBody {
 
 // the task id encoded injectively (review r2): safeId alone turned "a_b" and "a-b" into one id
 export const taskLineage = (mission: string, task: string): string => safeId(`task.${mission}.${idPart(task)}`);
+/** 4.4 (F12 a): the lineage of the fresh rework loop a repair's reopen starts at attempt k (no task lineage has a fourth part). */
+const reopenLoopLineage = (mission: string, task: string, k: number): string => safeId(`${taskLineage(mission, task)}.reopen${k}`);
+
+/**
+ * 4.4 (F12 a): the lineage attempt k's rework loop is counted on. A repair's reopen starts a fresh loop (its
+ * rework event names it): the reopened attempt and the reworks that follow it count there until one of them is
+ * accepted. Every other rework of the task (an attempt before the reopen, or work after the reopened work was
+ * accepted: a re-bind, a re-review, a review's reopen) counts on the task's lineage, whose count the repair leaves as it was.
+ */
+export function reworkLineage(mission: string, task: string, events: ReadonlyArray<{ revision: number; event: string; key: string; body: unknown }>, k: number): string {
+  const line = new Line(events);
+  const base = taskLineage(mission, task);
+  const fresh = line.all<ReworkBody>('rework').filter((r) => r.body.loop !== undefined && r.body.k <= k).at(-1);
+  if (fresh === undefined) return base;
+  for (let j = fresh.body.k; j <= k; j++) if (line.one('accepted', String(j)) !== null) return base;
+  return fresh.body.loop!;
+}
 /** A task's card identity under a plan: a spec records it, and a different one is a re-plan of the task (taskStep; plandoc.ts). */
 export { taskCardHash };
 
@@ -372,7 +429,9 @@ async function legacyPins(ctx: FlowCtx, line: Line, k: number): Promise<{ readon
 }
 
 export async function executionStep(ctx: FlowCtx): Promise<void> {
-  const eff = await latestEffective(ctx);
+  // 4.4 (F13): one read of the plan in effect, whose revision guards the moves of the repairs' reopens
+  const effective = (await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).at(-1);
+  const eff = effective?.body ?? null;
   if (eff === null) return;
   const raw = await detailedPlanOf(ctx, eff.dplan);
   if (raw === null) return internalError(ctx, `exec:${eff.dplan}`, `the effective detailed plan ${eff.dplan} is not in the ledger`);
@@ -393,7 +452,7 @@ export async function executionStep(ctx: FlowCtx): Promise<void> {
     return;
   }
   // reopen decisions (an integration review's, a repair's) carried out before the tasks move (restartable)
-  await carryReopens(ctx, stored.plan);
+  await carryReopens(ctx, stored.plan, { plan: stored.plan, revision: effective?.revision ?? null });
   const kept: KeptReport = { review: [], successors: null, waived: await waivedPlans(ctx) };
   await adoptKeptNotices(ctx);
   try {
@@ -732,7 +791,7 @@ async function taskStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   if (eff.mode === 'fast' && await contestedProduction(ctx, eff, plan, t)) return;
 
   // 4.1.3 (#41): the dependencies as execution reads them (an integration task's include the tasks repairs added)
-  const depIds = await taskDependencies(ctx, plan, t);
+  const depIds = await taskDependencies(ctx, plan, t, line);
   // an integration attempt whose start lacks its dependencies' current work starts again on a fresh start (#41)
   if (t.kind === 'integration' && (await integrationRestart(ctx, eff, t, line, k, depIds)) === 'restarted') return;
   // gate: dependencies accepted; stable mode: proven
@@ -1084,13 +1143,106 @@ async function integrationStart(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTas
  * task, also every task repairs added to the plan in effect (plandoc.ts amendedTaskIds; a later re-plan
  * that carries one keeps it so), except an integration task, one that depends on it, and one given up
  * (its work is not delivered). The one resolver of an integration's dependencies: its gate and start,
- * its Reviewer's card (so the reopen check at its hand-back), and its restart read it.
+ * its Reviewer's card (so the reopen check at its hand-back), and its restart read it. 4.4 (F12 b): for any
+ * task, also the tasks a repair's reopen of it comes after (`line`: the task's line when the caller has it).
  */
-export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask): Promise<string[]> {
-  if (t.kind !== 'integration') return [...t.dependsOn];
-  const added = amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body));
-  if (added.size === 0) return [...t.dependsOn];
-  const byId = new Map(plan.tasks.map((x) => [x.id, x]));
+export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: DetailedTask, line?: Line): Promise<string[]> {
+  // 4.4 (F12 b): the tasks the repair's reopen of this task's current work comes after are its dependencies too
+  const l = line ?? (await readLine(ctx, t.id));
+  const added = t.kind === 'integration' ? amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)) : new Set<string>();
+  const after = afterOf(l, l.k);
+  const givenUp = new Set<string>();
+  for (const x of plan.tasks) if ((added.has(x.id) || after.includes(x.id)) && (await readLine(ctx, x.id)).abandoned) givenUp.add(x.id);
+  return effectiveDependencies(plan, t, added, (id) => givenUp.has(id), after);
+}
+
+/**
+ * 4.4 (p7-4): the one description of what a task waits for, read by the gate and by the circle check of a repair's
+ * decision: its card's dependencies; for an integration task, every task repairs added (`added`) except an
+ * integration task, one that reaches it, and one given up; and the tasks its reopen comes after (`after`), except one
+ * given up (its reopen is not carried out, so no new work of it comes: the wait ends with it).
+ */
+export function effectiveDependencies(plan: DetailedPlanDoc, t: DetailedTask, added: ReadonlySet<string>, givenUp: (task: string) => boolean, after: readonly string[]): string[] {
+  const out = [...t.dependsOn];
+  if (t.kind === 'integration' && added.size > 0) {
+    const byId = new Map(plan.tasks.map((x) => [x.id, x]));
+    const reaches = (from: string, to: string): boolean => {
+      const seen = new Set<string>();
+      const stack = [from];
+      while (stack.length > 0) {
+        const at = stack.pop()!;
+        if (at === to) return true;
+        if (seen.has(at)) continue;
+        seen.add(at);
+        stack.push(...(byId.get(at)?.dependsOn ?? []));
+      }
+      return false;
+    };
+    for (const x of plan.tasks) {
+      if (!added.has(x.id) || x.id === t.id || x.kind === 'integration' || out.includes(x.id) || reaches(x.id, t.id) || givenUp(x.id)) continue;
+      out.push(x.id);
+    }
+  }
+  for (const x of after) if (x !== t.id && !out.includes(x) && plan.tasks.some((p) => p.id === x) && !givenUp(x)) out.push(x);
+  return out;
+}
+
+/**
+ * 4.4 (F12 b, p7-4): the tasks attempt k comes after: those the repair's reopen that opened its work names, while
+ * that work is not accepted yet (attempt k itself may be the accepted one: its product's re-bind reads them). Work
+ * after that acceptance, a later reopen, or a new card waits for none of them: a wait never outlives the reopen
+ * that asked for it.
+ */
+function afterOf(line: Line, k: number): string[] {
+  const opened = line.all<ReworkBody>('rework').filter((r) => r.body.k <= k && r.body.reason === 'reopen' && r.body.reopen?.kind === 'repair').at(-1);
+  if (opened === undefined || (opened.body.after ?? []).length === 0) return [];
+  if ((line.all('spec').at(-1)?.revision ?? 0) > opened.revision) return [];
+  for (let j = opened.body.k; j < k; j++) if (line.one('accepted', String(j)) !== null) return [];
+  return [...new Set(opened.body.after)];
+}
+
+/**
+ * 4.4 (F12 b, p7-4): the circles a repair's decision would close among the waits the flow holds once it is applied.
+ * Every task that will wait (one not accepted, one this decision reopens, adds or changes, one a 4.4 reopen of
+ * another repair has still to reach) waits for what the gate reads (effectiveDependencies: its card, an integration's
+ * implicit dependencies, the tasks its reopens come after: this decision's, another repair's open or pending one). A
+ * circle through an `after` wait would hold its tasks for ever: a mechanical failure of the decision. It is the only
+ * circle check of a reopen's `after`, so the graph is described once.
+ */
+export async function waitCircles(ctx: FlowCtx, plan: DetailedPlanDoc, d: { readonly reopen: ReadonlyArray<{ readonly task: string; readonly after?: readonly string[] }>; readonly add: readonly DetailedTask[]; readonly change?: readonly DetailedTask[] }): Promise<string[]> {
+  // no wait comes after anything unless a reopen named `after` (this decision's, or one decided before)
+  const decided = await eventsOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided');
+  if (!d.reopen.some((x) => (x.after ?? []).length > 0) && !decided.some((e) => e.body.reopen.some((x) => (x.after ?? []).length > 0))) return [];
+  const requests = (await reopenRequests(ctx)).filter((q) => q.source.kind === 'repair' && q.by44);
+  const cards = new Map(plan.tasks.map((t) => [t.id, t]));
+  for (const t of [...(d.change ?? []), ...d.add]) cards.set(t.id, t);
+  const after: DetailedPlanDoc = { ...plan, tasks: [...cards.values()] };
+  const added = new Set([...amendedTaskIds((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body)), ...d.add.map((t) => t.id)]);
+  const lines = new Map<string, Line>();
+  for (const t of after.tasks) lines.set(t.id, await readLine(ctx, t.id));
+  // 4.4 (p7-r3-2): a task given up stays given up only under the card it was given up under: one whose card this
+  // decision changes (or the plan in effect changed, and execution has not laid yet) is open again under that card,
+  // both as a task that waits and as the end of a wait
+  const givenUp = (id: string): boolean => {
+    const l = lines.get(id);
+    const card = cards.get(id);
+    return l !== undefined && l.abandoned && card !== undefined && l.all<SpecBody>('spec').at(-1)?.body.hash === taskCardHash(card);
+  };
+  const waits = new Map<string, string[]>();
+  const afterWaits = new Map<string, string[]>();
+  for (const t of after.tasks) {
+    const line = lines.get(t.id)!;
+    if (givenUp(t.id)) continue;
+    const here = d.reopen.find((x) => x.task === t.id);
+    // an added task has no line yet, a changed one no accepted product: both are open
+    const open = lineAcceptance(line.events).product === null;
+    const pending: ReopenRequest[] = [];
+    for (const q of requests) if (q.task === t.id && (await waitingRequest(ctx, line, q))) pending.push(q);
+    if (!open && here === undefined && pending.length === 0) continue;
+    const waitsAfter = [...(here?.after ?? []), ...(open ? afterOf(line, line.k) : []), ...pending.flatMap((q) => q.after)].filter((x) => x !== t.id);
+    waits.set(t.id, effectiveDependencies(after, t, added, givenUp, waitsAfter));
+    if (waitsAfter.length > 0) afterWaits.set(t.id, waitsAfter);
+  }
   const reaches = (from: string, to: string): boolean => {
     const seen = new Set<string>();
     const stack = [from];
@@ -1099,15 +1251,16 @@ export async function taskDependencies(ctx: FlowCtx, plan: DetailedPlanDoc, t: D
       if (at === to) return true;
       if (seen.has(at)) continue;
       seen.add(at);
-      stack.push(...(byId.get(at)?.dependsOn ?? []));
+      stack.push(...(waits.get(at) ?? []));
     }
     return false;
   };
-  const out = [...t.dependsOn];
-  for (const x of plan.tasks) {
-    if (!added.has(x.id) || x.id === t.id || x.kind === 'integration' || out.includes(x.id) || reaches(x.id, t.id)) continue;
-    if ((await readLine(ctx, x.id)).abandoned) continue;
-    out.push(x.id);
+  const out: string[] = [];
+  for (const [x, after] of afterWaits) {
+    if (!after.some((a) => waits.has(a) && reaches(a, x))) continue;
+    out.push(d.reopen.some((r) => r.task === x && (r.after ?? []).length > 0)
+      ? `reopen[${x}].after: it waits for work that waits for it (a circle through after and dependsOn)`
+      : `task ${x} waits, for another repair's reopen, for work this decision makes wait for ${x} (a circle through after and dependsOn): order the work so that nothing waits in a circle`);
   }
   return out;
 }
@@ -1266,6 +1419,10 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
   // one is laid over it: no cascade)
   const reopened = await reopenedProducts(ctx, plan, t, line);
   if (reopened === null) return null;
+  // 4.4 (F12 b, #59): a dependency that the repair this work answers reopens, while that reopen has not reached it
+  // yet, holds this attempt: its new work comes first. Read before the dependencies' products (p7-2): a reopen carried
+  // after this read has its dependency's next attempt written already, so the products read next show it not accepted
+  if (await sameRepairReopenPending(ctx, eff, t, line, depIds)) return null;
   const deps: string[] = [];
   // config `startOnHandback` (a project setting: it removes no check, E-2): a dependency still in review counts
   // with its current attempt's verified hand-back; the dependent's own acceptance still waits for the
@@ -1297,6 +1454,39 @@ async function dependencyGate(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPl
     for (const x of [eff.dplan, ...deps]) if (!(await usable(x))) return null;
   }
   return deps;
+}
+
+/**
+ * 4.4 (F12 b, #59): the repairs the task's current work answers: the one that added it, the one that changed its
+ * card in force, and those that reopened an attempt under that card.
+ */
+function causingRepairs(history: readonly EffectiveBody[], eff: EffectiveBody, t: DetailedTask, line: Line): Set<string> {
+  const out = new Set<string>();
+  // the repair that added it, also once a later plan keeps the card it gave (that plan carries no amendment, p7-r3-3)
+  const added = repairOfTask(eff.amendments, t.id) ?? history.flatMap((e) => e.amendments ?? []).find((a) => a.tasks.some((x) => x.id === t.id && taskCardHash(x) === taskCardHash(t)))?.repair ?? null;
+  if (added !== null) out.add(added);
+  const spec = line.all<SpecBody>('spec').at(-1);
+  if (spec?.body.repair !== undefined) out.add(spec.body.repair);
+  const since = spec?.revision ?? 0;
+  for (const rw of line.all<ReworkBody>('rework')) if (rw.revision > since && rw.body.reopen?.kind === 'repair') out.add(rw.body.reopen.repair);
+  return out;
+}
+
+/**
+ * 4.4 (F12 b, #59, p7-2): whether a dependency of the task is reopened by a repair its work answers, and that 4.4
+ * reopen has not reached the dependency yet (waitingRequest). The dependency's current product, accepted or
+ * (startOnHandback) a verified hand-back in review, is the work the repair replaces: the task waits for the attempt
+ * that carries the repair, and the gate reads that one once it is accepted. A reopen of 4.3 holds nothing (p7-r2-3).
+ */
+async function sameRepairReopenPending(ctx: FlowCtx, eff: EffectiveBody, t: DetailedTask, line: Line, depIds: readonly string[]): Promise<boolean> {
+  if (depIds.length === 0) return false;
+  const causing = causingRepairs((await eventsOf<EffectiveBody>(ctx, PLAN_LINE, 'effective')).map((e) => e.body), eff, t, line);
+  if (causing.size === 0) return false;
+  for (const r of await reopenRequests(ctx)) {
+    if (r.source.kind !== 'repair' || !causing.has(r.source.repair) || !depIds.includes(r.task)) continue;
+    if (await waitingRequest(ctx, await readLine(ctx, r.task), r)) return true;
+  }
+  return false;
 }
 
 /**
@@ -1613,20 +1803,196 @@ function coveredReopens(ctx: FlowCtx, task: string, line: Line, e: { readonly bo
     .map((v) => v.key);
 }
 
-/** One reopened task's new attempt (D-6, D-10), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. */
-async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, attempt: number, issue: string, instruction: string, key: string, source: ReopenSource): Promise<void> {
-  const t = plan.tasks.find((x) => x.id === taskId);
+/** One reopened task's new attempt (D-6), counted on its rework loop (used up: WI-08 and the Secretary); restartable by `key`. A repair's: repairReopen. */
+async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, r: ReopenRequest): Promise<void> {
+  const t = plan.tasks.find((x) => x.id === r.task);
   // the plan in effect no longer has it (a re-plan dropped it): the reopen is moot
   if (t === undefined) return;
-  const line = await readLine(ctx, taskId);
+  const line = await readLine(ctx, r.task);
   // it moved on (its new attempt is this one, or a re-plan restarted it), or it was given up: nothing to do
-  if (line.abandoned || line.k !== attempt || line.one('accepted', String(attempt)) === null) return;
-  if (line.one<{ proceed: boolean }>('loop-verdict', key)?.proceed === false) {
-    const escalations = await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation');
-    if (escalations.some((e) => coveredReopens(ctx, taskId, line, e).includes(key))) return;
-  }
+  if (line.abandoned || line.k !== r.attempt || line.one('accepted', String(r.attempt)) === null) return;
+  if (await coveredVerdict(ctx, line, r)) return;
   // No escalation covers this request: retry after a collision or an interrupted write.
-  await rework(ctx, t, attempt, [issue], [instruction], key, { reason: 'reopen', reopen: source });
+  await rework(ctx, t, r.attempt, [r.issue], [r.instruction], r.key, { reason: 'reopen', reopen: r.source });
+}
+
+/** A request whose kept verdict found its loop used up, and whose escalation exists (it waits for that decision). */
+async function coveredVerdict(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise<boolean> {
+  if (line.one<{ proceed: boolean }>('loop-verdict', r.key)?.proceed !== false) return false;
+  const escalations = await eventsOf<EscalationBody>(ctx, SECRETARY_LINE, 'escalation');
+  return escalations.some((e) => coveredReopens(ctx, r.task, line, e).includes(r.key));
+}
+
+/*
+ * 4.4 (F13): a repair's reopen request (repair R, task T) is in one of three states, read from the repairs line.
+ * A reopen always waits for T's open attempt and opens the next one; it never joins an open attempt.
+ *   requested(a)  R's decision, or the request's latest `reopen-pinned` (a): it waits for T's attempt a to be accepted
+ *   carried(c)    its latest `reopen-carried` (c): T's attempt c was opened with R's issue on its card. Final once a
+ *                 seat took c (its Constructor or Reviewer was claimed, or it was reviewed); until then it is read as
+ *                 requested(c), so an issue is never settled before a seat saw it (p7-3)
+ *   not carried   `reopen-not-carried`: final; the notice goes to the PM's inbox
+ * Each move is one append whose record is keyed by the request and its sequence number (`<R>:<T>#<n>`): its guard
+ * checks inside the write that no record #n of any kind exists (two passes make a move at most once, and a pass that
+ * read an older state writes nothing, p7-r2-1), that the plan in effect is still the revision the pass read, and:
+ *   requested(a) → carried(k+1)  T accepted at its current attempt k ≥ a: T's rework k+1 with R's issue and
+ *                                `reopen-carried` (k+1), one write. Checks: no rework k+1 on T's line
+ *   requested(a) → requested(k)  T's current attempt k > a is open: `reopen-pinned` (k). Checks: no rework k+1
+ *   → not carried                T given up, or not in the plan in effect: `reopen-not-carried`. Checks: T's card is
+ *                                the one read (its latest spec, so a giving-up still holds); the PM's notice is sent
+ *                                from the committed record, once (p7-r2-2)
+ * A request of a 4.3 decision (no `tracked`) that 4.4 never wrote to keeps 4.3's ways: 4.3's counted return, and when
+ * its task was accepted past it, it was left out (told as not carried out). No reopen of a 4.3 decision, and none 4.3
+ * counted, holds a dependent (p7-r2-3).
+ */
+type RequestState =
+  | { readonly kind: 'requested'; readonly at: number }
+  | { readonly kind: 'carried'; readonly at: number; readonly taken: boolean }
+  | { readonly kind: 'not-carried' };
+
+/** Where a repair's reopen request stands (the states above); `taken`: a seat took the carried attempt. */
+async function requestState(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise<RequestState> {
+  if (r.source.kind !== 'repair') return { kind: 'requested', at: r.attempt };
+  if (r.state === 'not-carried') return { kind: 'not-carried' };
+  if (r.state === 'carried') return { kind: 'carried', at: r.attempt, taken: await attemptTaken(ctx, r.task, line, r.attempt) };
+  // a request 4.3 carried out: its task's attempt opened by its reopen (counted by 4.3; the issue on its card)
+  if (!r.tracked) {
+    const repair = r.source.repair;
+    const opened = line.all<ReworkBody>('rework').find((x) => x.body.reopen?.kind === 'repair' && x.body.reopen.repair === repair && x.body.k > r.attempt);
+    if (opened !== undefined) return { kind: 'carried', at: opened.body.k, taken: true };
+  }
+  return { kind: 'requested', at: r.attempt };
+}
+
+/**
+ * Whether a reopen request a 4.4 decision made has still to reach its task: requested, or carried on an attempt no
+ * seat took that the task moved past or that was accepted as it was (the next pass moves it on). A reopen of a 4.3
+ * decision, or one 4.3 counted, holds nothing (p7-r2-3): no wait comes of it that 4.3 would not have had.
+ */
+async function waitingRequest(ctx: FlowCtx, line: Line, r: ReopenRequest): Promise<boolean> {
+  if (r.source.kind !== 'repair' || !r.by44 || line.abandoned || countedBy43(line, r)) return false;
+  const s = await requestState(ctx, line, r);
+  return s.kind === 'requested' || (s.kind === 'carried' && !s.taken && (line.k > s.at || line.one('accepted', String(s.at)) !== null));
+}
+
+/** A repair's reopen 4.3 counted on the task's loop: its marker or its verdict (two writes; either one, p7-7). 4.4 never counts one. */
+function countedBy43(line: Line, r: ReopenRequest): boolean {
+  return line.one('loop-verdict', r.key) !== null || line.one('loop-return', r.key) !== null;
+}
+
+/** Whether a seat took attempt k of the task: its Constructor or its Reviewer was claimed, or it was reviewed. */
+async function attemptTaken(ctx: FlowCtx, task: string, line: Line, k: number): Promise<boolean> {
+  if (line.all<ReviewBody>('review').some((v) => v.body.k === k)) return true;
+  for (const step of [conTask(ctx.mission, task, k), revTask(ctx.mission, task, k, 0)]) if (((await ctx.ports.scheduler.status(step))?.dispatches ?? []).length > 0) return true;
+  return false;
+}
+
+/** The guard code of a move another writer made first (the request or the task moved on): nothing is written, the next pass reads it again. */
+const MOVED_ON = 'REOPEN_MOVED_ON';
+
+/** The plan in effect a pass of execution read: its revision guards every move of a request. */
+interface PlanRead {
+  readonly plan: DetailedPlanDoc;
+  readonly revision: number | null;
+}
+
+/**
+ * 4.4 (F12 a, F13): a repair's reopen of one task (the states above). It is new work on the user's words, so it is
+ * not counted on the task's rework loop: the attempt it opens starts a fresh loop (reworkLineage). A reopen 4.3
+ * already counted (its marker or its verdict) goes on as 4.3 ran it.
+ */
+async function repairReopen(ctx: FlowCtx, read: PlanRead, r: ReopenRequest): Promise<void> {
+  if (r.source.kind !== 'repair') return;
+  const t = read.plan.tasks.find((x) => x.id === r.task);
+  const line = await readLine(ctx, r.task);
+  const s = await requestState(ctx, line, r);
+  // carried out (a seat took the attempt that carries it), or not carried out: final
+  if (s.kind === 'not-carried' || (s.kind === 'carried' && s.taken)) return;
+  // 4.3 counted it (p7-7: the marker and the verdict are two writes; either one means 4.3's counted return)
+  if (countedBy43(line, r)) {
+    if (t === undefined || line.abandoned || line.k !== r.attempt || line.one('accepted', String(r.attempt)) === null || (await coveredVerdict(ctx, line, r))) return;
+    await rework(ctx, t, r.attempt, [r.issue], [r.instruction], r.key, { reason: 'reopen', reopen: r.source });
+    return;
+  }
+  if (t === undefined) return reopenNotCarried(ctx, read, r, line, 'the plan in effect no longer has the task');
+  if (line.abandoned) return reopenNotCarried(ctx, read, r, line, 'the task was given up');
+  const k = line.k;
+  const from = s.at;
+  if (k < from) return;
+  // a decision of 4.3 that 4.4 never wrote to, whose task was accepted again past it, was left out by 4.3: told, not revived (p7-1)
+  if (!r.tracked && line.all<{ k: number }>('accepted').some((a) => a.body.k > from)) return reopenNotCarried(ctx, read, r, line, 'the task was accepted again at a later attempt before this reopen was carried out (a version before 4.4 left it out)');
+  // the attempt it waits for is accepted (or, carried on an attempt no seat took, that attempt was accepted as it was,
+  // or the task moved past it to an accepted one): the next attempt opens with its issue
+  if (line.one('accepted', String(k)) !== null) return carryReopen(ctx, read, t, line, r, k);
+  // the attempt it waits for is open, or the attempt that carries it is: it waits
+  if (k === from) return;
+  // its task moved past that attempt to an open one (queued, claimed or in review): someone else's work, the reopen
+  // waits for it to be accepted (p7-3: an issue carried on an attempt no seat took goes on to the next one)
+  await requestMove(ctx, read, r, line, { event: REOPEN_PINNED, body: { repair: r.source.repair, task: t.id, attempt: k, from } satisfies ReopenPinnedBody }, [{ mission: ctx.mission, line: taskLine(t.id), event: 'rework', key: String(k + 1) }]);
+}
+
+/**
+ * One move of a request (the states above): its record keyed `<R>:<T>#<n+1>`, with `extra` events in the same write.
+ * The guard: no record #n+1 of any kind yet (another pass moved it first), the plan in effect as read, the task
+ * state `absent` names. A move another writer made first is not an error: the next pass reads where things are.
+ * The operation names the move itself, so the same move made twice is one write, and another move of the same
+ * record is refused by the guard (never taken for a replay).
+ */
+async function requestMove<B extends { readonly attempt: number }>(ctx: FlowCtx, read: PlanRead, r: ReopenRequest, line: Line, record: { readonly event: string; readonly body: B }, absent: AppendGuard['absent'], extra: readonly FlowEventInput[] = [], latestSpec = false): Promise<boolean> {
+  if (r.source.kind !== 'repair') return false;
+  const key = `${r.source.repair}:${r.task}#${r.seq + 1}`;
+  try {
+    await commit(ctx, `flow:reopen:${ctx.mission}:${idPart(r.source.repair)}:${idPart(r.task)}:${r.seq + 1}:${record.event}:${record.body.attempt}`, {
+      events: [...extra, ev(ctx, REPAIRS_LINE, record.event, key, record.body)],
+      guard: {
+        absent: [...absent, ...[REOPEN_PINNED, REOPEN_CARRIED, REOPEN_NOT_CARRIED].map((event) => ({ mission: ctx.mission, line: REPAIRS_LINE, event, key }))],
+        latest: [
+          { mission: ctx.mission, line: PLAN_LINE, event: 'effective', revision: read.revision },
+          ...(latestSpec ? [{ mission: ctx.mission, line: taskLine(r.task), event: 'spec', revision: line.all('spec').at(-1)?.revision ?? null }] : []),
+        ],
+        code: MOVED_ON,
+        message: `repair ${r.source.repair}'s reopen of task ${r.task}, or the task or the plan in effect, moved on meanwhile; nothing was written (the next pass reads it again)`,
+      },
+    });
+    return true;
+  } catch (e) {
+    if ((e as { code?: string }).code !== MOVED_ON) throw e;
+    return false;
+  }
+}
+
+/** requested → carried: attempt k+1 of T opened with R's issue on its card, on a fresh loop (F12 a), after the tasks it names (F12 b). */
+async function carryReopen(ctx: FlowCtx, read: PlanRead, t: DetailedTask, line: Line, r: ReopenRequest, k: number): Promise<void> {
+  if (r.source.kind !== 'repair') return;
+  const product = currentAcceptance(line, k)?.product ?? r.product;
+  const after = r.after.filter((x) => x !== t.id);
+  const instructions = [
+    `Reopened by repair ${r.source.repair}${r.repairText !== '' ? ` (${r.repairText})` : ''}: fix this in your task's work (your accepted product ${product} stays recorded until this attempt is accepted).`,
+    ...(after.length > 0 ? [`This attempt starts once ${after.join(', ')} ${after.length === 1 ? 'is' : 'are'} accepted for the same repair, on ${after.length === 1 ? 'its' : 'their'} new work.`] : []),
+    ...(await deferredInstructions(ctx, line, k)),
+  ];
+  const body: ReworkBody = { k: k + 1, reason: 'reopen', issues: [r.issue], instructions, reopen: r.source, loop: reopenLoopLineage(ctx.mission, t.id, k + 1), ...(after.length > 0 ? { after } : {}) };
+  await requestMove(ctx, read, r, line, { event: REOPEN_CARRIED, body: { repair: r.source.repair, task: t.id, attempt: k + 1, from: r.attempt } satisfies ReopenCarriedBody }, [{ mission: ctx.mission, line: taskLine(t.id), event: 'rework', key: String(k + 1) }], [ev(ctx, taskLine(t.id), 'rework', String(k + 1), body)]);
+}
+
+/** → not carried: recorded under the guards of a move (the plan in effect and the task's card as read); the PM is told from the record (reopenNotices). */
+async function reopenNotCarried(ctx: FlowCtx, read: PlanRead, r: ReopenRequest, line: Line, why: string): Promise<void> {
+  if (r.source.kind !== 'repair') return;
+  await requestMove(ctx, read, r, line, { event: REOPEN_NOT_CARRIED, body: { repair: r.source.repair, task: r.task, attempt: line.k, why } satisfies ReopenNotCarriedBody }, [], [], true);
+}
+
+/** The PM is told of every reopen recorded as not carried out, once, from its record (a lost notice is sent again). */
+async function reopenNotices(ctx: FlowCtx): Promise<void> {
+  for (const e of await eventsOf<ReopenNotCarriedBody>(ctx, REPAIRS_LINE, REOPEN_NOT_CARRIED)) {
+    const b = e.body;
+    await tellOnce(ctx, REPAIRS_LINE, {
+      category: 'reopen-not-carried',
+      wi: null,
+      key: e.key,
+      trigger: `repair ${b.repair}'s reopen of task ${b.task} was not carried out: ${b.why}`,
+      defaultAction: `nothing is reopened for it and repair ${b.repair} does not read as done; the rest goes on. Tell the user what was not done; a new repair on their words (mp pm repair … --again) or a re-plan routes the work`,
+      detail: { repair: b.repair, task: b.task, attempt: b.attempt, why: b.why },
+    });
+  }
 }
 
 /**
@@ -1635,28 +2001,74 @@ async function reopenTask(ctx: FlowCtx, plan: DetailedPlanDoc, taskId: string, a
  * loses nothing. The reopened task's other dependents keep their products and their proof (no
  * cascade): the integration's full run checks the combination.
  */
-async function carryReopens(ctx: FlowCtx, plan: DetailedPlanDoc): Promise<void> {
-  for (const r of await reopenRequests(ctx)) await reopenTask(ctx, plan, r.task, r.attempt, r.issue, r.instruction, r.key, r.source);
+async function carryReopens(ctx: FlowCtx, plan: DetailedPlanDoc, read?: PlanRead): Promise<void> {
+  // a repair's reopen moves only under the plan the pass read with its revision (the review's own reopen carries its at once)
+  for (const r of await reopenRequests(ctx)) {
+    if (r.source.kind === 'repair') {
+      if (read !== undefined) await repairReopen(ctx, read, r);
+    } else await reopenTask(ctx, plan, r);
+  }
+  if (read !== undefined) await reopenNotices(ctx);
 }
 
-/** The recorded findings and requests, shared by reopening and a grant covering several reopens. */
-async function reopenRequests(ctx: FlowCtx): Promise<Array<{ task: string; attempt: number; issue: string; instruction: string; key: string; source: ReopenSource }>> {
-  const requests: Array<{ task: string; attempt: number; issue: string; instruction: string; key: string; source: ReopenSource }> = [];
+/** One recorded reopen request (an integration review's or a repair's). */
+interface ReopenRequest {
+  readonly task: string;
+  /** The attempt of its state: the one it waits for (requested: as decided, or as pinned again), or the one it opened (carried). */
+  readonly attempt: number;
+  /** A repair's (F13): its state as its latest record says (a review's: requested). */
+  readonly state: 'requested' | 'carried' | 'not-carried';
+  /** A repair's: the number of its 4.4 records (its next one is #seq+1). */
+  readonly seq: number;
+  /** A repair's: decided by 4.4, or written to by 4.4 since: none of 4.3's ways apply to it (p7-1). */
+  readonly tracked: boolean;
+  /** A repair's: its decision is 4.4's (`tracked` on it): only such a reopen holds the work of its repair (p7-r2-3). */
+  readonly by44: boolean;
+  readonly issue: string;
+  readonly instruction: string;
+  readonly key: string;
+  readonly source: ReopenSource;
+  /** The accepted product it was decided on. */
+  readonly product: string;
+  /** A repair's: the tasks of the same repair it comes after (F12 b; none before 4.4). */
+  readonly after: readonly string[];
+  /** A repair's: its kind and the user's words, for the instructions. */
+  readonly repairText: string;
+}
+
+/** The recorded findings and requests, shared by reopening and a grant covering several reopens (one read of the repairs line). */
+async function reopenRequests(ctx: FlowCtx): Promise<ReopenRequest[]> {
+  const requests: ReopenRequest[] = [];
   for (const e of await ctx.ports.ledger.events<ReopenBody>({ mission: ctx.mission, event: 'reopen' })) {
     if (!e.line.startsWith('task:')) continue;
     const integration = e.line.slice('task:'.length);
     for (const x of e.body.tasks) {
       const issue = `${x.issue}${x.evidence !== undefined ? ` (evidence: ${x.evidence})` : ''}`;
       const instruction = `Reopened by the review ${e.body.review} of integration task ${integration} (attempt ${e.body.k}): fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted); the integration task builds again on your new work.`;
-      requests.push({ task: x.task, attempt: x.attempt, issue, instruction, key: `reopen:${integration}:${e.body.k}`, source: { kind: 'review', integration, review: e.body.review, attempt: e.body.k } });
+      requests.push({ task: x.task, attempt: x.attempt, state: 'requested', seq: 0, tracked: true, by44: false, issue, instruction, key: `reopen:${integration}:${e.body.k}`, source: { kind: 'review', integration, review: e.body.review, attempt: e.body.k }, product: x.product, after: [], repairText: '' });
     }
   }
-  const repairs = new Map((await eventsOf<RepairBody>(ctx, REPAIRS_LINE, 'repair')).map((r) => [r.key, r.body]));
-  for (const e of await eventsOf<RepairDecidedBody>(ctx, REPAIRS_LINE, 'decided')) {
-    const r = repairs.get(e.body.repair);
-    for (const x of e.body.reopen) {
-      const instruction = `Reopened by repair ${e.body.repair}${r !== undefined ? ` (${r.kind}; the user's words ${r.words}: "${r.text}")` : ''}: fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted).`;
-      requests.push({ task: x.task, attempt: x.attempt, issue: x.issue, instruction, key: `reopen:repair:${e.body.repair}`, source: { kind: 'repair', repair: e.body.repair } });
+  const line = await eventsOf(ctx, REPAIRS_LINE);
+  const repairs = new Map(line.filter((e) => e.event === 'repair').map((e) => [e.key, e.body as RepairBody]));
+  // each request's 4.4 records, in order: the latest is its state
+  const records = new Map<string, Array<{ readonly event: string; readonly attempt: number }>>();
+  for (const e of line) {
+    if (e.event !== REOPEN_PINNED && e.event !== REOPEN_CARRIED && e.event !== REOPEN_NOT_CARRIED) continue;
+    const b = e.body as { repair: string; task: string; attempt: number };
+    const id = `${b.repair}:${b.task}`;
+    records.set(id, [...(records.get(id) ?? []), { event: e.event, attempt: b.attempt }]);
+  }
+  for (const e of line) {
+    if (e.event !== 'decided') continue;
+    const d = e.body as RepairDecidedBody;
+    const r = repairs.get(d.repair);
+    const repairText = r !== undefined ? `${r.kind}; the user's words ${r.words}: "${r.text}"` : '';
+    for (const x of d.reopen) {
+      const mine = records.get(`${d.repair}:${x.task}`) ?? [];
+      const last = mine.at(-1);
+      const state = last === undefined || last.event === REOPEN_PINNED ? 'requested' : last.event === REOPEN_CARRIED ? 'carried' : 'not-carried';
+      const instruction = `Reopened by repair ${d.repair}${repairText !== '' ? ` (${repairText})` : ''}: fix this in your task's work (your accepted product ${x.product} stays recorded until this attempt is accepted).`;
+      requests.push({ task: x.task, attempt: last?.attempt ?? x.attempt, state, seq: mine.length, tracked: d.tracked === true || mine.length > 0, by44: d.tracked === true, issue: x.issue, instruction, key: `reopen:repair:${d.repair}`, source: { kind: 'repair', repair: d.repair }, product: x.product, after: x.after ?? [], repairText });
     }
   }
   return requests;
@@ -1906,7 +2318,8 @@ async function keptStep(ctx: FlowCtx, eff: EffectiveBody, plan: DetailedPlanDoc,
   if (labels[eff.dplan] !== 'proven' && !kept.waived.has(eff.dplan)) return 'held';
   // the prerequisites: each must be its dependency's accepted version now, re-bound or proven itself first
   const deps = new Set<string>();
-  for (const d of t.dependsOn) {
+  // 4.4 (F12 b): a reopened attempt's start held the work of the tasks it came after, so its re-bind compares against them too
+  for (const d of [...new Set([...t.dependsOn, ...afterOf(line, k)])]) {
     const p = await acceptedProduct(ctx, d);
     if (p !== null) deps.add(p);
     // A dependency's accepted closure still describes the old plan while its new version is
@@ -2208,10 +2621,13 @@ function contractLines(ctx: FlowCtx, t: DetailedTask, ix: Awaited<ReturnType<typ
   return reviewContractLines(ctx.mission, t, ix);
 }
 
-/** A Reviewer rework: counted (initial + 2); exhausted → WI-08 and the Secretary. */
+/** A Reviewer rework: counted (initial + the cap, config `loops.rework`); exhausted → WI-08 and the Secretary. */
 async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly string[], instructions: readonly string[], key: string, o: { readonly reason?: ReworkBody['reason']; readonly reopen?: ReopenSource } = {}): Promise<void> {
   const lineName = taskLine(t.id);
-  const lineage = taskLineage(ctx.mission, t.id);
+  // 4.4 (F12 a): counted on the loop attempt k belongs to (a repair's reopened work has a fresh one)
+  const before = await readLine(ctx, t.id);
+  const lineage = reworkLineage(ctx.mission, t.id, before.events, k);
+  const freshOf = lineage === taskLineage(ctx.mission, t.id) ? null : before.all<ReworkBody>('rework').filter((x) => x.body.loop === lineage).at(-1)?.body.reopen ?? null;
   const r = await countedReturn(ctx, { line: lineName, key, lineage, loop: 'rework', signature: shortHash([...issues].sort()) });
   if (r.proceed) {
     const line = await readLine(ctx, t.id);
@@ -2249,7 +2665,7 @@ async function rework(ctx: FlowCtx, t: DetailedTask, k: number, issues: readonly
     source: 'loop-exhausted',
     lineage,
     subject: `task:${t.id}`,
-    summary: `Task ${t.id}: the reworks are used up (${v.attempts}/${v.allowed}${v.reason === 'no-progress' ? ', the same issues twice in a row' : ''}).`,
+    summary: `Task ${t.id}: the reworks${freshOf?.kind === 'repair' ? ` of repair ${freshOf.repair}'s reopen` : ''} are used up (${v.attempts}/${v.allowed}${v.reason === 'no-progress' ? ', the same issues twice in a row' : ''}).`,
     reasons: [...issues, ...(reopenRisk?.review.issues ?? []), ...(runRisk?.failed.map((f) => `a program run did not pass on the product: ${f}`) ?? [])],
     options: ['grant', 'replan', ...(offered !== null ? (['accept-risk'] as const) : []), 'abandon', 'ask-user'],
     ...(runRisk !== null ? { pmOnly: ['accept-risk'] as const } : {}),
@@ -2323,13 +2739,15 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
   const reopen = raised !== undefined && coveredReopens(ctx, t.id, line, raised).length > 0;
   switch (d.option) {
     case 'grant': {
-      const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${e.id}:${d.by}`, lineage, loop: 'rework', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
+      // 4.4 (F12 a): the grant goes to the loop that is used up (a repair's reopened work has its own; 4.3 escalations name the task's)
+      const loopLineage = e.lineage;
+      const g = await grantForDecision(ctx, { op: `grant:${ctx.mission}:${e.id}:${d.by}`, lineage: loopLineage, loop: 'rework', by: d.by === 'pm' ? 'pm' : d.by === 'user' ? 'user' : 'secretary', extra: Math.max(1, d.grantExtra), reason: d.reason });
       if (!g.granted) {
-        await escalateToUser(ctx, e.id, `the Secretary's grant on lineage ${lineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
+        await escalateToUser(ctx, e.id, `the Secretary's grant on lineage ${loopLineage} was refused (${g.why ?? 'refused'}): only the user can grant more`, WI.loopExhausted);
         return true;
       }
       const next = line.one<ReworkBody>('rework', String(k + 1));
-      if (next === null) await grantedAttempt(ctx, g, { op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage, loop: 'rework', signature: `granted:${e.id}` });
+      if (next === null) await grantedAttempt(ctx, g, { op: `flow:rework:${ctx.mission}:${e.id}:granted`, lineage: loopLineage, loop: 'rework', signature: `granted:${e.id}` });
       const body: ReworkBody = { k: k + 1, reason: 'secretary', issues: facts.issues ?? [], instructions: [...(d.instructions !== '' ? [d.instructions] : []), ...await deferredInstructions(ctx, line, k)] };
       const carry = await carryOut(ctx, e.id, { option: 'grant' }, g.records);
       await commit(ctx, `flow:rework:${ctx.mission}:${e.id}:apply-grant`, {
@@ -2374,6 +2792,17 @@ async function applyTaskDecision(ctx: FlowCtx, eff: EffectiveBody, plan: Detaile
           trigger: `the reopen request on ${e.id} for task ${t.id} attempt ${k} was given up`,
           defaultAction: 'only this reopen is dropped; other grants and work stay. A waiting integration needs new accepted dependency work, a re-plan or a repair',
           detail: { task: t.id, attempt: k, escalation: e.id, reason: d.reason } });
+        // 4.4 (F13): a repair's reopen given up here (counted by 4.3) is recorded as not carried out: its repair does not read as done
+        const given = coveredReopens(ctx, t.id, line, raised!).filter((key) => key.startsWith('reopen:repair:')).map((key) => key.slice('reopen:repair:'.length));
+        // keyed as a move of its request (its next record), so no other move of it can be written beside this one
+        const requests = (await reopenRequests(ctx)).filter((q) => q.source.kind === 'repair' && q.task === t.id && given.includes(q.source.repair) && q.state !== 'not-carried');
+        const keys = requests.map((q) => ({ repair: (q.source as { repair: string }).repair, key: `${(q.source as { repair: string }).repair}:${t.id}#${q.seq + 1}` }));
+        if (keys.length > 0) {
+          await commit(ctx, `flow:reopen-given-up:${ctx.mission}:${e.id}`, {
+            events: keys.map((x) => ev(ctx, REPAIRS_LINE, REOPEN_NOT_CARRIED, x.key, { repair: x.repair, task: t.id, attempt: k, why: `its reopen was given up on ${e.id}` } satisfies ReopenNotCarriedBody)),
+            guard: { absent: keys.flatMap((x) => [REOPEN_PINNED, REOPEN_CARRIED, REOPEN_NOT_CARRIED].map((event) => ({ mission: ctx.mission, line: REPAIRS_LINE, event, key: x.key }))), code: 'STALE_REQUEST', message: `a reopen given up on ${e.id} moved meanwhile; nothing was written (the next pass reads it again)` },
+          });
+        }
         await markApplied(ctx, e.id, { option: 'abandon' });
         return false;
       }
@@ -2858,6 +3287,7 @@ async function submitReviewer(
   const integration = t.kind === 'integration' ? { hasConstructor: !startOnlyAttempt, dependencies: await dependencyProducts(ctx, plan, t) } : undefined;
   const rw = await reworkAt(ctx, t, line, k);
   const reopened = rw?.reason === 'reopen' ? ` This attempt was reopened (${rw.reopen?.kind === 'repair' ? `repair ${rw.reopen.repair}` : rw.reopen?.kind === 'review' ? `the review ${rw.reopen.review} of integration task ${rw.reopen.integration}` : 'reopened'}): ${rw.issues.join('; ')}. Judge whether it is fixed too; if it is not, say so as a finding.` : '';
+  // 4.4 (F13): the repairs this attempt carries (each reopen opens its own attempt), judged the same way
   const repairs = await repairsOfWork(ctx, eff, t, line, k);
   // 4.4 (F3, E-4): the Constructor's hand-back of the attempt under review, as claims to check (optional, never evidence)
   const claims = startOnlyAttempt ? null : await constructorClaims(ctx, { constructor: product.task, task: t.id, attempt: product.k });

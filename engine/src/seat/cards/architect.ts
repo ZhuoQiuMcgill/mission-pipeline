@@ -467,7 +467,16 @@ export function repairPlanMaterial(put: (doc: string) => string, dplan: string, 
 }
 
 export const ArchitectRepairResultShape = {
-  reopen: z.array(z.object({ task: z.string().min(1).describe('A task with an accepted product, listed on the card.'), issue: z.string().min(1).describe('What its work must fix for this repair.') })).describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
+  reopen: z
+    .array(
+      z.object({
+        task: z.string().min(1).describe('A task with an accepted product, listed on the card.'),
+        issue: z.string().min(1).describe('What its work must fix for this repair.'),
+        // 4.4 (F12 b, #59)
+        after: z.array(z.string().min(1)).optional().describe('4.4: tasks this repair adds, changes or reopens whose new work this task builds on: its new attempt waits until they are accepted and starts on their work.'),
+      }),
+    )
+    .describe('Existing tasks whose accepted work causes the problem: each gets a new attempt with the issue on its card.'),
   add: z.array(DetailedTask).describe('New tasks the repair needs, added to the plan in effect (fresh ids; dependsOn the existing tasks whose work they build on or whose paths they touch).'),
   change: z
     .array(DetailedTask)
@@ -530,6 +539,16 @@ export function repairProblems(c: ArchitectRepairCard, r: ArchitectRepairResult)
     for (const e of elementsOf(t.provenance)) if (!elements.has(e)) out.push(`${where}[${t.id}].provenance: "${e}" is not an element of the PM plan`);
     for (const d of t.dependsOn) if (!existing.has(d) && !ids.includes(d)) out.push(`${where}[${t.id}].dependsOn: "${d}" is not a task of the plan in effect or of this repair`);
     if (t.estimate.basis.trim() === '') out.push(`${where}[${t.id}].estimate.basis: give the basis of the estimate`);
+  }
+  // 4.4 (F12 b): a reopen comes after other work of this repair only. Whether that closes a circle is checked once,
+  // by the flow after the hand-back, on what the scheduler itself waits for (execution.ts waitCircles, p7-4): a circle
+  // there is a mechanical failure that returns the decision to the Architect
+  const own = new Set([...ids, ...changed, ...named]);
+  for (const x of r.reopen) {
+    for (const a of x.after ?? []) {
+      if (a === x.task) out.push(`reopen[${x.task}].after: a task does not come after itself`);
+      else if (!own.has(a)) out.push(`reopen[${x.task}].after: "${a}" is not a task this repair adds, changes or reopens`);
+    }
   }
   return out;
 }

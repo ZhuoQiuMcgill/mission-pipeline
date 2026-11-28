@@ -1166,8 +1166,8 @@ export type RepairChanged =
  */
 export async function pmRepair(
   ctx: ProcessContext,
-  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null },
-): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged }> {
+  req: { readonly mission: string; readonly words: string; readonly kind: RepairKind; readonly text: string; readonly about?: string; readonly change?: RepairChange; readonly reason?: string | null; readonly again?: boolean; readonly op?: string | null },
+): Promise<{ readonly repair: string; readonly repeated: boolean; readonly about: { readonly kind: 'task' | 'exploration'; readonly id: string } | null; readonly changed?: RepairChanged; readonly over?: string }> {
   ctx.memory.read((db) => checkQuote(db, ctx.memory.data, req.words, req.text));
   const mission = req.mission as MissionId;
   let about: { kind: 'task' | 'exploration'; id: string } | null = null;
@@ -1204,15 +1204,15 @@ export async function pmRepair(
       }
     }
   }
-  let r: { readonly id: string; readonly repeated: boolean };
+  let r: { readonly id: string; readonly repeated: boolean; readonly over?: string };
   try {
-    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}) });
+    r = await recordRepair(ctx.ports(), { mission, words: req.words, kind: req.kind, text: req.text, about, ...(withdraw.length > 0 ? { withdraw } : {}), ...(req.again === true ? { again: true, ...(req.op != null ? { op: req.op } : {}) } : {}) });
   } catch (e) {
     if (e instanceof LedgerError || e instanceof ProcessError) throw e;
     throw new LedgerError('BAD_REQUEST', (e as Error).message);
   }
   await advance(ctx, mission, { dispatch: null, task: null, step: `mp pm repair ${r.id}` });
-  return { repair: r.id, repeated: r.repeated, about };
+  return { repair: r.id, repeated: r.repeated, about, ...(r.over !== undefined ? { over: r.over } : {}) };
 }
 
 export interface WaiveRequest {

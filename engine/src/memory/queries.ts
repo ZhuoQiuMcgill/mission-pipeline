@@ -49,7 +49,8 @@ export interface LoopState {
   readonly reason: LoopExhaustion | null;
 }
 
-export function readLoopState(s: Db, lineage: string, loop: LoopKind, failureClass: string | null = null): LoopState {
+/** `capOverride`: the attempts allowed before grants when the project sets them (4.4, F12 c: config.json `loops.rework`); absent, LOOP_CAPS. */
+export function readLoopState(s: Db, lineage: string, loop: LoopKind, failureClass: string | null = null, capOverride?: number): LoopState {
   const row = s.stmt('SELECT attempts, by_class, repeats, secretary_grants, extra, attempts_at_grant, no_progress_at FROM loops WHERE lineage = ? AND loop = ?').get(lineage, loop) as
     | { attempts: number; by_class: string; repeats: number; secretary_grants: number; extra: number; attempts_at_grant: number | null; no_progress_at: number | null }
     | undefined;
@@ -57,8 +58,22 @@ export function readLoopState(s: Db, lineage: string, loop: LoopKind, failureCla
   const attempts = Number(row?.attempts ?? 0);
   const extra = Number(row?.extra ?? 0);
   const byClass = row ? (JSON.parse(row.by_class) as Record<string, number>) : {};
-  const cap = LOOP_CAPS[loop] ?? 0;
-  const allowed = cap + extra;
+  const cap = capOverride ?? LOOP_CAPS[loop] ?? 0;
+  let allowed = cap + extra;
+  // 4.4 (F12 c, p7-6): each grant keeps at least what was allowed before it, or the attempts used when it was made if
+  // more, plus the attempts it granted: the floors add up over the grants in order, so a cap lowered below the attempts
+  // already used takes back no part of any grant, and a second grant never lowers the allowance (with a fixed cap the
+  // floor is never more than cap + extra)
+  if (row?.attempts_at_grant !== null && row?.attempts_at_grant !== undefined) {
+    const steps = s.stmt("SELECT kind, record FROM log WHERE kind IN ('loop.attempt', 'loop.grant') AND json_extract(record, '$.lineage') = ? AND json_extract(record, '$.loop') = ? ORDER BY rev").all(lineage, loop) as Array<{ kind: string; record: string }>;
+    let used = 0;
+    let floor = 0;
+    for (const x of steps) {
+      if (x.kind === 'loop.attempt') used += 1;
+      else floor = Math.max(floor, used) + Number((JSON.parse(x.record) as { extra?: unknown }).extra ?? 0);
+    }
+    allowed = Math.max(allowed, floor);
+  }
   let reason: LoopExhaustion | null = null;
   if (attempts >= allowed) reason = 'cap';
   else if (loop === 'env-retry' && failureClass !== null && (Object.hasOwn(byClass, failureClass) ? Number(byClass[failureClass]) : 0) >= ENV_RETRY_PER_CLASS + extra) reason = 'class-cap';

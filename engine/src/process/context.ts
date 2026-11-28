@@ -12,6 +12,7 @@ import type { Ident } from '../git/objects.ts';
 import { PlainGit } from '../git/plainGit.ts';
 import type { SnapshotFiles } from '../seat/results.ts';
 import type { SuiteCommand } from '../common/fullSuite.ts';
+import { LOOP_CAPS } from '../common/records.ts';
 import { collectCandidate, ensureWorkspace, releaseWorkspace, removeWorkspace, type Collection, type CollectRequest, type GitContext } from '../git/workspace.ts';
 import type { FlowPorts, FlowSchedulerPort } from '../flow/ports.ts';
 import { gitActions } from './actions.ts';
@@ -86,6 +87,8 @@ export interface ProcessOptions {
   readonly startOnHandback?: readonly string[];
   /** 4.4 (F16): above this many must-read pages a dispatch warns whoever dispatches it (config.json `mustReadWarnPages`). Default 6. */
   readonly mustReadWarnPages?: number;
+  /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`). Default LOOP_CAPS.rework (2). */
+  readonly reworkCap?: number;
   /** 4.4 (F6, H-3): config.json `limits`; while one is passed, new Constructor steps are held. Default none. */
   readonly limits?: DiskLimits;
   /** Tests: the free bytes of the project's disk, instead of the file system's (statfs). */
@@ -140,6 +143,8 @@ export interface ProcessContext {
   readonly startOnHandback: readonly string[];
   /** 4.4 (F16): the must-read pages above which a dispatch warns (config.json `mustReadWarnPages`, default 6). */
   readonly mustReadWarnPages: number;
+  /** 4.4 (F12 c): the reworks a rework loop allows before grants (config.json `loops.rework`, default 2), read wherever the loop's state is. */
+  readonly reworkCap: number;
   /** 4.4 (F6, H-3): the disk limits of config.json (empty: none). */
   readonly limits: DiskLimits;
   /** 4.4 (F6): the free bytes of the project's disk, or null when they cannot be read. */
@@ -198,6 +203,7 @@ export function processContext(memory: Memory, o: ProcessOptions = {}): ProcessC
     planReviewsWaived: o.planReviewsWaived ?? [],
     startOnHandback: o.startOnHandback ?? [],
     mustReadWarnPages: o.mustReadWarnPages ?? MUST_READ_WARN_PAGES,
+    reworkCap: o.reworkCap ?? LOOP_CAPS.rework,
     limits: o.limits ?? {},
     diskFree(): number | null {
       if (o.diskFree !== undefined) return o.diskFree();

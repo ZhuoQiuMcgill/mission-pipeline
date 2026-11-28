@@ -566,8 +566,9 @@ const repair: Command = {
     '       [--attempts <attempts.json> [--answers R-<n>] | --rerun <attempt-id>[,<attempt-id>...] | --resnapshot]   (change forms, about an exploration)\n' +
     '       --attempts: add or replace registered attempts (a JSON array in the schema of a method\'s registered attempts; a new id is added, a registered id replaces that attempt)\n' +
     '       --answers R-<n>: with --attempts, this change also settles that earlier repair (its author turn is taken back); without it, a change while the method is back with its author is refused\n' +
-    '       --rerun: run registered attempts again on the same method version; --resnapshot: the exploration reads the target branch as it is now',
-  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean' },
+    '       --rerun: run registered attempts again on the same method version; --resnapshot: the exploration reads the target branch as it is now\n' +
+    '       --again: file it as a new repair although the same repair (words, kind, text, subject) was decided (about an exploration: its round is over); one still in work is returned',
+  flags: { words: 'string', kind: 'string', text: 'string', about: 'string', attempts: 'string', answers: 'string', rerun: 'string', resnapshot: 'boolean', again: 'boolean' },
   identity: (a) => ({
     positionals: a.positionals,
     flags: a.flags,
@@ -598,13 +599,20 @@ const repair: Command = {
     if (answers !== null && file === null) throw usage('--answers goes with --attempts: the change that settles an earlier repair about the exploration');
     if (answers !== null && !/^R-[1-9][0-9]*$/.test(answers)) throw usage(`--answers names a repair R-<n>, not ${JSON.stringify(answers)}`);
     const change: RepairChange | undefined = file !== null ? { form: 'attempts', attempts: attemptsFile(file), ...(answers !== null ? { answers } : {}) } : rerun !== null ? { form: 'rerun', attempts: attemptIds(rerun) } : flagBool(args, 'resnapshot') ? { form: 'resnapshot' } : undefined;
-    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}) });
+    const again = flagBool(args, 'again');
+    if (again && change !== undefined) throw usage('--again files a repair again; a change form (--attempts, --rerun, --resnapshot) is a new decision of its own');
+    const r = await pmRepair(p.ctx, { mission: m, words, kind: kind as RepairKind, text, ...(about !== null ? { about } : {}), ...(change !== undefined ? { change } : {}), ...(again ? { again: true, op: c.op } : {}) });
     if (r.changed !== undefined) {
       const lines = [`Repair recorded: ${r.repair} (${kind}) of ${m}, from ${words}, about exploration ${about}: the user's decision takes effect directly, with no round and no review; the repair is answered.`, ...changedLines(m, about!, words, r.changed)];
       return ok(lines.join('\n'), { mission: m, repair: r.repair, repeated: false, about: r.about, changed: r.changed });
     }
     const what = r.about?.kind === 'exploration' ? `exploration ${r.about.id} is reopened with it as an added question; its author gets the turn now (in the attempts phase the method goes back to its author)` : 'an Architect repair step amends the plan in effect (mechanical checks only); mp pm next lists it';
-    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${what}.`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about });
+    const over = r.about?.kind === 'exploration' ? 'its exploration round is over' : 'it was decided';
+    // 4.4 (F13, #60): what the record says about the same repair filed before
+    const note = !r.repeated && r.over !== undefined ? ` Filed again: the same repair as ${r.over}, and ${over}.`
+      : r.repeated && r.over !== undefined ? ` ${r.over} is that repair, and ${over}: --again files a new one.`
+      : r.repeated && again ? ` The same repair is still in work: --again filed nothing new.` : '';
+    return ok(`${r.repeated ? 'Repair already recorded' : 'Repair recorded'}: ${r.repair} (${kind}) of ${m}, from ${words}: ${r.repeated ? 'nothing new was filed' : what}.${note}`, { mission: m, repair: r.repair, repeated: r.repeated, about: r.about, ...(r.over !== undefined ? { over: r.over } : {}) });
   },
 };
 
